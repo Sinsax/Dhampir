@@ -12,6 +12,7 @@
 // 用法：
 //   node scripts/record-acceptance.mjs                 # 默认跑 m0
 //   node scripts/record-acceptance.mjs --milestone m0
+//   node scripts/record-acceptance.mjs --milestone m1
 //   node scripts/record-acceptance.mjs --list          # 只看有哪些项
 //   node scripts/record-acceptance.mjs --self-test
 
@@ -69,6 +70,59 @@ export const MILESTONES = {
         id: 'guard-text-hygiene',
         says: '全仓 LF + 无 BOM + 合法 UTF-8',
         cmd: ['node', ['scripts/check-text-hygiene.mjs']],
+      },
+    ],
+  },
+  m1: {
+    title: 'M1 服务端 headless wgpu 基线',
+    source:
+      'plan/video-editor-plan.md §4「退出标准」；另按 §0 执行规则「上一个里程碑的退出标准全绿才允许进入下一个」' +
+      '重跑 M0 的两条 wasm 侧判据——M1 往 dhampir-core 里加了整个渲染模块，core 是两边共用的',
+    criteria: [
+      {
+        id: 'native-check',
+        says: 'cargo check --workspace（native）通过',
+        cmd: ['cargo', ['check', '--workspace', '--color', 'never']],
+      },
+      {
+        id: 'native-tests',
+        says: '工作区测试全绿（cargo test --workspace）——scene 模型、判定、CLI 契约都在这里',
+        cmd: ['cargo', ['test', '--workspace', '--color', 'never']],
+      },
+      {
+        id: 'wasm-check',
+        says: 'cargo check -p dhampir-wasm --target wasm32-unknown-unknown 通过（M0 判据重跑：core 改了）',
+        cmd: ['cargo', ['check', '-p', 'dhampir-wasm', '--target', 'wasm32-unknown-unknown', '--color', 'never']],
+      },
+      {
+        id: 'cross-runtime',
+        says: '同一份 golden 报告在 wasm32 上逐字节相等（M0 判据重跑）',
+        cmd: ['node', ['scripts/run-wasm-tests.mjs', '--out', 'records/m1']],
+      },
+      {
+        id: 'guard-core-purity',
+        says: 'dhampir-core 里没有 #[cfg] / cfg!（M1 往 core 里加了一整个渲染模块，这条必须重跑）',
+        cmd: ['node', ['scripts/check-core-purity.mjs']],
+      },
+      {
+        id: 'guard-dep-graph',
+        says: 'crate 依赖方向单向无环',
+        cmd: ['node', ['scripts/check-dep-graph.mjs']],
+      },
+      {
+        id: 'guard-text-hygiene',
+        says: '全仓 LF + 无 BOM + 合法 UTF-8',
+        cmd: ['node', ['scripts/check-text-hygiene.mjs']],
+      },
+      {
+        id: 'guard-m1-record',
+        says: 'records/m1 逐张 PNG 重算摘要与像素、重算判定、重算预算判决——记录说什么必须先被算出来',
+        cmd: ['node', ['scripts/check-m1-record.mjs', '--record', 'records/m1']],
+      },
+      {
+        id: 'guard-m1-record-self-test',
+        says: '记录守卫自己的 40 条自检（含 14 个检查项各一条反向用例）',
+        cmd: ['node', ['scripts/check-m1-record.mjs', '--self-test']],
       },
     ],
   },
@@ -299,7 +353,7 @@ export function selfTest() {
 function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
-    console.log('用法：node scripts/record-acceptance.mjs [--milestone m0] [--list] [--self-test]');
+    console.log('用法：node scripts/record-acceptance.mjs [--milestone m0|m1] [--list] [--self-test]');
     return 0;
   }
   if (args.error) {

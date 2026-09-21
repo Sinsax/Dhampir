@@ -1,0 +1,25 @@
+{
+  "backends": [
+    {
+      "adapter_name": "NVIDIA GeForce RTX 4070",
+      "frame_count": 80,
+      "frames_digest": "71ecc80cade3d73d",
+      "identical": true,
+      "matched_frames": 80,
+      "missing_in_current": [],
+      "missing_in_other": [],
+      "note": null,
+      "other_adapter_name": "NVIDIA GeForce RTX 4070",
+      "other_frame_count": 80,
+      "other_frames_digest": "71ecc80cade3d73d",
+      "pixel_mismatches": [],
+      "png_mismatches": [],
+      "requested": "DX12"
+    }
+  ],
+  "backends_compared": 1,
+  "backends_not_compared": 0,
+  "identical": true,
+  "note": "本文件由第二个进程写出（`--compare-run`）：它与被比的那份 `run.json` 是两次独立运行。逐帧比的是像素摘要（渲染结果）与 PNG 摘要（文件字节）两样——退出标准说的是「重复运行逐字节一致」，那指的是文件。",
+  "schema": 1
+}

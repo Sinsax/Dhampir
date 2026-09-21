@@ -388,6 +388,7 @@ pub fn render_probe_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::wgsl_subset::check_portable_subset;
 
     #[test]
     fn vertex_stride_has_no_padding() {
@@ -582,64 +583,19 @@ mod tests {
         );
     }
 
-    /// 剥掉 `//` 行注释与 `/* */` 块注释。
-    ///
-    /// 为什么必须剥：要扫的是**代码**，不是散文。模块头的说明里正好写着
-    /// "没有导数（`fwidth` / `dpdx` / `dpdy`）"——不剥注释的话，守卫会去举报
-    /// 自己的文档，而下一个人的修法通常是"把守卫删掉"。守卫被删掉比守卫误报更糟。
-    fn strip_wgsl_comments(src: &str) -> String {
-        let mut out = String::with_capacity(src.len());
-        let mut chars = src.chars().peekable();
-        while let Some(c) = chars.next() {
-            if c == '/' && chars.peek() == Some(&'/') {
-                // 行注释：连行尾的换行一起吃掉。
-                for c in chars.by_ref() {
-                    if c == '\n' {
-                        break;
-                    }
-                }
-            } else if c == '/' && chars.peek() == Some(&'*') {
-                chars.next();
-                while let Some(c) = chars.next() {
-                    if c == '*' && chars.peek() == Some(&'/') {
-                        chars.next();
-                        break;
-                    }
-                }
-            } else {
-                out.push(c);
-            }
-        }
-        out
-    }
-
-    #[test]
-    fn comment_stripping_leaves_code_alone() {
-        // 剥注释这件事本身也要被守住：如果它哪天变成了"整份都吃掉"，
-        // 下面那条可移植性子集检查会瞬间变成永远为真的空话。
-        let src = "// fwidth\nlet a = 1; /* dpdx */ let b = 2; // loop\n";
-        assert_eq!(strip_wgsl_comments(src), "let a = 1;  let b = 2; ");
-    }
-
     #[test]
     fn wgsl_is_embedded_and_stays_in_the_portable_subset() {
-        let code = strip_wgsl_comments(PROBE_WGSL);
+        // 剥注释与禁词表都搬去了 `render::wgsl_subset`：M1 之后它要服务于两份
+        // 着色器，各留一份的必然结果是其中一份的守卫悄悄变松，而两份报告都写着
+        // "通过"。那边还带着每个禁词的理由，以及"`textureSampleLevel` 必须过"
+        // 这条反例——误报被修掉之后，得有人守着别再修回去。
+        let code = check_portable_subset("探针 WGSL", PROBE_WGSL);
 
         // "编进来了"：两个入口都在。这里只证明文本存在；
         // "这份 WGSL 真能编译"是靠 GPU 路径证明的（宿主建 shader module 时会过编译器），
         // 不在这里假装——本 crate 没有 CPU 侧的 WGSL 编译器。
         for marker in ["@vertex", "@fragment", "fn vs_main", "fn fs_main"] {
             assert!(code.contains(marker), "探针 WGSL 里找不到 {marker}");
-        }
-
-        // 能力下限（指导文档 §4.3①）：这些构造的结果允许因实现而异，
-        // 基准用例里一个都不能出现，否则 M2 的双运行时比对测的是实现差异，
-        // 不是我们的代码差异。扫描对象是**去注释后**的代码。
-        for forbidden in ["fwidth", "dpdx", "dpdy", "textureSample", "loop", "atomic"] {
-            assert!(
-                !code.contains(forbidden),
-                "探针 WGSL 的代码里出现了 {forbidden}"
-            );
         }
     }
 }

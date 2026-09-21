@@ -1,0 +1,132 @@
+{
+  "adapter_name": "NVIDIA GeForce RTX 4070",
+  "align_probe": {
+    "frame": 0,
+    "padded_bytes_per_row": 5632,
+    "scene": "checker",
+    "size": "1366x768",
+    "unpadded_bytes_per_row": 5464
+  },
+  "backend_slug": "dx12",
+  "build_profile": "release",
+  "init_ms": 268.345,
+  "kind": "timing",
+  "milestone": "M1",
+  "nondeterministic_fields": [
+    "unix_epoch_seconds",
+    "unix_epoch_millis",
+    "init_ms",
+    "timing.*",
+    "row_alignment.ok / row_alignment.detail（只在硬件真的错位时才会变）",
+    "build_profile（换构建就变）"
+  ],
+  "requested_backends": "DX12",
+  "row_alignment": {
+    "byte_tolerance": 1,
+    "detail": null,
+    "examples": [],
+    "exercises_padding": true,
+    "frame": 0,
+    "ok": true,
+    "padded_bytes_per_row": 5632,
+    "pixels_compared": 1049088,
+    "pixels_ok": 1049088,
+    "size": "1366x768",
+    "unpadded_bytes_per_row": 5464,
+    "worst_distance": 0
+  },
+  "schema": 1,
+  "timing": {
+    "budget_metric": "worst_roundtrip_ms",
+    "budget_metric_note": "判的是「渲染 + 读回」往返（含 GPU 画完那一段，故为渲染时间的高估上界）。worst_frame_cpu_ms 不含 GPU，没有能力否证这条预算，所以只记不判。",
+    "budget_ms": 10.0,
+    "frame": 5,
+    "repeats": 24,
+    "scenes": [
+      {
+        "frame_cpu_ms": {
+          "max_ms": 0.158,
+          "median_ms": 0.105,
+          "min_ms": 0.101,
+          "n": 24
+        },
+        "readback_ms": {
+          "max_ms": 2.53,
+          "median_ms": 2.123,
+          "min_ms": 1.82,
+          "n": 24
+        },
+        "scene": "gradient"
+      },
+      {
+        "frame_cpu_ms": {
+          "max_ms": 0.147,
+          "median_ms": 0.103,
+          "min_ms": 0.1,
+          "n": 24
+        },
+        "readback_ms": {
+          "max_ms": 2.462,
+          "median_ms": 2.119,
+          "min_ms": 1.999,
+          "n": 24
+        },
+        "scene": "checker"
+      },
+      {
+        "frame_cpu_ms": {
+          "max_ms": 0.12,
+          "median_ms": 0.103,
+          "min_ms": 0.101,
+          "n": 24
+        },
+        "readback_ms": {
+          "max_ms": 2.505,
+          "median_ms": 2.145,
+          "min_ms": 2.021,
+          "n": 24
+        },
+        "scene": "srgb_linear"
+      },
+      {
+        "frame_cpu_ms": {
+          "max_ms": 0.151,
+          "median_ms": 0.105,
+          "min_ms": 0.102,
+          "n": 24
+        },
+        "readback_ms": {
+          "max_ms": 2.408,
+          "median_ms": 2.251,
+          "min_ms": 2.127,
+          "n": 24
+        },
+        "scene": "alpha_stack"
+      },
+      {
+        "frame_cpu_ms": {
+          "max_ms": 0.144,
+          "median_ms": 0.124,
+          "min_ms": 0.119,
+          "n": 24
+        },
+        "readback_ms": {
+          "max_ms": 3.214,
+          "median_ms": 2.289,
+          "min_ms": 2.14,
+          "n": 24
+        },
+        "scene": "blur"
+      }
+    ],
+    "size": "1920x1080",
+    "verdict": true,
+    "verdict_note": null,
+    "warmup": 3,
+    "worst_frame_cpu_ms": 0.124,
+    "worst_roundtrip_ms": 2.289
+  },
+  "timing_target_size": "1920x1080",
+  "unix_epoch_millis": 1790025577920,
+  "unix_epoch_seconds": 1790025577
+}

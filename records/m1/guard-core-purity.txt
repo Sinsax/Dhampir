@@ -1,0 +1,6 @@
+$ node scripts/check-core-purity.mjs
+
+----- stdout -----
+✓ dhampir-core 纯净：9 个文件里没有 #[cfg] / cfg!（豁免仅 #[cfg(test)]）
+
+----- stderr -----

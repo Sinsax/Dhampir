@@ -1,0 +1,33 @@
+{
+  "adapter": {
+    "backend": "Vulkan",
+    "device": "10118",
+    "device_type": "DiscreteGpu",
+    "driver": "NVIDIA",
+    "driver_info": "610.74",
+    "name": "NVIDIA GeForce RTX 4070",
+    "vendor": "4318"
+  },
+  "adapter_name": "NVIDIA GeForce RTX 4070",
+  "backend_slug": "vulkan",
+  "build_profile": "release",
+  "corpus_target_size": "256x256",
+  "crate_version": "0.0.1",
+  "kind": "adapter",
+  "milestone": "M1",
+  "naga_version": "30.0.1",
+  "nondeterministic_fields": [
+    "unix_epoch_seconds",
+    "unix_epoch_millis",
+    "build_profile（换构建就变）",
+    "adapter.* / adapter_name（换机器就变）"
+  ],
+  "probe_digest": "c3f0da6b37577e55",
+  "probe_format_version": 1,
+  "requested_backends": "VULKAN",
+  "schema": 1,
+  "target_format": "Rgba8UnormSrgb",
+  "unix_epoch_millis": 1790025578811,
+  "unix_epoch_seconds": 1790025578,
+  "wgpu_version": "30.0.1"
+}

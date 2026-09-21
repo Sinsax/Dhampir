@@ -167,14 +167,17 @@ FFmpeg 绑定（先造假帧源）、WebCodecs、任务队列、任何 UI、任�
 
 ### 任务
 
-- [ ] **T1.1 worker CLI 骨架**
+- [x] **T1.1 worker CLI 骨架** —— `dhampir-render`（`dhampir-worker` 的 `[[bin]]`），11 条 CLI 契约测试钉住接口
   - `dhampir-render --scene <name> --frames <range> --out <dir>`
+  - ✅ 实际接口比原计划宽：`--scene all|<name>`、`--frames a..b`（**半开区间**，`..=` 直接拒收，空区间/反写报错）、`--out`（corpus 模式**必须显式给**——默认值指向 `records/m0` 归档，不给就拦下）、`--backend all|dx12|vulkan`、`--compare-run <run.json>`、`--skip-timing`、`--probe-only`
+  - ✅ `--frames` / `--compare-run` / `--skip-timing` 在没有 `--scene` 时**报错**而不是静默忽略——静默忽略会让人以为自己验过
   - 此时**没有时间线概念，没有解码**，只有硬编码场景
-- [ ] **T1.2 离屏渲染 + 读回**
+- [x] **T1.2 离屏渲染 + 读回**
   - 目标纹理 `Rgba8UnormSrgb`，usage `RENDER_ATTACHMENT | COPY_SRC`
   - `copy_texture_to_buffer` —— 注意 **`bytes_per_row` 256 字节对齐**（经典坑）
-  - `image` crate 写 PNG
-- [ ] **T1.3 合成测试场景集（corpus，M2 直接复用）**
+  - ✅ 对齐不是"知道"而是探针实测：1366×768（5464 字节/行）→ 填充到 5632 后才可比，`exercises_padding: true`、1049088 像素最差距离 0；且**在"本来就不需要填充"的宽度上拒绝报通过**
+  - ✅ PNG 编码落进 core（`readback::Rgba8Image::encode_png`），依赖用 `png` 0.17 而不是整个 `image`——链接面小一个量级；守卫侧的 PNG **解码**器自写（只用 `node:zlib`），不引第三方 PNG 库
+- [x] **T1.3 合成测试场景集（corpus，M2 直接复用）**
   - `gradient`：全范围渐变 —— 考精度
   - `checker`：像素级棋盘 —— 考采样
   - `srgb_linear`：sRGB ↔ linear 往返色块 —— 考色彩/传输函数
@@ -182,22 +185,50 @@ FFmpeg 绑定（先造假帧源）、WebCodecs、任务队列、任何 UI、任�
   - `blur`：可分离高斯 —— 考浮点累加顺序
   - **全部确定性**：无时间、无随机；必须随机时用固定 seed 的确定性 PRNG
   - 场景代码进 `dhampir-core`（同一份代码两个宿主都要调）
-- [ ] **T1.4 环境探针与复现性**
+  - ✅ 全部落进 core：`render/scene.rs`（注册表 / 入口名 / 采样表 / 混合状态 / 容差）+ `render/scene_model.rs`（纯 `f64` 数值模型）+ `shaders/scene.wgsl`（254 行）——M2 的 wasm 侧直接复用，不需要第二份实现
+  - ✅ 确定性是构造出来的，不是靠 PRNG：五场景无时间无随机，**连 PRNG 都没用上**
+  - ✅ 判据 = 与 clamp 模型的**字节距离 ≤ 1**（`byte_tolerance`）；故意的缺陷模型距离在 2–78 之间——容差没有宽到能放过缺陷
+  - ✅ 预测表两张网：`PINNED` 逐点相等 + 整周期整表的 FNV-1a 64 摘要 `fff8d28ff54c24d8`；模型测试**必须包含"缺陷模型"的距离断言**，否则"模型正确"只是自说自话
+  - ✅ 踩坑：`fs_blur_h` / `fs_blur_v` 首版用 `frag.xy` 当纹理坐标直接采样，**编译期全绿、真跑 GPU 才暴露**；修成 `texel_of(frag.xy)` 后由 160 帧 corpus 全绿确认
+  - ✅ `alpha_stack` 是直通 alpha 的 source-over，**不能用 `PREMILLIPLIED_ALPHA_BLENDING`**；blur 权重按 6 位小数四舍五入、Σ = 1.000000
+- [x] **T1.4 环境探针与复现性** —— Windows 两条腿全达成；Linux 两条腿 **⏳ 待补**（缺的是环境，不是代码路径）
   - 记录 `adapter.get_info()`（name / backend / driver）+ wgpu 版本 + 时间戳 → `adapter.json`
+    - ✅ 记的是 `describe_adapter` 的人类可读输出（name / backend / driver / device_type / subgroup / limits 摘要），不是 `wgpu::AdapterInfo` 的 Debug；`adapter.json` 与 `timing.json` **刻意拆开**（"几乎不变" vs "每次都变"），两份共用同一个 `unix_epoch_millis` 且键不重叠——守卫会真的比对这两个数
   - 复现性检查：同机同后端，同帧渲染两次（同进程 + 跨进程）**逐字节相同**
-    - 若不相同，这是发现而非失败——立刻记录并归因（后端？驱动？提交顺序？）
-  - 依次跑：Windows/DX12 → Windows/Vulkan → Linux 容器 GPU → Linux/lavapipe
-- [ ] **T1.5 性能基线**：Init 时间、单帧渲染时间、读回时间（1080p）
+    - ✅ 同进程：每帧渲染两次比字节，两条腿各 80 帧，`repeat_mismatches: []`；真不一致时**照记不误**、该帧不做颜色判定（`passed` 三态），不是失败而是发现
+    - ✅ 跨进程：第二条腿带 `--compare-run` 与第一条腿比，`identical: true`、`matched_frames: 80`，两条腿整表摘要同为 `71ecc80cade3d73d`
+    - ✅ 顺带拿到一条计划外结论：**DX12 与 Vulkan 的同名 PNG 逐字节相同（80/80）**——同一份 WGSL 在两个驱动栈上出了同样的字节
+  - 依次跑：Windows/DX12 ✅ → Windows/Vulkan ✅ → Linux 容器 GPU ⏳ → Linux/lavapipe ⏳（本机无 docker、WSL 无发行版）
+- [x] **T1.5 性能基线**：Init 时间、单帧渲染时间、读回时间（1080p）—— 每场景 24 次取**中位数**，极值照记
+  - ✅ DX12：init `268.345 ms`；「渲染 + 读回」往返中位 2.119–2.289 ms、纯 CPU 提交中位 0.103–0.124 ms
+  - ✅ Vulkan：init `126.412 ms`；往返中位 2.099–2.217 ms、纯 CPU 提交中位 0.058–0.074 ms
+  - ✅ 两个计时数名字说清各是什么：`worst_frame_cpu_ms` 是 CPU 编码 + `submit`（异步，**不含 GPU**），`worst_roundtrip_ms` 是渲染 + 读回往返。**判预算用后者**——前者没有能力否证"一帧画完 ≤ 10 ms"，两者不一致时选会高估的那个；`budget_metric` / `budget_metric_note` 把选择写进记录，守卫按 `worst_roundtrip_ms` 自己重算一遍 verdict
 
 ### 产出物
 
-`frames/*.png` + `adapter.json` + 计时表 + 四种环境矩阵结果。
+`frames/*.png` + `adapter.json` + 计时表 + 四种环境矩阵结果（**2/4，Linux 两条 ⏳**）。
+
+里程碑记录见 [`records/m1/`](../records/m1/README.md)：两条腿各 5 份 JSON/TXT + 80 张 PNG（全目录 183 文件 / 1.1 MB）、9 条判据的原始 stdout/stderr 与退出码、native 侧 72 行纯逻辑探针报告（摘要 `c3f0da6b37577e55`，与 M0 归档的那份**逐字节相同**——M1 往 core 里加了一整个渲染模块，这就是"探针契约没被碰坏"的直接证据）。
+
+- ✅ 帧文件名三位补零（`{scene}-f{frame:03}.png`）：字典序 == 帧号序，`ls` 一遍就是时间顺序
+- ✅ `records/m1/` 只归档一次运行的字节（第二条腿）；跨进程那一半靠 `compare.json` 的**双侧摘要** + 记录里的可重跑命令立住
+- ✅ 记录里不装干净：`run.json` 声明 `nondeterministic_fields: []`，时间戳全住进 `adapter.json` / `timing.json`，两份各自声明自己的非确定项
 
 ### 退出标准
 
 - [ ] 目标环境（含 Linux 容器）能跑出 PNG，且重复运行**逐字节一致**
-- [ ] 四种环境（Win/DX12、Win/Vulkan、Linux/GPU、Linux/lavapipe）的 adapter 与通过情况全部记录
-- [ ] 1080p 单帧渲染 ≤ 10ms（不含读回）——**起始值，按实测定档**
+  - ✅ Windows 两条腿达成：同进程（每帧渲染两次）与跨进程（`--compare-run`）都逐字节一致，两腿整表摘要同为 `71ecc80cade3d73d`
+  - ⏳ Linux 容器未跑（本机无 docker、WSL 无发行版），**这一条没有勾**
+- [ ] 四种环境（Win/DX12、Win/Vulkan、Linux/GPU、Linux/lavapipe）的 adapter 与通过情况全部记录 —— 当前 **2/4**
+  - ✅ `records/m1/dx12/` 与 `records/m1/vulkan/` 的 5 份文件 + 80 张 PNG 已归档
+  - ⏳ Linux 两条腿的记录缺（同上）
+- [x] 1080p 单帧渲染 ≤ 10ms（不含读回）——**起始值，按实测定档** —— ✅ 实测后 `FRAME_BUDGET_MS` 仍留 10 ms：判的是「渲染 + 读回」往返（含 GPU，数字比"纯渲染"更大，是**高估**），最慢 2.289 ms；不含 GPU 的 CPU 提交另记 0.124 ms。预算不参与退出码
+
+> 第 1 条是这一步真正的目的：headless wgpu 出图**稳定可复现**。而它最不确定的部分从来不是渲染逻辑，
+> 是**容器里的 GPU 注入**——所以 Windows 两条腿只是把链路先钉住了，Linux 两条腿（上面两处 ⏳）
+> 才是这条判据真正的考点；**在那之前不进 M2**。本机部分已由
+> `node scripts/record-acceptance.mjs --milestone m1` 落进 `records/m1/acceptance.json`
+> （9 条判据全绿，每条都留了原始 stdout/stderr 与退出码）。
 
 ### 明确不做
 

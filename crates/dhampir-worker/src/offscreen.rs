@@ -14,10 +14,20 @@
 //!   也别依赖插入序。
 //! - 不含时间戳以外的任何非确定性内容
 //! - 渲染两次的字节比较结果也写进去——**不一致要当发现记录，不是当失败吞掉**
+//!
+//! # 记录里的后端名有两套拼法，这是**决定**，不是笔误
+//!
+//! `records/m0/*.json` 里那一栏是 `Backends(DX12)`——当时直接 `{:?}` 了 wgpu 的
+//! 位标志包装。那批文件的价值在于**重新跑一遍就能复现**，所以它们的写法由
+//! [`m0_requested_label`] 原地冻结。M1 起的新记录走
+//! [`baseline::backend_label`](crate::baseline::backend_label)（`DX12`），
+//! 于是"记录里的后端名"和"产物目录名"同源。两处的差别记在 `records/m1/README.md`。
 
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use dhampir_core::gpu::{GpuContext, request_context};
+use crate::baseline::{AdapterIdentity, backend_slug};
+use dhampir_core::gpu::GpuContext;
 use dhampir_core::render::{PROBE_CLEAR_COLOR, ProbeRenderer, ProbeSample, SampleExpectation};
 use dhampir_core::wgpu;
 use dhampir_core::{readback, timeline};
@@ -32,54 +42,105 @@ pub use dhampir_core::render::PROBE_TARGET_SIZE;
 /// 的首选格式各平台不同——统一成 RGBA 可以少一次通道重排。
 pub const PROBE_TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
+/// M0 那份记录里"请求的后端"那一栏的写法（`Backends(DX12)`）。
+///
+/// **冻结**：`records/m0/run.json` 与 `records/m0/probe-native-*.adapter.json` 里
+/// 就是这个字符串，它们的内容里除了 `unix_epoch_seconds` 之外都是确定的——换个写法
+/// 就等于把"重跑一遍能和归档对上"这条性质丢掉。难看归难看，它属于那一次运行；
+/// 以后的记录用 [`baseline::backend_label`](crate::baseline::backend_label)。
+pub fn m0_requested_label(backends: wgpu::Backends) -> String {
+    format!("{backends:?}")
+}
+
 /// 一次探针运行的完整结果。全部字段都要落盘。
 #[derive(Debug)]
 pub struct ProbeRun {
-    /// 请求的后端。`None` 表示让 wgpu 自己选。
-    pub requested_backend: Option<wgpu::Backends>,
     /// 渲染出的图像（紧密打包 RGBA8）。
     pub image: readback::Rgba8Image,
     /// 同一进程内渲染两次是否逐字节相同。
     pub deterministic_in_process: bool,
-    /// `adapter.json` 的内容。
-    pub adapter_json: serde_json::Value,
+    /// adapter 身份：记录里那几个字段的**唯一来源**（见 [`AdapterIdentity`]）。
+    pub adapter: AdapterIdentity,
 }
 
 impl ProbeRun {
     /// 记录文件名（不带目录），后端名参与命名，避免不同后端的产物互相覆盖。
     pub fn stem(&self) -> String {
+        // 优先用 adapter **实际报出来的**后端，而不是"请求的那个"：两者正常时一致，
+        // 不一致时（请求 DX12 却落到别处）文件名要说的是"跑成了什么"。
         let backend = self
-            .adapter_json
-            .get("backend")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_ascii_lowercase();
+            .adapter
+            .field("backend")
+            .map(|b| b.to_ascii_lowercase())
+            // `describe_adapter` 没报 backend 时退回请求的那个。不退回的话就没有
+            // 名字可用了，而 `unknown` 会让两个后端的产物落进同一个文件名——
+            // 那正是 M0 踩过的"后跑的盖了先跑的"。
+            .unwrap_or_else(|| backend_slug(self.adapter.requested));
         format!("probe-native-{backend}")
+    }
+
+    /// `{stem}.adapter.json` 的内容。
+    ///
+    /// 时间戳由调用方传进来而不是在这里读时钟：那样这个函数就是**纯的**，
+    /// 字段集合与后端名的写法都能被单测钉住。
+    ///
+    /// 除了 adapter 自身的信息，还带上"这次出图是在什么条件下发生的"——
+    /// 少了后半截，这张 JSON 就只是一份硬件清单，没法用来解释任何差异。
+    pub fn adapter_json(&self, unix_epoch_seconds: u64) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        self.adapter.insert_into(&mut map);
+
+        map.insert(
+            "requested_backends".into(),
+            serde_json::Value::String(m0_requested_label(self.adapter.requested)),
+        );
+        map.insert(
+            "target_format".into(),
+            serde_json::Value::String(format!("{PROBE_TARGET_FORMAT:?}")),
+        );
+        map.insert(
+            "target_size".into(),
+            serde_json::Value::String(format!(
+                "{}x{}",
+                PROBE_TARGET_SIZE.0, PROBE_TARGET_SIZE.1
+            )),
+        );
+        map.insert(
+            "crate_version".into(),
+            serde_json::Value::String(env!("CARGO_PKG_VERSION").into()),
+        );
+        map.insert(
+            "probe_digest".into(),
+            serde_json::Value::String(format!("{:016x}", timeline::probe_digest())),
+        );
+        map.insert(
+            "probe_format_version".into(),
+            serde_json::Value::Number(timeline::PROBE_FORMAT_VERSION.into()),
+        );
+        map.insert(
+            "unix_epoch_seconds".into(),
+            serde_json::Value::Number(unix_epoch_seconds.into()),
+        );
+
+        serde_json::Value::Object(map)
     }
 }
 
 /// 出图一次，读回，并做进程内确定性检查。
 pub fn run_probe(backends: wgpu::Backends) -> Result<ProbeRun, Box<dyn std::error::Error>> {
-    // `Instance::new` 按值收 descriptor（wgpu 30 起），且没有 `Default`——
-    // 用 `new_without_display_handle()` 起底，只覆盖 `backends` 这一个字段。
-    // 这也是**唯一**把后端选择写进代码的地方，宿主与宿主之间就分叉这么一行。
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends,
-        ..wgpu::InstanceDescriptor::new_without_display_handle()
-    });
-
-    // 这个 `block_on` 之所以合法，是因为 `request_context` 里的 future 在 native 上
-    // 第一次 poll 就会就绪（wgpu-core 的 adapter/device 申请本体是同步的）。
-    // 真正需要等待的是读回，见 `readback::MapWait` 的文档。
-    let ctx = pollster::block_on(request_context(&instance, None))?;
+    // 建 Instance / adapter / device 走 [`crate::baseline::open_leg`]——那是**唯一**
+    // 把后端选择写进代码的地方（`Instance::new` 就在它里面）。探针与 corpus 两条路径
+    // 各写一遍的话，"这次请求的是哪个后端"就有了两个真相。
+    //
+    // 它顺带返回 init 用时，这里用不上（M0 的记录里没有计时）；corpus 路径要。
+    let (ctx, _init) = crate::baseline::open_leg(backends)?;
     let (first, second) = (render_once(&ctx)?, render_once(&ctx)?);
     let deterministic_in_process = first.pixels == second.pixels;
 
     Ok(ProbeRun {
-        requested_backend: Some(backends),
         image: first,
         deterministic_in_process,
-        adapter_json: adapter_json(&ctx, backends),
+        adapter: AdapterIdentity::from_context(&ctx, backends),
     })
 }
 
@@ -120,53 +181,12 @@ fn render_once(ctx: &GpuContext) -> Result<readback::Rgba8Image, Box<dyn std::er
     ))?)
 }
 
-/// 组装 `adapter.json`。
-///
-/// 除了 adapter 自身的信息，还带上"这次出图是在什么条件下发生的"——
-/// 少了后半截，这张 JSON 就只是一份硬件清单，没法用来解释任何差异。
-fn adapter_json(ctx: &GpuContext, requested: wgpu::Backends) -> serde_json::Value {
-    let mut map = serde_json::Map::new();
-
-    for (key, value) in dhampir_core::gpu::describe_adapter(&ctx.adapter_info) {
-        map.insert(key.to_string(), serde_json::Value::String(value));
-    }
-
-    map.insert(
-        "requested_backends".into(),
-        serde_json::Value::String(format!("{requested:?}")),
-    );
-    map.insert(
-        "target_format".into(),
-        serde_json::Value::String(format!("{PROBE_TARGET_FORMAT:?}")),
-    );
-    map.insert(
-        "target_size".into(),
-        serde_json::Value::String(format!("{}x{}", PROBE_TARGET_SIZE.0, PROBE_TARGET_SIZE.1)),
-    );
-    map.insert(
-        "crate_version".into(),
-        serde_json::Value::String(env!("CARGO_PKG_VERSION").into()),
-    );
-    map.insert(
-        "probe_digest".into(),
-        serde_json::Value::String(format!("{:016x}", timeline::probe_digest())),
-    );
-    map.insert(
-        "probe_format_version".into(),
-        serde_json::Value::Number(timeline::PROBE_FORMAT_VERSION.into()),
-    );
-    map.insert(
-        "unix_epoch_seconds".into(),
-        serde_json::Value::Number(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0)
-                .into(),
-        ),
-    );
-
-    serde_json::Value::Object(map)
+/// 记录里的时间戳。**探针记录里唯一的非确定项。**
+fn unix_epoch_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// 把一次运行的全部产物写进 `dir`。
@@ -184,7 +204,10 @@ pub fn write_run_artifacts(dir: &Path, run: &ProbeRun) -> Result<Vec<PathBuf>, s
     written.push(png);
 
     let json = dir.join(format!("{stem}.adapter.json"));
-    std::fs::write(&json, serde_json::to_string_pretty(&run.adapter_json)?)?;
+    std::fs::write(
+        &json,
+        serde_json::to_string_pretty(&run.adapter_json(unix_epoch_seconds()))?,
+    )?;
     written.push(json);
 
     Ok(written)
@@ -344,21 +367,80 @@ pub fn check_samples(samples: &[SampleReading], image_size: (u32, u32)) -> Resul
 mod tests {
     use super::*;
 
-    #[test]
-    fn artifacts_use_backend_specific_names() {
-        let run = ProbeRun {
-            requested_backend: Some(wgpu::Backends::DX12),
+    /// 造一个只有 adapter 身份不同的 `ProbeRun`（不碰 GPU）。
+    fn probe_run(requested: wgpu::Backends, fields: Vec<(&'static str, String)>) -> ProbeRun {
+        ProbeRun {
             image: readback::Rgba8Image {
                 width: 1,
                 height: 1,
                 pixels: vec![0, 0, 0, 255],
             },
             deterministic_in_process: true,
-            adapter_json: serde_json::json!({ "backend": "Vulkan" }),
-        };
+            adapter: AdapterIdentity { requested, fields },
+        }
+    }
+
+    #[test]
+    fn artifacts_use_backend_specific_names() {
         // 覆盖不同后端的产物是最容易犯的错之一：两个后端都跑完了，
         // 打开 records/ 却只剩一个文件——因为后跑的把先跑的盖了。
-        assert_eq!(run.stem(), "probe-native-vulkan");
+        let vulkan = probe_run(
+            wgpu::Backends::VULKAN,
+            vec![("backend", "Vulkan".to_string())],
+        );
+        assert_eq!(vulkan.stem(), "probe-native-vulkan");
+
+        let dx12 = probe_run(wgpu::Backends::DX12, vec![("backend", "Dx12".into())]);
+        assert_eq!(dx12.stem(), "probe-native-dx12");
+        assert_ne!(dx12.stem(), vulkan.stem());
+    }
+
+    /// adapter 没报 `backend` 时，名字要退回**请求的那个后端**。
+    ///
+    /// 退回 `unknown` 看着也能跑，但两个后端的产物会落进同一个文件名——而且那正是
+    /// "驱动器不给名字"这种环境里才会显形的覆盖。
+    #[test]
+    fn a_missing_backend_field_falls_back_to_the_requested_one() {
+        let run = probe_run(wgpu::Backends::DX12, vec![]);
+        assert_eq!(run.stem(), "probe-native-dx12");
+        assert_ne!(run.stem(), probe_run(wgpu::Backends::VULKAN, vec![]).stem());
+    }
+
+    /// 探针记录的字段集合与后端名写法：**故意的旧写法**（M0 归档形态）。
+    ///
+    /// 这条测试的作用是"让 `Backends(DX12)` 看起来不像笔误"：它旁边就写着新记录用
+    /// [`crate::baseline::backend_label`]，给出的是 `DX12`。两个函数给出不同字符串是
+    /// **决定**——改掉哪一个都会让某一份记录无法复现。
+    #[test]
+    fn probe_record_keeps_the_m0_spelling() {
+        let run = probe_run(
+            wgpu::Backends::DX12,
+            vec![
+                ("backend", "Dx12".to_string()),
+                ("name", "测试卡".to_string()),
+            ],
+        );
+        let json = run.adapter_json(1_790_000_000);
+
+        assert_eq!(json["requested_backends"], "Backends(DX12)");
+        assert_eq!(
+            json["requested_backends"],
+            m0_requested_label(wgpu::Backends::DX12)
+        );
+        assert_eq!(
+            crate::baseline::backend_label(wgpu::Backends::DX12),
+            "DX12",
+            "新记录用的是另一个拼法——差别是有意的"
+        );
+
+        // 身份字段原样搬运；探针自己那几项都在；时间戳由调用方给。
+        assert_eq!(json["backend"], "Dx12");
+        assert_eq!(json["name"], "测试卡");
+        assert_eq!(json["target_format"], "Rgba8UnormSrgb");
+        assert_eq!(json["target_size"], "256x256");
+        assert_eq!(json["unix_epoch_seconds"], 1_790_000_000_u64);
+        assert_eq!(json["probe_format_version"], 1);
+        assert_eq!(json["probe_digest"].as_str().unwrap().len(), 16);
     }
 
     /// 探针图上真实读到的值（RTX 4070 / DX12，`records/m0` 那一轮）。
