@@ -17,7 +17,7 @@
 //   node scripts/check-text-hygiene.mjs
 //   node scripts/check-text-hygiene.mjs --self-test
 
-import { readdirSync, readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { readdirSync, readFileSync, mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, extname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -84,6 +84,29 @@ export function inspectBytes(bytes) {
   return problems;
 }
 
+/**
+ * 由「扫到几个文件」+「哪些文件违规」得出退出码。空集合**不是**全绿。
+ *
+ * 为什么把它抽成可导出的函数：这段判定就是守卫的全部结论，而它最危险的失效
+ * 模式是「在空集合上宣布全绿」——那样路径写错、扫描器坏掉、目录改名，都会
+ * 得到一条 ✓。逻辑留在 main() 里就没法单测（和 scripts/record-acceptance.mjs
+ * 的 judgeResult 抽出来是同一个理由）。
+ *
+ * 退出码口径（根 README §守卫脚本：三者的共同纪律）：
+ *   2 = 环境/输入错——"没扫到"跟"扫过了没问题"是两件事，拒绝通过；
+ *   1 = 扫到了文件，但内容违规（CR / BOM / 非法 UTF-8）；
+ *   0 = 扫过，且干净。
+ *
+ * 注意：`files.length === 0` 在**本仓库**里几乎走不到，因为本脚本自己是 .mjs、
+ * 自己也算"可查文件"。这条分支的价值不在本仓库当场触发，而在于"扫描根被人改
+ * 到别处"时不会静默变绿——所以它必须有单测（见 SCAN_SELF_TESTS）。
+ */
+export function decideScan(files, offenders) {
+  if (files.length === 0) return { exitCode: 2, verdict: 'empty' };
+  if (offenders.length > 0) return { exitCode: 1, verdict: 'violations' };
+  return { exitCode: 0, verdict: 'clean' };
+}
+
 // ---------------------------------------------------------------------------
 // 自检
 // ---------------------------------------------------------------------------
@@ -107,12 +130,37 @@ export const SELF_TEST_CASES = [
   { name: '合法的 4 字节序列不误报', bytes: Buffer.from('🎬\n', 'utf8'), expect: 0 },
 ];
 
+/**
+ * 退出码判定本身的自检。
+ *
+ * 这一组是 README「不在空文件集上通过」那句承诺的**唯一**钉子：去掉它，判定就可
+ * 以被悄悄改成"空集合也算绿"而没人发现。
+ */
+export const SCAN_SELF_TESTS = [
+  { name: '空集合判 2（拒绝通过，不是全绿）', files: [], offenders: [], expect: 2 },
+  { name: '扫到文件且干净判 0', files: ['README.md'], offenders: [], expect: 0 },
+  {
+    name: '扫到文件但有违规判 1（与空集合的 2 区分开）',
+    files: ['README.md'],
+    offenders: [{ file: 'README.md', problems: ['有 1 个 CR'] }],
+    expect: 1,
+  },
+];
+
 function runSelfTest() {
   const failures = [];
+  let diskCases = 0;
   for (const testCase of SELF_TEST_CASES) {
     const problems = inspectBytes(testCase.bytes);
     if (problems.length !== testCase.expect) {
       failures.push(`自检「${testCase.name}」期望 ${testCase.expect} 处，实际 ${problems.length} 处：${problems.join('；')}`);
+    }
+  }
+
+  for (const testCase of SCAN_SELF_TESTS) {
+    const { exitCode } = decideScan(testCase.files, testCase.offenders);
+    if (exitCode !== testCase.expect) {
+      failures.push(`退出码自检「${testCase.name}」期望 ${testCase.expect}，实际 ${exitCode}`);
     }
   }
 
@@ -122,6 +170,7 @@ function runSelfTest() {
     const crlfPath = join(dir, 'dirty.txt');
     writeFileSync(crlfPath, 'a\r\nb\r\n');
     const problems = inspectBytes(readFileSync(crlfPath));
+    diskCases += 1;
     if (problems.length !== 1) {
       failures.push(`自检「从磁盘读 CRLF 文件」期望 1 处，实际 ${problems.length} 处`);
     }
@@ -131,14 +180,46 @@ function runSelfTest() {
     const latin1Path = join(dir, 'dirty-latin1.txt');
     writeFileSync(latin1Path, Buffer.from([0xd6, 0xd0, 0xce, 0xc4, 0x0a]));
     const latin1Problems = inspectBytes(readFileSync(latin1Path));
+    diskCases += 1;
     if (latin1Problems.length !== 1 || !latin1Problems[0].includes('UTF-8')) {
       failures.push(`自检「从磁盘读 Latin-1 文件」期望 1 处且理由是 UTF-8，实际 ${latin1Problems.length} 处：${latin1Problems.join('；')}`);
+    }
+
+    // 空集合这条判定要走一遍**真的**收集路径：一个文本文件都不放的目录，
+    // collectFiles 必须给出空数组，decideScan 必须给出 2。
+    // 只测 decideScan([]) 会漏掉"收集器把目录也算成文件"这类错。
+    const emptyRoot = join(dir, 'empty-root');
+    mkdirSync(emptyRoot);
+    const noFiles = collectFiles(emptyRoot, []);
+    const emptyVerdict = decideScan(noFiles, []);
+    diskCases += 1;
+    if (noFiles.length !== 0 || emptyVerdict.exitCode !== 2) {
+      failures.push(
+        `自检「空目录上拒绝通过」期望 0 个文件 / 退出码 2，实际 ${noFiles.length} 个 / 退出码 ${emptyVerdict.exitCode}`,
+      );
+    }
+
+    // 反过来：同一个收集器在有脏文件时必须能红。否则上面那条"空目录判 2"可能只是
+    // 因为收集器永远返回空数组——两条一起才说明收集器真的在工作。
+    const dirtyRoot = join(dir, 'dirty-root');
+    mkdirSync(dirtyRoot);
+    writeFileSync(join(dirtyRoot, 'probe.txt'), 'a\r\n');
+    const dirtyFiles = collectFiles(dirtyRoot, []);
+    const dirtyOffenders = dirtyFiles
+      .map((file) => ({ file, problems: inspectBytes(readFileSync(file)) }))
+      .filter((entry) => entry.problems.length > 0);
+    const dirtyVerdict = decideScan(dirtyFiles, dirtyOffenders);
+    diskCases += 1;
+    if (dirtyFiles.length !== 1 || dirtyOffenders.length !== 1 || dirtyVerdict.exitCode !== 1) {
+      failures.push(
+        `自检「磁盘上真放一个 CRLF 文件」期望 1 个文件 / 1 个违规 / 退出码 1，实际 ${dirtyFiles.length} 个 / ${dirtyOffenders.length} 个 / 退出码 ${dirtyVerdict.exitCode}`,
+      );
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 
-  return failures;
+  return { failures, diskCases };
 }
 
 // ---------------------------------------------------------------------------
@@ -171,24 +252,18 @@ function main() {
     return 0;
   }
 
-  const selfTestFailures = runSelfTest();
-  if (selfTestFailures.length > 0) {
+  const selfTest = runSelfTest();
+  if (selfTest.failures.length > 0) {
     console.error('✗ 守卫自检失败——先修守卫，别信它的结论：');
-    for (const failure of selfTestFailures) console.error(`  - ${failure}`);
+    for (const failure of selfTest.failures) console.error(`  - ${failure}`);
     return 2;
   }
   if (process.argv.includes('--self-test')) {
-    console.log(`✓ 守卫自检通过（${SELF_TEST_CASES.length} 条内存用例 + 2 条磁盘用例）`);
+    console.log(`✓ 守卫自检通过（${SELF_TEST_CASES.length} 条内存用例 + ${SCAN_SELF_TESTS.length} 条退出码用例 + ${selfTest.diskCases} 条磁盘用例）`);
     return 0;
   }
 
   const files = collectFiles(REPO_ROOT, []);
-  // 空集合上宣布"全绿"是自欺：多半是根目录算错了。
-  if (files.length === 0) {
-    console.error(`✗ ${REPO_ROOT} 下没有找到任何文本文件——路径是不是变了？拒绝在空集合上通过。`);
-    return 2;
-  }
-
   const offenders = [];
   for (const file of files) {
     const problems = inspectBytes(readFileSync(file));
@@ -197,17 +272,27 @@ function main() {
     }
   }
 
-  if (offenders.length > 0) {
+  // 判定本身在 decideScan 里（并被自检钉住），main() 只负责把话说清楚。
+  const { exitCode, verdict } = decideScan(files, offenders);
+
+  // 空集合上宣布"全绿"是自欺：多半是根目录算错了——"没扫到"不等于"扫过了没问题"。
+  if (verdict === 'empty') {
+    console.error(`✗ ${REPO_ROOT} 下没有找到任何文本文件——路径是不是变了？拒绝在空集合上通过。`);
+    console.error('  （扫描器坏了 / 根目录算错了也是这个症状，它不等于"全绿"。）');
+    return exitCode;
+  }
+
+  if (verdict === 'violations') {
     console.error(`✗ 有 ${offenders.length} 个文件违反 LF + 无 BOM + 合法 UTF-8（共扫了 ${files.length} 个）：`);
     for (const o of offenders) console.error(`  ${o.file}: ${o.problems.join('；')}`);
     console.error('');
     console.error('  改法：让编辑器对本仓库使用 LF 与 UTF-8（无 BOM）；不要用 PowerShell 的');
     console.error('  Set-Content / Out-File 默认编码写源码文件。');
-    return 1;
+    return exitCode;
   }
 
   console.log(`✓ 文本卫生：${files.length} 个文件全是 LF、无 BOM、合法 UTF-8`);
-  return 0;
+  return exitCode;
 }
 
 // 只设 process.exitCode，不调 process.exit()——理由同 scripts/check-core-purity.mjs

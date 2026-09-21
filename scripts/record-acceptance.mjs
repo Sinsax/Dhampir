@@ -136,6 +136,88 @@ function writeLf(path, text) {
   writeFileSync(path, text.replace(/\r\n/g, '\n').replace(/^\uFEFF/, ''));
 }
 
+// ---------------------------------------------------------------------------
+// 这份记录属于哪一棵树
+//
+// `generated_at` 只说明"什么时候跑的"，回答不了"跑在哪个提交上"——而记录的价值
+// 恰恰在于别人能照着它复核。所以补两个字段：
+//
+//   commit：`git rev-parse --short=12 HEAD`
+//   dirty ：`git status --porcelain` 剔除 `records/` 之后还有没有条目
+//
+// **为什么 dirty 必须忽略 `records/`**：本工具自己就在往 `records/` 里写文件
+// （`acceptance.json` + 每项一份 `.txt`），不排除的话每次跑完 dirty 都是 true，
+// 这个字段就永远取同一个值、一点信息都没有。
+//
+// **`null` 不等于干净**：git 不可用 / 不在仓库里 / 命令失败时两个字段降级为
+// `null`。`dirty: null` 的意思是"**未知**"，跟 `false`（确认干净）是两件事——
+// 读记录的人不能把"不知道"当成"没问题"。
+// ---------------------------------------------------------------------------
+
+/** 本工具自己的落盘目录。它的改动不参与 dirty 判定（见上面那段）。 */
+const RECORDS_DIR = 'records/';
+
+function isRecordPath(path) {
+  // porcelain 里的路径一律用 `/`；含特殊字符时 git 会给整个路径加双引号。
+  const clean = path.trim().replace(/^"|"$/g, '').split('\\').join('/');
+  return clean === 'records' || clean.startsWith(RECORDS_DIR);
+}
+
+/**
+ * 从 `git status --porcelain` 的输出里剔除 `records/` 下的条目，返回剩下的条目。
+ *
+ * porcelain 的格式是固定的 `XY <path>`：前两列是状态码（`??`、` M`、`M `…），
+ * 从第 3 列起才是路径。重命名写成 `R  old -> new`，两侧都要看——只要**任一侧**
+ * 在 records/ 之外，这条就说明"树上有别的东西动了"，必须保留。
+ *
+ * 抽成可导出的纯函数是为了能单测：这段解析写错的样子是"dirty 永远 false"，
+ * 它不会报错、只会让字段失去意义。
+ */
+export function stripRecordEntries(porcelainText) {
+  const kept = [];
+  for (const line of porcelainText.split('\n')) {
+    if (line.trim().length === 0) continue;
+    const paths = line.slice(3).split(' -> ');
+    if (paths.some((p) => !isRecordPath(p))) kept.push(line);
+  }
+  return kept;
+}
+
+/**
+ * 把一次 spawnSync 的结果折成"有没有输出"：失败一律 `null`。
+ *
+ * `null` 表示**未知**（没装 git / 不在仓库里 / 退出码非 0），不是"空输出"。
+ * 单测这条，是因为"git 缺失就把记录工具搞崩"会让整份验收记录写不出来——
+ * 记录工具自己崩掉，比少一个字段严重得多。
+ */
+export function gitOutput(run) {
+  if (run.error) return null;
+  if (typeof run.status !== 'number' || run.status !== 0) return null;
+  return run.stdout ?? '';
+}
+
+/**
+ * 由两个 git 探针的原始输出折成记录里的两个字段。
+ *
+ * - `commit`：`git rev-parse --short=12 HEAD` 的输出（去掉首尾空白）。
+ * - `dirty` ：剔除 `records/` 之后，porcelain 里还有没有条目。
+ *
+ * 任一探针为 `null`（未知）时，对应字段就是 `null`：`dirty: null` **不是**"干净"，
+ * 别把未知读成 false。
+ */
+export function judgeTree(commitOutput, statusOutput) {
+  const commit = commitOutput === null ? '' : commitOutput.trim();
+  return {
+    commit: commit.length > 0 ? commit : null,
+    dirty: statusOutput === null ? null : stripRecordEntries(statusOutput).length > 0,
+  };
+}
+
+/** 跑一条 git 子命令，失败/缺失返回 null（见 gitOutput）。 */
+function runGit(args) {
+  return gitOutput(spawnSync('git', args, { cwd: REPO_ROOT, encoding: 'utf8', shell: false }));
+}
+
 export function selfTest() {
   const cases = [];
   const check = (name, ok) => cases.push({ name, ok });
@@ -165,6 +247,37 @@ export function selfTest() {
   );
   // 反向再钉一次：红必须能被红出来。若哪天判定被改成"只要跑到就算过"，这些会先炸。
   check('判定不是恒绿：存在至少一组输入判红', [0, 1, -1, null].some((s) => judgeResult({ status: s }).ok === false));
+
+  // 「这份记录属于哪棵树」的三个函数。没有这几条，dirty 的解析可以悄悄坏成
+  // "永远 false"（比如漏掉了 records/ 的排除，或反过来把什么都排除掉）。
+  check('porcelain：records/ 下的未跟踪条目被剔除', stripRecordEntries('?? records/m0/acceptance.json\n').length === 0);
+  check('porcelain：records/ 下的已修改条目被剔除', stripRecordEntries(' M records/m0/native-check.txt\n').length === 0);
+  check('porcelain：records/ 本身（不带斜杠）也算记录目录', stripRecordEntries('?? records\n').length === 0);
+  check(
+    'porcelain：records/ 之外的条目仍算改动',
+    stripRecordEntries('?? records/m0/x.txt\n M crates/dhampir-timeline/src/lib.rs\n').length === 1,
+  );
+  check(
+    'porcelain：重命名条目只要任一侧在 records/ 之外就保留',
+    stripRecordEntries('R  records/m0/a.txt -> src/b.rs\n').length === 1 &&
+      stripRecordEntries('R  src/a.rs -> records/m0/b.txt\n').length === 1,
+  );
+  check('porcelain：空输出 / 空行 → 没有条目', stripRecordEntries('').length === 0 && stripRecordEntries('\n\n').length === 0);
+
+  check('dirty：只有 records/ 改动 → false（否则这个字段永远是 true）', judgeTree('abc123d0a1f7', '?? records/m0/x.txt\n').dirty === false);
+  check('dirty：records/ 之外有改动 → true', judgeTree('abc123d0a1f7', ' M scripts/check-dep-graph.mjs\n').dirty === true);
+  check('commit：取 --short=12 的输出并去掉换行', judgeTree('98b517a3d0a1\n', '').commit === '98b517a3d0a1');
+  check(
+    'git 缺失/失败 → commit 与 dirty 都是 null（不崩）',
+    judgeTree(null, null).commit === null && judgeTree(null, null).dirty === null,
+  );
+  check('dirty: null 是"未知"，绝不等同于 false', judgeTree(null, null).dirty !== false && judgeTree(null, '').dirty === false);
+  check(
+    'gitOutput：spawn 失败 / 退出非 0 都降级为 null',
+    gitOutput({ error: new Error('spawn git ENOENT') }) === null &&
+      gitOutput({ status: 128, stdout: '' }) === null &&
+      gitOutput({ status: 0, stdout: 'ok\n' }) === 'ok\n',
+  );
 
   // 每一项都必须能独立判死：缺 exit_code 或缺 ok 都算不完整
   for (const [name, spec] of Object.entries(MILESTONES)) {
@@ -272,6 +385,10 @@ function main() {
     problems.push(`${failed.length} 项没绿：${failed.map((r) => r.id).join(', ')}`);
   }
 
+  // 这份记录属于哪棵树。git 不可用 / 不在仓库里时两个字段是 null（未知）——
+  // 绝不能因此崩掉：记录工具自己崩了，比少一个字段严重得多。
+  const tree = judgeTree(runGit(['rev-parse', '--short=12', 'HEAD']), runGit(['status', '--porcelain']));
+
   const record = {
     schema: 1,
     milestone: args.milestone,
@@ -279,6 +396,10 @@ function main() {
     source: spec.source,
     generated_at: new Date().toISOString(),
     node: process.version,
+    // 记录跑在哪个提交上、树干不干净。`dirty: null` 是"未知"，不是"干净"——
+    // 排除 records/ 的理由见文件上方「这份记录属于哪一棵树」那段。
+    commit: tree.commit,
+    dirty: tree.dirty,
     criteria: results,
     green: problems.length === 0,
     exit_code: problems.length === 0 ? 0 : 1,

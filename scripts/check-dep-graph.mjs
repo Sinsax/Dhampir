@@ -25,7 +25,8 @@
 //   node scripts/check-dep-graph.mjs
 //   node scripts/check-dep-graph.mjs --self-test
 
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -193,6 +194,36 @@ export function parseWorkspaceMembers(text) {
   return [...body.matchAll(/"([^"]+)"/g)].map((m) => m[1].split('\\').join('/'));
 }
 
+/**
+ * 把根清单里列出的成员路径，对照成"清单真的存在"的成员。
+ *
+ * 为什么缺清单必须是**错误**而不是跳过：成员目录存在、却没有 Cargo.toml，
+ * 意味着那个 crate 根本不参与构建（`cargo` 会直接报错退出），守卫也就永远
+ * 看不见它——"没被检查"比"检查失败"更糟。先前这里是 `existsSync → continue`，
+ * 于是"少了一个 crate"被静默吞掉，只见一句误导人的"根 Cargo.toml 是不是变了？"。
+ *
+ * `hasManifest` 注入进来（真实调用传 existsSync），因为这条规则最容易坏成的样子
+ * 就是"悄悄少查一个 crate"——必须能用假目录树在自检里钉住。
+ *
+ * 返回 `{ members: [{ member, manifestPath }], problems: string[] }`。
+ */
+export function resolveMembers(members, hasManifest) {
+  const resolved = [];
+  const problems = [];
+  for (const member of members) {
+    const manifestPath = `${member}/Cargo.toml`;
+    if (hasManifest(manifestPath)) {
+      resolved.push({ member, manifestPath });
+      continue;
+    }
+    problems.push(
+      `workspace 成员 ${member}/ 下没有 Cargo.toml——期望 ${manifestPath}。` +
+        `这个 crate 现在既不参与构建、也不被本守卫检查；要么补上清单，要么把它从根 Cargo.toml 的 members 里删掉。`,
+    );
+  }
+  return { members: resolved, problems };
+}
+
 // ---------------------------------------------------------------------------
 // 检查
 // ---------------------------------------------------------------------------
@@ -333,14 +364,58 @@ const RULE_SELF_TESTS = [
   },
 ];
 
+/**
+ * 成员清单规则的自检：缺清单要变成"写明目录与期望文件名的错误"，而不是跳过或抛异常。
+ */
+const MEMBER_SELF_TESTS = [
+  {
+    name: '成员有 Cargo.toml 时放行',
+    members: ['crates/dhampir-core'],
+    present: ['crates/dhampir-core/Cargo.toml'],
+    expectProblems: 0,
+  },
+  {
+    name: '成员缺 Cargo.toml 要明确报错',
+    members: ['crates/dhampir-timeline'],
+    present: [],
+    expectProblems: 1,
+    expectMentions: ['crates/dhampir-timeline/', 'crates/dhampir-timeline/Cargo.toml'],
+  },
+  {
+    name: '多成员里只缺一个，也只报那一个',
+    members: ['crates/a', 'crates/b'],
+    present: ['crates/a/Cargo.toml'],
+    expectProblems: 1,
+    expectMentions: ['crates/b/Cargo.toml'],
+  },
+];
+
 function runSelfTest() {
   const failures = [];
+  let diskCases = 0;
 
   for (const testCase of PARSER_SELF_TESTS) {
     const got = parseManifest(testCase.text).map((d) => d.name).sort();
     const want = [...testCase.expect].sort();
     if (got.join(',') !== want.join(',')) {
       failures.push(`解析自检「${testCase.name}」期望 ${want.join(',') || '（空）'}，实际 ${got.join(',') || '（空）'}`);
+    }
+  }
+
+  for (const testCase of MEMBER_SELF_TESTS) {
+    const { members, problems } = resolveMembers(testCase.members, (p) => testCase.present.includes(p));
+    const unresolved = testCase.members.filter((m) => !testCase.present.includes(`${m}/Cargo.toml`));
+    if (problems.length !== testCase.expectProblems || members.length !== testCase.members.length - unresolved.length) {
+      failures.push(
+        `成员清单自检「${testCase.name}」期望 ${testCase.expectProblems} 处问题 / ${testCase.members.length - unresolved.length} 个成员，` +
+          `实际 ${problems.length} 处 / ${members.length} 个：${problems.join('；')}`,
+      );
+      continue;
+    }
+    for (const needle of testCase.expectMentions ?? []) {
+      if (!problems.some((p) => p.includes(needle))) {
+        failures.push(`成员清单自检「${testCase.name}」的问题里没写清 ${needle}：${problems.join('；')}`);
+      }
     }
   }
 
@@ -352,29 +427,116 @@ function runSelfTest() {
   }
 
   // 规则也要能放行：每个真实 crate 都用实际 manifest 跑一遍，不该有误报。
-  for (const [crate, entry] of loadGraph()) {
+  // `--self-test` 的语义与另外两个守卫一致：只验**守卫自己的逻辑**，不依赖这棵树
+  // 完不完整（树不完整由 main() 的环境闸门负责判死，不在这里重复报一次）。
+  const environment = readEnvironment();
+  const notes = [];
+  if (environment.errors.length > 0) {
+    notes.push(
+      `本树有 ${environment.errors.length} 处环境/输入错（正常跑会退出码 2，与自检结果无关）：${environment.errors.join('；')}`,
+    );
+  }
+  for (const [crate, entry] of environment.graph) {
     const problems = checkGraph(new Map([[crate, entry]]));
     if (problems.length > 0) {
       failures.push(`规则自检：${crate} 的真实 manifest 被误报——${problems.join('；')}`);
     }
   }
+  const realManifests = environment.graph.size;
 
-  return failures;
+  // 再走一遍真正的磁盘路径。上面那组是注入出来的判定，这里要证的是
+  // "合成根里缺清单时，readEnvironment 给出一条写明期望路径的错误、**且不抛异常**"——
+  // 先前这条路径会抛出 node:fs 的未捕获异常（退出码 1、栈指向 node 内部），
+  // 而且它发生在 runSelfTest 里，连 main() 的空集合检查都到不了。
+  const dir = mkdtempSync(join(tmpdir(), 'dhampir-depgraph-'));
+  try {
+    const memberMissing = join(dir, 'member-no-manifest');
+    mkdirSync(join(memberMissing, 'crates', 'dhampir-timeline'), { recursive: true });
+    writeFileSync(join(memberMissing, 'Cargo.toml'), '[workspace]\nmembers = ["crates/dhampir-timeline"]\n');
+    const memberEnv = readEnvironment(memberMissing);
+    diskCases += 1;
+    if (memberEnv.errors.length !== 1 || memberEnv.graph.size !== 0 || !memberEnv.errors[0].includes('crates/dhampir-timeline/Cargo.toml')) {
+      failures.push(
+        `磁盘自检「成员目录缺 Cargo.toml」期望 1 处错误 / 0 个成员且写明期望路径，实际 ` +
+          `${memberEnv.errors.length} 处 / ${memberEnv.graph.size} 个：${memberEnv.errors.join('；')}`,
+      );
+    }
+
+    const noRoot = join(dir, 'no-root-manifest');
+    mkdirSync(noRoot, { recursive: true });
+    const bareEnv = readEnvironment(noRoot);
+    diskCases += 1;
+    if (bareEnv.errors.length !== 1 || bareEnv.graph.size !== 0) {
+      failures.push(
+        `磁盘自检「根 Cargo.toml 不存在」期望 1 处错误 / 0 个成员（且不抛异常），实际 ${bareEnv.errors.length} 处 / ${bareEnv.graph.size} 个`,
+      );
+    }
+
+    // 空集合这条判定得**可达**：根清单里 members 写成空表时没有环境错，
+    // 于是 main() 里"拒绝在空集合上通过"那条检查接手（先前崩得比它早）。
+    const emptyMembers = join(dir, 'empty-members');
+    mkdirSync(emptyMembers, { recursive: true });
+    writeFileSync(join(emptyMembers, 'Cargo.toml'), '[workspace]\nmembers = []\n');
+    const emptyEnv = readEnvironment(emptyMembers);
+    diskCases += 1;
+    if (emptyEnv.errors.length !== 0 || emptyEnv.graph.size !== 0) {
+      failures.push(
+        `磁盘自检「members 空表」期望 0 处环境错 / 0 个成员（好让空集合检查接手），实际 ${emptyEnv.errors.length} 处 / ${emptyEnv.graph.size} 个`,
+      );
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  return { failures, diskCases, notes, realManifests };
 }
 
 // ---------------------------------------------------------------------------
 
-function loadGraph() {
-  const members = parseWorkspaceMembers(readFileSync(join(REPO_ROOT, 'Cargo.toml'), 'utf8'));
-  const graph = new Map();
-  for (const member of members) {
-    const manifestPath = join(REPO_ROOT, member, 'Cargo.toml');
-    if (!existsSync(manifestPath)) continue;
-    const text = readFileSync(manifestPath, 'utf8');
-    const name = /^\s*name\s*=\s*"([^"]+)"/m.exec(text);
-    graph.set(name ? name[1] : member, { deps: parseManifest(text), manifestPath: relative(REPO_ROOT, manifestPath) });
+/**
+ * 读磁盘：根清单 → 成员清单 → 依赖图。
+ *
+ * **一律不抛异常。** 环境/输入错（根清单读不到、成员目录缺清单）收进 `errors`，
+ * 由 main() 统一按"环境错 = 退出码 2"报出。先前这里的 `readFileSync` 在根清单
+ * 不存在时抛未捕获异常：退出码落在 1、栈指向 node:fs 内部，把"哪个成员缺清单"
+ * 这条最该被看见的信息埋掉了；而且它先在 runSelfTest() 里炸，main() 里那条
+ * "拒绝在空集合上通过"根本走不到。
+ *
+ * `root` 可注入（默认本仓库），这样自检能拿合成目录树跑真路径。
+ */
+function readEnvironment(root = REPO_ROOT) {
+  const errors = [];
+  const rootManifestPath = join(root, 'Cargo.toml');
+  let rootText;
+  try {
+    rootText = readFileSync(rootManifestPath, 'utf8');
+  } catch (error) {
+    return {
+      listedPaths: [],
+      graph: new Map(),
+      errors: [`读不到根清单 ${relative(root, rootManifestPath)}：${error.message}——workspace 根目录是不是算错了？`],
+    };
   }
-  return graph;
+
+  const listedPaths = parseWorkspaceMembers(rootText).sort();
+  const resolved = resolveMembers(listedPaths, (manifestPath) => existsSync(join(root, manifestPath)));
+  errors.push(...resolved.problems);
+
+  const graph = new Map();
+  for (const { member, manifestPath } of resolved.members) {
+    let text;
+    try {
+      text = readFileSync(join(root, manifestPath), 'utf8');
+    } catch (error) {
+      errors.push(`读不到 ${manifestPath}：${error.message}`);
+      continue;
+    }
+    const name = /^\s*name\s*=\s*"([^"]+)"/m.exec(text);
+    graph.set(name ? name[1] : member, { deps: parseManifest(text), manifestPath });
+  }
+
+  // `listedPaths` 原样带出去：main() 要用它跟磁盘上的 crate 目录比对，不必再读一遍根清单。
+  return { listedPaths, graph, errors };
 }
 
 function diskCrates() {
@@ -400,20 +562,36 @@ function main() {
     return 0;
   }
 
-  const selfTestFailures = runSelfTest();
-  if (selfTestFailures.length > 0) {
+  const selfTest = runSelfTest();
+  if (selfTest.failures.length > 0) {
     console.error('✗ 守卫自检失败——先修守卫，别信它的结论：');
-    for (const failure of selfTestFailures) console.error(`  - ${failure}`);
+    for (const failure of selfTest.failures) console.error(`  - ${failure}`);
     return 2;
   }
   if (process.argv.includes('--self-test')) {
     console.log(
-      `✓ 守卫自检通过（${PARSER_SELF_TESTS.length} 条解析用例 + ${RULE_SELF_TESTS.length} 条规则用例 + 真实 manifest 无误报）`,
+      `✓ 守卫自检通过（${PARSER_SELF_TESTS.length} 条解析用例 + ${RULE_SELF_TESTS.length} 条规则用例 + ` +
+        `${MEMBER_SELF_TESTS.length} 条成员清单用例 + ${selfTest.diskCases} 条磁盘用例 + ` +
+        `真实 manifest ${selfTest.realManifests} 个无误报）`,
     );
+    // 树本身有问题时如实说出来：自检通过只说明守卫逻辑没问题，不代表这棵树能判。
+    for (const note of selfTest.notes) console.error(`⚠ ${note}`);
     return 0;
   }
 
-  const graph = loadGraph();
+  const environment = readEnvironment();
+
+  // 环境/输入错 → 退出码 2（README §守卫脚本：不在空文件集上通过）。
+  // 先判死：这类情况下图是不完整的，拿它下"依赖方向正确"的结论就是假绿。
+  if (environment.errors.length > 0) {
+    console.error(`✗ 这份 workspace 读不干净，拒绝下结论（${environment.errors.length} 处环境/输入错）：`);
+    for (const error of environment.errors) console.error(`  - ${error}`);
+    return 2;
+  }
+
+  const graph = environment.graph;
+  // 空集合上宣布"全绿"是自欺。现在这条**真的可达**：根 Cargo.toml 里
+  // members 没写出任何成员时就是它接手（见 readEnvironment / 磁盘自检）。
   if (graph.size === 0) {
     console.error('✗ 一个 workspace 成员都没解析到——根 Cargo.toml 是不是变了？拒绝在空集合上通过。');
     return 2;
@@ -425,12 +603,11 @@ function main() {
   // crate 根本不参与构建，而守卫也就永远看不见它——"没被检查"比"检查失败"更糟。
   const onDisk = diskCrates();
   const listed = [...graph.keys()].length;
-  const listedPaths = parseWorkspaceMembers(readFileSync(join(REPO_ROOT, 'Cargo.toml'), 'utf8')).sort();
-  if (onDisk.join(',') !== listedPaths.join(',')) {
+  if (onDisk.join(',') !== environment.listedPaths.join(',')) {
     problems.push(
       `crates/ 下的目录与 workspace members 不一致：\n` +
         `      磁盘：${onDisk.join(', ')}\n` +
-        `      成员：${listedPaths.join(', ')}`,
+        `      成员：${environment.listedPaths.join(', ')}`,
     );
   }
 
