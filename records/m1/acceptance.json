@@ -3,10 +3,10 @@
   "milestone": "m1",
   "title": "M1 服务端 headless wgpu 基线",
   "source": "plan/video-editor-plan.md §4「退出标准」；另按 §0 执行规则「上一个里程碑的退出标准全绿才允许进入下一个」重跑 M0 的两条 wasm 侧判据——M1 往 dhampir-core 里加了整个渲染模块，core 是两边共用的",
-  "generated_at": "2026-09-21T21:33:51.421Z",
+  "generated_at": "2026-09-21T21:34:43.037Z",
   "node": "v25.5.0",
-  "commit": "855cc182a1a2",
-  "dirty": true,
+  "commit": "89708db8fca6",
+  "dirty": false,
   "criteria": [
     {
       "id": "native-check",
