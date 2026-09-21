@@ -1,0 +1,16 @@
+{
+  "backend": "Dx12",
+  "crate_version": "0.0.1",
+  "device": "10118",
+  "device_type": "DiscreteGpu",
+  "driver": "32.0.16.1074",
+  "driver_info": "",
+  "name": "NVIDIA GeForce RTX 4070",
+  "probe_digest": "c3f0da6b37577e55",
+  "probe_format_version": 1,
+  "requested_backends": "Backends(DX12)",
+  "target_format": "Rgba8UnormSrgb",
+  "target_size": "256x256",
+  "unix_epoch_seconds": 1790017184,
+  "vendor": "4318"
+}

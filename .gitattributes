@@ -1,0 +1,43 @@
+# 全仓 LF —— 这一条不是风格偏好，是**守卫能不能在别人机器上成立**的前提。
+#
+# scripts/check-text-hygiene.mjs 要求每个文本文件都是 LF 且无 BOM。但 git 在
+# Windows 上默认可能按 CRLF 检出（core.autocrlf），于是同一份提交：
+#
+#   作者机器（LF 工作区）→ 守卫绿
+#   队友机器（CRLF 工作区）→ 守卫红，而且红得毫无道理
+#
+# 误报会诱导人删掉守卫，所以这里把它钉死在仓库层面，而不是靠每个人的本地配置。
+# `eol=lf` 只管工作区检出，不改仓库里已有的行尾；规范化仍由 text=auto 负责。
+* text=auto eol=lf
+
+# 二进制：显式标出来。别让 `text=auto` 的探测来决定——它是启发式，
+# 而这几类一旦被当文本处理（换行转换、diff 内联），产物就悄悄坏了。
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.ico binary
+*.wasm binary
+*.mp4 binary
+*.mov binary
+*.mkv binary
+*.webm binary
+*.wav binary
+*.flac binary
+*.zip binary
+*.gz binary
+*.woff2 binary
+
+# 注：records/ 里刻意**不加**额外规则。
+#
+# 曾经的写法是 `records/** -text`（当成二进制、绝不转换）。它有个反效果：
+# run.json / acceptance.json 这些记录的 diff 会变成"Binary files differ"，
+# 而它们恰恰是最需要被人逐行看的东西。
+#
+# 现在的做法靠上面那条 `* text=auto eol=lf`：提交时把 CRLF 规范成 LF、
+# 检出时按 LF 写出。效果一样是"工作区里必定是 LF"，但不牺牲可读的 diff。
+# 唯一要留意的是 records/ 里的文本必须真的是文本——这里没有例外文件。
+
+# Rust 源码的 diff 可读性（不影响内容）
+*.rs diff=rust

@@ -1,0 +1,141 @@
+# dhampir · CI
+#
+# 三个 job —— 对应 plan/video-editor-plan.md §11.1 的 CI 蓝图里"M0 起"那三行：
+#
+#   check-native   双编译之一：native + 全量测试 + fmt/clippy      ← Win + Linux
+#   check-wasm     双编译之二：wasm32 + 跨运行时等值测试
+#   guard          守卫脚本（core 无 #[cfg] / 依赖方向 / 文本卫生）
+#
+# 三点刻意的设计：
+#
+#  1. **不忽略任何退出码**。没有 `|| true`，没有 `continue-on-error`。
+#     "守卫永远绿"是这套东西最危险的失效模式，而它通常就是这样开始的。
+#  2. **每个守卫先跑 `--self-test` 再跑正式扫描**。自检证明守卫自己没坏；
+#     正式扫描证明仓库没坏。两件事分开报，才知道是哪一边出了问题。
+#  3. **wasm-bindgen CLI 的版本从 Cargo.lock 读**，不在这里写死。
+#     crate 与 CLI 版本不一致是"第一天就红"的头号来源，所以只能有一处真相。
+#
+# 首次推送前未在本机验证过（本机没有 GitHub runner）。最可能首跑就红的是
+# ubuntu 上的 check-native —— 已经在本机用交叉 check 预验过：
+#   cargo check --workspace --target x86_64-unknown-linux-gnu   → 退出码 0
+# cargo check 不链接，所以这条能真正证明 Linux 的 cfg 分支都在。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支连续推两次时，取消上一次——不取消的话跑的是过期提交，绿了也不算数。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check-native:
+    name: check-native (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux 是服务端出片的目标环境，Windows 是开发环境。两个都要。
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          # 与 rust-toolchain.toml 保持一致；两处不一致时以 rust-toolchain.toml 为准
+          # （rustup 会按它切工具链），这里显式写是为了让 components 装齐。
+          toolchain: "1.97.0"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # 格式与 lint 放在编译之前：它们最快，失败信息也最清楚。
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo clippy（警告即失败）
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: 双编译之一：native
+        run: cargo check --workspace
+
+      - name: native 全量测试
+        run: cargo test --workspace
+
+  check-wasm:
+    name: check-wasm + 跨运行时等值
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.0"
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 双编译之二：wasm32
+        # 注意：不能用 --workspace —— dhampir-worker 是 native-only。
+        run: cargo check -p dhampir-wasm --target wasm32-unknown-unknown
+
+      - name: 读出 Cargo.lock 里钉住的 wasm-bindgen 版本
+        id: wb
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node scripts/run-wasm-tests.mjs --print-locked-version)"
+          echo "crate 版本 = ${version}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: 装同版本的 wasm-bindgen CLI
+        run: cargo install wasm-bindgen-cli --version "${{ steps.wb.outputs.version }}" --locked
+
+      - name: wasm32 运行时测试（与 native 断言同一份 golden 报告）
+        # 这一步的判据全部在脚本里，且不接受"日志里有 ok 字样"这种软判据：
+        # 每个目标的退出码为 0、跑过的条数 == 二进制列出的条数、
+        # 且 == 源码里 #[wasm_bindgen_test] 的条数。
+        run: node scripts/run-wasm-tests.mjs --out records/m0
+
+      - name: 上传本次记录
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: records-m0-wasm
+          path: records/m0/wasm-tests.json
+          if-no-files-found: error
+
+  guard:
+    name: guard（守卫脚本）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: core 无 #[cfg] / cfg!
+        run: |
+          set -euo pipefail
+          node scripts/check-core-purity.mjs --self-test
+          node scripts/check-core-purity.mjs
+
+      - name: crate 依赖方向单向无环
+        run: |
+          set -euo pipefail
+          node scripts/check-dep-graph.mjs --self-test
+          node scripts/check-dep-graph.mjs
+
+      - name: 全仓 LF + 无 BOM + 合法 UTF-8
+        # 这条在别的机器上有历史误报风险（git 按 CRLF 检出），
+        # 仓库层面已经用 .gitattributes 的 `* text=auto eol=lf` 钉死。
+        run: |
+          set -euo pipefail
+          node scripts/check-text-hygiene.mjs --self-test
+          node scripts/check-text-hygiene.mjs

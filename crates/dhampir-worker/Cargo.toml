@@ -1,0 +1,23 @@
+[package]
+name = "dhampir-worker"
+description = "dhampir 的服务端 headless 宿主（native-only）：离屏渲染、读回、写记录。"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "dhampir-render"
+path = "src/main.rs"
+
+[dependencies]
+dhampir-core = { workspace = true }
+dhampir-media = { workspace = true }
+# native 宿主在这里、也只在这里开后端 feature。
+# core 里不开（会把 wasm32 编译打死），wasm 宿主里开 "webgpu"。
+wgpu = { workspace = true, features = ["vulkan", "dx12", "metal"] }
+log = { workspace = true }
+env_logger = { workspace = true }
+pollster = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

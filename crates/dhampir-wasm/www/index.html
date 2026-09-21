@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dhampir · M0 浏览器宿主自检</title>
+<!--
+  M0 的浏览器宿主自检页。
+
+  它不是产品 UI（M0 的「明确不做」里写着"任何 UI"），也不是 M3 那个 React 应用的起点。
+  它存在的唯一目的：让"同一个 dhampir-core 能在浏览器里跑"这句话有一个**可截图的产物**。
+  页面上的每一个 ✓ 都由 wasm32 上的同一份源码算出——特别是
+  `dhampir_probe_golden_check()`：它比对的是编进 crate 的 golden 报告，
+  **不需要服务端先跑一遍**。所以截图里那个 ✓ 是一个真结论，不是脚本打印的一句好话。
+
+  结果会自动 POST 到 scripts/serve-wasm-harness.mjs 的落盘口，写进 records/m0/：
+  浏览器渲染出的 PNG 与 JSON 因此成为**仓库里的文件**，而不是只活在截图里。
+  用 `file://` 直接打开时没有落盘口，页面会如实显示"未落盘"，其余结论照常成立。
+
+  复跑（`serve-wasm-harness.mjs` 启动时会把这条地址连着摘要一起打印出来）：
+  http://127.0.0.1:8787/?autorun=1&expect=<records/m0/probe-native-dx12.png 的 fnv1a64>
+  `?autorun=1` 让页面加载完自己跑；不带它就只挂按钮，等人点。
+-->
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 28px 32px 48px;
+    background: #14161a; color: #e6e8eb;
+    font: 14px/1.6 "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+  }
+  h1 { margin: 0 0 4px; font-size: 20px; letter-spacing: .3px; }
+  h2 { margin: 26px 0 8px; font-size: 14px; color: #9aa4b2; font-weight: 600; }
+  .sub { margin: 0 0 20px; color: #9aa4b2; }
+  code { color: #c8d0da; }
+  button {
+    font: inherit; padding: 8px 18px; cursor: pointer;
+    background: #2b6cb0; color: #fff; border: 0; border-radius: 4px;
+  }
+  button:disabled { background: #2d3748; color: #8a94a2; cursor: progress; }
+  #status { margin: 18px 0 4px; font-size: 17px; }
+  .grid { display: flex; gap: 36px; flex-wrap: wrap; }
+  canvas { width: 256px; height: 256px; image-rendering: pixelated; border: 1px solid #2d3748; }
+  img#offscreen { width: 256px; height: 256px; image-rendering: pixelated; border: 1px solid #2d3748; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { padding: 1px 0; white-space: pre; }
+  li.ok::before { content: "✓ "; color: #4ade80; }
+  li.bad::before { content: "✗ "; color: #f87171; }
+  li.info::before { content: "· "; color: #6b7280; }
+  .bad { color: #f87171; }
+  .ok { color: #4ade80; }
+  pre {
+    background: #0f1115; border: 1px solid #2d3748; border-radius: 4px;
+    padding: 12px; overflow: auto; max-height: 420px; margin: 0;
+  }
+  details { margin-top: 12px; }
+  summary { cursor: pointer; color: #9aa4b2; }
+</style>
+</head>
+<body>
+
+<h1>dhampir · M0 浏览器宿主自检</h1>
+<p class="sub">同一个 <code>dhampir-core</code> 的第二个宿主。本页每一项结论都由 wasm32 上的同一份源码算出。</p>
+
+<button id="run">运行自检</button>
+<div id="status">尚未运行。</div>
+
+<div class="grid">
+  <section>
+    <h2>① 目标无关的纯逻辑探针（无需 GPU）</h2>
+    <ul id="probe-list"><li class="info">等待运行…</li></ul>
+  </section>
+
+  <section>
+    <h2>② 浏览器 WebGPU：canvas 呈现</h2>
+    <canvas id="probe-canvas" width="256" height="256"></canvas>
+    <ul id="canvas-list"><li class="info">等待运行…</li></ul>
+  </section>
+
+  <section>
+    <h2>③ 浏览器 WebGPU：离屏读回 → PNG</h2>
+    <img id="offscreen" alt="浏览器侧离屏渲染的探针图">
+    <ul id="pixels-list"><li class="info">等待运行…</li></ul>
+  </section>
+</div>
+
+<h2>④ 落盘</h2>
+<ul id="sink-list"><li class="info">尚未运行。</li></ul>
+
+<h2>⑤ 机器可读结果</h2>
+<pre id="report">尚未运行。</pre>
+
+<details>
+  <summary>探针报告全文（与 native 侧逐字节比对的同一份文本）</summary>
+  <pre id="full-report"></pre>
+</details>
+
+<script type="module">
+import init, * as wasm from './pkg/dhampir_wasm.js';
+
+const $ = (id) => document.getElementById(id);
+
+/** 往列表里加一条结论。`ok` 为 undefined 时只是信息行。 */
+function add(id, text, ok) {
+  const el = document.createElement('li');
+  el.textContent = text;
+  el.className = ok === undefined ? 'info' : ok ? 'ok' : 'bad';
+  $(id).appendChild(el);
+}
+
+function reset(id) {
+  $(id).replaceChildren();
+}
+
+function clear(id, text) {
+  reset(id);
+  add(id, text);
+}
+
+function toBase64(bytes) {
+  let out = '';
+  const chunk = 0x8000; // 分块，避免 `String.fromCharCode(...)` 撑爆调用栈
+  for (let i = 0; i < bytes.length; i += chunk) {
+    out += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(out);
+}
+
+async function run() {
+  const button = $('run');
+  button.disabled = true;
+  $('status').textContent = '运行中…';
+
+  const report = {
+    schema: 1,
+    milestone: 'M0',
+    harness: 'crates/dhampir-wasm/www/index.html',
+    user_agent: navigator.userAgent,
+    webgpu_in_navigator: 'gpu' in navigator,
+  };
+  // `?expect=<hex>`：把 native 侧记录的 PNG 摘要传进来，页面就地比对。
+  // 不把期望值写死在页面里——那样"一致"只是页面在自说自话。
+  const expectPng = new URLSearchParams(location.search).get('expect');
+
+  let pngBytes = null;
+  let failures = 0;
+
+  try {
+    await init();
+
+    // ---- ① 纯逻辑 ---------------------------------------------------------
+    const goldenCheck = wasm.dhampir_probe_golden_check();
+    const reportText = wasm.dhampir_probe_report();
+    $('full-report').textContent = reportText;
+
+    report.probe = {
+      golden_check_passed: goldenCheck === '',
+      golden_check_error: goldenCheck,
+      digest_hex: wasm.dhampir_probe_digest_hex(),
+      golden_digest_hex: wasm.dhampir_probe_golden_digest_hex(),
+      format_version: wasm.dhampir_probe_format_version(),
+      lines: wasm.dhampir_probe_line_count(),
+    };
+
+    reset('probe-list');
+    add('probe-list', `golden 报告比对：${goldenCheck === '' ? '一致' : '不一致'}`,
+        goldenCheck === '');
+    if (goldenCheck !== '') {
+      failures += 1;
+      add('probe-list', goldenCheck, false);
+    }
+    add('probe-list', `报告摘要 ${report.probe.digest_hex}`);
+    add('probe-list', `golden 摘要 ${report.probe.golden_digest_hex}`);
+    add('probe-list', `格式版本 ${report.probe.format_version}，行数 ${report.probe.lines}`);
+    add('probe-list', `完整报告已展开在页底（${reportText.split('\n').length} 行文本）`);
+
+    // ---- ② canvas --------------------------------------------------------
+    reset('canvas-list');
+    try {
+      const adapterJson = await wasm.dhampir_probe_init_canvas('probe-canvas');
+      report.canvas_adapter = JSON.parse(adapterJson);
+      add('canvas-list', `adapter ${report.canvas_adapter.name}`);
+      add('canvas-list', `后端 ${report.canvas_adapter.backend}，surface ${report.canvas_adapter.surface_format}`
+          + ` @ ${report.canvas_adapter.surface_size}`);
+
+      const ms = await wasm.dhampir_probe_render_canvas('probe-canvas');
+      report.canvas_render_ms = ms;
+      add('canvas-list', `已提交并 present 一帧：${ms.toFixed(2)} ms`, true);
+    } catch (e) {
+      report.canvas_error = String(e);
+      failures += 1;
+      add('canvas-list', `canvas 路径失败：${report.canvas_error}`, false);
+    }
+
+    // ---- ③ 离屏 PNG -------------------------------------------------------
+    reset('pixels-list');
+    try {
+      const timing = JSON.parse(await wasm.dhampir_probe_offscreen_timing());
+      report.offscreen = timing;
+      // 再取一次字节用于落盘。`timing` 那次已经把同一份工作跑过一遍，
+      // 这里不合并，是因为"耗时"和"字节"是两条不同的证据，混在一起会互相遮。
+      pngBytes = await wasm.dhampir_probe_offscreen_png();
+      report.offscreen_png = {
+        bytes: pngBytes.length,
+        fnv1a64: wasm.dhampir_fnv1a64_hex(pngBytes),
+      };
+      add('pixels-list', `${report.offscreen.target} 渲染 + 读回 + 编码：`
+          + `${timing.total_ms.toFixed(2)} ms`);
+      add('pixels-list', `PNG ${pngBytes.length} 字节，fnv1a64 ${report.offscreen_png.fnv1a64}`);
+      $('offscreen').src = URL.createObjectURL(new Blob([pngBytes], { type: 'image/png' }));
+
+      if (expectPng) {
+        report.expected_png_fnv1a64 = expectPng;
+        report.expected_png_match = report.offscreen_png.fnv1a64 === expectPng;
+        add('pixels-list', `与 native 侧记录比对：${report.expected_png_match ? '逐字节相同' : '不同'}`,
+            report.expected_png_match);
+        if (!report.expected_png_match) {
+          add('pixels-list', `native 记的是 ${expectPng}`, false);
+        }
+      } else {
+        add('pixels-list', '未传 ?expect=<hex>，未与 native 侧比对');
+      }
+    } catch (e) {
+      report.offscreen_error = String(e);
+      failures += 1;
+      add('pixels-list', `离屏路径失败：${report.offscreen_error}`, false);
+    }
+  } catch (e) {
+    report.init_error = String(e);
+    failures += 1;
+    clear('probe-list', `wasm 模块加载失败：${report.init_error}`);
+  }
+
+  // ---- ④ 落盘 -------------------------------------------------------------
+  reset('sink-list');
+  try {
+    const response = await fetch('/__record', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        report,
+        png_base64: pngBytes ? toBase64(pngBytes) : null,
+      }),
+    });
+    report.sink = await response.json();
+    for (const file of report.sink.files ?? []) {
+      add('sink-list', `已写入 ${file}`, true);
+    }
+    if (!response.ok || report.sink.ok !== true) {
+      failures += 1;
+      add('sink-list', `落盘被拒：${report.sink.error ?? response.status}`, false);
+    }
+  } catch (e) {
+    report.sink = { ok: false, error: String(e) };
+    add('sink-list', `没有落盘口（用 file:// 打开就不会有）：${report.sink.error}`);
+  }
+
+  // ---- 汇总 --------------------------------------------------------------
+  $('report').textContent = JSON.stringify(report, null, 2);
+  const status = $('status');
+  status.textContent = failures === 0
+    ? '全部通过——这份页面里的每一项都由 wasm32 上的同一份源码算出。'
+    : `${failures} 项未通过——见下面各节的 ✗。`;
+  status.className = failures === 0 ? 'ok' : 'bad';
+  button.disabled = false;
+  return report;
+}
+
+$('run').addEventListener('click', run);
+
+// 模块一旦求值完就把状态改掉。这行不是装饰：如果 `pkg/` 少了文件、MIME 不对，
+// 模块根本不会求值，页面就会一直停在「尚未运行」——那句话和「点了按钮但没反应」
+// 长得一模一样。分开写死，是为了让"模块没跑起来"这件事在截图里就能看出来。
+$('status').textContent = '模块已加载（wasm 尚未初始化），等待运行。';
+
+// 给自动化留的接口：截图工具/复核脚本可以直接 await 它，不必找按钮。
+globalThis.dhampirHarness = { run };
+
+// `?autorun=1`：加载完立刻跑一次。
+//
+// 为什么要这条路径：截图/复核往往在自动化宿主里做，"点一下按钮"那一步可能
+// **被派发了却没进到页面**（宿主报了 dispatched，页面纹丝不动）。这种失败
+// 比"没点"更阴——截图里只看到"尚未运行"，会被当成"还没跑"。
+// 有了 autorun，证据的产生不再依赖任何一次点击；手动按钮照旧保留。
+if (new URLSearchParams(location.search).has('autorun')) {
+  run();
+}
+</script>
+</body>
+</html>

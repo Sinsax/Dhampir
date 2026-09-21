@@ -1,0 +1,11 @@
+[package]
+name = "dhampir-media"
+description = "dhampir 的解码 / 编码抽象契约（纯 trait 与词汇表，不依赖 wgpu，两端各自实现）。"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# 只为 VideoInfo::timebase —— 时间基的定义只允许有一处，不能各层各写一份。
+dhampir-timeline = { workspace = true }

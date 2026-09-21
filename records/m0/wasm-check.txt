@@ -1,0 +1,6 @@
+$ cargo check -p dhampir-wasm --target wasm32-unknown-unknown --color never
+
+----- stdout -----
+
+----- stderr -----
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.10s

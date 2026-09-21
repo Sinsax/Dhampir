@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "milestone": "m0",
+  "title": "M0 骨架与双编译贯通",
+  "source": "plan/video-editor-plan.md §3「退出标准（三条全绿才算过，源自指导文档 §9.4）」",
+  "generated_at": "2026-09-21T19:39:33.372Z",
+  "node": "v25.5.0",
+  "criteria": [
+    {
+      "id": "native-check",
+      "says": "cargo check --workspace（native）通过",
+      "command": "cargo check --workspace --color never",
+      "exit_code": 0,
+      "seconds": 0.2,
+      "ok": true
+    },
+    {
+      "id": "wasm-check",
+      "says": "cargo check -p dhampir-wasm --target wasm32-unknown-unknown 通过",
+      "command": "cargo check -p dhampir-wasm --target wasm32-unknown-unknown --color never",
+      "exit_code": 0,
+      "seconds": 0.2,
+      "ok": true
+    },
+    {
+      "id": "native-tests",
+      "says": "工作区测试全绿（cargo test --workspace）",
+      "command": "cargo test --workspace --color never",
+      "exit_code": 0,
+      "seconds": 0.6,
+      "ok": true,
+      "tests": {
+        "passed": 48,
+        "failed": 0
+      }
+    },
+    {
+      "id": "cross-runtime",
+      "says": "同一份 golden 报告在 wasm32 运行时上逐字节相等（双运行时等值）",
+      "command": "node scripts/run-wasm-tests.mjs --out records/m0",
+      "exit_code": 0,
+      "seconds": 1.9,
+      "ok": true
+    },
+    {
+      "id": "guard-core-purity",
+      "says": "dhampir-core 里没有 #[cfg] / cfg!",
+      "command": "node scripts/check-core-purity.mjs",
+      "exit_code": 0,
+      "seconds": 0.1,
+      "ok": true
+    },
+    {
+      "id": "guard-dep-graph",
+      "says": "crate 依赖方向单向无环",
+      "command": "node scripts/check-dep-graph.mjs",
+      "exit_code": 0,
+      "seconds": 0.1,
+      "ok": true
+    },
+    {
+      "id": "guard-text-hygiene",
+      "says": "全仓 LF + 无 BOM + 合法 UTF-8",
+      "command": "node scripts/check-text-hygiene.mjs",
+      "exit_code": 0,
+      "seconds": 0.1,
+      "ok": true
+    }
+  ],
+  "green": true,
+  "exit_code": 0
+}

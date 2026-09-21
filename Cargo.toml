@@ -1,0 +1,70 @@
+# dhampir · Cargo workspace 根
+#
+# 依赖方向（指导文档「crate 家族命名」）单向无环：
+#   dhampir-timeline   无内部依赖（纯数据，零 GPU 依赖）
+#   dhampir-media      依赖 timeline            ← 纯契约 trait，连 wgpu 都不依赖
+#   dhampir-core       依赖 timeline            ← 最贵资产，禁止任何 #[cfg]
+#   dhampir-wasm       依赖 core + media        ← 仅 wasm32
+#   dhampir-worker     依赖 core + media        ← 仅 native
+# wasm 与 worker 互不依赖 —— 它们是同一份 core 的两个宿主。
+#
+# 「media 依赖 timeline」不是笔误：`VideoInfo` 里的时间基必须与时间轴用的是
+# **同一个** `Timebase`，各层各写一份有理数定义，迟早在 30000/1001 上分叉。
+#
+# 依赖方向由守卫脚本检查（scripts/check-dep-graph.mjs），不要靠自觉。
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/dhampir-timeline",
+    "crates/dhampir-media",
+    "crates/dhampir-core",
+    "crates/dhampir-wasm",
+    "crates/dhampir-worker",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.87" # = wgpu 30.0.1 的 MSRV
+license = "MIT OR Apache-2.0"
+authors = ["dhampir contributors"]
+# repository: 待 GitHub 建仓后回填（见 plan/video-editor-plan.md §2「仓库侧」），先留空不编造 URL。
+
+[workspace.dependencies]
+dhampir-timeline = { version = "0.0.1", path = "crates/dhampir-timeline" }
+dhampir-media = { version = "0.0.1", path = "crates/dhampir-media" }
+dhampir-core = { version = "0.0.1", path = "crates/dhampir-core" }
+
+# wgpu：**不在这里开任何后端**。
+#   core   → 只要 std + wgsl（API 层与 WGSL 前端），后端由宿主自己加
+#   wasm   → 追加 "webgpu"
+#   worker → 追加 "vulkan" / "dx12" / "metal"
+# 理由：wgpu 的 backend feature 会拉到 ash / d3d12 这类 native-only 依赖，
+# 一旦从 core 里开就会把 wasm32 编译打死。这也是"core 零 #[cfg]"能成立的前提。
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "wgsl"] }
+
+bytemuck = { version = "1.24", features = ["derive"] }
+log = "0.4"
+env_logger = "0.11"
+pollster = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 注：图片编解码用 `png` 而不是 `image`——core 只需要"把 RGBA 编成 PNG"这一件事，
+# 多拉一个格式大礼包既拖慢 wasm 体积，也让"两端同一个编码器"这句话更难确认。
+# `png` 是 core 的直接依赖（见 crates/dhampir-core/Cargo.toml），不在这里统一版本。
+
+# wasm 宿主。**wasm-bindgen crate 版本必须与 wasm-pack 使用的 wasm-bindgen-cli 对齐**，
+# 这是"第一天就红"的头号来源：crate 与 CLI 大版本不一致时 wasm-pack 会报
+# "it looks like the Rust project used to create this wasm file was linked against
+#  a different version of wasm-bindgen" 并拒绝生成胶水代码。
+wasm-bindgen = "0.2.128"
+wasm-bindgen-futures = "0.4"
+wasm-bindgen-test = "0.3"
+web-sys = "0.3"
+console_error_panic_hook = "0.1"
+
+[profile.release]
+# 服务端渲染 worker 是长时间跑的重活，release 打开 LTO 换吞吐。
+lto = "thin"
+codegen-units = 1

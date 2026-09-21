@@ -1,0 +1,194 @@
+{
+  "backends": [
+    {
+      "adapter_name": "NVIDIA GeForce RTX 4070",
+      "deterministic_in_process": true,
+      "error": null,
+      "files": [
+        "records/m0/probe-native-dx12.png",
+        "records/m0/probe-native-dx12.adapter.json"
+      ],
+      "requested": "Backends(DX12)",
+      "sample_verdict": null,
+      "samples": [
+        {
+          "expect": {
+            "kind": "background"
+          },
+          "name": "background_topleft",
+          "rgba": [
+            63,
+            63,
+            63,
+            255
+          ],
+          "x": 2,
+          "y": 2
+        },
+        {
+          "expect": {
+            "kind": "background"
+          },
+          "name": "background_bottomright",
+          "rgba": [
+            63,
+            63,
+            63,
+            255
+          ],
+          "x": 253,
+          "y": 253
+        },
+        {
+          "expect": {
+            "channel": 0,
+            "channel_name": "r",
+            "kind": "dominant"
+          },
+          "name": "near_vertex_red",
+          "rgba": [
+            247,
+            52,
+            50,
+            255
+          ],
+          "x": 128,
+          "y": 50
+        },
+        {
+          "expect": {
+            "channel": 1,
+            "channel_name": "g",
+            "kind": "dominant"
+          },
+          "name": "near_vertex_green",
+          "rgba": [
+            49,
+            248,
+            51,
+            255
+          ],
+          "x": 56,
+          "y": 176
+        },
+        {
+          "expect": {
+            "channel": 2,
+            "channel_name": "b",
+            "kind": "dominant"
+          },
+          "name": "near_vertex_blue",
+          "rgba": [
+            49,
+            54,
+            247,
+            255
+          ],
+          "x": 200,
+          "y": 176
+        }
+      ]
+    },
+    {
+      "adapter_name": "NVIDIA GeForce RTX 4070",
+      "deterministic_in_process": true,
+      "error": null,
+      "files": [
+        "records/m0/probe-native-vulkan.png",
+        "records/m0/probe-native-vulkan.adapter.json"
+      ],
+      "requested": "Backends(VULKAN)",
+      "sample_verdict": null,
+      "samples": [
+        {
+          "expect": {
+            "kind": "background"
+          },
+          "name": "background_topleft",
+          "rgba": [
+            63,
+            63,
+            63,
+            255
+          ],
+          "x": 2,
+          "y": 2
+        },
+        {
+          "expect": {
+            "kind": "background"
+          },
+          "name": "background_bottomright",
+          "rgba": [
+            63,
+            63,
+            63,
+            255
+          ],
+          "x": 253,
+          "y": 253
+        },
+        {
+          "expect": {
+            "channel": 0,
+            "channel_name": "r",
+            "kind": "dominant"
+          },
+          "name": "near_vertex_red",
+          "rgba": [
+            247,
+            52,
+            50,
+            255
+          ],
+          "x": 128,
+          "y": 50
+        },
+        {
+          "expect": {
+            "channel": 1,
+            "channel_name": "g",
+            "kind": "dominant"
+          },
+          "name": "near_vertex_green",
+          "rgba": [
+            49,
+            248,
+            51,
+            255
+          ],
+          "x": 56,
+          "y": 176
+        },
+        {
+          "expect": {
+            "channel": 2,
+            "channel_name": "b",
+            "kind": "dominant"
+          },
+          "name": "near_vertex_blue",
+          "rgba": [
+            49,
+            54,
+            247,
+            255
+          ],
+          "x": 200,
+          "y": 176
+        }
+      ]
+    }
+  ],
+  "milestone": "M0",
+  "pinned_expectations": {
+    "probe_target_format": "Rgba8UnormSrgb",
+    "probe_target_size": "256x256"
+  },
+  "probe": {
+    "digest": "c3f0da6b37577e55",
+    "format_version": 1,
+    "lines": 72
+  },
+  "sample_check_passed": true,
+  "schema": 1
+}

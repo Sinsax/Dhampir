@@ -1,0 +1,23 @@
+# Rust 构建产物。
+# 注意：Cargo.lock **要提交**（workspace 里有二进制），不要加进来。
+/target/
+**/*.rs.bk
+
+# 运行产物（临时）。里程碑证据在 records/，那个是要提交的。
+/out/
+/tmp/
+
+# wasm 打包产物（三份，同一个 crate 的三个目标）
+#   pkg/       --target web     → 浏览器（serve-wasm-harness.mjs 从这里取）
+#   pkg-node/  --target nodejs  → node 下用真实公开 API 做跨运行时比对
+#   www/pkg/   --target web 的原地输出（历史路径，保留忽略以免误提交）
+crates/dhampir-wasm/pkg/
+crates/dhampir-wasm/pkg-node/
+crates/dhampir-wasm/www/pkg/
+node_modules/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

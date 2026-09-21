@@ -1,0 +1,9 @@
+# pin 具体版本，不用 "stable" 漂移（plan/video-editor-plan.md §2 / §3 T0.2）。
+#
+# 为什么不用 stable：ssim 闸门要的是"改变一个变量才能归因"。工具链自己会动的时候，
+# 你没法区分"渲染结果变了"是代码改的还是编译器改的。1.97.0 也是 wgpu 30 上验证过的版本。
+[toolchain]
+channel = "1.97.0"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

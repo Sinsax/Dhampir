@@ -1,0 +1,5 @@
+edition = "2024"
+max_width = 100
+newline_style = "Unix" # 全仓 LF，与 plan/*.md 一致
+use_field_init_shorthand = true
+use_try_shorthand = true

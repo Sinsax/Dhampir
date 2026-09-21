@@ -1,0 +1,137 @@
+$ cargo test --workspace --color never
+
+----- stdout -----
+
+running 9 tests
+test readback::tests::alignment_constant_is_256 ... ok
+test render::probe::tests::comment_stripping_leaves_code_alone ... ok
+test render::probe::tests::vertex_stride_has_no_padding ... ok
+test readback::tests::padding_aligns_up ... ok
+test render::probe::tests::documented_sample_coordinates_are_the_real_ones ... ok
+test render::probe::tests::every_sample_point_lands_where_it_claims_to ... ok
+test readback::tests::pixel_indexing_is_row_major ... ok
+test render::probe::tests::vertices_avoid_pixel_centres_and_midpoints ... ok
+test render::probe::tests::wgsl_is_embedded_and_stays_in_the_portable_subset ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 3 tests
+test tests::bt709_presets_are_distinct ... ok
+test tests::packed_formats_report_bytes_per_pixel ... ok
+test tests::planar_formats_refuse_to_guess ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 21 tests
+test golden::tests::golden_is_wellformed ... ok
+test golden::tests::current_report_matches_golden ... ok
+test selfcheck::tests::fnv1a_matches_published_vectors ... ok
+test golden::tests::golden_self_check_rejects_a_broken_golden ... ok
+test golden::tests::verdict_notices_truncation ... ok
+test timebase::tests::ntsc_is_not_a_float ... ok
+test golden::tests::verdict_names_the_first_differing_line ... ok
+test timebase::tests::try_new_rejects_zero ... ok
+test selfcheck::tests::probe_digest_is_pinned ... ok
+test selfcheck::tests::report_is_ascii_and_versioned ... ok
+test timebase::tests::nominal_fps_rounds_up ... ok
+test timebase::tests::ticks_per_frame_is_exact ... ok
+test selfcheck::tests::case_count_matches ... ok
+test timecode::tests::exact_ticks_are_lossless ... ok
+test golden::tests::verdict_notices_a_lone_carriage_return ... ok
+test timecode::tests::ndf_25_and_24_known_values ... ok
+test timecode::tests::ndf_2997_known_values ... ok
+test timecode::tests::negative_frames_use_absolute_value_and_never_panic ... ok
+test timecode::tests::round_trip_over_a_sweep ... ok
+test timecode::tests::timecode_to_frame_rejects_off_grid ... ok
+test selfcheck::tests::report_is_deterministic ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 5 tests
+test golden_header_matches_format_version ... ok
+test digest_matches_golden_bytes ... ok
+test report_from_public_api_matches_golden ... ok
+test verdict_rejects_a_report_from_another_world ... ok
+test report_is_pure_ascii ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 5 tests
+test probe::tests::golden_check_passes_on_this_build ... ok
+test probe::tests::verify_golden_looks_at_the_captured_report ... ok
+test probe::tests::summary_is_stable_within_a_run ... ok
+test probe::tests::verify_reports_which_side_differs ... ok
+test probe::tests::verify_golden_points_at_the_line_that_moved ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 5 tests
+test offscreen::tests::artifacts_use_backend_specific_names ... ok
+test offscreen::tests::background_must_be_neutral_and_clear_coloured ... ok
+test offscreen::tests::dominant_channel_must_dominate ... ok
+test offscreen::tests::out_of_range_samples_are_reported_as_such ... ok
+test offscreen::tests::missing_samples_are_caught_by_the_coverage_check ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+----- stderr -----
+warning: linker stdout: 正在创建库 F:\para\Code\Dhampir\target\debug\deps\dhampir_wasm.dll.lib 和对象 F:\para\Code\Dhampir\target\debug\deps\dhampir_wasm.dll.exp
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `dhampir-wasm` (lib) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running unittests src\lib.rs (target\debug\deps\dhampir_core-93e7fd86f65e49eb.exe)
+     Running unittests src\lib.rs (target\debug\deps\dhampir_media-1f429968c06e7f57.exe)
+     Running unittests src\lib.rs (target\debug\deps\dhampir_timeline-837d48d915eebd26.exe)
+     Running tests\golden_report.rs (target\debug\deps\golden_report-54fb43e65f588c2f.exe)
+     Running unittests src\lib.rs (target\debug\deps\dhampir_wasm-17c133146d3ab823.exe)
+     Running tests\cross_runtime.rs (target\debug\deps\cross_runtime-e3b121518b9f6b63.exe)
+     Running unittests src\lib.rs (target\debug\deps\dhampir_worker-59cd936557e54cde.exe)
+     Running unittests src\main.rs (target\debug\deps\dhampir_render-e0819b3d8eb19fc7.exe)
+   Doc-tests dhampir_core
+   Doc-tests dhampir_media
+   Doc-tests dhampir_timeline
+   Doc-tests dhampir_wasm
+   Doc-tests dhampir_worker

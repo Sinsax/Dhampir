@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "milestone": "M0",
+  "purpose": "M0 浏览器宿主自检页的整页截图，以及这次运行的硬结论——用于人工复核截图里的绿是不是真的。",
+  "captured_at": "2026-09-21T19:35:02.958Z",
+  "page_url": "http://127.0.0.1:49439/?autorun=1&expect=85bbc2017f35dda9",
+  "browser": {
+    "kind": "chrome",
+    "path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "product": "Chrome/153.0.8010.50",
+    "revision": "@583c5b4655acea7450a3b5224ea5121ae8caca9b",
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36",
+    "headless": true
+  },
+  "viewport": {
+    "width": 1400,
+    "height": 1000,
+    "captured_content": {
+      "width": 1400,
+      "height": 1278
+    }
+  },
+  "screenshot": {
+    "file": "screenshot-browser-harness.png",
+    "bytes": 88779,
+    "sha256": "e845a011f9a83fd72dadd902a43e4873ac414af2da61b38535da761869880da0"
+  },
+  "status_bar": {
+    "className": "ok",
+    "text": "全部通过——这份页面里的每一项都由 wasm32 上的同一份源码算出。"
+  },
+  "verdicts": {
+    "golden_check_passed": true,
+    "golden_digest_hex": "c3f0da6b37577e55",
+    "golden_expected_digest_hex": "c3f0da6b37577e55",
+    "expected_png_fnv1a64": "85bbc2017f35dda9",
+    "browser_png_fnv1a64": "85bbc2017f35dda9",
+    "expected_png_match": true,
+    "sink_ok": true,
+    "sink_files": [
+      "records/m0/browser-harness.json",
+      "records/m0/probe-browser-webgpu.png"
+    ]
+  },
+  "audit": {
+    "ok": true,
+    "problems": []
+  },
+  "notes": [
+    "截图是 CDP Page.captureScreenshot 的整页结果，不是人按的 PrintScreen——同一条命令能再拍一张。",
+    "页面在 ?autorun=1 下自己跑一次；本脚本不重复触发 run()，所以图上的结论与 browser-harness.json 来自同一次运行。",
+    "注：页面若在 90 s 内没给出状态栏结论，run() 会以 timeout 返回并判红——本次是 ok。",
+    "`expected_png_fnv1a64` 由本地服务从 records/m0/probe-native-dx12.png 算出，页面拿它比对；两侧的 FNV-1a 各自被公开向量钉着。"
+  ]
+}

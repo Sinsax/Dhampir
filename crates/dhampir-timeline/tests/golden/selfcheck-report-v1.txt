@@ -1,0 +1,72 @@
+dhampir-probe v1
+tb=24/1 nominal=24 f=0 tc=00:00:00:00 ticks=0 rt=0
+tb=24/1 nominal=24 f=1 tc=00:00:00:01 ticks=1 rt=1
+tb=24/1 nominal=24 f=23 tc=00:00:00:23 ticks=23 rt=23
+tb=24/1 nominal=24 f=24 tc=00:00:01:00 ticks=24 rt=24
+tb=24/1 nominal=24 f=29 tc=00:00:01:05 ticks=29 rt=29
+tb=24/1 nominal=24 f=30 tc=00:00:01:06 ticks=30 rt=30
+tb=24/1 nominal=24 f=1799 tc=00:01:14:23 ticks=1799 rt=1799
+tb=24/1 nominal=24 f=1800 tc=00:01:15:00 ticks=1800 rt=1800
+tb=24/1 nominal=24 f=108000 tc=01:15:00:00 ticks=108000 rt=108000
+tb=24/1 nominal=24 f=1000000 tc=11:34:26:16 ticks=1000000 rt=1000000
+tb=25/1 nominal=25 f=0 tc=00:00:00:00 ticks=0 rt=0
+tb=25/1 nominal=25 f=1 tc=00:00:00:01 ticks=1 rt=1
+tb=25/1 nominal=25 f=23 tc=00:00:00:23 ticks=23 rt=23
+tb=25/1 nominal=25 f=24 tc=00:00:00:24 ticks=24 rt=24
+tb=25/1 nominal=25 f=29 tc=00:00:01:04 ticks=29 rt=29
+tb=25/1 nominal=25 f=30 tc=00:00:01:05 ticks=30 rt=30
+tb=25/1 nominal=25 f=1799 tc=00:01:11:24 ticks=1799 rt=1799
+tb=25/1 nominal=25 f=1800 tc=00:01:12:00 ticks=1800 rt=1800
+tb=25/1 nominal=25 f=108000 tc=01:12:00:00 ticks=108000 rt=108000
+tb=25/1 nominal=25 f=1000000 tc=11:06:40:00 ticks=1000000 rt=1000000
+tb=30/1 nominal=30 f=0 tc=00:00:00:00 ticks=0 rt=0
+tb=30/1 nominal=30 f=1 tc=00:00:00:01 ticks=1 rt=1
+tb=30/1 nominal=30 f=23 tc=00:00:00:23 ticks=23 rt=23
+tb=30/1 nominal=30 f=24 tc=00:00:00:24 ticks=24 rt=24
+tb=30/1 nominal=30 f=29 tc=00:00:00:29 ticks=29 rt=29
+tb=30/1 nominal=30 f=30 tc=00:00:01:00 ticks=30 rt=30
+tb=30/1 nominal=30 f=1799 tc=00:00:59:29 ticks=1799 rt=1799
+tb=30/1 nominal=30 f=1800 tc=00:01:00:00 ticks=1800 rt=1800
+tb=30/1 nominal=30 f=108000 tc=01:00:00:00 ticks=108000 rt=108000
+tb=30/1 nominal=30 f=1000000 tc=09:15:33:10 ticks=1000000 rt=1000000
+tb=24000/1001 nominal=24 f=0 tc=00:00:00:00 ticks=0 rt=0
+tb=24000/1001 nominal=24 f=1 tc=00:00:00:01 ticks=1001 rt=1
+tb=24000/1001 nominal=24 f=23 tc=00:00:00:23 ticks=23023 rt=23
+tb=24000/1001 nominal=24 f=24 tc=00:00:01:00 ticks=24024 rt=24
+tb=24000/1001 nominal=24 f=29 tc=00:00:01:05 ticks=29029 rt=29
+tb=24000/1001 nominal=24 f=30 tc=00:00:01:06 ticks=30030 rt=30
+tb=24000/1001 nominal=24 f=1799 tc=00:01:14:23 ticks=1800799 rt=1799
+tb=24000/1001 nominal=24 f=1800 tc=00:01:15:00 ticks=1801800 rt=1800
+tb=24000/1001 nominal=24 f=108000 tc=01:15:00:00 ticks=108108000 rt=108000
+tb=24000/1001 nominal=24 f=1000000 tc=11:34:26:16 ticks=1001000000 rt=1000000
+tb=30000/1001 nominal=30 f=0 tc=00:00:00:00 ticks=0 rt=0
+tb=30000/1001 nominal=30 f=1 tc=00:00:00:01 ticks=1001 rt=1
+tb=30000/1001 nominal=30 f=23 tc=00:00:00:23 ticks=23023 rt=23
+tb=30000/1001 nominal=30 f=24 tc=00:00:00:24 ticks=24024 rt=24
+tb=30000/1001 nominal=30 f=29 tc=00:00:00:29 ticks=29029 rt=29
+tb=30000/1001 nominal=30 f=30 tc=00:00:01:00 ticks=30030 rt=30
+tb=30000/1001 nominal=30 f=1799 tc=00:00:59:29 ticks=1800799 rt=1799
+tb=30000/1001 nominal=30 f=1800 tc=00:01:00:00 ticks=1801800 rt=1800
+tb=30000/1001 nominal=30 f=108000 tc=01:00:00:00 ticks=108108000 rt=108000
+tb=30000/1001 nominal=30 f=1000000 tc=09:15:33:10 ticks=1001000000 rt=1000000
+tb=60000/1001 nominal=60 f=0 tc=00:00:00:00 ticks=0 rt=0
+tb=60000/1001 nominal=60 f=1 tc=00:00:00:01 ticks=1001 rt=1
+tb=60000/1001 nominal=60 f=23 tc=00:00:00:23 ticks=23023 rt=23
+tb=60000/1001 nominal=60 f=24 tc=00:00:00:24 ticks=24024 rt=24
+tb=60000/1001 nominal=60 f=29 tc=00:00:00:29 ticks=29029 rt=29
+tb=60000/1001 nominal=60 f=30 tc=00:00:00:30 ticks=30030 rt=30
+tb=60000/1001 nominal=60 f=1799 tc=00:00:29:59 ticks=1800799 rt=1799
+tb=60000/1001 nominal=60 f=1800 tc=00:00:30:00 ticks=1801800 rt=1800
+tb=60000/1001 nominal=60 f=108000 tc=00:30:00:00 ticks=108108000 rt=108000
+tb=60000/1001 nominal=60 f=1000000 tc=04:37:46:40 ticks=1001000000 rt=1000000
+tb=30000/1001 offgrid tc=00:00:00:30 rt=-
+tb=30000/1001 offgrid tc=00:00:60:00 rt=-
+tb=30000/1001 offgrid tc=00:60:00:00 rt=-
+tb=30000/1001 ticks=-1001 f=-1
+tb=30000/1001 ticks=-1 f=-1
+tb=30000/1001 ticks=0 f=0
+tb=30000/1001 ticks=1 f=0
+tb=30000/1001 ticks=1000 f=0
+tb=30000/1001 ticks=1001 f=1
+tb=30000/1001 ticks=2147483647 f=2145338
+cases=70

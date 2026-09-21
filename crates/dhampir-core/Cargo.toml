@@ -1,0 +1,19 @@
+[package]
+name = "dhampir-core"
+description = "dhampir 的渲染核心：渲染图、WGSL 内置 shader、特效注册表。**本 crate 内不允许出现任何 #[cfg]**。"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+dhampir-timeline = { workspace = true }
+# 刻意不在这里加任何 wgpu 后端 feature：核心层只用到 API 层与 WGSL 前端，
+# 后端（webgpu / vulkan / dx12）由宿主自己加。详见根 Cargo.toml 的注释。
+wgpu = { workspace = true }
+bytemuck = { workspace = true }
+log = { workspace = true }
+# PNG 编码器放在 core 而不是宿主里，是为了让 M2 的两端用**同一个编码器**：
+# 比对在编码后的字节上进行，两端编码器不同的话归因就无从下手。
+# `png` 是纯 Rust，wasm32 上原样可用。
+png = "0.17"

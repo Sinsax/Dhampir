@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "milestone": "M0",
+  "harness": "crates/dhampir-wasm/www/index.html",
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36",
+  "webgpu_in_navigator": true,
+  "probe": {
+    "golden_check_passed": true,
+    "golden_check_error": "",
+    "digest_hex": "c3f0da6b37577e55",
+    "golden_digest_hex": "c3f0da6b37577e55",
+    "format_version": 1,
+    "lines": 72
+  },
+  "canvas_adapter": {
+    "backend": "BrowserWebGpu",
+    "device_type": "Other",
+    "driver": "",
+    "driver_info": "",
+    "name": "",
+    "surface_format": "Bgra8Unorm",
+    "surface_size": "256x256"
+  },
+  "canvas_render_ms": 1.6000000014901161,
+  "offscreen": {
+    "png_bytes": 8789,
+    "target": "256x256",
+    "total_ms": 154.69999999552965
+  },
+  "offscreen_png": {
+    "bytes": 8789,
+    "fnv1a64": "85bbc2017f35dda9"
+  },
+  "expected_png_fnv1a64": "85bbc2017f35dda9",
+  "expected_png_match": true,
+  "received_unix_epoch_seconds": 1790019302
+}

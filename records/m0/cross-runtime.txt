@@ -1,0 +1,18 @@
+$ node scripts/run-wasm-tests.mjs --out records/m0
+
+----- stdout -----
+  no tests to run!
+  running 4 tests
+  test verify_against_rejects_a_wrong_digest ... ok
+  test report_matches_golden_on_wasm ... ok
+  test report_and_digest_describe_the_same_bytes ... ok
+  test golden_check_entry_point_agrees ... ok
+  
+  test result: ok. 4 passed; 0 failed; 0 ignored; 0 filtered out; finished in 0.01s
+
+✓ wasm32 运行时上 4 个测试全过（2 个目标，退出码全为 0）
+  与源码对账：4 个 #[wasm_bindgen_test] == 4 条实际列出并跑过
+  无 wasm 可跑测试的目标（普通 #[test] 在 wasm 上不执行，如实记下）：dhampir_wasm
+  记录 → F:\para\Code\Dhampir\records\m0\wasm-tests.json
+
+----- stderr -----

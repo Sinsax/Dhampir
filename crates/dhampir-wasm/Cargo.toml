@@ -1,0 +1,50 @@
+[package]
+name = "dhampir-wasm"
+description = "dhampir 的浏览器宿主：wasm-bindgen 导出 + canvas 渲染。仅 wasm32 时有实际内容。"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# 目标无关的部分（探针包装）。native 下也会编译这些，于是
+# `cargo check --workspace` 顺带验证了"同一份源码"这一半。
+#
+# 依赖方向与指导文档一字不差：**core + media**。`dhampir-timeline` 不在这里，
+# 它是通过 `dhampir_core::timeline` 这个重导出用的——依赖表就是字面成立的。
+dhampir-core = { workspace = true }
+dhampir-media = { workspace = true }
+
+# ---------------------------------------------------------------------------
+# 下面全是 wasm32-only。
+#
+# 用 target-specific 依赖而不是在代码里堆 #[cfg]：这样 `cargo check --workspace`
+# 在 native 上依然能通过（否则验收第 1 条就没法做），而 wasm32 构建会拿到
+# 完整的浏览器依赖。指导文档的"零 #[cfg]"只约束 dhampir-core；宿主本来就是
+# 允许分叉的那一层，但分叉越少越好，能用 Cargo 表达的就别用 cfg 表达。
+# ---------------------------------------------------------------------------
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+console_error_panic_hook = { workspace = true }
+log = { workspace = true }
+serde_json = { workspace = true }
+# 浏览器侧唯一可用的后端。见 dhampir_core::gpu::BROWSER_BACKENDS。
+wgpu = { workspace = true, features = ["webgpu"] }
+web-sys = { workspace = true, features = [
+    "Window",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
+    # `window.performance().now()`——计时用。web-sys 每个类型一个 feature，
+    # 少了它 `Window::performance` 根本不存在（报 "method not found"）。
+    "Performance",
+    "console",
+] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = { workspace = true }
