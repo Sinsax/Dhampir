@@ -59,6 +59,15 @@ export function validateReport(report, want = { w: WANT_W, h: WANT_H, n: WANT_N 
   if (ge === undefined) problems.push('结果里没有 gpu_errors，无法确认这次测量没有 WebGPU 错误');
   else if (!Array.isArray(ge)) problems.push('gpu_errors 不是数组');
   else if (ge.length > 0) problems.push('这次测量里有 ' + ge.length + ' 条 WebGPU 错误——测的不是有效路径：' + ge[0]);
+  // S3.3 的生命周期实验必须在场：没有它，报告里就少了"源能活多久"这一条结论。
+  const lt = report.lifetime;
+  if (lt === undefined || lt === null) problems.push('结果里没有 lifetime，S3.3 的实验没跑');
+  else {
+    for (const key of ['close_before_gpu_done', 'close_after_gpu_done']) {
+      if (lt[key] === undefined) problems.push('lifetime 缺 ' + key);
+      else if (typeof lt[key].differing_bytes !== 'number') problems.push('lifetime.' + key + '.differing_bytes 不是数');
+    }
+  }
   return problems;
 }
 
@@ -105,6 +114,10 @@ function selfTest() {
     b_copy_render: { n: 200, mean_ms: 3, median_ms: 3, p95_ms: 3 },
     pixels: { total_bytes: 1920 * 1080 * 4, differing_bytes: 0 },
     gpu_errors: [],
+    lifetime: {
+      close_before_gpu_done: { differing_bytes: 0, identical: true },
+      close_after_gpu_done: { differing_bytes: 0, identical: true },
+    },
   };
   expect('自洽的结果必须过', validateReport(good).length === 0, validateReport(good).join(' | '));
   expect('页面报错必须被抓', validateReport({ ...good, ok: false, error: 'boom' }).length > 0, '放过了 ok=false');
@@ -114,6 +127,7 @@ function selfTest() {
   expect('mean 非正必须被抓', validateReport({ ...good, b_copy_only: { n: 200, mean_ms: 0, median_ms: 0, p95_ms: 0 } }).length > 0, '放过了 mean=0');
   expect('有 WebGPU 错误必须被抓', validateReport({ ...good, gpu_errors: ['boom'] }).length > 0, '放过了 gpu_errors 非空');
   expect('缺 gpu_errors 必须被抓', validateReport({ ...good, gpu_errors: undefined }).length > 0, '放过了缺字段');
+  expect('缺 lifetime 必须被抓', validateReport({ ...good, lifetime: undefined }).length > 0, '放过了缺 lifetime');
   if (failures.length > 0) { for (const f of failures) console.error('  - ' + f); return 1; }
   console.log('✓ 驱动自检通过（' + count + ' 条断言：结果自洽性校验）');
   return 0;

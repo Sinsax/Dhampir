@@ -125,6 +125,36 @@ async function main() {
   report.images = { a: imageStats(a), b: imageStats(b), b_vflipped: imageStats(bv) };
   report.pixels = { total_bytes: a.length, a_vs_b: cmp(a, b), a_vs_b_vflipped: cmp(a, bv), b_vs_b_vflipped: cmp(b, bv) };
   report.pixels.differing_bytes = report.pixels.a_vs_b.differing_bytes;
+
+  // ---- S3.3：VideoFrame 生命周期 ----
+  // 问题：选 (b) 之后，"源要不要活到 GPU 完成"这件事从"外部纹理会不会失效"变成了
+  // "拷贝时源还在不在"。规范说拷贝在命令缓冲执行时发生，所以理论上必须活到 onSubmittedWorkDone。
+  // 这里**实测**：一次在 GPU 完成前 close、一次在完成后 close，各自与 A 路（直接从 video 渲染）比对。
+  const mkLife = () => device.createTexture({
+    size: [W, H], format: 'rgba8unorm',
+    usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+  });
+  const lifeTex1 = mkLife(), lifeTex2 = mkLife();
+  const mkFrame = () => new VideoFrame(video, { timestamp: 0 });
+
+  const frame1 = mkFrame();
+  device.queue.copyExternalImageToTexture({ source: frame1 }, { texture: lifeTex1 }, [W, H]);
+  frame1.close();                       // ← 在 GPU 完成**之前**就关掉
+  await device.queue.onSubmittedWorkDone();
+  const life1 = await read(lifeTex1);
+
+  const frame2 = mkFrame();
+  device.queue.copyExternalImageToTexture({ source: frame2 }, { texture: lifeTex2 }, [W, H]);
+  await device.queue.onSubmittedWorkDone();
+  frame2.close();                       // ← 在 GPU 完成**之后**才关
+  const life2 = await read(lifeTex2);
+
+  report.lifetime = {
+    reference: 'A 路（直接从 video 渲染）',
+    close_before_gpu_done: cmp(a, life1),
+    close_after_gpu_done: cmp(a, life2),
+  };
+
   report.gpu_errors = gpuErrors;
   report.ok = true;
   log('完成');
