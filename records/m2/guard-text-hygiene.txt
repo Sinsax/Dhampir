@@ -1,0 +1,6 @@
+$ node scripts/check-text-hygiene.mjs
+
+----- stdout -----
+✓ 文本卫生：70 个文本文件全是 LF、无 BOM、合法 UTF-8（整树口径：含未跟踪与被忽略的文件；records/、target/ 等 SKIP_DIRS 在外）
+
+----- stderr -----

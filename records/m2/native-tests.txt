@@ -1,0 +1,237 @@
+$ cargo test --workspace --color never
+
+----- stdout -----
+
+running 70 tests
+test gpu::tests::backend_label_is_not_the_debug_wrapper ... ok
+test gpu::tests::backend_slug_is_a_legal_directory_name ... ok
+test readback::tests::padding_aligns_up ... ok
+test render::corpus::tests::empty_table_is_not_a_pass ... ok
+test gpu::tests::the_versions_are_real ... ok
+test render::corpus::tests::a_missing_clock_is_null_not_1970 ... ok
+test readback::tests::alignment_constant_is_256 ... ok
+test render::corpus::tests::a_wrong_pixel_is_reported_and_named ... ok
+test render::corpus::tests::clean_requires_all_three_buckets_empty ... ok
+test render::corpus::tests::corpus_format_alias_points_at_the_scene_format ... ok
+test render::corpus::tests::counts_separate_the_four_outcomes ... ok
+test readback::tests::pixel_indexing_is_row_major ... ok
+test render::corpus::tests::frame_paths_sort_in_numeric_order ... ok
+test render::corpus::tests::frames_digest_is_order_sensitive ... ok
+test render::corpus::tests::out_of_range_point_is_kept_without_a_verdict ... ok
+test render::corpus::tests::out_of_range_is_not_the_same_as_unjudged ... ok
+test render::corpus::tests::record_text_bytes_are_pinned ... ok
+test render::corpus::tests::table_digest_is_order_sensitive ... ok
+test render::corpus::tests::every_scene_judges_its_own_declared_points ... ok
+test render::corpus::tests::table_digest_layout_is_pinned ... ok
+test render::corpus::tests::table_digest_sees_every_field ... ok
+test render::corpus::tests::every_scene_passes_on_its_own_model ... ok
+test render::probe::tests::documented_sample_coordinates_are_the_real_ones ... ok
+test render::probe::tests::every_sample_point_lands_where_it_claims_to ... ok
+test render::corpus::tests::unstable_frames_are_left_unjudged ... ok
+test render::probe::tests::vertex_stride_has_no_padding ... ok
+test render::corpus::tests::unstable_frame_is_recorded_but_not_judged ... ok
+test render::probe::tests::vertices_avoid_pixel_centres_and_midpoints ... ok
+test render::scene::tests::alpha_stack_model_is_the_blend_equation ... ok
+test render::probe::tests::wgsl_is_embedded_and_stays_in_the_portable_subset ... ok
+test render::scene::tests::an_unknown_scene_name_is_a_programming_error_not_a_zero ... ok
+test render::scene::tests::blend_state_is_alpha_blending_and_not_the_premultiplied_one ... ok
+test render::scene::tests::documented_sample_coordinates_are_the_real_ones ... ok
+test render::scene::tests::blur_taps_in_the_shader_are_the_models_weights ... ok
+test render::scene::tests::judge_sample_passes_within_tolerance_and_fails_beyond_it ... ok
+test render::scene::tests::layer_vertex_layout_declares_one_vec4 ... ok
+test render::scene::tests::only_blur_ignores_the_frame ... ok
+test render::scene::tests::pass_count_and_draw_kind_agree_with_the_entry_list ... ok
+test render::scene::tests::every_entry_point_the_registry_names_exists_in_the_shader ... ok
+test render::scene::tests::pinned_predictions_match_the_independent_reimplementation ... ok
+test render::scene::tests::sample_points_are_static_unique_and_inside_the_target ... ok
+test render::scene::tests::params_layout_matches_the_wgsl_struct ... ok
+test render::scene::tests::scene_registry_names_and_order_are_pinned ... ok
+test render::scene::tests::the_declared_frame_spans_are_real_periods ... ok
+test render::scene::tests::the_left_edge_point_is_the_only_one_that_can_see_the_edge_semantics ... ok
+test render::scene::tests::the_whole_prediction_table_hashes_to_the_pinned_digest ... ok
+test render::scene_model::tests::blur_model_matches_pinned_samples ... ok
+test render::scene::tests::tolerance_bites_the_defects_we_care_about ... ok
+test render::scene_model::tests::box_filter_is_not_the_gaussian ... ok
+test render::scene_model::tests::blur_samples_do_not_depend_on_size ... ok
+test render::scene_model::tests::edge_modes_are_distinguishable ... ok
+test render::scene_model::tests::intermediate_quantization_stays_below_one_byte ... ok
+test render::scene_model::tests::round_to_f16_matches_binary16 ... ok
+test render::scene_model::tests::scene_models_separate_the_defects_we_care_about ... ok
+test render::scene_model::tests::srgb_roundtrip_is_byte_exact ... ok
+test render::scene_model::tests::srgb_segments_meet_at_the_thresholds ... ok
+test render::scene_model::tests::stack_alpha_channel_uses_the_over_operator ... ok
+test render::scene_model::tests::stack_order_changes_the_result_by_a_wide_margin ... ok
+test render::scene_model::tests::stack_quantization_stays_within_tolerance ... ok
+test render::scene_model::tests::weights_are_the_rounded_exact_gaussian ... ok
+test render::scene_model::tests::weights_are_not_binary_exact ... ok
+test render::scene_model::tests::weights_sum_to_one ... ok
+test render::scene_model::tests::wrap01_matches_wgsl_fract ... ok
+test render::wgsl_subset::tests::comment_stripping_leaves_code_alone ... ok
+test render::wgsl_subset::tests::forbidden_tokens_do_not_swallow_texture_sample_level ... ok
+test render::wgsl_subset::tests::portable_subset_accepts_texture_load_and_texture_sample_level ... ok
+test render::wgsl_subset::tests::portable_subset_rejects_each_forbidden_token ... ok
+test render::corpus::tests::a_leg_record_is_shaped_for_the_comparison ... ok
+test render::corpus::tests::an_unstable_frame_makes_the_leg_not_clean ... ok
+test render::corpus::tests::the_record_keys_are_pinned ... ok
+
+test result: ok. 70 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 3 tests
+test tests::bt709_presets_are_distinct ... ok
+test tests::packed_formats_report_bytes_per_pixel ... ok
+test tests::planar_formats_refuse_to_guess ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 21 tests
+test golden::tests::golden_self_check_rejects_a_broken_golden ... ok
+test golden::tests::golden_is_wellformed ... ok
+test golden::tests::current_report_matches_golden ... ok
+test golden::tests::verdict_notices_truncation ... ok
+test selfcheck::tests::case_count_matches ... ok
+test selfcheck::tests::probe_digest_is_pinned ... ok
+test timebase::tests::ticks_per_frame_is_exact ... ok
+test selfcheck::tests::fnv1a_matches_published_vectors ... ok
+test golden::tests::verdict_names_the_first_differing_line ... ok
+test selfcheck::tests::report_is_ascii_and_versioned ... ok
+test golden::tests::verdict_notices_a_lone_carriage_return ... ok
+test timebase::tests::nominal_fps_rounds_up ... ok
+test timebase::tests::try_new_rejects_zero ... ok
+test timebase::tests::ntsc_is_not_a_float ... ok
+test timecode::tests::ndf_25_and_24_known_values ... ok
+test timecode::tests::exact_ticks_are_lossless ... ok
+test timecode::tests::negative_frames_use_absolute_value_and_never_panic ... ok
+test timecode::tests::ndf_2997_known_values ... ok
+test timecode::tests::round_trip_over_a_sweep ... ok
+test timecode::tests::timecode_to_frame_rejects_off_grid ... ok
+test selfcheck::tests::report_is_deterministic ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 5 tests
+test digest_matches_golden_bytes ... ok
+test golden_header_matches_format_version ... ok
+test report_from_public_api_matches_golden ... ok
+test report_is_pure_ascii ... ok
+test verdict_rejects_a_report_from_another_world ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 5 tests
+test probe::tests::golden_check_passes_on_this_build ... ok
+test probe::tests::verify_golden_looks_at_the_captured_report ... ok
+test probe::tests::verify_reports_which_side_differs ... ok
+test probe::tests::summary_is_stable_within_a_run ... ok
+test probe::tests::verify_golden_points_at_the_line_that_moved ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 33 tests
+test baseline::tests::backend_slug_is_lowercase ... ok
+test baseline::tests::alignment_probe_catches_a_wrong_byte_count ... ok
+test baseline::tests::backend_slug_is_a_legal_directory_name ... ok
+test baseline::tests::alignment_probe_catches_a_row_shift ... ok
+test baseline::tests::an_unreadable_clock_is_null_not_1970 ... ok
+test baseline::tests::json_milliseconds_are_rounded ... ok
+test baseline::tests::measurement_takes_the_median ... ok
+test baseline::tests::alignment_probe_passes_on_the_model_itself ... ok
+test baseline::tests::the_budget_judges_the_roundtrip_not_the_cpu_submit ... ok
+test baseline::tests::the_record_names_the_metric_it_judged ... ok
+test baseline::tests::budget_verdict_is_three_state ... ok
+test baseline::tests::backend_label_is_not_the_debug_wrapper ... ok
+test baseline::tests::the_adapter_record_needs_no_measurement ... ok
+test baseline::tests::alignment_probe_refuses_a_width_that_needs_no_padding ... ok
+test baseline::tests::versions_are_real_numbers ... ok
+test offscreen::tests::a_missing_backend_field_falls_back_to_the_requested_one ... ok
+test baseline::tests::the_two_records_do_not_answer_the_same_question ... ok
+test offscreen::tests::artifacts_use_backend_specific_names ... ok
+test offscreen::tests::background_must_be_neutral_and_clear_coloured ... ok
+test baseline::tests::worst_frame_is_the_slowest_scene ... ok
+test offscreen::tests::dominant_channel_must_dominate ... ok
+test offscreen::tests::missing_samples_are_caught_by_the_coverage_check ... ok
+test offscreen::tests::out_of_range_samples_are_reported_as_such ... ok
+test offscreen::tests::probe_record_keeps_the_m0_spelling ... ok
+test scenes::tests::a_frame_only_the_other_side_has_is_reported_too ... ok
+test scenes::tests::a_missing_backend_is_reported_as_not_compared ... ok
+test scenes::tests::a_missing_frame_is_not_a_match ... ok
+test scenes::tests::all_selection_keeps_registry_order ... ok
+test scenes::tests::an_empty_current_run_is_never_identical ... ok
+test scenes::tests::frame_ranges_parse_only_the_half_open_form ... ok
+test scenes::tests::identical_runs_compare_identical ... ok
+test scenes::tests::pixel_and_png_mismatches_are_reported_separately ... ok
+test scenes::tests::selection_parses_all_and_named_scenes ... ok
+
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 11 tests
+test tests::a_scene_selects_the_corpus_path ... ok
+test tests::an_unknown_argument_is_rejected_instead_of_ignored ... ok
+test tests::an_option_without_its_value_is_rejected ... ok
+test tests::a_single_frame_is_a_one_frame_range ... ok
+test tests::an_unknown_backend_is_rejected ... ok
+test tests::corpus_only_flags_without_a_scene_are_rejected ... ok
+test tests::corpus_refuses_the_archived_m0_default_out ... ok
+test tests::expand_filters_by_what_this_build_has ... ok
+test tests::probe_only_needs_no_gpu_and_no_explicit_out ... ok
+test tests::scene_and_probe_only_are_two_different_paths ... ok
+test tests::no_arguments_still_means_the_m0_probe_path ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+----- stderr -----
+warning: linker stdout: 正在创建库 F:\para\Code\Dhampir\target\debug\deps\dhampir_wasm.dll.lib 和对象 F:\para\Code\Dhampir\target\debug\deps\dhampir_wasm.dll.exp
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `dhampir-wasm` (lib) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running unittests src\lib.rs (target\debug\deps\dhampir_core-419ad88741d41ba5.exe)
+     Running unittests src\lib.rs (target\debug\deps\dhampir_media-1f429968c06e7f57.exe)
+     Running unittests src\lib.rs (target\debug\deps\dhampir_timeline-837d48d915eebd26.exe)
+     Running tests\golden_report.rs (target\debug\deps\golden_report-54fb43e65f588c2f.exe)
+     Running unittests src\lib.rs (target\debug\deps\dhampir_wasm-83e352dd3e5cea89.exe)
+     Running tests\cross_runtime.rs (target\debug\deps\cross_runtime-a6bb4b216fe5f389.exe)
+     Running unittests src\lib.rs (target\debug\deps\dhampir_worker-15f39be65caa1152.exe)
+     Running unittests src\main.rs (target\debug\deps\dhampir_render-5259f7e890ea9b56.exe)
+   Doc-tests dhampir_core
+   Doc-tests dhampir_media
+   Doc-tests dhampir_timeline
+   Doc-tests dhampir_wasm
+   Doc-tests dhampir_worker

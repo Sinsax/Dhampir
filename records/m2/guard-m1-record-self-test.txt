@@ -1,0 +1,6 @@
+$ node scripts/check-m1-record.mjs --self-test
+
+----- stdout -----
+✓ 守卫自检通过（47 条用例：摘要标准向量、五种滤波器往返、目录分类、14 个检查项各一条反向用例、跨后端与诚实性）
+
+----- stderr -----
