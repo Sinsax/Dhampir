@@ -7,9 +7,14 @@
 use dhampir_timeline::schema::EffectSpec;
 
 /// 高斯模糊。radius 是像素半径。
+///
+/// 上界**必须**等于着色器能展开的最大抽头数的一半（`render::BLUR_MAX_RADIUS`）。
+/// 写死一个更大的数会让「用户能拖到 64」而着色器只按 16 算——
+/// 那种不一致不报错，只是模糊得不够，正是这份登记表要防的事。
+/// 有一条测试把两者钉在一起。
 pub const GAUSSIAN_BLUR: EffectSpec = EffectSpec {
     kind: "gaussian_blur",
-    params: &[("radius", 0.0, 64.0)],
+    params: &[("radius", 0.0, crate::render::BLUR_MAX_RADIUS as f32)],
 };
 
 /// 全部已登记的特效。
@@ -35,6 +40,16 @@ mod tests {
         validate_project_with_effects,
     };
     use std::collections::BTreeMap;
+
+    #[test]
+    fn 模糊半径上界与着色器展开数必须一致() {
+        // 这条是**跨模块的一致性闸**：着色器展开多少抽头，登记表就只准报多大半径。
+        // 两边各写一个数，迟早会出现「UI 能拖、后端算不到」。
+        let spec = spec_of("gaussian_blur").expect("应当登记了 gaussian_blur");
+        let (_, _, max) = spec.params.iter().find(|(name, _, _)| *name == "radius").expect("应当有 radius");
+        assert_eq!(*max, crate::render::BLUR_MAX_RADIUS as f32);
+        assert_eq!(crate::render::BLUR_TAPS, 2 * crate::render::BLUR_MAX_RADIUS as usize + 1);
+    }
 
     #[test]
     fn 登记表能查到也能列出来() {
@@ -76,11 +91,20 @@ mod tests {
         );
 
         let mut bad = project.clone();
-        bad.tracks[0].clips[0].effects[0].params.insert("radius".to_string(), 65.0);
+        // 越界值从登记表推：上界 + 1
+        let over = spec_of("gaussian_blur").expect("应当登记了").params[0].2 + 1.0;
+        bad.tracks[0].clips[0].effects[0].params.insert("radius".to_string(), over);
         let issues = validate_project_with_effects(&bad, REGISTRY);
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].code, "effect_param_out_of_range");
-        // 报出来的范围必须与登记表一致，否则用户按提示改还是错
-        assert!(issues[0].message.contains("64"), "提示里要带上真实上界：{}", issues[0].message);
+        // 报出来的范围必须与登记表一致，否则用户按提示改还是错。
+        // 上界**从登记表推**，不写死：写死的话改一次上界就要改一次测试，
+        // 而「改测试让它过」正是这类断言最容易退化的方式。
+        let bound = spec_of("gaussian_blur").expect("应当登记了").params[0].2;
+        assert!(
+            issues[0].message.contains(&bound.to_string()),
+            "提示里要带上真实上界 {bound}：{}",
+            issues[0].message
+        );
     }
 }

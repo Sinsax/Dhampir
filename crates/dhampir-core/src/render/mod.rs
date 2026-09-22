@@ -14,6 +14,7 @@
 //! 没有显卡的机器上也能被测试。这一层独立于测量，才谈得上"独立答案"。
 
 mod blit;
+mod blur;
 mod compose;
 mod probe;
 mod scene;
@@ -43,6 +44,7 @@ pub use corpus::{
     render_frame_pair, render_frame_record, render_run, report_text, scene_json, table_digest,
 };
 pub use blit::{BLIT_WGSL, BlitRenderer};
+pub use blur::{BLUR_WGSL, BlurRenderer, MAX_RADIUS as BLUR_MAX_RADIUS, TAPS as BLUR_TAPS, gaussian_weights_1d};
 pub use compose::{COMPOSE_WGSL, Compositor, LayerDraw, inverse_affine};
 pub use probe::{
     PROBE_CLEAR_COLOR, PROBE_TARGET_SIZE, PROBE_VERTICES, ProbeRenderer, ProbeSample, ProbeVertex,
