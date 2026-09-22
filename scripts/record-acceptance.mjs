@@ -481,13 +481,15 @@ function main() {
     // 原始输出原样落盘：复核的人要看到的是命令说了什么，不是我摘了什么。
     // stdout 与 stderr 分开写——cargo 把 "Running ..." 打给 stderr、测试结果打给
     // stdout，拼在一起会让顺序看着像个 bug（结果在前、谁跑的在后）。
-    // 但**先攒着不写**，见循环后那段注释。
-    pendingWrites.push([
-      join(outDir, `${criterion.id}.txt`),
-      `$ ${command} ${commandArgs.join(' ')}\n\n----- stdout -----\n${stdout}\n----- stderr -----\n${stderr}`,
-    ]);
     const tests = countTests(output);
     const verdict = judgeResult(run);
+
+    // 但**先攒着不写**，见循环后那段注释。
+    // 退出码一并写进原文：它原先只活在 acceptance.json 里，记录内不可复算（复核 P1）。
+    pendingWrites.push([
+      join(outDir, `${criterion.id}.txt`),
+      `$ ${command} ${commandArgs.join(' ')}\nexit: ${verdict.exit_code}\n\n----- stdout -----\n${stdout}\n----- stderr -----\n${stderr}`,
+    ]);
 
     results.push({
       id: criterion.id,

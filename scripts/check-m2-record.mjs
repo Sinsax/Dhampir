@@ -3714,6 +3714,15 @@ const HONESTY_JUDGES = {
 
   'acceptance': ({ model }) => {
     const messages = [];
+    // 判据原文的头两行：[$ 命令] 与 [exit: 退出码]。
+    // 退出码写进原文是复核 P1 逼出来的：原先它只活在 acceptance.json 里，
+    // 于是 [JSON 谎称全绿 + 原文其实是红的] 在记录内无从复算。现在两处必须对得上。
+    const parseCriterionTxt = (text) => {
+      const lines = String(text).split('\n');
+      const command = /^[$] (.*)$/.exec(lines[0] === undefined ? '' : lines[0]);
+      const exit = /^exit: (-?[0-9]+|null)$/.exec(lines[1] === undefined ? '' : lines[1]);
+      return { command: command === null ? null : command[1], exit: exit === null ? null : exit[1] };
+    };
     const txts = EXPECTED.acceptanceIds.map((id) => `${id}.txt`);
     const present = txts.filter((name) => model.listing.names.has(name));
     const got = model.acceptance;
@@ -3735,7 +3744,13 @@ const HONESTY_JUDGES = {
     if (value.exit_code !== 0) messages.push(`exit_code=${JSON.stringify(value.exit_code)}`);
     // `dirty: null` 是"未知"（git 不可用），与 `false` 是两件事——只有 `true` 判红。
     if (value.dirty === true) {
-      messages.push('dirty=true——记录是在一棵脏树上跑的，`commit` 那一栏代表不了记录内容');
+      messages.push('dirty=true——记录是在一棵脏树上跑的，commit 那一栏代表不了记录内容');
+    }
+    // commit 至少得像一个提交号。注意：本项**不重跑**那 13 条判据——其中两条就是
+    // 「把本守卫跑一遍」，重跑会成环。所以「守卫绿」只等于「快照自洽」，不等于「快照诚实」：
+    // 判据原文在 records/m2/*.txt，人得自己看（复核 P1 的边界）。
+    if (value.commit !== null && (typeof value.commit !== 'string' || !/^[0-9a-f]{12}$/.test(value.commit))) {
+      messages.push('commit=' + JSON.stringify(value.commit) + ' 不像一个 12 位提交号');
     }
 
     const criteria = Array.isArray(value.criteria) ? value.criteria : [];
@@ -3755,7 +3770,22 @@ const HONESTY_JUDGES = {
       );
       if (unknown.length > 0) messages.push(`判据 ${item.id} 多出没认领的栏：${unknown.slice(0, 4).join('、')}`);
       if (item.ok !== true) messages.push(`判据 ${item.id} 记的是 ok=${JSON.stringify(item.ok)}`);
-      if (item.exit_code !== 0) messages.push(`判据 ${item.id} 记的是 exit_code=${JSON.stringify(item.exit_code)}`);
+      if (item.exit_code !== 0) messages.push('判据 ' + item.id + ' 记的是 exit_code=' + JSON.stringify(item.exit_code));
+
+      // 与判据原文逐条对账（复核 P1）：退出码与命令都要与原文一致。
+      const txtName = item.id + '.txt';
+      const txt = model.listing.names.has(txtName) ? readTextIfPresent(join(model.dir, txtName)) : null;
+      if (txt !== null) {
+        const parsed = parseCriterionTxt(txt);
+        if (parsed.exit === null) {
+          messages.push(txtName + ' 里没有 exit: 行——退出码在记录内不可复算');
+        } else if (parsed.exit !== String(item.exit_code)) {
+          messages.push(txtName + ' 写 exit: ' + parsed.exit + '，acceptance.json 记 ' + JSON.stringify(item.exit_code));
+        }
+        if (parsed.command !== null && parsed.command !== item.command) {
+          messages.push(txtName + ' 的第一行命令与 acceptance.json 记的不是同一条');
+        }
+      }
     }
     // 逐条判据都要有**原样输出**：只有一句"✓"的验收表是没法复核的。
     for (const id of EXPECTED.acceptanceIds) {
@@ -3856,6 +3886,32 @@ export const ALL_CHECK_IDS = [
   ...CROSS_CHECKS,
   ...HONESTY_CHECKS,
 ];
+
+/**
+ * 各族的 id **逐字**清单，写死。
+ *
+ * 为什么必须写死（复核 P2 的实证）：覆盖率断言如果只拿 `ALL_CHECK_IDS` 与 `MUTATIONS`
+ * 互相比，两者是**同源**的——「同时删掉一个检查项和它的反向用例」会让两边一起缩小，
+ * 自检照样报 36/36 绿，屏幕上却仍然印着"160 张 PNG 的像素摘要逐张重算"。
+ * 钉死之后，删任何一项都会与锚对不上，当场报红。
+ */
+const EXPECTED_FAMILIES = {
+  leg: ['required-files', 'run-shape', 'frame-set', 'png-bytes-and-digest', 'pixels', 'repeat',
+    'frames-digest', 'counts', 'points', 'measured-vs-png', 'readings', 'adapter', 'host-gpu',
+    'screenshot', 'rerun-repro'],
+  native: ['native-archive', 'native-frames-digest', 'native-readings'],
+  framediff: ['dir-listing', 'inputs', 'thresholds', 'summary-csv', 'verdict-json', 'report-txt',
+    'shape-json', 'diff-images'],
+  cross: ['browser-vs-native-bytes', 'amd-vs-native-readings', 'adapter-drift', 'screenshot-drift',
+    'run-json-drift', 'leg-distinctness'],
+  honesty: ['root-listing', 'readme-claims', 'wasm-tests', 'acceptance', 'review-independent'],
+};
+
+/** 检查项总数的锚。与 `EXPECTED_FAMILIES` 一起，让"协同缩表"当场暴露。 */
+const EXPECTED_CHECK_TOTAL = 37;
+
+/** 断言条数的锚：少了说明有人删了断言（复核 P2）。 */
+const EXPECTED_ASSERTIONS = 59;
 
 /** 检查项的 spec 是**两层合起来**的：语料级（scenes/frames/frameRange…）+ 腿级（pngBytes/inPage…）。 */
 function legSpecOf(spec) {
@@ -4077,6 +4133,29 @@ export function runSelfTest() {
   const covered = new Set(MUTATIONS.map((mutation) => mutation.expect));
   const uncovered = ALL_CHECK_IDS.filter((id) => !covered.has(id));
   expect('每个检查项都有反向用例', uncovered.length === 0, '没有反向用例的是 ' + uncovered.join('、'));
+
+  // ---- ⑤ 钉死：族清单 / 总数 / 断言条数都要与锚对得上（复核 P2）----
+  //
+  // 这一组是**独立于覆盖断言**的：覆盖率拿 ALL_CHECK_IDS 与 MUTATIONS 互比，两者同源，
+  // 「协同缩表」能同时骗过它们；这里的锚是写死的，缩表就会露出来。
+  expect('检查项总数与锚一致', ALL_CHECK_IDS.length === EXPECTED_CHECK_TOTAL,
+    '得到 ' + ALL_CHECK_IDS.length + '，锚是 ' + EXPECTED_CHECK_TOTAL + '——检查项被增删了');
+  const families = [
+    ['LEG_CHECKS', LEG_CHECKS, EXPECTED_FAMILIES.leg],
+    ['NATIVE_CHECKS', NATIVE_CHECKS, EXPECTED_FAMILIES.native.slice().map((id) => id.replace(/^native-/, ''))],
+    ['FRAMEDIFF_CHECKS', FRAMEDIFF_CHECKS, EXPECTED_FAMILIES.framediff],
+    ['CROSS_CHECKS', CROSS_CHECKS, EXPECTED_FAMILIES.cross],
+    ['HONESTY_CHECKS', HONESTY_CHECKS, EXPECTED_FAMILIES.honesty],
+  ];
+  for (const [name, actual, want] of families) {
+    const same = actual.length === want.length && actual.every((id, index) => id === want[index]);
+    expect(name + ' 与锚逐字一致', same,
+      '得到 [' + actual.join('、') + ']，锚是 [' + want.join('、') + ']');
+  }
+  // 断言条数最后核：少了说明有人把断言删掉了（它自己不计入 count）。
+  if (count !== EXPECTED_ASSERTIONS) {
+    failures.push('断言条数与锚不一致：得到 ' + count + '，锚是 ' + EXPECTED_ASSERTIONS);
+  }
 
   return { failures, count, covered: covered.size, total: ALL_CHECK_IDS.length };
 }
