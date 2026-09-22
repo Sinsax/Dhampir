@@ -2,7 +2,7 @@
 //!
 //! # 为什么需要一个 build script
 //!
-//! T1.4 要求记录里出现 **wgpu 版本**，而 wgpu 没有给出任何运行时可读的版本号：
+//! 记录里要出现 **wgpu 版本**，而 wgpu 没有给出任何运行时可读的版本号：
 //! `wgpu` crate 里没有 `pub const VERSION`（`wgpu-core` / `naga` 也没有），
 //! `Instance` 上也没有这类查询。唯一的真相来源是 `Cargo.lock`——那也正是
 //! "这次编译实际用了哪个版本"的**定义**。
@@ -15,8 +15,14 @@
 //!   一旦没有锁文件（打包、`cargo install`）就直接编译失败。
 //!
 //! 所以：能读到就编进去，读不到就编进 `"unknown"`——**记录里出现 `"unknown"`
-//! 是一个可见的缺陷，比一个看起来很像真的假版本号好得多**。
-//! `baseline.rs` 里有一条测试钉着"不许是 unknown"，所以本脚本失效会红。
+//! 是一个可见的缺陷，比一个看起来很象真的假版本号好得多**。`gpu.rs` 里有一条测试钉着
+//! "不许是 unknown"，所以本脚本失效会红。
+//!
+//! # 为什么在 core 而不是每个宿主各来一份
+//!
+//! 两个宿主都要写"这是哪个 wgpu 编出来的"。各写一份 build script，等于让同一个
+//! 事实有两个来源——而漂移的那天正好是最不该有漂移的那天（版本号对上了，记录却不同）。
+//! 这里编进 core，`dhampir_core::gpu::WGPU_VERSION` 是唯一出口。
 
 use std::path::{Path, PathBuf};
 
@@ -49,7 +55,7 @@ fn main() {
     }
 }
 
-/// 从 `crates/dhampir-worker` 往上找 `Cargo.lock`。
+/// 从 `crates/<crate>` 往上找 `Cargo.lock`。
 ///
 /// **走上去找而不是拼死路径**：本仓库现在是 `crates/<crate>/`，但"往上有几层"
 /// 这种事会在某次目录调整里悄悄变——变成"版本号静默变成 unknown"的那种变化。
@@ -100,7 +106,7 @@ fn package_version(lock: &str, package: &str) -> Option<String> {
 }
 
 fn emit_unknown(reason: &str) {
-    println!("cargo:warning=dhampir-worker：读不到 Cargo.lock（{reason}），版本号将记为 unknown");
+    println!("cargo:warning=dhampir-core：读不到 Cargo.lock（{reason}），版本号将记为 unknown");
     for env_key in ["DHAMPIR_WGPU_VERSION", "DHAMPIR_NAGA_VERSION"] {
         println!("cargo:rustc-env={env_key}=unknown");
     }
@@ -108,7 +114,7 @@ fn emit_unknown(reason: &str) {
 
 fn emit_unknown_package(env_key: &str, package: &str, lock: &Path) {
     println!(
-        "cargo:warning=dhampir-worker：{} 里没有 {package} 包的记录，{env_key} 记为 unknown",
+        "cargo:warning=dhampir-core：{} 里没有 {package} 包的记录，{env_key} 记为 unknown",
         lock.display()
     );
     println!("cargo:rustc-env={env_key}=unknown");

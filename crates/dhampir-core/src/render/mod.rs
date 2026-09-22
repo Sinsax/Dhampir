@@ -36,8 +36,8 @@ mod wgsl_subset;
 
 pub use corpus::{
     CORPUS_RECORD_KIND, CORPUS_RECORD_SCHEMA, CORPUS_TARGET_FORMAT, CORPUS_TABLE_MILESTONE, Counts,
-    CorpusError, PointReading, RenderPair, SceneFrame, SceneRun, TableRow, frame_json,
-    frame_rel_path, frames_digest, judge_frame, leg_json, point_json, render_frame,
+    CorpusError, PointReading, RenderPair, SceneFrame, SceneRun, TableRow, epoch_seconds, frame_json,
+    frame_rel_path, frames_digest, judge_frame, leg_json, point_json, record_text, render_frame,
     render_frame_pair, render_frame_record, render_run, report_text, scene_json, table_digest,
 };
 pub use probe::{

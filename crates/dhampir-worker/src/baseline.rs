@@ -91,21 +91,30 @@ pub fn build_profile() -> &'static str {
     }
 }
 
-/// 编进二进制的 wgpu 版本。来源是 `Cargo.lock`，由 `build.rs` 取出——见它的文档。
+/// 编进二进制的 wgpu 版本。**实现在 core**（[`dhampir_core::gpu::WGPU_VERSION`]）。
+///
+/// 这里只留一层转发：记录里那个键叫 `wgpu_version`，而"这个数从哪来"必须只有一个答案。
+/// M2 之前它是 worker 自己 `build.rs` 编进去的——那时只有 native 一个宿主要写这份记录。
+/// 浏览器那条腿也要写同一个键之后，"两个宿主各自编一个版本号"就多出了一处可能的漂移：
+/// 版本号对上了，记录却不同。搬进 core 之后，两个宿主读的是同一个常量。
 ///
 /// 读不到时是 `"unknown"`，而不是一个编造的数字：**记录里出现 unknown 是可见的缺陷**。
 /// [`wgpu_version_is_real`] 钉着这一条。
 pub fn wgpu_version() -> &'static str {
-    env!("DHAMPIR_WGPU_VERSION")
+    dhampir_core::gpu::WGPU_VERSION
 }
 
-/// 编进二进制的 naga 版本（`wgpu` 的着色器前端，`wgpu::naga`）。
+/// 编进二进制的 naga 版本（`wgpu` 的着色器前端，`wgpu::naga`）。**实现在 core**。
 ///
 /// 记它是因为 WGSL 的可移植子集检查（`wgsl_subset`）针对的就是这个前端的行为：
 /// 将来排查"某段 WGSL 在浏览器上过了、在 native 上没过"时，第一个要问的就是两边
 /// naga 是不是同一个版本。
+///
+/// **但它只描述 native 这条腿。** 浏览器上 WGSL 由浏览器自己的实现编译
+/// （Chrome 是 Dawn/Tint），naga 不在那条路径上——浏览器那条腿的记录里对这一点
+/// 必须如实写明，不能把这个数抄过去。
 pub fn naga_version() -> &'static str {
-    env!("DHAMPIR_NAGA_VERSION")
+    dhampir_core::gpu::NAGA_VERSION
 }
 
 // ---------------------------------------------------------------------------
@@ -196,27 +205,22 @@ impl AdapterIdentity {
     }
 }
 
-/// 请求的后端位标志 → **记录里那个后端名**（`DX12`、`VULKAN`）。
+/// 请求的后端位标志 → **记录里那个后端名**（`DX12`、`VULKAN`、`BROWSER_WEBGPU`）。
+/// **实现在 core**（[`dhampir_core::gpu::backend_label`]）。
 ///
 /// 不直接 `{:?}` 出来：`wgpu::Backends` 是位标志包装，它的 `Debug` 是
 /// `Backends(DX12)`——那是 wgpu 的内部形态，不是后端名。M0 归档的
 /// `records/m0/*.json` 里就是那个形态（当时直接 `{:?}` 了），**不追溯改写**：
 /// 那些文件是那一次运行的证据。M1 起统一走本函数，于是"记录里写的后端名"和
 /// "产物目录名"（[`backend_slug`]）说的是同一件事，而不是两套拼法。
+///
+/// M2 之后实现搬去了 core：浏览器那条腿要写**同一个键**，而两个宿主互不依赖。
+/// 这里只留一层转发，调用点与归档记录都不用动。见 core 里那段注释。
 pub fn backend_label(backends: wgpu::Backends) -> String {
-    let raw = format!("{backends:?}");
-    match raw
-        .strip_prefix("Backends(")
-        .and_then(|inner| inner.strip_suffix(')'))
-    {
-        Some(inner) => inner.to_string(),
-        // 万一日后 wgpu 换了写法：原样返回也不致命——**名字难看总好过名字为空**，
-        // 而"空名字"会让两个后端的产物落进同一个目录。
-        None => raw,
-    }
+    dhampir_core::gpu::backend_label(backends)
 }
 
-/// 后端名 → 目录/文件名里的小写形式（`DX12` → `dx12`）。
+/// 后端名 → 目录/文件名里的小写形式（`DX12` → `dx12`）。**实现在 core**。
 ///
 /// 每个后端的产物必须落在**自己的目录**里：M0 已经踩过"后跑的盖了先跑的"这个坑
 /// （见 `offscreen::ProbeRun::stem` 的注释），一次 `--backend all` 会让两个后端
@@ -225,18 +229,7 @@ pub fn backend_label(backends: wgpu::Backends) -> String {
 /// 只留下 `[a-z0-9-]`：位或起来的多后端（`DX12 | VULKAN`）也要能当目录名，
 /// 而 `|` 在 Windows 上不是合法文件名字符。
 pub fn backend_slug(backends: wgpu::Backends) -> String {
-    backend_label(backends)
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_string()
+    dhampir_core::gpu::backend_slug(backends)
 }
 
 // ---------------------------------------------------------------------------
@@ -621,14 +614,15 @@ pub fn unix_epoch_millis() -> u64 {
 }
 
 /// `epoch_millis` → 记录里"秒"那一栏。0（读不到时钟）写成 `null`。
+/// **实现在 core**（[`dhampir_core::render::corpus::epoch_seconds`]）。
 ///
 /// 秒与毫秒都给：M0 的记录里就是秒（整数），跨记录对时间时毫秒更有用。
+///
+/// 搬进 core 的理由：M2 的浏览器腿也要写这一对键，而它那边的时钟是页面从
+/// `Date.now()` 传进来的——"0 要写成 null"这条 M0 就定下的规矩必须两条腿都成立，
+/// 不能一边一个实现。
 fn epoch_seconds(epoch_millis: u64) -> serde_json::Value {
-    if epoch_millis == 0 {
-        serde_json::Value::Null
-    } else {
-        serde_json::Value::from(epoch_millis / 1000)
-    }
+    dhampir_core::render::corpus::epoch_seconds(epoch_millis)
 }
 
 /// `adapter.json` 的内容：**这条腿是在什么环境里跑的**。**纯函数**。

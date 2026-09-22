@@ -837,9 +837,12 @@ fn run_corpus(
 ///
 /// 统一走这一个函数，是因为 `json!` 出来的东西默认不换行——一行几千字节的记录，
 /// `git diff` 只会说"这一整行变了"，等于没有 diff。
+///
+/// **字节由 core 决定**（[`dhampir_core::render::corpus::record_text`]）：M2 的浏览器腿
+/// 要把同一份值变成同一串字节交给页面写下，两处各写一遍 `to_string_pretty` 的话，
+/// 哪天一边加了结尾换行、另一边没加，"两端的记录一样"就得靠人去读几百行 JSON。
 fn write_json(path: &Path, json: &serde_json::Value) -> Result<(), String> {
-    let mut text = serde_json::to_string_pretty(json).map_err(|e| e.to_string())?;
-    text.push('\n');
+    let text = dhampir_core::render::corpus::record_text(json)?;
     std::fs::write(path, text).map_err(|e| format!("写 {} 失败：{e}", path.display()))
 }
 

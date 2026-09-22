@@ -666,6 +666,47 @@ pub fn leg_json(
     })
 }
 
+// ---------------------------------------------------------------------------
+// 记录的字节：全仓唯一的一处
+// ---------------------------------------------------------------------------
+
+/// 一条记录 → **要写进文件的那串字节**。
+///
+/// # 为什么连"怎么序列化"也要收进 core
+///
+/// 形状（有哪些键）与字节（缩进、换行、数字怎么打）是两件事，但它们一起决定
+/// "两份记录能不能逐字节比"。M1 归档的 `run.json` 是 `to_string_pretty` + 一个结尾换行
+/// 的产物；M2 的浏览器腿要走同一条路，否则"两端的记录一样"就得靠人去读。
+/// 两个宿主各写一遍 `to_string_pretty` 的话，哪天一边加了结尾换行、另一边没加，
+/// 差异会淹没在几百行 JSON 里。
+///
+/// 返回 `Result` 而不是直接 `unwrap`：序列化本身不该失败（我们的值里没有 NaN、
+/// 没有非字符串的键），但**一份写不出来的记录必须让退出码红**，而不是让进程炸在
+/// 别的地方、留下半份文件。native 侧把这句话变成 `Result<(), String>`，
+/// 浏览器侧变成抛给页面的异常。
+pub fn record_text(value: &Value) -> Result<String, String> {
+    let mut text = serde_json::to_string_pretty(value)
+        .map_err(|e| format!("记录序列化失败：{e}"))?;
+    text.push('\n');
+    Ok(text)
+}
+
+/// `epoch_millis` → 记录里"秒"那一栏。0（读不到时钟）写成 `null`。
+///
+/// 秒与毫秒都给：M0 的记录里就是秒（整数），跨记录对时间时毫秒更有用。
+///
+/// 住在这里的理由与 [`record_text`] 相同：两条腿的记录里都有这一对键，
+/// **"0 要写成 null"是一条记录规则，不是某一侧的实现细节**。浏览器侧的时间戳由
+/// 页面从 `Date.now()` 传进来（wasm 里没有系统时钟），判定它"读到了没有"的规矩
+/// 必须与 native 完全一致——否则 M0 就定下的"绝不编造时间戳"会在浏览器腿失效。
+pub fn epoch_seconds(epoch_millis: u64) -> Value {
+    if epoch_millis == 0 {
+        Value::Null
+    } else {
+        Value::from(epoch_millis / 1000)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1225,5 +1266,31 @@ mod tests {
         assert_eq!(leg["schema"], CORPUS_RECORD_SCHEMA);
         assert_eq!(leg["milestone"], CORPUS_TABLE_MILESTONE);
         assert_eq!(leg["kind"], CORPUS_RECORD_KIND);
+    }
+
+    /// 记录文本的**字节**：两空格缩进 + **一个**结尾换行，且结尾只有一个。
+    ///
+    /// 钉在这儿是因为 M1 归档的那些文件就是它。谁改了缩进或换行，M2 的浏览器腿
+    /// 与 `records/m1/` 的逐字节比对就会红——那时应当先问"为什么改"，
+    /// 而不是去改归档。
+    #[test]
+    fn record_text_bytes_are_pinned() {
+        let text = record_text(&json!({"b": [1, 2], "a": {"n": null}})).unwrap();
+        assert_eq!(text, "{\n  \"a\": {\n    \"n\": null\n  },\n  \"b\": [\n    1,\n    2\n  ]\n}\n");
+        // 结尾**只有一个**换行：多一个，M1 归档的 diff 会多出一行空行。
+        assert!(text.ends_with("}\n"));
+        assert!(!text.ends_with("\n\n"));
+    }
+
+    /// 读不到时钟记 `null`，**不是** 1970 年。
+    ///
+    /// 这条规矩 M0 就定了（`records/m0/*.json` 里能读到），M2 的浏览器腿沿用同一个
+    /// 判定——两条腿的 `adapter.json` 在这一点上必须是同一个答案。
+    #[test]
+    fn a_missing_clock_is_null_not_1970() {
+        assert_eq!(epoch_seconds(0), Value::Null);
+        assert_eq!(epoch_seconds(1_790_000_000_123), Value::from(1_790_000_000_u64));
+        // 毫秒被**截断**而不是四舍五入：秒那一栏说的是"这一秒"，不是"最接近的一秒"。
+        assert_eq!(epoch_seconds(1_790_000_000_999), Value::from(1_790_000_000_u64));
     }
 }

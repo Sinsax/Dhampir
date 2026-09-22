@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dhampir · M2 浏览器腿（corpus）</title>
+<!--
+  M2 的浏览器腿。
+
+  它做的事只有一个：把 M1 那张冻结的表（5 个场景 × 16 帧）在**浏览器里**重画一遍，
+  把结果交给 scripts/serve-corpus-harness.mjs 落盘成 records/ 里的文件。
+
+  为什么是**另一个页面**而不是 M0 那张自检页的一个新面板：M0 的截图是那份已归档
+  记录的产物，它的字节不该因为 M2 加功能而变化。两张页面各自的记录各自冻结。
+
+  页面**不做任何判定**。"这 80 帧可信吗"由服务端回答：每帧的路径形状、字节数、
+  FNV-1a 摘要都要与 run.json 里那一行对上，对不上一律拒收。所以页面底部
+  那几行 ✓ 是**服务端**的结论（POST run.json 的响应），不是页面的自我评价。
+
+  复跑（serve-corpus-harness.mjs 启动时会把带 ?expect= 的地址打印出来）：
+    http://127.0.0.1:8788/corpus.html?leg=m2&scene=all&frames=0..16&autorun=1&expect=<native 的 frames_digest>
+  `?expect=` 是 native 腿 run.json 里的 `frames_digest`：给了它就显示两条腿画出的
+  字节是否**完全相同**。相同与不同都不影响退出码——M2 的判据是逐帧 SSIM（T2.4），
+  这里只是把"是否逐字节相同"这个更强的事实先量出来。
+-->
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 28px 32px 48px;
+    background: #14161a; color: #e6e8eb;
+    font: 14px/1.6 "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+  }
+  h1 { margin: 0 0 4px; font-size: 20px; letter-spacing: .3px; }
+  h2 { margin: 26px 0 8px; font-size: 14px; color: #9aa4b2; font-weight: 600; }
+  .sub { margin: 0 0 20px; color: #9aa4b2; }
+  code { color: #c8d0da; }
+  button {
+    font: inherit; padding: 8px 18px; cursor: pointer;
+    background: #2b6cb0; color: #fff; border: 0; border-radius: 4px;
+  }
+  button:disabled { background: #2d3748; color: #8a94a2; cursor: progress; }
+  #status { margin: 18px 0 4px; font-size: 17px; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { padding: 1px 0; white-space: pre-wrap; }
+  li.ok::before { content: "✓ "; color: #4ade80; }
+  li.bad::before { content: "✗ "; color: #f87171; }
+  li.info::before { content: "· "; color: #6b7280; }
+  .ok { color: #4ade80; }
+  .bad { color: #f87171; }
+  .gallery { display: flex; gap: 14px; flex-wrap: wrap; }
+  figure { margin: 0; }
+  figure img { width: 160px; height: 160px; image-rendering: pixelated; border: 1px solid #2d3748; }
+  figcaption { color: #9aa4b2; font-size: 12px; padding-top: 4px; }
+  pre {
+    background: #0f1115; border: 1px solid #2d3748; border-radius: 4px;
+    padding: 12px; overflow: auto; max-height: 420px; margin: 0;
+  }
+</style>
+</head>
+<body>
+
+<h1>dhampir · M2 浏览器腿（同一张 corpus 表）</h1>
+<p class="sub">同一份 <code>dhampir-core</code>、同一张表，在浏览器 WebGPU 上重画一遍。
+页面只负责渲染与上传；判定在服务端。</p>
+
+<button id="run">跑一轮 corpus</button>
+<div id="status">尚未运行。</div>
+
+<section>
+  <h2>① 设备与环境（adapter.json）</h2>
+  <ul id="adapter-list"><li class="info">等待运行…</li></ul>
+</section>
+
+<section>
+  <h2>② 渲染</h2>
+  <ul id="render-list"><li class="info">等待运行…</li></ul>
+</section>
+
+<section>
+  <h2>③ 逐帧落盘（每帧的字节由服务端复算摘要）</h2>
+  <ul id="sink-list"><li class="info">等待运行…</li></ul>
+</section>
+
+<section>
+  <h2>④ 服务端复核</h2>
+  <ul id="verdict-list"><li class="info">等待运行…</li></ul>
+</section>
+
+<section>
+  <h2>⑤ 每场景第一帧</h2>
+  <div class="gallery" id="gallery"></div>
+</section>
+
+<h2>⑥ 机器可读结果（页面这一侧的口述，判定见 ④）</h2>
+<pre id="report">尚未运行。</pre>
+
+<script type="module">
+import init, * as wasm from './pkg/dhampir_wasm.js';
+
+const $ = (id) => document.getElementById(id);
+
+/** 往列表里加一条结论。`ok` 为 undefined 时只是信息行。 */
+function add(id, text, ok) {
+  const el = document.createElement('li');
+  el.textContent = text;
+  el.className = ok === undefined ? 'info' : ok ? 'ok' : 'bad';
+  $(id).appendChild(el);
+}
+
+function reset(id) {
+  $(id).replaceChildren();
+}
+
+const params = new URLSearchParams(location.search);
+const LEG_SLUG = params.get('leg') ?? 'm2';
+const SCENE_ARG = params.get('scene') ?? 'all';
+const FRAMES_ARG = params.get('frames') ?? '0..16';
+/** native 腿的 `frames_digest`。不给就跳过"逐字节相同吗"这一栏。 */
+const EXPECT_DIGEST = params.get('expect');
+
+/** `0..16` → `[0, 16]`。与 wasm 侧 `check_frames` 同一套写法（半开区间）。 */
+function parseFrames(text) {
+  const match = /^(\d+)\.\.(\d+)$/.exec(String(text).trim());
+  if (!match) throw new Error(`帧区间要写成 a..b（例如 0..16），收到 ${JSON.stringify(text)}`);
+  return [Number(match[1]), Number(match[2])];
+}
+
+/**
+ * 页面里那一次 `navigator.gpu.requestAdapter()`：**浏览器自己报的适配器身份**。
+ *
+ * 为什么非要在这里另读一次：wgpu 的 webgpu 后端把 `GPUAdapterInfo` 丢掉了
+ * （`name` = description() 即空串、`vendor`/`device` 写死 0），而它内部那个 JS 适配器
+ * 对象不对外暴露——于是"用了哪块卡"这句话只能在页面里问。读到什么就原样交上去
+ * （`dhampir_corpus_open` 负责形状与拒绝），这里**不做判断、不填默认值**：
+ * 空字符串也是答案（Chrome 的隐私策略），填个"unknown"才是把事实盖掉。
+ */
+async function readInPageAdapter() {
+  const gpu = navigator.gpu;
+  if (!gpu) throw new Error('这个浏览器没有 navigator.gpu：M2 的浏览器腿需要 WebGPU');
+  // 选项与 wgpu 内部那次保持一致（不要 fallback 适配器，不指定功耗偏好）。
+  const adapter = await gpu.requestAdapter({ forceFallbackAdapter: false });
+  if (!adapter) throw new Error('requestAdapter 返回了 null：这台机器上没有可用的 WebGPU 适配器');
+  const info = adapter.info ?? {};
+  const number = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : null);
+  return {
+    vendor: info.vendor ?? '',
+    architecture: info.architecture ?? '',
+    device: info.device ?? '',
+    description: info.description ?? '',
+    is_fallback_adapter: adapter.isFallbackAdapter === true,
+    subgroup_min_size: number(info.subgroupMinSize),
+    subgroup_max_size: number(info.subgroupMaxSize),
+  };
+}
+
+/**
+ * POST 一份文本（adapter / readings / run —— 都是**逐字节要落盘的原文**）。
+ *
+ * 一律走这里而不是 `JSON.stringify` 再 POST：adapter.json 与 run.json 的字节
+ * 由 core 的 `record_text` 定稿（缩进、结尾换行），页面重打一遍就等于给同一份
+ * 记录写了第二个作者。
+ */
+async function postText(url, text, contentType) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': contentType },
+    body: text,
+  });
+  const verdict = await readVerdict(response);
+  if (!response.ok || verdict.ok !== true) {
+    throw new Error(verdict.error ?? `HTTP ${response.status}`);
+  }
+  return verdict;
+}
+
+async function postBytes(url, bytes) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/octet-stream' },
+    body: bytes,
+  });
+  const verdict = await readVerdict(response);
+  if (!response.ok || verdict.ok !== true) {
+    throw new Error(verdict.error ?? `HTTP ${response.status}`);
+  }
+  return verdict;
+}
+
+async function readVerdict(response) {
+  try {
+    return await response.json();
+  } catch {
+    return { ok: false, error: `服务端返回的不是 JSON（HTTP ${response.status}）` };
+  }
+}
+
+/**
+ * 一份文本落盘后**真写了多少字节**——只认服务端回话里的那个数。
+ *
+ * 页面自己算不出这件事：`text.length` 是 UTF-16 码元数，而盘上是 UTF-8 字节。中文一个字
+ * 盘上占 3 字节、`.length` 只算 1，于是 `readings.txt` 曾经被报成 78791 字节而真身是
+ * 112215 字节——记录里一个查不出来的假数（字段名还写着 `_bytes`）。写文件的与服务端
+ * 回话的是同一侧，所以那里才是这个数的出处；这一侧**不自己算替代品**，缺了就当轮失败。
+ */
+function writtenBytes(sink, name) {
+  if (!Number.isInteger(sink?.bytes) || sink.bytes < 0) {
+    throw new Error(`服务端没回 ${name} 写了多少字节——页面不拿码元数顶替`);
+  }
+  return sink.bytes;
+}
+
+async function run() {
+  const button = $('run');
+  button.disabled = true;
+  const startedAt = performance.now();
+  $('status').textContent = '运行中…';
+  $('status').className = '';
+
+  const state = {
+    schema: 1,
+    milestone: 'M2',
+    harness: 'crates/dhampir-wasm/www/corpus.html',
+    user_agent: navigator.userAgent,
+    leg_slug: LEG_SLUG,
+    scene: SCENE_ARG,
+    frames_arg: FRAMES_ARG,
+    expected_frames_digest: EXPECT_DIGEST,
+  };
+  let failures = 0;
+
+  try {
+    const [start, end] = parseFrames(FRAMES_ARG);
+    await init();
+    state.wasm_loaded = true;
+
+    // ---- ① 设备 -----------------------------------------------------------
+    reset('adapter-list');
+    const inPage = await readInPageAdapter();
+    add('adapter-list', `浏览器报的适配器：vendor ${JSON.stringify(inPage.vendor)}、`
+      + `architecture ${JSON.stringify(inPage.architecture)}、device ${JSON.stringify(inPage.device)}、`
+      + `description ${JSON.stringify(inPage.description)}`);
+    const adapterText = await wasm.dhampir_corpus_open(LEG_SLUG, Date.now(), JSON.stringify(inPage));
+    state.adapter_json_bytes = adapterText.length;
+    const adapter = JSON.parse(adapterText);
+    state.adapter = {
+      adapter: adapter.adapter,
+      in_page: adapter.in_page,
+      gpu_identity: adapter.gpu_identity ?? null,
+      requested_backends: adapter.requested_backends,
+      backend_slug: adapter.backend_slug,
+      build_profile: adapter.build_profile,
+      wgpu_version: adapter.wgpu_version,
+      naga_version: adapter.naga_version,
+    };
+    add('adapter-list', `wgpu 报的适配器名：${JSON.stringify(adapter.adapter.name)}`
+      + `（Chrome 不给，见下）`);
+    add('adapter-list', `后端 ${adapter.requested_backends}，腿名 ${adapter.backend_slug}，${adapter.build_profile} 构建`);
+    add('adapter-list', `wgpu ${adapter.wgpu_version}；naga ${adapter.naga_version ?? 'null（浏览器自己编译 WGSL）'}`);
+    if (adapter.gpu_identity) {
+      add('adapter-list', `卡身份：页面里问不出（${adapter.gpu_identity.state}）——`
+        + `由宿主补齐，见 ${adapter.gpu_identity.resolves_to}`);
+    }
+    const adapterSink = await postText('/__corpus/adapter', adapterText, 'application/json');
+    state.adapter_bytes = writtenBytes(adapterSink, 'adapter.json');
+    add('adapter-list', `已落盘 ${adapterSink.file}（${state.adapter_bytes} 字节）`, true);
+
+    // ---- ② 渲染 -----------------------------------------------------------
+    reset('render-list');
+    add('render-list', `场景 ${SCENE_ARG}，帧 ${start}..${end}（每帧渲染两次、比对同帧一致性）…`);
+    const renderStart = performance.now();
+    const summary = JSON.parse(await wasm.dhampir_corpus_run(SCENE_ARG, start, end));
+    const renderMs = performance.now() - renderStart;
+    state.render_ms = Math.round(renderMs);
+    state.frames_digest = summary.frames_digest;
+    state.counts = summary.counts;
+    state.frames_per_scene = summary.frames_per_scene;
+    state.scene_names = summary.scenes.map((scene) => scene.name);
+
+    const byScene = new Map();
+    for (const row of summary.frames) {
+      if (!byScene.has(row.scene)) byScene.set(row.scene, []);
+      byScene.get(row.scene).push(row);
+    }
+    for (const [name, rows] of byScene) {
+      const first = String(rows[0].frame).padStart(3, '0');
+      const last = String(rows[rows.length - 1].frame).padStart(3, '0');
+      add('render-list', `${name}：${rows.length} 帧 f${first}..f${last}`);
+    }
+    add('render-list', `整轮 ${summary.frame_count} 帧 / ${renderMs.toFixed(0)} ms`);
+    add('render-list', `frames_digest ${summary.frames_digest}`);
+    add('render-list', `判定：帧 ${summary.counts.frames}、采样点 ${summary.counts.points}、`
+      + `失败 ${summary.counts.failed}、越界 ${summary.counts.out_of_range}、`
+      + `未判定 ${summary.counts.unjudged}`,
+      summary.counts.clean);
+    if (Array.isArray(summary.repeat_mismatches) && summary.repeat_mismatches.length > 0) {
+      failures += 1;
+      add('render-list', `同帧两次渲染不一致：${summary.repeat_mismatches.join('、')}`, false);
+    }
+    if (!summary.counts.clean) {
+      failures += 1;
+      add('render-list', '表里有没过的点——这正是 M2 要找的结构性差异', false);
+    }
+
+    // ---- ③ 逐帧落盘 -------------------------------------------------------
+    reset('sink-list');
+    const firstFrameOfScene = new Map();
+    const progress = document.createElement('li');
+    progress.className = 'info';
+    $('sink-list').appendChild(progress);
+    let written = 0;
+    let bytesTotal = 0;
+    for (const row of summary.frames) {
+      const png = await wasm.dhampir_corpus_frame_png(row.scene, row.frame);
+      if (png.length !== row.png_bytes) {
+        throw new Error(`${row.png} 本地字节数 ${png.length} 与记录里的 ${row.png_bytes} 不一致`);
+      }
+      const url = `/__corpus/frame?path=${encodeURIComponent(row.png)}`
+        + `&digest=${row.png_digest}&bytes=${row.png_bytes}`;
+      await postBytes(url, png);
+      written += 1;
+      bytesTotal += png.length;
+      if (!firstFrameOfScene.has(row.scene) && row.frame === start) {
+        firstFrameOfScene.set(row.scene, png);
+      }
+      if (written === 1 || written % 10 === 0 || written === summary.frames.length) {
+        progress.textContent = `已落盘 ${written} / ${summary.frames.length} 帧…`;
+      }
+    }
+    state.frames_written = written;
+    state.png_bytes_total = bytesTotal;
+    add('sink-list', `${written} 帧、共 ${bytesTotal} 字节已交给服务端（逐帧复算摘要）`, true);
+
+    // 每场景第一帧贴出来。截图里能直接看到"浏览器画出来的到底是什么"。
+    const gallery = $('gallery');
+    gallery.replaceChildren();
+    for (const [name, png] of firstFrameOfScene) {
+      const figure = document.createElement('figure');
+      const img = document.createElement('img');
+      img.src = URL.createObjectURL(new Blob([png], { type: 'image/png' }));
+      img.alt = `${name} 的第一帧`;
+      const caption = document.createElement('figcaption');
+      caption.textContent = `${name} f${String(start).padStart(3, '0')}·${png.length} 字节`;
+      figure.append(img, caption);
+      gallery.append(figure);
+    }
+
+    // ---- ④ 两份文本 + 服务端复核 -------------------------------------------
+    const readingsSink = await postText('/__corpus/readings', summary.readings, 'text/plain; charset=utf-8');
+    state.readings_bytes = writtenBytes(readingsSink, 'readings.txt');
+    const runSink = await postText('/__corpus/run', summary.run_json, 'application/json');
+    state.run_json_bytes = writtenBytes(runSink, 'run.json');
+
+    reset('verdict-list');
+    add('verdict-list', `readings.txt ${state.readings_bytes} 字节 → ${readingsSink.file}`);
+    add('verdict-list', `run.json ${state.run_json_bytes} 字节 → ${runSink.file}`);
+    add('verdict-list', `服务端复核：${runSink.frames_verified} 帧全部与 run.json 的路径/字节数/摘要一致`, true);
+    for (const check of runSink.checks ?? []) {
+      add('verdict-list', check.detail, check.ok);
+    }
+    state.server_verdict = {
+      frames_verified: runSink.frames_verified,
+      checks: runSink.checks ?? [],
+      expected_frames_digest: runSink.expected_frames_digest ?? null,
+      digest_matches_expect: runSink.digest_matches_expect ?? null,
+    };
+    if (runSink.expected_frames_digest) {
+      const same = runSink.digest_matches_expect === true;
+      add('verdict-list',
+        same
+          ? `与 native 腿（${runSink.expected_frames_digest}）逐字节相同`
+          : `与 native 腿（${runSink.expected_frames_digest}）不同：${summary.frames_digest}`
+            + '——这正是 T2.4 逐帧 SSIM 要量的东西，不是错误',
+        same ? true : undefined);
+      state.digest_matches_native = same;
+    } else {
+      add('verdict-list', '未传 ?expect=<native 的 frames_digest>，跳过"逐字节相同吗"这一栏');
+    }
+
+    // ---- ④' 宿主补的卡身份 -------------------------------------------------
+    // 浏览器问不出显卡型号（见 ① 里的 gpu_identity），补这一环的是驱动脚本：它从
+    // CDP 的 SystemInfo.getInfo 拿到宿主设备表，POST 给服务端，服务端把页面报的
+    // vendor 对到其中**唯一**一块卡。这一问放在最后，是因为驱动那边先于这一轮跑完；
+    // 拿不到时**不报红**——它是不是问题由驱动与服务端的硬条件说了算，页面上凭空
+    // 红一条会把截图里那份结论说成另一回事。
+    const host = await fetch('/__corpus/host').then((response) => response.json()).catch(() => null);
+    if (host?.ok && host.host_gpu?.device) {
+      state.host_gpu = host.host_gpu;
+      add('adapter-list', `宿主补的卡身份：${host.host_gpu.device}`
+        + `（驱动 ${host.host_gpu.driver_version}，依据 ${host.host_gpu.match_reason}）`, true);
+      add('verdict-list', `卡身份已由宿主补齐：${host.host_gpu.device}`, true);
+    } else {
+      state.host_gpu = null;
+      add('adapter-list', `宿主还没报上卡身份（${host?.error ?? '取不到 /__corpus/host'}）`);
+      add('verdict-list', `宿主还没报上卡身份：${host?.error ?? '取不到 /__corpus/host'}`);
+    }
+  } catch (error) {
+    failures += 1;
+    state.error = String(error);
+    add('verdict-list', `失败：${state.error}`, false);
+  }
+
+  // ---- 汇总 --------------------------------------------------------------
+  state.elapsed_ms = Math.round(performance.now() - startedAt);
+  state.failures = failures;
+  state.ok = failures === 0;
+  $('report').textContent = JSON.stringify(state, null, 2);
+
+  const status = $('status');
+  status.textContent = failures === 0
+    ? `这一轮的 ${state.frames_written ?? 0} 帧已全部落盘并由服务端复核（${state.elapsed_ms} ms）。`
+    : `${failures} 项未通过——见下面各节的 ✗。`;
+  status.className = failures === 0 ? 'ok' : 'bad';
+  button.disabled = false;
+  return state;
+}
+
+$('run').addEventListener('click', run);
+
+// 模块一旦求值完就把状态改掉——理由与 M0 页面相同：`pkg/` 缺文件或 MIME 不对时
+// 模块根本不会求值，页面会一直停在上一句话，而那句话和"点了没反应"长得一样。
+$('status').textContent = '模块已加载（wasm 尚未初始化），等待运行。';
+
+/**
+ * 给自动化留的接口。
+ *
+ * `done` 是**这一轮跑完才会 resolve 的 Promise**：驱动脚本靠它知道"何时可以截图、
+ * 何时服务端已经收齐 80 帧"，而不是靠 sleep 一个猜出来的秒数。
+ */
+globalThis.dhampirCorpusHarness = { run, done: null, state: null };
+
+if (params.has('autorun')) {
+  const pending = run();
+  globalThis.dhampirCorpusHarness.done = pending;
+  pending.then((state) => { globalThis.dhampirCorpusHarness.state = state; });
+}
+</script>
+</body>
+</html>

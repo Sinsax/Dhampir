@@ -68,7 +68,13 @@ pub fn start() {
     log::info!("dhampir-wasm {} 已加载", env!("CARGO_PKG_VERSION"));
 }
 
-fn js_err(message: impl Into<String>) -> JsValue {
+/// 报错给页面的**唯一**写法。
+///
+/// `pub(crate)` 而不是私有：corpus 侧（[`crate::corpus`]）也要用它，
+/// 但"怎么把错误交给 JS"这件事不该因此多出第二个定义——
+/// 一边抛 `Err(JsValue::from_str(...))`、另一边抛别的形状，
+/// 页面就得写两套 catch。
+pub(crate) fn js_err(message: impl Into<String>) -> JsValue {
     JsValue::from_str(&message.into())
 }
 
@@ -81,7 +87,11 @@ fn js_err(message: impl Into<String>) -> JsValue {
 /// **这是本 crate 里唯一与 native 不同的代码行。** 对比
 /// `crates/dhampir-worker/src/offscreen.rs` 的同名逻辑：那边用的是
 /// `dhampir_core::gpu::NATIVE_BACKENDS`。
-fn new_instance() -> wgpu::Instance {
+///
+/// `pub(crate)` 不是为了让"唯一的分叉"变成两句：corpus 侧的离屏设备也**必须**
+/// 走这一个函数（[`crate::corpus`] 自己再写一遍 `Instance::new` 就等于有了第二个
+/// 分叉点，guard 也拦不住它）。可见性放开的是调用，不是定义。
+pub(crate) fn new_instance() -> wgpu::Instance {
     wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: gpu::BROWSER_BACKENDS,
         ..wgpu::InstanceDescriptor::new_without_display_handle()
