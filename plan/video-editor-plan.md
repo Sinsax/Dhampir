@@ -32,7 +32,7 @@
 | **M0** | 骨架与双编译贯通 | 同一份源码在两个 target 上编译并输出一致 | ✅ **已收官**（退出标准 3/3） | 环境准备 |
 | **M1** | 服务端 headless wgpu | 目标环境能离屏出图且可复现 | ✅ **已收官**（1/3；Linux 两条腿延期，属已知缺口） | M0 |
 | **M2** | **双运行时同帧 SSIM**（架构命门） | 同一份 WGSL，两端渲染同一帧结果一致 | ✅ **已收官**：退出标准 4/4 ｜ 记录自证 `EXIT=0` ｜ 验收快照 13/13 ｜ **独立复核「通过」** | M1 + M0 的 wasm 壳 |
-| **M3** | 浏览器预览链路 | proxy 硬解 → 零拷贝上 GPU → 出画面 | ⬜ **未开始**（第一件事：S3.1 决策） | M0（可与 M1/M2 并行） |
+| **M3** | 浏览器预览链路 | proxy 硬解 → 零拷贝上 GPU → 出画面 | 🔵 **进行中**：S3.1 已决（选 (b) 拷贝路线）；S3.2/S3.3 与 T3.x 未开始 | M0（可与 M1/M2 并行） |
 | **M4** | 契约闭环 | 时间线 JSON 驱动两端，出片与预览一致 | ⬜ **未开始**（T4.4 编码/mux 归下游） | M2 + M3 |
 | ⛔ **M5** | 分布式分片渲染 | 分片结果 == 整体渲染 | **移出范围** → 附录 B | — |
 | ⚠️ **M6** | 一致性与发布保障 | SSIM 闸门（留）/ 影子环境与发布（移出） | **部分移出** → 附录 B | M2 |
@@ -97,7 +97,8 @@
 2. **提交（P0-3）必须排在验收（P0-2）之前**：`acceptance.json` 的 `dirty` 剔除 `records/`，
    树脏就会写出 `dirty: true`，守卫按红判（`dirty=true——记录是在一棵脏树上跑的`）。
 
-**下一步**：M3（第一件事 = S3.1 源帧采样策略决策）、M4。逐条交接见 [`remaining-work.md`](./remaining-work.md)。
+**下一步**：M3 其余前置 spike（S3.2 proxy 生成规格、S3.3 VideoFrame 生命周期）与 T3.x；然后 M4。
+逐条交接见 [`remaining-work.md`](./remaining-work.md)。
 
 **M2 收官口径（三条同时成立才算）**：① `--record records/m2` → `EXIT=0`；② `--self-test` → `EXIT=0`；
 ③ `acceptance.json` 13/13、`dirty=false`；④ `records/m2/review-independent.md` 存在且结论为「通过」。**四条现在都成立。**
@@ -108,7 +109,7 @@
 
 | # | 建议 | 落点 |
 |---|---|---|
-| **R1** | **先定 S3.1 再写 M3 代码**——它决定底座能否零拷贝 | M3 前置 spike |
+| **R1** | **先定 S3.1 再写 M3 代码**——它决定底座能否零拷贝 | ✅ 已决：见 [`s3.1-source-frame-sampling.md`](./s3.1-source-frame-sampling.md) |
 | **R2** | **暂不拆取证脚手架**（占仓库过半体积），等 M2 记录冻结后再拆 | §11 |
 | **R3** | 钉死**唯一跨边界契约 = timeline JSON**；`FrameSource`/`FrameSink` 不跨进程 | M4 T4.1 |
 | **R4** | 给 `dhampir-media` 标注「未验证契约」（五个 trait 零实现） | §11.3 |
@@ -602,7 +603,13 @@ FFmpeg 绑定、解码、时间线、分片、任务队列。
 
 ### 前置 spike（先做，结论必须落文件）
 
-- [ ] **S3.1 源帧采样策略三选一 —— 本里程碑最重要的决策**
+> ✅ **已决（2026-09-22）：选 (b) `copyExternalImageToTexture`。**
+> 决策文件：[`s3.1-source-frame-sampling.md`](./s3.1-source-frame-sampling.md)（含实机实测数字与复现方式）。
+> 一句话理由：1080p 下**两条路输出逐字节相同**、成本差在噪声内（`copy+render − import+render = +0.04 ms`），
+> 而 (a) 的结构性代价是与 native **WGSL 分叉**——那正是底座的立身之本。
+> 直接后果：`dhampir-core::io` 里「`frame_view` 装不下外部纹理」那条已知张力**解除**，不必给 `FrameSource` 开分支。
+
+- [x] ~~**S3.1 源帧采样策略三选一 —— 本里程碑最重要的决策**~~（见上方「已决」块）
 
   三条已核实的硬约束（W3C WebGPU 规范 / webgpufundamentals）：
 
@@ -648,7 +655,7 @@ FFmpeg 绑定、解码、时间线、分片、任务队列。
 - [ ] 1080p proxy **全速播放 60fps**，无 FFmpeg WASM 回退路径
 - [ ] 拖动 scrub p95 ≤ 50ms ——**起始值，按实测定档**
 - [ ] 4K 源素材下浏览器内存/显存不越界（上限 + LRU 淘汰生效）
-- [ ] S3.1 决策文件落盘，含实测数字
+- [x] S3.1 决策文件落盘，含实测数字 —— ✅ [`plan/s3.1-source-frame-sampling.md`](./s3.1-source-frame-sampling.md)
 
 ### 明确不做
 

@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>S3.1 源帧采样策略 · 实测</title>
+<style>body { font: 13px/1.5 ui-monospace, Consolas, monospace; margin: 12px; } #log { white-space: pre-wrap; } video { width: 480px; border: 1px solid #ccc; }</style>
+</head>
+<body>
+<h1>S3.1 源帧采样策略实测</h1>
+<p>① 1080p 下两条路的每帧成本；② 两条路渲染同一帧，像素差在哪（含 Y 翻转与"哪条路根本没画"的归因）。</p>
+<video id="v" src="/media/source1080p.mp4" muted playsinline preload="auto"></video>
+<pre id="log"></pre>
+<script type="module">
+const W = 1920, H = 1080, N = 200, WARMUP = 20;
+const logEl = document.getElementById('log');
+const NL = String.fromCharCode(10);
+const log = (m) => { logEl.textContent += m + NL; };
+const post = (o) => fetch('/result', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(o) });
+
+const stats = (xs) => {
+  const s = [...xs].sort((a, b) => a - b);
+  const at = (q) => s[Math.min(s.length - 1, Math.floor(q * s.length))];
+  const mean = xs.reduce((a, b) => a + b, 0) / xs.length;
+  return { n: xs.length, mean_ms: +mean.toFixed(4), median_ms: +at(0.5).toFixed(4), p95_ms: +at(0.95).toFixed(4), min_ms: +s[0].toFixed(4), max_ms: +s[s.length - 1].toFixed(4) };
+};
+
+const HEAD = [
+  'struct VOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };',
+  '@vertex fn vs(@builtin(vertex_index) i: u32) -> VOut {',
+  '  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));',
+  '  var o: VOut;',
+  '  o.pos = vec4f(p[i], 0.0, 1.0);',
+  '  o.uv = vec2f((p[i].x + 1.0) * 0.5, (1.0 - p[i].y) * 0.5);',
+  '  return o;',
+  '}',
+].join(NL);
+const FS_A = '@group(0) @binding(0) var t: texture_external; @group(0) @binding(1) var s: sampler; @fragment fn fs(i: VOut) -> @location(0) vec4f { return textureSampleBaseClampToEdge(t, s, i.uv); }';
+const FS_B = '@group(0) @binding(0) var t: texture_2d<f32>; @group(0) @binding(1) var s: sampler; @fragment fn fs(i: VOut) -> @location(0) vec4f { return textureSample(t, s, i.uv); }';
+const FS_BV = '@group(0) @binding(0) var t: texture_2d<f32>; @group(0) @binding(1) var s: sampler; @fragment fn fs(i: VOut) -> @location(0) vec4f { return textureSample(t, s, vec2f(i.uv.x, 1.0 - i.uv.y)); }';
+const WGSL_A = HEAD + NL + FS_A;
+const WGSL_B = HEAD + NL + FS_B;
+const WGSL_BV = HEAD + NL + FS_BV;
+
+async function main() {
+  const report = { w: W, h: H, n: N };
+  const video = document.getElementById('v');
+  await new Promise((res, rej) => {
+    video.addEventListener('loadeddata', res, { once: true });
+    video.addEventListener('error', () => rej(new Error('video error')), { once: true });
+  });
+  video.pause();
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  report.video = { videoWidth: video.videoWidth, videoHeight: video.videoHeight, currentTime: +video.currentTime.toFixed(3), paused: video.paused, readyState: video.readyState };
+
+  if (!navigator.gpu) throw new Error('这个浏览器没有 navigator.gpu');
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) throw new Error('requestAdapter() 返回 null');
+  const device = await adapter.requestDevice();
+  const gpuErrors = [];
+  device.onuncapturederror = (e) => {
+    const err = e.error;
+    gpuErrors.push(err && err.message ? String(err.message) : String(err));
+  };
+  report.adapter = { vendor: adapter.info ? adapter.info.vendor : '', architecture: adapter.info ? adapter.info.architecture : '', device: adapter.info ? adapter.info.device : '', description: adapter.info ? adapter.info.description : '' };
+
+  const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+  const USAGE = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC;
+  const mk = () => device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: USAGE });
+  const targetA = mk(), targetB = mk(), targetBV = mk();
+  // Dawn 要求 copyExternalImageToTexture 的目标纹理**同时带 RenderAttachment**。
+  // 少这一位它会**静默失败**：只有 onuncapturederror 收得到，纹理保持未初始化，
+  // 于是"B 渲染出黑图"、"翻 V 不变"、"量到的是失败调用的耗时"三件事同时发生。
+  const srcTex = device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+  const srcView = srcTex.createView();
+
+  const mkPipe = (code) => device.createRenderPipeline({ layout: 'auto', vertex: { module: device.createShaderModule({ code }), entryPoint: 'vs' }, fragment: { module: device.createShaderModule({ code }), entryPoint: 'fs', targets: [{ format: 'rgba8unorm' }] }, primitive: { topology: 'triangle-list' } });
+  const pipeA = mkPipe(WGSL_A), pipeB = mkPipe(WGSL_B), pipeBV = mkPipe(WGSL_BV);
+
+  const draw = (pipe, bind, view) => {
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+    pass.setPipeline(pipe); pass.setBindGroup(0, bind); pass.draw(3); pass.end();
+    device.queue.submit([enc.finish()]);
+  };
+  const frameA = () => {
+    const ext = device.importExternalTexture({ source: video });
+    draw(pipeA, device.createBindGroup({ layout: pipeA.getBindGroupLayout(0), entries: [{ binding: 0, resource: ext }, { binding: 1, resource: sampler }] }), targetA.createView());
+  };
+  const copyOnly = () => device.queue.copyExternalImageToTexture({ source: video }, { texture: srcTex }, [W, H]);
+  const frameB = () => { copyOnly(); draw(pipeB, device.createBindGroup({ layout: pipeB.getBindGroupLayout(0), entries: [{ binding: 0, resource: srcView }, { binding: 1, resource: sampler }] }), targetB.createView()); };
+  const frameBV = () => { draw(pipeBV, device.createBindGroup({ layout: pipeBV.getBindGroupLayout(0), entries: [{ binding: 0, resource: srcView }, { binding: 1, resource: sampler }] }), targetBV.createView()); };
+
+  const bench = async (fn, label) => {
+    for (let i = 0; i < WARMUP; i += 1) fn();
+    await device.queue.onSubmittedWorkDone();
+    const t = [];
+    for (let i = 0; i < N; i += 1) { const t0 = performance.now(); fn(); await device.queue.onSubmittedWorkDone(); t.push(performance.now() - t0); }
+    const s = stats(t); log(label + ' ' + JSON.stringify(s)); return s;
+  };
+  report.a_import_render = await bench(frameA, 'A 零拷贝外部纹理 + 渲染');
+  report.b_copy_only = await bench(copyOnly, 'B 仅 copyExternalImageToTexture');
+  report.b_copy_render = await bench(frameB, 'B 拷贝 + 渲染');
+  report.derived = { copy_cost_ms: report.b_copy_only.mean_ms, copy_render_minus_import_render_ms: +(report.b_copy_render.mean_ms - report.a_import_render.mean_ms).toFixed(4) };
+
+  frameA(); copyOnly(); frameB(); await device.queue.onSubmittedWorkDone();
+  frameBV(); await device.queue.onSubmittedWorkDone();
+
+  const read = async (tex) => {
+    const bytes = W * H * 4;
+    const buf = device.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const enc = device.createCommandEncoder();
+    enc.copyTextureToBuffer({ texture: tex }, { buffer: buf, bytesPerRow: W * 4 }, [W, H]);
+    device.queue.submit([enc.finish()]);
+    await buf.mapAsync(GPUMapMode.READ);
+    return new Uint8Array(buf.getMappedRange()).slice();
+  };
+  const cmp = (a, b) => { let d = 0, m = 0; for (let i = 0; i < a.length; i += 1) { const x = Math.abs(a[i] - b[i]); if (x !== 0) d += 1; if (x > m) m = x; } return { differing_bytes: d, max_abs_diff: m, identical: d === 0 }; };
+  const [a, b, bv] = [await read(targetA), await read(targetB), await read(targetBV)];
+  const imageStats = (px) => {
+    let min = 255, max = 0;
+    for (let i = 0; i < px.length; i += 4) { const v = px[i]; if (v < min) min = v; if (v > max) max = v; }
+    const at = (x, y) => { const o = (y * W + x) * 4; return [px[o], px[o + 1], px[o + 2], px[o + 3]]; };
+    return { r_min: min, r_max: max, constant: min === max, tl: at(2, 2), center: at(W >> 1, H >> 1), br: at(W - 3, H - 3) };
+  };
+  report.images = { a: imageStats(a), b: imageStats(b), b_vflipped: imageStats(bv) };
+  report.pixels = { total_bytes: a.length, a_vs_b: cmp(a, b), a_vs_b_vflipped: cmp(a, bv), b_vs_b_vflipped: cmp(b, bv) };
+  report.pixels.differing_bytes = report.pixels.a_vs_b.differing_bytes;
+  report.gpu_errors = gpuErrors;
+  report.ok = true;
+  log('完成');
+  await post(report);
+}
+main().catch(async (e) => { log('✗ ' + (e && e.stack ? e.stack : e)); await post({ ok: false, error: String(e && e.message ? e.message : e) }); });
+</script>
+</body>
+</html>
