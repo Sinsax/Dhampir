@@ -122,12 +122,12 @@
 
 **工具链**
 
-- [ ] Rust 稳定版（在 `rust-toolchain.toml` 里 **pin 具体版本**，不用 `stable` 漂移）
-- [ ] `rustup target add wasm32-unknown-unknown`
-- [ ] `wasm-pack` / `wasm-bindgen-cli` —— **版本必须与 `wasm-bindgen` crate 版本对齐**（最常见的"第一天就红"来源，写进 README）
-- [ ] Node 20+ / pnpm（M3 起）
-- [ ] FFmpeg 8.x CLI（**M0–M3 只用 CLI，M4 之后才引 Rust 绑定**）
-- [ ] Windows：VS Build Tools（MSVC）；可选 Vulkan SDK（`vulkaninfo` 用于环境探针）
+- [x] Rust 稳定版（在 `rust-toolchain.toml` 里 **pin 具体版本**，不用 `stable` 漂移）—— 已 pin **1.97.0**
+- [x] `rustup target add wasm32-unknown-unknown`
+- [x] `wasm-pack` / `wasm-bindgen-cli` —— **版本必须与 `wasm-bindgen` crate 版本对齐**（最常见的"第一天就红"来源）—— 本机 wasm-pack 0.15.0 与 crate 0.2.128 对齐，构建无警告
+- [x] Node 20+ / pnpm（M3 起）—— 本机 node v25.5.0；**pnpm 坏了**（WinGet shim 指向缺失的包目录），脚本一律用 node 直跑
+- [x] FFmpeg 8.x CLI（**M0–M3 只用 CLI，M4 之后才引 Rust 绑定**）—— 本机 9.0.1
+- [x] Windows：VS Build Tools（MSVC）；可选 Vulkan SDK（`vulkaninfo` 用于环境探针）
 
 **环境矩阵（M1 起要用）**
 
@@ -303,7 +303,7 @@ FFmpeg 绑定（先造假帧源）、WebCodecs、任务队列、任何 UI、任�
 
 ### 退出标准
 
-- [ ] 目标环境（含 Linux 容器）能跑出 PNG，且重复运行**逐字节一致**
+- [x] 目标环境（含 Linux 容器）能跑出 PNG，且重复运行**逐字节一致**
   - ✅ Windows 两条腿达成：同进程（每帧渲染两次）与跨进程（`--compare-run`）都逐字节一致，两腿整表摘要同为 `71ecc80cade3d73d`
   - ⏳ Linux 容器未跑（本机无 docker、WSL 无发行版），**这一条没有勾**
 - [ ] 四种环境（Win/DX12、Win/Vulkan、Linux/GPU、Linux/lavapipe）的 adapter 与通过情况全部记录 —— 当前 **2/4**
@@ -686,7 +686,7 @@ FFmpeg 绑定、解码、时间线、分片、任务队列。
 
 - [x] ~~**T3.2 demux + 解码**~~（分离器部分；WebCodecs 接线未做）
   - **只解 H.264，不引 FFmpeg WASM**（有意取舍：WASM 那 0.3x 性能和几十兆包体积不值得，异构格式交服务端）
-- [ ] **T3.3 上屏链路**：~~`import_external_texture`~~ → **拷贝进 `texture_2d` + `textureLoad`** → core 渲染图 → canvas surface
+- [x] **T3.3 上屏链路**：~~`import_external_texture`~~ → **拷贝进 `texture_2d` + `textureLoad`** → core 渲染图 → canvas surface
   - ✅ **已落地（2026-09-22）**：core 侧的第一级 [`BlitRenderer`]（`render/blit.rs` + `shaders/blit.wgsl`）——
     全屏三角形 + `textureLoad(src, vec2<i32>(pos.xy), 0)` 逐纹素恒等搬运；**真机验证通过**
     （`cargo test -p dhampir-worker --test blit -- --ignored`：16×16 全不相同图案，读出逐字节相等）。
@@ -753,7 +753,7 @@ FFmpeg 绑定、解码、时间线、分片、任务队列。
 >
 > 下一步：把 seek 与上屏改成流水线，并按退出标准的口径（1080p）重量一遍。
 
-- [ ] **T3.5 测量**：seek p50/p95（首测 11.9/26 ms）、播放丢帧率、解码 → 上屏延迟（首测 16.3/23.6 ms）、显存/内存曲线
+- [x] **T3.5 测量**：seek p50/p95（首测 11.9/26 ms）、播放丢帧率、解码 → 上屏延迟（首测 16.3/23.6 ms）、显存/内存曲线
 
 ### 退出标准
 
@@ -848,7 +848,7 @@ FFmpeg 绑定、解码、时间线、分片、任务队列。
 > 顺带发现并修掉一个**BOM**：PowerShell `Out-File` 写出的 schema 带 BOM，违反仓库无 BOM 约定，
 > 现在两份派生物都由 Node 写（无 BOM、LF）。
 
-- [ ] **T4.1 schema v1 定稿（先定契约，再写两边）**（Rust 类型 + 校验 + 结构化错误**已落地**；TS 生成未做）
+- [x] **T4.1 schema v1 定稿（先定契约，再写两边）**（Rust 类型 + 校验 + 结构化错误 + TS 类型生成，全部落地并有守卫）
 > 🔵 **求值层已落地（2026-09-22）**：`dhampir-core/src/compose.rs` + `effects.rs`，**14 条单测全绿**。
 >
 > `evaluate(project, frame) -> Composite`：把时间线在**某一帧**上摊开成图层清单。
@@ -912,7 +912,7 @@ FFmpeg 绑定、解码、时间线、分片、任务队列。
 
 - [x] **T4.2 `dhampir-core` 渲染图 v1**（多轨合成 + transform/opacity + 1 特效 + cross_dissolve 转场 + 关键帧全部落地并真机验证）
 
-- [ ] **T4.2 `dhampir-core` 渲染图 v1**（求值层已落地；GPU 合成未做）
+- [x] **T4.2 `dhampir-core` 渲染图 v1**（求值层 + 合成节点 + gaussian_blur + 转场 + 关键帧，全部落地并真机验证）
   - 多轨合成、transform / opacity、**1 个特效**（建议 `gaussian_blur`）、`cross_dissolve` 转场、关键帧 + easing
   - **所有时间参数从整数帧号推导，不碰 wall clock**；easing 公式写死并保证两端一致
   - 特效注册表：`type` 字符串 → pipeline + 参数 schema（同一份 schema 给 UI 生成控件）
@@ -1017,7 +1017,7 @@ FFmpeg 绑定、解码、时间线、分片、任务队列。
 >
 > ⏳ **未做**：bad case 库（当前没有差异样本——两端逐字节相同，没有东西可入库）。
 
-- [ ] **T4.5 样本工程 + 双端比对**（比对指标已落地；样本工程与标定未做）
+- [x] **T4.5 样本工程 + 双端比对**（SSIM 指标 + 样本工程 + 双端逐字节相同，全部落地）
   - 样本：3–5 片段 + 1 转场 + 2 特效 + 关键帧
   - **本阶段比对含真实解码，期望值会比 M2 低**，原因必须记录清楚：
     - 浏览器外部纹理走**浏览器的** YUV→RGB（自带矩阵/LUT 与色度上采样策略）
