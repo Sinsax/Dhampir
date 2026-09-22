@@ -198,10 +198,17 @@ export function selfTest() {
 
 // ---------------------------------------------------------------------------
 // CDP
+//
+// 这一段是**共用件**：M2 的 `run-browser-corpus.mjs` 也 import 它（`import` 时
+// 本脚本的入口被最后那行 entry 判断挡住，不会跑起来）。放在这里而不是各写一份，
+// 理由是这里的每条都踩过坑——`about:blank` + URL 双 target、旧 `--headless`
+// 不跑 GPU 进程、`waitForOccupiedPort` 的名字与语义（等"被占上"，不是等"能 bind"）。
+// 抄一份就等于让第二个工具去重新踩一遍，而且踩出来的红是"两端渲染不一致"这种假红。
+// 出现第三个消费者时再抽成 `scripts/browser-cdp.mjs`。
 // ---------------------------------------------------------------------------
 
 /** 一个够用的 CDP 客户端：够发命令、够收回复，不做订阅。 */
-class Cdp {
+export class Cdp {
   constructor(ws) {
     this.ws = ws;
     this.nextId = 1;
@@ -240,9 +247,9 @@ class Cdp {
   }
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function withTimeout(promise, ms, what) {
+export async function withTimeout(promise, ms, what) {
   let timer;
   try {
     return await Promise.race([
@@ -257,7 +264,7 @@ async function withTimeout(promise, ms, what) {
 }
 
 /** 要一个空闲端口。写死端口在多任务机器上就是"偶尔红一次"。 */
-function freePort() {
+export function freePort() {
   return new Promise((resolvePromise, rejectPromise) => {
     const server = createServer();
     server.on('error', rejectPromise);
@@ -276,7 +283,7 @@ function freePort() {
  * 一个把人引向网络配置、而真相是"根本没等"的错误。名字也一起改掉了，
  * 免得下次又被 `waitForPort` 这个模棱两可的名字骗一遍。
  */
-function waitForOccupiedPort(port, ms = 20000) {
+export function waitForOccupiedPort(port, ms = 20000) {
   const deadline = Date.now() + ms;
   return new Promise((resolvePromise, rejectPromise) => {
     const attempt = () => {
@@ -297,7 +304,7 @@ function waitForOccupiedPort(port, ms = 20000) {
   });
 }
 
-async function fetchPageTarget(devtoolsPort, urlPrefix, ms = 30000) {
+export async function fetchPageTarget(devtoolsPort, urlPrefix, ms = 30000) {
   const deadline = Date.now() + ms;
   let last = '';
   for (;;) {

@@ -56,9 +56,12 @@
 // 真实存在的测试数、以及源码里写下的测试数都对得上，截断的运行对不上。
 //
 // 用法：
-//   node scripts/run-wasm-tests.mjs
-//   node scripts/run-wasm-tests.mjs --out records/m0
+//   node scripts/run-wasm-tests.mjs                   # 记录写 target/wasm-test-record/（临时）
+//   node scripts/run-wasm-tests.mjs --out records/m2  # 里程碑归档位置必须显式给
 //   node scripts/run-wasm-tests.mjs --self-test
+//
+// 默认输出目录**不在 records/ 里**：这个默认值曾经是 records/m0，一次不带 --out 的裸跑
+// 就把 M0 的冻结快照覆盖掉了。冻结快照只该被显式 --out 指向、由人有意重写。
 //
 // 环境变量 DHAMPIR_WASM_TEST_TIMEOUT_MS 可覆盖单个目标的超时（默认 300000）。
 
@@ -78,7 +81,9 @@ const TARGET_TIMEOUT_MS = Number(process.env.DHAMPIR_WASM_TEST_TIMEOUT_MS ?? 300
 // 导出以便自检：参数解析错一次就够丢人的了（第一版就漏了 `i += 1`，
 // 于是 `--out records/m0` 报"不认识的参数：records/m0"）。
 export function parseArgs(argv) {
-  const out = { out: 'records/m0', keepLogs: false };
+  // 默认值刻意**不在 records/ 里**（见文件头）：裸跑覆盖里程碑归档，真发生过一次。
+  // CI 与 scripts/record-acceptance.mjs 都是显式传 --out 的，改默认值不影响它们。
+  const out = { out: 'target/wasm-test-record', keepLogs: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--out') {
@@ -290,7 +295,9 @@ export function selfTest() {
   check('--out 缺值要报错，不能默默用默认值', typeof parseArgs(['--out']).error === 'string');
   check('--out 后面跟另一个参数算缺值', typeof parseArgs(['--out', '--keep-logs']).error === 'string');
   check('不认识的参数要报错', typeof parseArgs(['--nope']).error === 'string');
-  check('默认输出目录是 records/m0', parseArgs([]).out === 'records/m0');
+  check('默认输出目录是 target/wasm-test-record', parseArgs([]).out === 'target/wasm-test-record');
+  // 反向：默认值一旦落回 records/ 下，裸跑就会再次覆盖冻结快照（真发生过），必须红。
+  check('默认输出目录不许落在 records/ 里', !parseArgs([]).out.startsWith('records/'));
   check('--help 能被识别', parseArgs(['--help']).help === true);
 
   // -- summarizeLog
@@ -360,7 +367,7 @@ export function selfTest() {
 function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
-    console.log('用法：node scripts/run-wasm-tests.mjs [--out <dir>] [--keep-logs] [--self-test]');
+    console.log('用法：node scripts/run-wasm-tests.mjs [--out <dir>（默认 target/wasm-test-record，非归档）] [--keep-logs] [--self-test]');
     return 0;
   }
   if (args.error) {
