@@ -49,6 +49,28 @@ export function validateReport(report, want = { w: WANT_W, h: WANT_H }) {
   if (!Array.isArray(ge)) problems.push('js_gpu_errors 不是数组');
   else if (ge.length > 0) problems.push('JS 侧有 ' + ge.length + ' 条 WebGPU 错误：' + ge[0]);
   if (report.canvas_draw !== 'ok') problems.push('canvas 上屏没成功：' + JSON.stringify(report.canvas_draw));
+  // T3.2：分离器与 WebCodecs 解码。
+  const d = report.demux === undefined ? {} : report.demux;
+  if (d.width !== want.w || d.height !== want.h) problems.push('分离器报的视频尺寸是 ' + d.width + 'x' + d.height);
+  if (d.samples !== 480) problems.push('分离器报的样本数是 ' + d.samples + '，要求 480（8s × 60fps）');
+  if (d.samples_parsed !== d.samples) problems.push('样本表 JSON 的条数 ' + d.samples_parsed + ' 与元信息 ' + d.samples + ' 不一致');
+  if (d.sync_count !== 8) problems.push('同步样本数是 ' + d.sync_count + '，要求 8');
+  if (JSON.stringify(d.first_sync) !== JSON.stringify([0, 60, 120])) problems.push('前三个同步样本应当是 [0,60,120]，得到 ' + JSON.stringify(d.first_sync));
+  if (d.sync_start_of_130 !== 120) problems.push('第 130 帧应当从样本 120 起解（同步样本回溯），得到 ' + d.sync_start_of_130);
+  if (report.decode === undefined) problems.push('缺 decode：解码那一步没跑');
+  else {
+    if (report.decode.error !== null) problems.push('解码报错：' + JSON.stringify(report.decode.error));
+    if (!(report.decode.produced > 0)) problems.push('解码没有产出任何帧');
+  }
+  if (report.seek === undefined) problems.push('缺 seek：同步样本回溯的等价性没验');
+  else {
+    if (report.seek.target_frame !== 130) problems.push('seek 目标帧不是 130');
+    if (!(report.seek.from_start_frames > report.seek.from_sync_frames)) problems.push('从头解应当比从同步样本解产出更多帧');
+    if (report.seek.equivalent !== true) problems.push('「从同步样本解到第 130 帧」与「从头解到第 130 帧」末帧不一致：' + report.seek.from_sync_digest + ' vs ' + report.seek.from_start_digest);
+  }
+  if (report.frame0_matches_video_path !== true) {
+    problems.push('自己分离出来的第 0 帧与 <video> 那条路的第 0 帧不一致：' + JSON.stringify(report.decoded_frame0));
+  }
   return problems;
 }
 
@@ -68,7 +90,7 @@ export function findBrowser() {
 function parseArgs(argv) {
   const out = {
     media: join(REPO_ROOT, 'target', 's3', 'proxy720p.mp4'),
-    headed: false, selfTest: false, timeoutMs: 180000, bad: false,
+    headed: false, selfTest: false, timeoutMs: 420000, bad: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -91,6 +113,11 @@ function selfTest() {
     rust: { width: 1280, height: 720, bytes, digest: '0123456789abcdef' },
     js: { width: 1280, height: 720, bytes, digest: '0123456789abcdef' },
     digests_match: true, js_gpu_errors: [], canvas_draw: 'ok',
+    demux: { width: 1280, height: 720, samples: 480, samples_parsed: 480, sync_count: 8, first_sync: [0, 60, 120], sync_start_of_130: 120 },
+    decode: { produced: 6, error: null },
+    decoded_frame0: { bytes: 3686400, digest: '0123456789abcdef' },
+    frame0_matches_video_path: true,
+    seek: { target_frame: 130, sync_from: 120, from_sync_frames: 11, from_start_frames: 131, equivalent: true },
   };
   expect('自洽的结果必须过', validateReport(good).length === 0, validateReport(good).join(' | '));
   expect('摘要不同必须被抓', validateReport({ ...good, digests_match: false }).length > 0, '放过了摘要不同');
@@ -99,6 +126,9 @@ function selfTest() {
   expect('字节数不对必须被抓', validateReport({ ...good, rust: { ...good.rust, bytes: 16 } }).length > 0, '放过了 16 字节');
   expect('canvas 失败必须被抓', validateReport({ ...good, canvas_draw: 'err: boom' }).length > 0, '放过了 canvas 失败');
   expect('WebGPU 错误必须被抓', validateReport({ ...good, js_gpu_errors: ['boom'] }).length > 0, '放过了 gpu 错误');
+  expect('第 0 帧不一致必须被抓', validateReport({ ...good, frame0_matches_video_path: false }).length > 0, '放过了第 0 帧不一致');
+  expect('同步样本回溯错必须被抓', validateReport({ ...good, demux: { ...good.demux, sync_start_of_130: 0 } }).length > 0, '放过了回溯错');
+  expect('末帧不一致必须被抓', validateReport({ ...good, seek: { ...good.seek, equivalent: false } }).length > 0, '放过了末帧不一致');
   if (failures.length > 0) { for (const f of failures) console.error('  - ' + f); return 1; }
   console.log('✓ 驱动自检通过（' + count + ' 条断言：结果自洽性校验）');
   return 0;

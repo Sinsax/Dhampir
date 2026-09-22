@@ -28,6 +28,9 @@ pub mod probe;
 pub mod corpus;
 
 #[cfg(target_arch = "wasm32")]
+pub mod demux_wasm;
+
+#[cfg(target_arch = "wasm32")]
 pub mod preview;
 
 #[cfg(target_arch = "wasm32")]

@@ -136,6 +136,115 @@ async function main() {
     report.canvas_draw = 'err: ' + (e && e.message ? e.message : String(e));
   }
 
+
+  // (4) T3.2：把**自己分离出来的样本**喂给 VideoDecoder，验帧号精确
+  const mp4 = new Uint8Array(await (await fetch('/media/proxy.mp4')).arrayBuffer());
+  report.mp4_bytes = mp4.length;
+  const meta = JSON.parse(mod.dhampir_demux_open(mp4));
+  const samples = JSON.parse(mod.dhampir_demux_samples());
+  report.demux = {
+    width: meta.width,
+    height: meta.height,
+    timescale: meta.timescale,
+    samples: meta.samples,
+    samples_parsed: samples.length,
+    sync_count: meta.sync_indices.length,
+    first_sync: meta.sync_indices.slice(0, 3),
+    constant_rate: meta.constant_rate,
+    sync_start_of_130: mod.dhampir_demux_sync_start(130),
+    frame_index_of_130: mod.dhampir_demux_frame_index(130),
+  };
+
+  const desc = mod.dhampir_demux_description();
+  const codec = 'avc1.' + Array.from(desc.slice(1, 4)).map((b) => b.toString(16).padStart(2, '0')).join('');
+  report.codec = codec;
+
+  const decoded = [];
+  let decodeError = null;
+  const decoder = new VideoDecoder({
+    output: (frame) => { decoded.push(frame); },
+    error: (e) => { decodeError = String(e && e.message ? e.message : e); },
+  });
+  decoder.configure({ codec: codec, description: desc, codedWidth: meta.width, codedHeight: meta.height });
+  // 从同步样本 0 起，喂前 6 个样本
+  for (let i = 0; i < 6; i += 1) {
+    const s = samples[i];
+    decoder.decode(new EncodedVideoChunk({
+      type: s.k ? 'key' : 'delta',
+      timestamp: Math.round((s.d / meta.timescale) * 1e6),
+      duration: Math.round((s.u / meta.timescale) * 1e6),
+      data: mp4.subarray(s.o, s.o + s.s),
+    }));
+  }
+  await decoder.flush();
+  report.decode = { produced: decoded.length, error: decodeError };
+
+  // 把一张 VideoFrame 走一遍「拷贝 + 搬运 + 读回」，给出摘要。
+  const digestOfFrame = async (frame) => {
+    const tex = device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+    device.queue.copyExternalImageToTexture({ source: frame }, { texture: tex, premultipliedAlpha: false }, [W, H]);
+    const out = device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+    const e = device.createCommandEncoder();
+    const p = e.beginRenderPass({ colorAttachments: [{ view: out.createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+    const b = device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: tex.createView() }] });
+    p.setPipeline(pipe); p.setBindGroup(0, b); p.draw(3); p.end();
+    device.queue.submit([e.finish()]);
+    const px = await readTexture(out);
+    return fnv1a64(px);
+  };
+
+  if (decoded.length > 0) {
+    report.decoded_frame0 = { bytes: W * H * 4, digest: await digestOfFrame(decoded[0]) };
+    // 关键判据：自己分离出来的第 0 帧，渲染出来应当与 <video> 那条路的第 0 帧逐字节相同
+    report.frame0_matches_video_path = report.decoded_frame0.digest === report.js.digest;
+    // 按 S3.3 的约定：用完就 close，别让它活到下一轮
+    decoded.forEach((f) => f.close());
+  }
+
+  // 「从同步样本起解」与「从头解」必须等价 —— 这是帧号精确那条回溯的兑现处。
+  // 只留最新一帧、把上一帧立刻 close。
+  // 这不是洁癖：WebCodecs 的输出帧池有限，不释放会让解码器**停下来等**，
+  // flush() 就永远不 resolve——我第一次跑这一条就是这么卡住的。
+  const decodeRange = async (from, to) => {
+    let last = null;
+    let count = 0;
+    let err = null;
+    const dec = new VideoDecoder({
+      output: (f) => { if (last !== null) last.close(); last = f; count += 1; },
+      error: (e) => { err = String(e && e.message ? e.message : e); },
+    });
+    dec.configure({ codec: codec, description: desc, codedWidth: meta.width, codedHeight: meta.height });
+    for (let i = from; i <= to; i += 1) {
+      const s = samples[i];
+      dec.decode(new EncodedVideoChunk({ type: s.k ? 'key' : 'delta', timestamp: Math.round((s.d / meta.timescale) * 1e6), duration: Math.round((s.u / meta.timescale) * 1e6), data: mp4.subarray(s.o, s.o + s.s) }));
+    }
+    await dec.flush();
+    return { last: last, count: count, err: err };
+  };
+  // 目标帧取 130（同步样本在 120）：不用 200 是为了别让「从头解 201 帧」把整轮拖到超时。
+  const targetFrame = 130;
+  const syncFrom = mod.dhampir_demux_sync_start(targetFrame);
+  log('开始 seek 等价性：target=' + targetFrame + ' sync_from=' + syncFrom);
+  const fromSync = await decodeRange(syncFrom, targetFrame);
+  const fromStart = await decodeRange(0, targetFrame);
+  report.seek = {
+    target_frame: targetFrame,
+    sync_from: syncFrom,
+    from_sync_frames: fromSync.count,
+    from_start_frames: fromStart.count,
+    from_sync_error: fromSync.err,
+    from_start_error: fromStart.err,
+  };
+  log('两条路都解完了：from_sync=' + fromSync.count + ' from_start=' + fromStart.count);
+  if (fromSync.last !== null && fromStart.last !== null) {
+    report.seek.from_sync_digest = await digestOfFrame(fromSync.last);
+    report.seek.from_start_digest = await digestOfFrame(fromStart.last);
+    report.seek.equivalent = report.seek.from_sync_digest === report.seek.from_start_digest;
+    fromSync.last.close();
+    fromStart.last.close();
+  }
+
+  log('seek 等价性：' + (report.seek.equivalent === true ? '一致' : '不一致'));
   report.ok = true;
   log('完成');
   await post(report);
