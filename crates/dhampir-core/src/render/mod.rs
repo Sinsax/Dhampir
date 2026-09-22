@@ -13,6 +13,7 @@
 //! 判定（"这一帧应当是什么样"）在 [`scene_model`]：纯 `f64`、不碰 GPU，因此
 //! 没有显卡的机器上也能被测试。这一层独立于测量，才谈得上"独立答案"。
 
+mod blit;
 mod probe;
 mod scene;
 
@@ -40,6 +41,7 @@ pub use corpus::{
     frame_rel_path, frames_digest, judge_frame, leg_json, point_json, record_text, render_frame,
     render_frame_pair, render_frame_record, render_run, report_text, scene_json, table_digest,
 };
+pub use blit::{BLIT_WGSL, BlitRenderer};
 pub use probe::{
     PROBE_CLEAR_COLOR, PROBE_TARGET_SIZE, PROBE_VERTICES, ProbeRenderer, ProbeSample, ProbeVertex,
     SampleExpectation, VERTEX_INSET, probe_samples, render_probe_frame,

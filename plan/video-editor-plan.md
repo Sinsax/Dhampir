@@ -657,6 +657,11 @@ FFmpeg 绑定、解码、时间线、分片、任务队列。
 - [ ] **T3.2 demux + 解码**：mp4box.js 取样本 → `VideoDecoder` → VideoFrame
   - **只解 H.264，不引 FFmpeg WASM**（有意取舍：WASM 那 0.3x 性能和几十兆包体积不值得，异构格式交服务端）
 - [ ] **T3.3 上屏链路**：~~`import_external_texture`~~ → **拷贝进 `texture_2d` + `textureLoad`** → core 渲染图 → canvas surface
+  - ✅ **已落地（2026-09-22）**：core 侧的第一级 [`BlitRenderer`]（`render/blit.rs` + `shaders/blit.wgsl`）——
+    全屏三角形 + `textureLoad(src, vec2<i32>(pos.xy), 0)` 逐纹素恒等搬运；**真机验证通过**
+    （`cargo test -p dhampir-worker --test blit -- --ignored`：16×16 全不相同图案，读出逐字节相等）。
+    该测试默认 `#[ignore]`，**不把 GPU 依赖塞进 `cargo test --workspace`**（默认套件仍是 148 passed / 1 ignored）。
+    子集普查 EXIT=0（用了但没申报 0 条）；**wasm 侧 `FrameSource` / `FrameSink` 与 canvas 上屏还未做**。
   - ⚠️ 按 S3.1 的结论改了做法。两条实测理由：① 子集**禁隐式 LOD 采样**（`textureSample(`），
     而 `texture_external` **只能**用 `textureSampleBaseClampToEdge` 采——选外部纹理就等于给子集开例外；
     ② `textureLoad` **没有 external 重载**（实测编译失败：`no matching call to textureLoad(texture_external, …)`）。
