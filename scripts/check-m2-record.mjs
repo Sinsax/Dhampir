@@ -3978,6 +3978,32 @@ const MUTATIONS = [
 ];
 
 /**
+ * 把**后到的、自指的**产物从模型里摘掉，得到自检基线。
+ *
+ * 为什么必须摘：`acceptance.json` 与 13 份判据原文里有一条判据就是"把本守卫跑一遍"，
+ * 而 `acceptance` 那一项又要求"在就必须整份绿"。于是**只要盘上留着一份红的快照**，
+ * 体检基线就永远不绿 → 自检失败 → 守卫退 2 → 判据永远补不绿 = 死锁。
+ *
+ * 摘掉不等于不查：真跑（`--record`）照样按原样加载、红的照红；自检里那两条反向用例
+ * 也是**主动塞进**坏快照来验证判据会红（见 `MUTATIONS`）。这里只是让"基线"测的是记录本体，
+ * 而不是一个依赖守卫自身结论的产物。
+ */
+function stripOptionalArtifacts(model) {
+  model.acceptance = null;
+  model.acceptanceBytes = null;
+  model.reviewText = null;
+  model.reviewBytes = null;
+  for (const name of [...model.listing.names]) {
+    if (name === 'acceptance.json' || name === 'review-independent.md' || name.endsWith('.txt')) {
+      model.listing.names.delete(name);
+      model.listing.files.delete(name);
+      model.listing.bytes.delete(name);
+    }
+  }
+  return model;
+}
+
+/**
  * 自检。返回 `{ failures, count, covered, total }`。
  *
  * 与 M1 同形：`expect(name, condition, detail)` **真数断言条数**——守卫报的每个数都是结论的一部分。
@@ -3994,7 +4020,7 @@ export function runSelfTest() {
     failures.push('自检基线不在 ' + DEFAULT_RECORD + '——反向用例以真记录为基线，没有它就无从自检');
     return { failures, count, covered: 0, total: ALL_CHECK_IDS.length };
   }
-  const base = loadRecord(DEFAULT_RECORD, 'records/m2');
+  const base = stripOptionalArtifacts(loadRecord(DEFAULT_RECORD, 'records/m2'));
 
   // ---- ① 基线必须全绿。基线不绿说明记录或守卫本身有问题，后面的"因为那一条红"就没有意义 ----
   const baselineGroups = [

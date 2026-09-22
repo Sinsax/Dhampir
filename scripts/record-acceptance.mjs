@@ -452,6 +452,9 @@ function main() {
   mkdirSync(outDir, { recursive: true });
 
   const results = [];
+  // 判据的原始输出先攒着，等全部跑完再落盘——理由见循环之后那段注释。
+  const pendingWrites = [];
+
   for (const criterion of spec.criteria) {
     const [command, commandArgs] = criterion.cmd;
 
@@ -478,10 +481,11 @@ function main() {
     // 原始输出原样落盘：复核的人要看到的是命令说了什么，不是我摘了什么。
     // stdout 与 stderr 分开写——cargo 把 "Running ..." 打给 stderr、测试结果打给
     // stdout，拼在一起会让顺序看着像个 bug（结果在前、谁跑的在后）。
-    writeLf(
+    // 但**先攒着不写**，见循环后那段注释。
+    pendingWrites.push([
       join(outDir, `${criterion.id}.txt`),
       `$ ${command} ${commandArgs.join(' ')}\n\n----- stdout -----\n${stdout}\n----- stderr -----\n${stderr}`,
-    );
+    ]);
     const tests = countTests(output);
     const verdict = judgeResult(run);
 
@@ -500,6 +504,14 @@ function main() {
         (verdict.ok ? '' : ` ← ${verdict.note ?? `退出码 ${verdict.exit_code}`}`),
     );
   }
+
+  // 判据全跑完，这时才把 .txt 落盘。
+  //
+  // 这条是被一次实测逼出来的死锁：本工具原先**边跑边写**，而 `guard-m2-record` 那一项
+  // 跑在中间，它看到"盘上有判据原文却没有 acceptance.json"就判红——那判断是对的
+  // （半份记录就是该红），但结果是守卫在自己的判据上必然失败，快照永远补不绿。
+  // 攒到最后再写，盘上就只剩两种状态：一份都没有，或者一份不缺。
+  for (const [path, text] of pendingWrites) writeLf(path, text);
 
   // 一个文件都没写出来 → 拒绝通过。这条是为了防"脚本自己写错了路径，
   // 于是把空集合报成全绿"。
