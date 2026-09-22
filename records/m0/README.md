@@ -10,7 +10,9 @@ M0 = 「骨架与双编译贯通」。它要证明的只有一件事：**同一�
 
 ## 一句话结论
 
-`acceptance.json` → `green: true`、`exit_code: 0`，7 条判据全绿（2026-09-21T19:35:36Z 重跑）。
+`acceptance.json` → `green: true`、`exit_code: 0`，7 条判据全绿（重跑时间以
+`acceptance.json` 的 `generated_at` 为准：**2026-09-21T19:39:33.372Z**——这里先前手写过一个
+比它早 4 分钟的时间，复核实测后改正；往后别再手抄，指向字段本身）。
 
 其中真正撑起 M0 的那一条是 `cross-runtime`：native 侧 48 条测试与 wasm32 侧 4 条测试
 读的是**同一份 72 行 golden 报告**，摘要是 `c3f0da6b37577e55`（两端相同）。
@@ -51,10 +53,14 @@ M0 = 「骨架与双编译贯通」。它要证明的只有一件事：**同一�
 | `cross-runtime` | `node scripts/run-wasm-tests.mjs --out records/m0` | 同一份 golden 在 wasm32 上逐字节相等（4 passed，两个 target 退出码均为 0） |
 | `guard-core-purity` | `node scripts/check-core-purity.mjs` | `dhampir-core` 的 6 个文件里没有 `#[cfg]` / `cfg!`（豁免仅 `#[cfg(test)]`） |
 | `guard-dep-graph` | `node scripts/check-dep-graph.mjs` | 5 个 crate 依赖方向正确、无环 |
-| `guard-text-hygiene` | `node scripts/check-text-hygiene.mjs` | 全仓 50 个文本文件全是 LF、无 BOM、合法 UTF-8（自检 12 内存 + 2 磁盘用例） |
+| `guard-text-hygiene` | `node scripts/check-text-hygiene.mjs` | 整棵树 50 个文本文件全是 LF、无 BOM、合法 UTF-8（自检 12 内存 + 2 磁盘用例） |
 
 > `acceptance.json` 的 `green` 有个前提：**至少写出一份 `.txt`**。一条都没写出来时
 > 它拒绝通过——"没跑"和"跑过了"必须区分开。
+
+> 表里「50 个文本文件」是**整棵树**的口径：含被 `.gitignore` 忽略的产物（如 `pkg-node/`），
+> 干净检出里是 **45** 个。另外 `records/`、`target/`、`node_modules/` 等目录按守卫的
+> `SKIP_DIRS` 直接跳过——"记录自身合不合规"不在它的结论里（复核报告 U-5 用独立扫描器补过这块）。
 
 ### ② 探针：两个 native 后端各一份图 + adapter 信息
 
@@ -135,6 +141,10 @@ node scripts/capture-harness-screenshot.mjs
 6. **`selfcheck-native.txt` 与 `cross-runtime.txt` 是同一次比对的两半。** 前者是 native
    跑出来的报告全文，后者是 wasm32 跑出来的测试日志；只有两边都在，`cross-runtime`
    这条判据才是闭合的。
+7. **`guard-*.txt` 里的数字是 M0 那棵树的数字。** 它们是那次运行的 stdout 原文
+   （`50 个文件`、`6 个文件`、crate 的打印顺序都按当时的树）；M1 之后树变了、守卫也
+   改过措辞与自检条数，**重跑会得到语义等价但数字不同的输出**。要今天这一轮的数，
+   看 `records/m1/acceptance.json`（那是最新一次落盘的快照）。
 
 ---
 
@@ -142,7 +152,10 @@ node scripts/capture-harness-screenshot.mjs
 
 - **不证明性能。** 这里没有任何一处对帧时/吞吐下结论；`seconds` 字段只是命令耗时的记录。
 - **不证明 Linux 上跑得通。** 本机是 Windows。`x86_64-unknown-linux-gnu` 的
-  `cargo check` 在本机过了（见根 `README.md`），但 `cargo check` 不链接、也不运行。
+  `cargo check` 在本机过了（见 `plan/video-editor-plan.md` §3 的 T0.6 与退出标准第 1 条，
+  以及 `.github/workflows/ci.yml` 顶部那段预验注释），但 `cargo check` 不链接、也不运行；
+  **`records/m0/` 里没有这条命令的产物**——它是文字断言，由 `records/m0/review-independent.md`
+  的 E-4 在独立克隆里重跑过一次（退出码 0）。
 - **不证明 CI 跑得通。** `.github/workflows/ci.yml` 尚未在真 runner 上跑过——
   仓库还没建，首次推送时才会验证。
 - **不证明 Safari / Firefox 上跑得通。** 浏览器那一栏只有一个 Chromium 系宿主。
@@ -153,6 +166,9 @@ node scripts/capture-harness-screenshot.mjs
 ## 相关文档
 
 - 计划与决策真相：`plan/video-editor-plan.md`（本目录的结论回填在 §3）
+- 本目录的独立复核（另一位复核者在隔离克隆里重跑）：`records/m0/review-independent.md`
+  ——它列出的 F-1 / F-4 / F-5 三条瑕疵已在本目录里改正，U-1～U-5 是**未被覆盖的面**
+- 里程碑 M1 的记录（更新一轮的现场与守卫输出）：`records/m1/README.md`
 - 项目总览与构建方式：`README.md`（仓库根）
 - 守卫与记录工具：`scripts/`（`record-acceptance.mjs`、三个 `check-*.mjs`、
   `run-wasm-tests.mjs`、`serve-wasm-harness.mjs`、`capture-harness-screenshot.mjs`）

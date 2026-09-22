@@ -175,7 +175,13 @@ node scripts/check-m1-record.mjs --self-test
    的 `DX12` / `VULKAN`。所以 `adapter.json` 里 `backend: Dx12`（wgpu 枚举的 Debug）
    与 `requested_backends: DX12`（人的标签）会同时出现，`backend_slug: dx12` 是文件名。
 6. **`adapter.json` 与 `timing.json` 是刻意拆开的。** 前者"几乎不变"，后者"每次都变"；
-   两份共用同一个 `unix_epoch_millis`（守卫会真的比对这两个数），键**刻意不重叠**。
+   两份共用同一个 `unix_epoch_millis`（守卫会真的比对这两个数，并校验
+   `unix_epoch_seconds === floor(ms / 1000)`）。但"拆开"**不等于"键不重叠"**——
+   实测 18 / 15 个键里有 **10 个同名**，其中 `kind`（`"adapter"` vs `"timing"`）与
+   `nondeterministic_fields`（各自的非确定项清单）两键**值不同**，其余 8 个
+   （`adapter_name`、`backend_slug`、`build_profile`、`milestone`、`requested_backends`、
+   `schema`、`unix_epoch_millis`、`unix_epoch_seconds`）刻意取同值。拆开说的是
+   **非确定项各归各**，不是"没有同名键"。
 7. **`compare.json` 是第二个进程写的。** 它不属于被比的那一次运行——它比的是
    "本目录的 `run.json`" vs "`--compare-run` 指过去的那份 `run.json`"，两侧摘要都记
    （`frames_digest` / `other_frames_digest`）。只有一份 `run.json` 归档，跨进程那一半
@@ -210,6 +216,14 @@ node scripts/check-m1-record.mjs --self-test
 ## 相关文档
 
 - 计划与决策真相：`plan/video-editor-plan.md`（§4 是 M1 的任务与退出标准）
+- 本目录的独立复核（另一位复核者、隔离克隆）：`records/m1/review-independent.md`
+  ——判定 **PASS**。它提的 2 条中等问题（记录守卫的诚实性检查可被一个**空壳 `linux/`
+  目录**绕过；依赖守卫看不见 `crates/` 下没有清单的目录）已在本轮**补了守卫与反向自检**：
+  诚实性只认"**完整**的腿"（5 份必备文件 + `frames/` 里有 PNG），空壳 `linux*` 目录
+  直接红，缺腿的 ⏳ 还必须与 Linux **同一行**；`crates/` 下每个目录都必须在 members 里。
+  4 条低问题是数字与措辞，已改：`键不重叠`→ 实测 10 键同名（见上面的坑 6）、
+  `183 文件`→ 185、`254 行`→ 253（`wc -l` 口径）；`docker` 那条经实测确认本机确实
+  没有 docker，原结论成立（可关闭）
 - 记录格式的上一份：`records/m0/README.md`（M0 的产物与坑）
 - 项目总览与构建方式：`README.md`（仓库根）
 - 守卫与记录工具：`scripts/`（`record-acceptance.mjs`、`check-m1-record.mjs`、
