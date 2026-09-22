@@ -21,6 +21,7 @@
 //! 整个 crate 里只有一行代码"和 native 长得不一样"：创建 `wgpu::Instance` 时
 //! 传的后端常量。见 [`web`] 里的 `new_instance`。
 
+pub mod demux;
 pub mod probe;
 
 #[cfg(target_arch = "wasm32")]

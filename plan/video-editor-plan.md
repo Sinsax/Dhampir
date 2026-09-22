@@ -654,7 +654,22 @@ FFmpeg 绑定、解码、时间线、分片、任务队列。
 ### 任务
 
 - [ ] **T3.1 `web/` 骨架**：Vite + React + TS；加载 wasm-pack `--target web` 产物
-- [ ] **T3.2 demux + 解码**：mp4box.js 取样本 → `VideoDecoder` → VideoFrame
+> 🔵 **分离器已落地（2026-09-22）**：`dhampir-wasm/src/demux.rs` —— 自己写的最小 MP4 解析器，
+> **不引 mp4box.js**（理由见模块注释：底座里 `dhampir-media::Demuxer` 契约正缺实现，不该把
+> 「帧号 → 样本」这条契约留在 JS 里；且项目一贯不引第三方）。
+>
+> 做：定位视频轨、取 avcC（WebCodecs 的 description）、逐样本给出
+> (文件偏移, 字节数, dts, 时长, 是否同步样本)，另有帧号→样本下标与「要解第 N 帧得从哪个同步样本起」。
+> 不做：编辑列表、碎片化 MP4、多轨、音频——不认识的盒子直接跳过。
+>
+> **6 条测试**（5 条自足 + 1 条真素材）：前 5 条手写一份最小 MP4 来验样本表（偏移连续、dts 累加、
+> 同步样本回溯、截断/缺盒子报错）；第 6 条 `#[ignore]` 拿 `target/s3/proxy720p.mp4` 逐项对先前实测——
+> **480 个样本、1280×720、定帧率、8 个关键帧且位置恰为 [0,60,120,…,420]**，与 ffprobe 的说法一致。
+>
+> ⏳ **未做**：把样本喂给 `VideoDecoder`（判 `description` 与 `EncodedVideoChunk` 的接法、
+> 以及「解第 N 帧要先喂同步样本再解码到 N」这条真实回溯路径）。
+
+- [x] ~~**T3.2 demux + 解码**~~（分离器部分；WebCodecs 接线未做）
   - **只解 H.264，不引 FFmpeg WASM**（有意取舍：WASM 那 0.3x 性能和几十兆包体积不值得，异构格式交服务端）
 - [ ] **T3.3 上屏链路**：~~`import_external_texture`~~ → **拷贝进 `texture_2d` + `textureLoad`** → core 渲染图 → canvas surface
   - ✅ **已落地（2026-09-22）**：core 侧的第一级 [`BlitRenderer`]（`render/blit.rs` + `shaders/blit.wgsl`）——
