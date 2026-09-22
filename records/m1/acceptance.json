@@ -3,9 +3,9 @@
   "milestone": "m1",
   "title": "M1 服务端 headless wgpu 基线",
   "source": "plan/video-editor-plan.md §4「退出标准」；另按 §0 执行规则「上一个里程碑的退出标准全绿才允许进入下一个」重跑 M0 的两条 wasm 侧判据——M1 往 dhampir-core 里加了整个渲染模块，core 是两边共用的",
-  "generated_at": "2026-09-21T21:34:43.037Z",
+  "generated_at": "2026-09-22T05:11:33.613Z",
   "node": "v25.5.0",
-  "commit": "89708db8fca6",
+  "commit": "e752860abb4d",
   "dirty": false,
   "criteria": [
     {
@@ -13,7 +13,7 @@
       "says": "cargo check --workspace（native）通过",
       "command": "cargo check --workspace --color never",
       "exit_code": 0,
-      "seconds": 0.2,
+      "seconds": 0.3,
       "ok": true
     },
     {
@@ -41,7 +41,7 @@
       "says": "同一份 golden 报告在 wasm32 上逐字节相等（M0 判据重跑）",
       "command": "node scripts/run-wasm-tests.mjs --out records/m1",
       "exit_code": 0,
-      "seconds": 2,
+      "seconds": 1.9,
       "ok": true
     },
     {
@@ -78,7 +78,7 @@
     },
     {
       "id": "guard-m1-record-self-test",
-      "says": "记录守卫自己的 40 条自检（含 14 个检查项各一条反向用例）",
+      "says": "记录守卫自己的 47 条自检（含 14 个检查项各一条反向用例）",
       "command": "node scripts/check-m1-record.mjs --self-test",
       "exit_code": 0,
       "seconds": 0.1,
