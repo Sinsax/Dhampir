@@ -38,6 +38,7 @@ pub mod compose;
 pub mod effects;
 pub mod gpu;
 pub mod io;
+pub mod metric;
 pub mod readback;
 pub mod render;
 
