@@ -1,6 +1,0 @@
-$ cargo check --workspace --color never
-
------ stdout -----
-
------ stderr -----
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.17s

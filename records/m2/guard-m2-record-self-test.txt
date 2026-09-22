@@ -1,6 +1,0 @@
-$ node scripts/check-m2-record.mjs --self-test
-
------ stdout -----
-✓ 守卫自检通过（53 条断言；37/37 个检查项各一条反向用例）
-
------ stderr -----
