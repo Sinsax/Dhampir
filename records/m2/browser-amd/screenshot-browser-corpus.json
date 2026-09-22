@@ -1,0 +1,272 @@
+{
+  "schema": 1,
+  "milestone": "M2",
+  "purpose": "M2 浏览器腿（wasm + 浏览器 WebGPU）那一轮 corpus 取证的整页截图，以及这次运行的硬结论——用于人工复核截图里的绿是不是真的。逐帧 SSIM 判定在 T2.4（framediff）另有一份。",
+  "captured_at": "2026-09-22T08:44:22.066Z",
+  "page_url": "http://127.0.0.1:52633/corpus.html?leg=m2-amd&scene=all&frames=0..16&autorun=1&expect=71ecc80cade3d73d",
+  "leg": {
+    "slug": "m2-amd",
+    "out_dir": "records/m2/browser-amd",
+    "requested_backends": "BROWSER_WEBGPU",
+    "backend_slug": "m2-amd",
+    "adapter_name": null,
+    "build_profile": "debug",
+    "wgpu_version": "30.0.1",
+    "naga_version": null
+  },
+  "browser": {
+    "kind": "chrome",
+    "path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "product": "Chrome/153.0.8010.53",
+    "revision": "@792bf6722e73a45aa9e47c163b9901bdc17f3230",
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36",
+    "headless": true,
+    "extra_args": [
+      "--force_low_power_gpu"
+    ]
+  },
+  "viewport": {
+    "width": 1600,
+    "height": 1200,
+    "captured_content": {
+      "width": 1600,
+      "height": 2068
+    }
+  },
+  "round": {
+    "scene": "all",
+    "frames_arg": "0..16",
+    "frames_written": 80,
+    "frames_verified": 80,
+    "frames_on_disk": 80,
+    "png_bytes_total": 129765,
+    "frames_digest": "a37b0ab5140b18e6",
+    "expected_frames_digest": "71ecc80cade3d73d",
+    "digest_matches_expect": false,
+    "counts": {
+      "clean": true,
+      "failed": 0,
+      "frames": 80,
+      "out_of_range": 0,
+      "points": 368,
+      "unjudged": 0
+    },
+    "readings_bytes": 112215,
+    "run_json_bytes": 305089,
+    "adapter_bytes": 2397,
+    "readings_bytes_on_disk": 112215,
+    "run_json_bytes_on_disk": 305089,
+    "adapter_bytes_on_disk": 2397,
+    "elapsed_ms": 1819
+  },
+  "server_checks": [
+    {
+      "ok": true,
+      "detail": "记录身份：kind=corpus schema=1 milestone=M1（表契约版本）"
+    },
+    {
+      "ok": true,
+      "detail": "请求的后端：BROWSER_WEBGPU"
+    },
+    {
+      "ok": true,
+      "detail": "frames_digest a37b0ab5140b18e6"
+    },
+    {
+      "ok": true,
+      "detail": "记录自报\"没有任何一项允许变化\"（nondeterministic_fields 为空）"
+    },
+    {
+      "ok": true,
+      "detail": "帧区间 0..16（每场景 16 帧）"
+    },
+    {
+      "ok": true,
+      "detail": "5 个场景 × 16 帧，逐场景无缺帧、无重复（共 80 帧）"
+    },
+    {
+      "ok": true,
+      "detail": "帧里的场景都在记录自述的 scenes 表里（gradient、checker、srgb_linear、alpha_stack、blur）"
+    },
+    {
+      "ok": true,
+      "detail": "盘上 80 帧全部与 run.json 的路径/字节数/摘要一致，且没有多余文件"
+    },
+    {
+      "ok": true,
+      "detail": "账本与明细自洽：帧 80、采样点 368、失败 0、越界 0、未判定 0"
+    },
+    {
+      "ok": true,
+      "detail": "账本摘要能由逐帧明细复算出来（a37b0ab5140b18e6，80 行）"
+    },
+    {
+      "ok": true,
+      "detail": "readings.txt 的计数与 run.json 一致（帧 80、采样点 368）"
+    },
+    {
+      "ok": true,
+      "detail": "卡身份由宿主设备表解出：AMD Radeon(TM) Graphics（vendor \"amd\" → PCI id 4098，见 host-gpu.json）"
+    }
+  ],
+  "server_findings": [
+    {
+      "ok": true,
+      "detail": "同帧两次渲染：80 帧全部逐字节一致"
+    },
+    {
+      "ok": true,
+      "detail": "表里的采样点全部通过（这就是 M1 冻结的那张表）"
+    },
+    {
+      "ok": false,
+      "detail": "与 native 腿不同：浏览器 a37b0ab5140b18e6、native 71ecc80cade3d73d——交给 T2.4 的逐帧 SSIM 判定差异有多大"
+    },
+    {
+      "ok": false,
+      "detail": "readings.txt 与 records/m1/dx12 不同（浏览器 532 行、native 532 行，首个不同在第 23 行）——交给 T2.4 逐帧 SSIM 定量"
+    }
+  ],
+  "host_gpu": {
+    "source": "CDP SystemInfo.getInfo",
+    "read_from": "CDP SystemInfo.getInfo（浏览器级 WS：Chrome/153.0.8010.53）",
+    "devices": [
+      {
+        "vendorId": 4098,
+        "deviceId": 5056,
+        "subSysId": 2116293730,
+        "revision": 197,
+        "vendorString": "",
+        "deviceString": "AMD Radeon(TM) Graphics",
+        "driverVendor": "",
+        "driverVersion": "32.0.21030.2001"
+      },
+      {
+        "vendorId": 4318,
+        "deviceId": 10118,
+        "subSysId": 663119496,
+        "revision": 161,
+        "vendorString": "",
+        "deviceString": "NVIDIA GeForce RTX 4070",
+        "driverVendor": "AMD",
+        "driverVersion": "32.0.16.1074"
+      },
+      {
+        "vendorId": 5140,
+        "deviceId": 140,
+        "subSysId": 0,
+        "revision": 0,
+        "vendorString": "",
+        "deviceString": "Microsoft Basic Render Driver",
+        "driverVendor": "",
+        "driverVersion": "10.0.19041.5794"
+      }
+    ],
+    "post": {
+      "status": 200,
+      "body": {
+        "ok": true,
+        "devices": 3,
+        "written": false,
+        "host_gpu": null
+      }
+    },
+    "on_disk": {
+      "source": "CDP SystemInfo.getInfo",
+      "devices": [
+        {
+          "vendorId": 4098,
+          "deviceId": 5056,
+          "subSysId": 2116293730,
+          "revision": 197,
+          "vendorString": "",
+          "deviceString": "AMD Radeon(TM) Graphics",
+          "driverVendor": "",
+          "driverVersion": "32.0.21030.2001"
+        },
+        {
+          "vendorId": 4318,
+          "deviceId": 10118,
+          "subSysId": 663119496,
+          "revision": 161,
+          "vendorString": "",
+          "deviceString": "NVIDIA GeForce RTX 4070",
+          "driverVendor": "AMD",
+          "driverVersion": "32.0.16.1074"
+        },
+        {
+          "vendorId": 5140,
+          "deviceId": 140,
+          "subSysId": 0,
+          "revision": 0,
+          "vendorString": "",
+          "deviceString": "Microsoft Basic Render Driver",
+          "driverVendor": "",
+          "driverVersion": "10.0.19041.5794"
+        }
+      ],
+      "resolved": {
+        "vendor": "amd",
+        "vendor_id": 4098,
+        "device_id": 5056,
+        "device": "AMD Radeon(TM) Graphics",
+        "driver_vendor": "",
+        "driver_version": "32.0.21030.2001",
+        "match_reason": "in_page.vendor=amd → PCI vendor id 4098，宿主设备表里唯一一块"
+      },
+      "note": "本文件由 scripts/serve-corpus-harness.mjs 落盘：devices 是驱动从 CDP SystemInfo.getInfo 原样读到的宿主设备表；resolved 是服务端把页面报的 in_page.vendor 对到其中**唯一**一块卡的结果（匹配只走数字 vendorId——vendorString 实测是空串）。"
+    }
+  },
+  "trigger": {
+    "autorun_suppressed": true,
+    "by": "scripts/run-browser-corpus.mjs（摘下 ?autorun 后自己调 dhampirCorpusHarness.run）",
+    "why": "宿主设备表必须先于页面的 adapter.json 到达服务端：解卡身份要用页面报的 in_page.vendor 当匹配起点"
+  },
+  "screenshot": {
+    "file": "screenshot-browser-corpus.png",
+    "bytes": 176458,
+    "sha256": "0fb072c683cde5a88ec9f7a22e7d22ca0947fd98162b749cf44670e444acaed6"
+  },
+  "audit": {
+    "ok": true,
+    "hard": [],
+    "findings": [
+      {
+        "ok": true,
+        "detail": "文本产物字节数：页面自报与盘上文件一致（adapter.json 2397、readings.txt 112215、run.json 305089）"
+      },
+      {
+        "ok": true,
+        "detail": "卡身份：AMD Radeon(TM) Graphics（deviceId 5056，由宿主设备表补上：in_page.vendor=amd → PCI vendor id 4098，宿主设备表里唯一一块）"
+      },
+      {
+        "ok": true,
+        "detail": "同帧两次渲染：80 帧全部逐字节一致"
+      },
+      {
+        "ok": true,
+        "detail": "表里的采样点全部通过（这就是 M1 冻结的那张表）"
+      },
+      {
+        "ok": false,
+        "detail": "与 native 腿不同：浏览器 a37b0ab5140b18e6、native 71ecc80cade3d73d——交给 T2.4 的逐帧 SSIM 判定差异有多大"
+      },
+      {
+        "ok": false,
+        "detail": "readings.txt 与 records/m1/dx12 不同（浏览器 532 行、native 532 行，首个不同在第 23 行）——交给 T2.4 逐帧 SSIM 定量"
+      },
+      {
+        "ok": true,
+        "detail": "服务端 12 条完整性检查全过（帧数与服务端/页面/盘上三方一致）"
+      }
+    ]
+  },
+  "notes": [
+    "截图是 CDP Page.captureScreenshot 的整页结果，不是人按的 PrintScreen——同一条命令能再拍一张。",
+    "服务端在写 run.json **之前**逐帧复算了路径/字节数/FNV-1a 摘要；本脚本另外自己数了一遍盘上的 PNG。",
+    "`digest_matches_expect` 只是\"逐字节相同吗\"这一栏的答案；不同**不是**错误——T2.4 的逐帧 SSIM 才是定量判定。",
+    "判定在服务端与页面各有一份，两边都得同意才写这张图。",
+    "`host_gpu.devices` 是驱动从 CDP 原样搬来的宿主设备表；`on_disk` 是服务端把页面报的 vendor 对到其中**唯一**一块卡之后写出的 host-gpu.json——\"用了哪块卡\"这句话的出处就是这里。",
+    "`round.*_bytes` 是服务端实测\"这份文件写了多少字节\"（页面的那一栏抄的就是它）；`round.*_bytes_on_disk` 是驱动 `stat` 盘上文件得到的。两栏必须相等，否则不写这张图——页面的 `text.length` 是 UTF-16 码元数，拿它当字节会在记录里留下一个查不出来的假数。"
+  ]
+}

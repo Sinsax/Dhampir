@@ -1,0 +1,54 @@
+{
+  "adapter": {
+    "backend": "BrowserWebGpu",
+    "device": "0",
+    "device_type": "Other",
+    "driver": "",
+    "driver_info": "",
+    "name": "",
+    "vendor": "0"
+  },
+  "adapter_name": null,
+  "backend_slug": "m2",
+  "build_profile": "debug",
+  "corpus_target_size": "256x256",
+  "crate_version": "0.0.1",
+  "gpu_identity": {
+    "reason": "浏览器不暴露显卡型号：GPUAdapterInfo.device/description 为空，页面里问不出“哪块卡”",
+    "resolved_by": "harness",
+    "resolves_to": "host-gpu.json",
+    "state": "unresolved"
+  },
+  "in_page": {
+    "architecture": "lovelace",
+    "description": "",
+    "device": "",
+    "is_fallback_adapter": false,
+    "note": "浏览器自己报的适配器身份。Chrome 只给得出 vendor 与 architecture，device/description 是空串——这是浏览器的隐私策略，不是我们没读到；而 wgpu 的 webgpu 后端把 GPUAdapterInfo 映射成 name=description()（空）、vendor/device=0，所以旁边 `adapter` 那一块在浏览器上认不出卡。这一块是页面里**另一次** requestAdapter 的结果：wgpu 内部那个 JS 适配器对象不对外暴露，两处无法在页面内对账；把 vendor 对到宿主某一块卡由 host-gpu.json 做（见 gpu_identity）。",
+    "subgroup_max_size": 32,
+    "subgroup_min_size": 32,
+    "vendor": "nvidia"
+  },
+  "kind": "adapter",
+  "milestone": "M1",
+  "naga_version": null,
+  "naga_version_note": "浏览器侧 WGSL 由浏览器自己的实现编译（Chrome 是 Dawn/Tint），naga 不在这条路径上——这一栏不适用，不是漏填",
+  "nondeterministic_fields": [
+    "unix_epoch_seconds",
+    "unix_epoch_millis",
+    "build_profile（换构建就变）",
+    "adapter.* / adapter_name（换机器、换浏览器、换驱动就变）",
+    "in_page.*（同上；它记的是浏览器当场报的那块卡）"
+  ],
+  "probe_digest": "c3f0da6b37577e55",
+  "probe_format_version": 1,
+  "producer": "browser-webgpu/wasm32",
+  "requested_backends": "BROWSER_WEBGPU",
+  "schema": 1,
+  "target_format": "Rgba8UnormSrgb",
+  "timing_note": "本腿不出 timing.json：M2 的判据是两条腿画得一样，不是浏览器多快（计时在 M6 的验收里）。这里写明，免得复核的人以为它写失败了",
+  "timing_record": null,
+  "unix_epoch_millis": 1790066626240,
+  "unix_epoch_seconds": 1790066626,
+  "wgpu_version": "30.0.1"
+}

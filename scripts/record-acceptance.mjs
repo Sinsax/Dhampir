@@ -13,6 +13,7 @@
 //   node scripts/record-acceptance.mjs                 # 默认跑 m0
 //   node scripts/record-acceptance.mjs --milestone m0
 //   node scripts/record-acceptance.mjs --milestone m1
+//   node scripts/record-acceptance.mjs --milestone m2
 //   node scripts/record-acceptance.mjs --list          # 只看有哪些项
 //   node scripts/record-acceptance.mjs --self-test
 
@@ -123,6 +124,79 @@ export const MILESTONES = {
         id: 'guard-m1-record-self-test',
         says: '记录守卫自己的 47 条自检（含 14 个检查项各一条反向用例）',
         cmd: ['node', ['scripts/check-m1-record.mjs', '--self-test']],
+      },
+    ],
+  },
+  m2: {
+    title: 'M2 corpus 记录与浏览器取证',
+    source:
+      'plan/video-editor-plan.md §5「退出标准」；另按 §0 执行规则「上一个里程碑的退出标准全绿才允许进入下一个」' +
+      '重跑 M0/M1 的判据——M2 把 corpus 驱动与记录形状搬进了 dhampir-core，core 是两个宿主共用的',
+    criteria: [
+      {
+        id: 'native-check',
+        says: 'cargo check --workspace（native）通过',
+        cmd: ['cargo', ['check', '--workspace', '--color', 'never']],
+      },
+      {
+        id: 'native-tests',
+        says: '工作区测试全绿（cargo test --workspace）——含「WGSL 可移植性子集」的 7 条（退出标准第 3 条的机器判定之一）',
+        cmd: ['cargo', ['test', '--workspace', '--color', 'never']],
+      },
+      {
+        id: 'wasm-check',
+        says: 'cargo check -p dhampir-wasm --target wasm32-unknown-unknown 通过（M0 判据重跑：M2 的改动横跨 core 与 wasm 两侧）',
+        cmd: ['cargo', ['check', '-p', 'dhampir-wasm', '--target', 'wasm32-unknown-unknown', '--color', 'never']],
+      },
+      {
+        id: 'cross-runtime',
+        says: '同一份 golden 报告在 wasm32 上逐字节相等（M0 判据重跑）；这条的输出就是记录里的 wasm-tests.json',
+        cmd: ['node', ['scripts/run-wasm-tests.mjs', '--out', 'records/m2']],
+      },
+      {
+        id: 'guard-core-purity',
+        says: 'dhampir-core 里没有 #[cfg] / cfg!（M2 又把 corpus 驱动搬进了 core）',
+        cmd: ['node', ['scripts/check-core-purity.mjs']],
+      },
+      {
+        id: 'guard-dep-graph',
+        says: 'crate 依赖方向单向无环',
+        cmd: ['node', ['scripts/check-dep-graph.mjs']],
+      },
+      {
+        id: 'guard-text-hygiene',
+        says: '全仓 LF + 无 BOM + 合法 UTF-8',
+        cmd: ['node', ['scripts/check-text-hygiene.mjs']],
+      },
+      {
+        id: 'guard-m1-record',
+        says: 'records/m1 归档仍整份绿——M2 的 native 锚就是这份归档，它要是红了，M2 的结论就建在没核过的目录上',
+        cmd: ['node', ['scripts/check-m1-record.mjs', '--record', 'records/m1']],
+      },
+      {
+        id: 'guard-m1-record-self-test',
+        says: 'M1 记录守卫自己的 47 条自检（M2 拿它当锚，它的自检也得先过）',
+        cmd: ['node', ['scripts/check-m1-record.mjs', '--self-test']],
+      },
+      {
+        id: 'framediff-self-test',
+        says: '比对工具自己的自检（合成负用例 + 逐字节可复现 + 差异图口径）——两份 framediff 记录是它产出的',
+        cmd: ['node', ['scripts/dhampir-framediff.mjs', '--self-test']],
+      },
+      {
+        id: 'wgsl-census',
+        says: '普查工具：用了但没申报的 WGSL 内建 / 特性 0 条（退出标准第 3 条的另一半）',
+        cmd: ['node', ['scripts/dhampir-wgsl-census.mjs', '--declared', 'plan/wgsl-portable-subset.md']],
+      },
+      {
+        id: 'guard-m2-record',
+        says: 'records/m2 整份重算：逐张 PNG 的像素摘要、SSIM / PSNR / 差异统计、档位解析、判定、渲染逐字节对账——记录里说什么，先得被算出来一遍',
+        cmd: ['node', ['scripts/check-m2-record.mjs', '--record', 'records/m2']],
+      },
+      {
+        id: 'guard-m2-record-self-test',
+        says: 'M2 记录守卫自己的自检（每个检查项各一条反向用例、空帧集拒绝通过、参数不认识判 2）',
+        cmd: ['node', ['scripts/check-m2-record.mjs', '--self-test']],
       },
     ],
   },

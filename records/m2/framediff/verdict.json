@@ -1,0 +1,238 @@
+{
+  "schema": 1,
+  "kind": "framediff",
+  "tool": "scripts/dhampir-framediff.mjs",
+  "amp": 16,
+  "window": {
+    "space": "luma",
+    "size": 11,
+    "sigma": 1.5,
+    "k1": 0.01,
+    "k2": 0.03,
+    "range": 255
+  },
+  "inputs": {
+    "a": {
+      "label": "browser-webgpu-nvidia",
+      "dir": "records/m2/browser/frames",
+      "frames": 80,
+      "bytes_total": 129619,
+      "set_digest": "4bc004b502a1301a",
+      "ignored": []
+    },
+    "b": {
+      "label": "native-dx12-nvidia",
+      "dir": "records/m1/dx12/frames",
+      "frames": 80,
+      "bytes_total": 129619,
+      "set_digest": "4bc004b502a1301a",
+      "ignored": []
+    }
+  },
+  "thresholds": {
+    "path": "scripts/framediff-thresholds-exact.toml",
+    "digest": "fce01cde0b735693",
+    "resolved": {
+      "alpha_stack": {
+        "mean_ssim_min": 1,
+        "min_ssim_min": 1,
+        "max_abs_diff_max": 0
+      },
+      "blur": {
+        "mean_ssim_min": 1,
+        "min_ssim_min": 1,
+        "max_abs_diff_max": 0
+      },
+      "checker": {
+        "mean_ssim_min": 1,
+        "min_ssim_min": 1,
+        "max_abs_diff_max": 0
+      },
+      "gradient": {
+        "mean_ssim_min": 1,
+        "min_ssim_min": 1,
+        "max_abs_diff_max": 0
+      },
+      "srgb_linear": {
+        "mean_ssim_min": 1,
+        "min_ssim_min": 1,
+        "max_abs_diff_max": 0
+      }
+    }
+  },
+  "scenes": [
+    {
+      "scene": "alpha_stack",
+      "frames": 16,
+      "mean_ssim_luma": 1,
+      "min_ssim_luma": 1,
+      "min_psnr_rgb_db": null,
+      "max_abs_diff": 0,
+      "diff_pixels": 0,
+      "worst_frames": [
+        {
+          "file": "alpha_stack-f000.png",
+          "ssim_luma": 1,
+          "max_abs_diff": 0
+        },
+        {
+          "file": "alpha_stack-f001.png",
+          "ssim_luma": 1,
+          "max_abs_diff": 0
+        },
+        {
+          "file": "alpha_stack-f002.png",
+          "ssim_luma": 1,
+          "max_abs_diff": 0
+        }
+      ],
+      "limits": {
+        "mean_ssim_min": 1,
+        "min_ssim_min": 1,
+        "max_abs_diff_max": 0
+      },
+      "verdict": "pass",
+      "failures": []
+    },
+    {
+      "scene": "blur",
+      "frames": 16,
+      "mean_ssim_luma": 1,
+      "min_ssim_luma": 1,
+      "min_psnr_rgb_db": null,
+      "max_abs_diff": 0,
+      "diff_pixels": 0,
+      "worst_frames": [
+        {
+          "file": "blur-f000.png",
+          "ssim_luma": 1,
+          "max_abs_diff": 0
+        },
+        {
+          "file": "blur-f001.png",
+          "ssim_luma": 1,
+          "max_abs_diff": 0
+        },
+        {
+          "file": "blur-f002.png",
+          "ssim_luma": 1,
+          "max_abs_diff": 0
+        }
+      ],
+      "limits": {
+        "mean_ssim_min": 1,
+        "min_ssim_min": 1,
+        "max_abs_diff_max": 0
+      },
+      "verdict": "pass",
+      "failures": []
+    },
+    {
+      "scene": "checker",
+      "frames": 16,
+      "mean_ssim_luma": 1,
+      "min_ssim_luma": 1,
+      "min_psnr_rgb_db": null,
+      "max_abs_diff": 0,
+      "diff_pixels": 0,
+      "worst_frames": [
+        {
+          "file": "checker-f000.png",
+          "ssim_luma": 1,
+          "max_abs_diff": 0
+        },
+        {
+          "file": "checker-f001.png",
+          "ssim_luma": 1,
+          "max_abs_diff": 0
+        },
+        {
+          "file": "checker-f002.png",
+          "ssim_luma": 1,
+          "max_abs_diff": 0
+        }
+      ],
+      "limits": {
+        "mean_ssim_min": 1,
+        "min_ssim_min": 1,
+        "max_abs_diff_max": 0
+      },
+      "verdict": "pass",
+      "failures": []
+    },
+    {
+      "scene": "gradient",
+      "frames": 16,
+      "mean_ssim_luma": 1,
+      "min_ssim_luma": 1,
+      "min_psnr_rgb_db": null,
+      "max_abs_diff": 0,
+      "diff_pixels": 0,
+      "worst_frames": [
+        {
+          "file": "gradient-f000.png",
+          "ssim_luma": 1,
+          "max_abs_diff": 0
+        },
+        {
+          "file": "gradient-f001.png",
+          "ssim_luma": 1,
+          "max_abs_diff": 0
+        },
+        {
+          "file": "gradient-f002.png",
+          "ssim_luma": 1,
+          "max_abs_diff": 0
+        }
+      ],
+      "limits": {
+        "mean_ssim_min": 1,
+        "min_ssim_min": 1,
+        "max_abs_diff_max": 0
+      },
+      "verdict": "pass",
+      "failures": []
+    },
+    {
+      "scene": "srgb_linear",
+      "frames": 16,
+      "mean_ssim_luma": 1,
+      "min_ssim_luma": 1,
+      "min_psnr_rgb_db": null,
+      "max_abs_diff": 0,
+      "diff_pixels": 0,
+      "worst_frames": [
+        {
+          "file": "srgb_linear-f000.png",
+          "ssim_luma": 1,
+          "max_abs_diff": 0
+        },
+        {
+          "file": "srgb_linear-f001.png",
+          "ssim_luma": 1,
+          "max_abs_diff": 0
+        },
+        {
+          "file": "srgb_linear-f002.png",
+          "ssim_luma": 1,
+          "max_abs_diff": 0
+        }
+      ],
+      "limits": {
+        "mean_ssim_min": 1,
+        "min_ssim_min": 1,
+        "max_abs_diff_max": 0
+      },
+      "verdict": "pass",
+      "failures": []
+    }
+  ],
+  "totals": {
+    "scenes": 5,
+    "frames": 80,
+    "diff_pixels": 0,
+    "diff_images": 0
+  },
+  "verdict": "pass",
+  "exit_code": 0
+}

@@ -1,0 +1,11 @@
+  档位：scripts/framediff-thresholds-exact.toml（digest fce01cde0b735693）
+  a = browser-webgpu-nvidia：records/m2/browser/frames（80 张 PNG，129619 字节）
+  b = native-dx12-nvidia：records/m1/dx12/frames（80 张 PNG，129619 字节）
+  ✓ alpha_stack：16 帧，mean SSIM 1，min SSIM 1，min PSNR inf，max|Δ| 0，差异像素 0
+  ✓ blur：16 帧，mean SSIM 1，min SSIM 1，min PSNR inf，max|Δ| 0，差异像素 0
+  ✓ checker：16 帧，mean SSIM 1，min SSIM 1，min PSNR inf，max|Δ| 0，差异像素 0
+  ✓ gradient：16 帧，mean SSIM 1，min SSIM 1，min PSNR inf，max|Δ| 0，差异像素 0
+  ✓ srgb_linear：16 帧，mean SSIM 1，min SSIM 1，min PSNR inf，max|Δ| 0，差异像素 0
+  记录 → records/m2/framediff/summary.csv、records/m2/framediff/verdict.json、records/m2/framediff/report.txt
+
+✓ 5 个场景、80 帧全部达标（退出码 0）

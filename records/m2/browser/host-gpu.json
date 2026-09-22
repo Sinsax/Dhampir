@@ -1,0 +1,45 @@
+{
+  "source": "CDP SystemInfo.getInfo",
+  "devices": [
+    {
+      "vendorId": 4318,
+      "deviceId": 10118,
+      "subSysId": 663119496,
+      "revision": 161,
+      "vendorString": "",
+      "deviceString": "NVIDIA GeForce RTX 4070",
+      "driverVendor": "NVIDIA",
+      "driverVersion": "32.0.16.1074"
+    },
+    {
+      "vendorId": 4098,
+      "deviceId": 5056,
+      "subSysId": 2116293730,
+      "revision": 197,
+      "vendorString": "",
+      "deviceString": "AMD Radeon(TM) Graphics",
+      "driverVendor": "",
+      "driverVersion": "32.0.21030.2001"
+    },
+    {
+      "vendorId": 5140,
+      "deviceId": 140,
+      "subSysId": 0,
+      "revision": 0,
+      "vendorString": "",
+      "deviceString": "Microsoft Basic Render Driver",
+      "driverVendor": "",
+      "driverVersion": "10.0.19041.5794"
+    }
+  ],
+  "resolved": {
+    "vendor": "nvidia",
+    "vendor_id": 4318,
+    "device_id": 10118,
+    "device": "NVIDIA GeForce RTX 4070",
+    "driver_vendor": "NVIDIA",
+    "driver_version": "32.0.16.1074",
+    "match_reason": "in_page.vendor=nvidia → PCI vendor id 4318，宿主设备表里唯一一块"
+  },
+  "note": "本文件由 scripts/serve-corpus-harness.mjs 落盘：devices 是驱动从 CDP SystemInfo.getInfo 原样读到的宿主设备表；resolved 是服务端把页面报的 in_page.vendor 对到其中**唯一**一块卡的结果（匹配只走数字 vendorId——vendorString 实测是空串）。"
+}

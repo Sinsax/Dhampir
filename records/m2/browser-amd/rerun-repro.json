@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "kind": "browser-leg-rerun-repro",
+  "leg": "m2-amd",
+  "question": "跨厂商那一腿（浏览器 WebGPU / AMD 核显）跑出来的字节是不是确定的？",
+  "first": {
+    "out_dir": "records/m2/browser-amd",
+    "frames_digest": "a37b0ab5140b18e6",
+    "png_bytes_total": 129765
+  },
+  "rerun": {
+    "out_dir": "target/m2-amd-rerun",
+    "frames_digest": "a37b0ab5140b18e6",
+    "png_bytes_total": 129765
+  },
+  "frames": {
+    "compared": 80,
+    "byte_identical": 80,
+    "mismatches": []
+  },
+  "readings": {
+    "first_sha256_16": "496a5e3ef2e8e2ba",
+    "rerun_sha256_16": "496a5e3ef2e8e2ba",
+    "first_bytes": 112215,
+    "rerun_bytes": 112215,
+    "identical": true
+  },
+  "not_compared": {
+    "run_json": "run.json 里带着腿名与计时（leg、epoch、耗时），两次必然不同——比它只会制造一条假差异"
+  },
+  "made_by": {
+    "browser_leg": "node scripts/run-browser-corpus.mjs --out <dir> --leg <slug> --chrome-arg --force_low_power_gpu",
+    "comparison": "node target/m2-amd-repro.mjs"
+  }
+}

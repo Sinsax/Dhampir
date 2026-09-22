@@ -1,0 +1,93 @@
+{
+  "schema": 1,
+  "milestone": "M0",
+  "kind": "wasm-tests",
+  "target": "wasm32-unknown-unknown",
+  "crate": "dhampir-wasm",
+  "runner": {
+    "path": "C:\\Users\\para\\AppData\\Local\\.wasm-pack\\wasm-bindgen-962cf579bc69a48f\\wasm-bindgen-test-runner.exe",
+    "version": "wasm-bindgen-test-runner 0.2.128"
+  },
+  "node": "v25.5.0",
+  "wasm_bindgen_locked": "0.2.128",
+  "node_exit_shim": {
+    "applied": true,
+    "platform": "win32",
+    "reason": "win32：libuv 退出断言在本机实测复现（12 次里崩 10 次）",
+    "shim": "F:/para/Code/Dhampir/target/wasm-test-run/dhampir-wasm-test-defer-exit.cjs",
+    "why": "Windows + Node 只要真的调用 process.exit()，就可能撞上 libuv 的 UV_HANDLE_CLOSING 断言，退出码变成 -1073740791，与测试结果无关。垫片接管 process.exit，只设 process.exitCode，让 node 自然退出。12 次实测：无垫片崩 10 次、接管后崩 0 次。非 win32 上该缺陷不复现，故不注入。",
+    "nota_bene": "垫片只改退出路径，不改退出码——测试失败仍然是非零退出；\"挂住\"由超时判死。",
+    "override": "DHAMPIR_WASM_TEST_SHIM=1|0 可强制（在一种平台上复现另一种平台的行为）",
+    "timeout_ms": 300000
+  },
+  "command": "node scripts/run-wasm-tests.mjs",
+  "source_wasm_bindgen_tests": {
+    "count": 10,
+    "files": [
+      "crates/dhampir-wasm/src/corpus.rs×6",
+      "crates/dhampir-wasm/tests/cross_runtime.rs×4"
+    ]
+  },
+  "targets": [
+    {
+      "target": "dhampir_wasm",
+      "wasm": "F:/para/Code/Dhampir/target/wasm32-unknown-unknown/debug/deps/dhampir_wasm-a62784349159f769.wasm",
+      "listed_tests": [
+        "corpus::tests::a_broken_in_page_is_rejected_not_defaulted",
+        "corpus::tests::a_missing_clock_or_a_negative_one_stays_zero",
+        "corpus::tests::an_empty_name_becomes_a_declared_identity_gap",
+        "corpus::tests::browser_adapter_json_declares_its_differences",
+        "corpus::tests::leg_slug_allows_what_it_should_and_nothing_else",
+        "corpus::tests::the_summary_projects_the_same_rows_as_the_record"
+      ],
+      "exit_code": 0,
+      "passed": 6,
+      "failed": 0,
+      "ran": true,
+      "wasm_runnable": true,
+      "timed_out": false,
+      "node_crash_text_seen": false,
+      "log": [
+        "running 6 tests",
+        "test corpus::tests::the_summary_projects_the_same_rows_as_the_record ... ok",
+        "test corpus::tests::leg_slug_allows_what_it_should_and_nothing_else ... ok",
+        "test corpus::tests::browser_adapter_json_declares_its_differences ... ok",
+        "test corpus::tests::an_empty_name_becomes_a_declared_identity_gap ... ok",
+        "test corpus::tests::a_missing_clock_or_a_negative_one_stays_zero ... ok",
+        "test corpus::tests::a_broken_in_page_is_rejected_not_defaulted ... ok",
+        "",
+        "test result: ok. 6 passed; 0 failed; 0 ignored; 0 filtered out; finished in 0.02s"
+      ]
+    },
+    {
+      "target": "cross_runtime",
+      "wasm": "F:/para/Code/Dhampir/target/wasm32-unknown-unknown/debug/deps/cross_runtime-3b99a4806fcc63c4.wasm",
+      "listed_tests": [
+        "golden_check_entry_point_agrees",
+        "report_and_digest_describe_the_same_bytes",
+        "report_matches_golden_on_wasm",
+        "verify_against_rejects_a_wrong_digest"
+      ],
+      "exit_code": 0,
+      "passed": 4,
+      "failed": 0,
+      "ran": true,
+      "wasm_runnable": true,
+      "timed_out": false,
+      "node_crash_text_seen": false,
+      "log": [
+        "running 4 tests",
+        "test verify_against_rejects_a_wrong_digest ... ok",
+        "test report_matches_golden_on_wasm ... ok",
+        "test report_and_digest_describe_the_same_bytes ... ok",
+        "test golden_check_entry_point_agrees ... ok",
+        "",
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 filtered out; finished in 0.01s"
+      ]
+    }
+  ],
+  "listed_total": 10,
+  "passed": 10,
+  "failed": 0,
+  "exit_code": 0
+}

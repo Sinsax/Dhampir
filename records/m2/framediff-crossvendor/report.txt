@@ -1,0 +1,11 @@
+  档位：scripts/framediff-thresholds.toml（digest 3f9560d1e3d4fb3f）
+  a = browser-webgpu-amd：records/m2/browser-amd/frames（80 张 PNG，129765 字节）
+  b = native-dx12-nvidia：records/m1/dx12/frames（80 张 PNG，129619 字节）
+  ✓ alpha_stack：16 帧，mean SSIM 0.9999911822267717，min SSIM 0.9999892068517506，min PSNR 49.891716199235915，max|Δ| 1，差异像素 1048576
+  ✓ blur：16 帧，mean SSIM 0.9999999782648813，min SSIM 0.999999978264881，min PSNR 92.61583506197015，max|Δ| 1，差异像素 48
+  ✓ checker：16 帧，mean SSIM 1，min SSIM 1，min PSNR inf，max|Δ| 0，差异像素 0
+  ✓ gradient：16 帧，mean SSIM 0.9997868247257939，min SSIM 0.9997810177884726，min PSNR 65.52313545221185，max|Δ| 1，差异像素 57344
+  ✓ srgb_linear：16 帧，mean SSIM 1，min SSIM 1，min PSNR inf，max|Δ| 0，差异像素 0
+  记录 → records/m2/framediff-crossvendor/summary.csv、records/m2/framediff-crossvendor/verdict.json、records/m2/framediff-crossvendor/report.txt，另 diff/ 下 48 张放大差异图
+
+✓ 5 个场景、80 帧全部达标（退出码 0）
