@@ -71,6 +71,28 @@ export function validateReport(report, want = { w: WANT_W, h: WANT_H }) {
   if (report.frame0_matches_video_path !== true) {
     problems.push('自己分离出来的第 0 帧与 <video> 那条路的第 0 帧不一致：' + JSON.stringify(report.decoded_frame0));
   }
+  // T3.4 接线 + T3.5 测量
+  if (report.cache === undefined) problems.push('缺 cache：T3.4 的接线没跑');
+  else {
+    const c = report.cache;
+    if (!(c.texture_capacity > 0)) problems.push('按预算换算出的纹理张数为 0');
+    if (c.initial === undefined || c.initial.ram_bytes !== 0) problems.push('缓存初始账目不是空的');
+    if (!(c.evicted_frames > 0)) problems.push('一帧都没淘汰——LRU 没被真正压到（预算给大了？）');
+    if (!(c.evicted_textures > 0)) problems.push('一张纹理都没淘汰');
+    if (c.final === undefined) problems.push('缺 cache.final');
+    else {
+      if (c.final.ram_over === true) problems.push('RAM 记账超预算：LRU 没把账压住');
+      if (c.final.vram_over === true) problems.push('VRAM 记账超预算');
+      if (!(c.final.ram_bytes <= c.ram_budget)) problems.push('RAM 用度 ' + c.final.ram_bytes + ' 超过预算 ' + c.ram_budget);
+    }
+  }
+  if (report.perf === undefined) problems.push('缺 perf：T3.5 的测量没跑');
+  else {
+    const perf = report.perf;
+    if (perf.decode === undefined || !(perf.decode.n >= 5)) problems.push('解码样本数不足：' + JSON.stringify(perf.decode));
+    else if (!(perf.decode.p95 > 0)) problems.push('decode p95 不是正数');
+    if (perf.upload_render === undefined || !(perf.upload_render.p95 > 0)) problems.push('upload_render 没量到');
+  }
   return problems;
 }
 
@@ -118,6 +140,13 @@ function selfTest() {
     decoded_frame0: { bytes: 3686400, digest: '0123456789abcdef' },
     frame0_matches_video_path: true,
     seek: { target_frame: 130, sync_from: 120, from_sync_frames: 11, from_start_frames: 131, equivalent: true },
+    cache: {
+      vram_budget: 16777216, ram_budget: 16777216, frame_bytes: 3686400, texture_capacity: 4,
+      initial: { ram_bytes: 0, vram_bytes: 0 },
+      evicted_frames: 6, evicted_textures: 6, open_frames_after: 4,
+      final: { ram_bytes: 14745600, vram_bytes: 14745600, ram_over: false, vram_over: false },
+    },
+    perf: { targets: 10, decode: { n: 10, p50: 12, p95: 30, max: 40 }, upload_render: { n: 10, p50: 2, p95: 4, max: 6 } },
   };
   expect('自洽的结果必须过', validateReport(good).length === 0, validateReport(good).join(' | '));
   expect('摘要不同必须被抓', validateReport({ ...good, digests_match: false }).length > 0, '放过了摘要不同');
@@ -129,6 +158,8 @@ function selfTest() {
   expect('第 0 帧不一致必须被抓', validateReport({ ...good, frame0_matches_video_path: false }).length > 0, '放过了第 0 帧不一致');
   expect('同步样本回溯错必须被抓', validateReport({ ...good, demux: { ...good.demux, sync_start_of_130: 0 } }).length > 0, '放过了回溯错');
   expect('末帧不一致必须被抓', validateReport({ ...good, seek: { ...good.seek, equivalent: false } }).length > 0, '放过了末帧不一致');
+  expect('一帧没淘汰必须被抓', validateReport({ ...good, cache: { ...good.cache, evicted_frames: 0 } }).length > 0, '放过了零淘汰');
+  expect('记账超预算必须被抓', validateReport({ ...good, cache: { ...good.cache, final: { ...good.cache.final, ram_over: true } } }).length > 0, '放过了超预算');
   if (failures.length > 0) { for (const f of failures) console.error('  - ' + f); return 1; }
   console.log('✓ 驱动自检通过（' + count + ' 条断言：结果自洽性校验）');
   return 0;

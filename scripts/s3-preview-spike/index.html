@@ -15,6 +15,8 @@ const NL = String.fromCharCode(10);
 const logEl = document.getElementById('log');
 const log = (m) => { logEl.textContent += m + NL; };
 const post = (o) => fetch('/result', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(o) });
+const report = {};
+const step = (name) => { report.step = name; };
 
 // 与 Rust 侧同参数的 FNV-1a 64（16 位小写十六进制）——摘要能跨语言直接比。
 function fnv1a64(bytes) {
@@ -49,8 +51,9 @@ const WGSL_VFLIP = [
   '}',
 ].join(NL);
 
+// 放到模块作用域：main() 中途抛错时，catch 也要能把已经量到的部分带出去——
+// 否则一次失败只会得到一句 error，连"卡在哪一步"都不知道。
 async function main() {
-  const report = {};
   const video = document.getElementById('v');
   await new Promise((res, rej) => {
     video.addEventListener('loadeddata', res, { once: true });
@@ -61,9 +64,12 @@ async function main() {
   const W = video.videoWidth, H = video.videoHeight;
   report.video = { w: W, h: H, readyState: video.readyState };
 
+  step('import-pkg');
   const mod = await import('/pkg/dhampir_wasm.js');
+  step('init-wasm');
   await mod.default();
   report.wasm_loaded = true;
+  step('wasm-ready');
 
   // (1) Rust 侧：copy_external_image_to_texture + BlitRenderer + 读回 + FNV
   report.rust = JSON.parse(await mod.dhampir_preview_probe_digest('v'));
@@ -244,12 +250,105 @@ async function main() {
     fromStart.last.close();
   }
 
+
+  // ---- (5) T3.4 接线 + T3.5 首次测量 ----
+  const pctl = (xs) => {
+    const s = [...xs].sort((a, b) => a - b);
+    const at = (q) => s[Math.min(s.length - 1, Math.floor(q * s.length))];
+    return { n: s.length, p50: +at(0.5).toFixed(2), p95: +at(0.95).toFixed(2), max: +s[s.length - 1].toFixed(2) };
+  };
+
+  const VRAM_BUDGET = 16 * 1024 * 1024;
+  const RAM_BUDGET = 16 * 1024 * 1024;
+  const frameBytes = W * H * 4;
+  mod.dhampir_cache_open(VRAM_BUDGET, RAM_BUDGET);
+  report.cache = {
+    vram_budget: VRAM_BUDGET,
+    ram_budget: RAM_BUDGET,
+    frame_bytes: frameBytes,
+    texture_capacity: mod.dhampir_cache_texture_capacity(W, H),
+    initial: JSON.parse(mod.dhampir_cache_stats()),
+  };
+
+  const openFrames = new Map();
+  let evictedTotal = 0;
+  let clippedTotal = 0;
+  const decodeTimes = [];
+  const renderTimes = [];
+
+  // 一次 seek：从同步样本一路解到目标帧。只留最新一帧，避免输出帧池把它卡住。
+  const seekTo = async (frame) => {
+    const from = mod.dhampir_demux_sync_start(frame);
+    let last = null;
+    const t0 = performance.now();
+    const dec = new VideoDecoder({
+      output: (f) => { if (last !== null) last.close(); last = f; },
+      error: () => {},
+    });
+    dec.configure({ codec: codec, description: desc, codedWidth: meta.width, codedHeight: meta.height });
+    for (let i = from; i <= frame; i += 1) {
+      const s = samples[i];
+      dec.decode(new EncodedVideoChunk({ type: s.k ? 'key' : 'delta', timestamp: Math.round((s.d / meta.timescale) * 1e6), duration: Math.round((s.u / meta.timescale) * 1e6), data: mp4.subarray(s.o, s.o + s.s) }));
+    }
+    await dec.flush();
+    return { video: last, decode_ms: performance.now() - t0, sync_from: from };
+  };
+
+  const targets = [10, 50, 90, 130, 200, 260, 320, 380, 420, 460];
+  for (const target of targets) {
+    const got = await seekTo(target);
+    if (got.video === null) continue;
+    decodeTimes.push(got.decode_ms);
+
+    // 上传 + 搬运 + 等 GPU 完成：这才是「上屏」那一步的代价（不含读回）
+    const t1 = performance.now();
+    const tex = device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+    device.queue.copyExternalImageToTexture({ source: got.video }, { texture: tex, premultipliedAlpha: false }, [W, H]);
+    const out = device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+    const e5 = device.createCommandEncoder();
+    const p5 = e5.beginRenderPass({ colorAttachments: [{ view: out.createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+    const b5 = device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: tex.createView() }] });
+    p5.setPipeline(pipe); p5.setBindGroup(0, b5); p5.draw(3); p5.end();
+    device.queue.submit([e5.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    renderTimes.push(performance.now() - t1);
+
+    openFrames.set(target, { video: got.video, tex: tex, out: out });
+    // 记账：RAM 记 VideoFrame，VRAM 记纹理；淘汰谁由 Rust 的策略说了算
+    const evictRam = new Set(JSON.parse(mod.dhampir_cache_note_ram(target, frameBytes)));
+    const evictVram = new Set(JSON.parse(mod.dhampir_cache_note_vram(target, frameBytes)));
+    // 两层要**一起**处理再决定要不要丢掉这条记录。
+    // 先前写成「先遍历 RAM 淘汰（顺带 delete），再遍历 VRAM 淘汰」——结果 VRAM 那轮
+    // 在 map 里已经找不到人，一张纹理都没销毁。驱动那条「一张纹理都没淘汰」就是抓这个的。
+    for (const f of new Set([...evictRam, ...evictVram])) {
+      const entry = openFrames.get(f);
+      if (entry === undefined) continue;
+      if (evictRam.has(f)) { entry.video.close(); evictedTotal += 1; }
+      if (evictVram.has(f) && entry.tex !== null) { entry.tex.destroy(); entry.tex = null; clippedTotal += 1; }
+      // 两样都释放了才把记录删掉；只释放了一样就留着，免得另一种资源失去追踪。
+      if (evictRam.has(f) && entry.tex === null) openFrames.delete(f);
+    }
+  }
+
+  report.cache.evicted_frames = evictedTotal;
+  report.cache.evicted_textures = clippedTotal;
+  report.cache.open_frames_after = openFrames.size;
+  report.cache.final = JSON.parse(mod.dhampir_cache_stats());
+  report.perf = { targets: targets.length, decode: pctl(decodeTimes), upload_render: pctl(renderTimes) };
+  log('缓存与测量完成：淘汰 ' + evictedTotal + ' 帧，decode p95=' + report.perf.decode.p95 + 'ms');
+
+  for (const entry of openFrames.values()) { entry.video.close(); if (entry.tex !== null) entry.tex.destroy(); }
+  openFrames.clear();
   log('seek 等价性：' + (report.seek.equivalent === true ? '一致' : '不一致'));
   report.ok = true;
   log('完成');
   await post(report);
 }
-main().catch(async (e) => { log('✗ ' + (e && e.stack ? e.stack : e)); await post({ ok: false, error: String(e && e.message ? e.message : e) }); });
+main().catch(async (e) => {
+  log('✗ ' + (e && e.stack ? e.stack : e));
+  // 把已经量到的部分一并送出去：失败时最有用的信息是「走到哪一步了」。
+  await post(Object.assign({ ok: false, error: String(e && e.message ? e.message : e), stack: String(e && e.stack ? e.stack : '') }, report));
+});
 </script>
 </body>
 </html>

@@ -183,6 +183,16 @@ impl FrameCache {
         self.vram.len()
     }
 
+    /// 显存预算是多少字节（宿主用它换算「该留几张纹理」）。
+    pub fn vram_budget(&self) -> usize {
+        self.vram.budget
+    }
+
+    /// 内存预算是多少字节。
+    pub fn ram_budget(&self) -> usize {
+        self.ram.budget
+    }
+
     pub fn ram_len(&self) -> usize {
         self.ram.len()
     }
