@@ -1077,8 +1077,14 @@ mod tests {
             .contains("worst_frame_cpu_ms 是判据"));
     }
 
-    /// 两份记录回答**两个不同的问题**，所以键不重叠：`adapter.json` 里没有计时，
-    /// `timing.json` 里没有"这台机器是什么"。重叠的键会让"这个数该信哪一份"变成一个问题。
+    /// 两份记录回答**两个不同的问题**：`adapter.json` 里没有计时，`timing.json` 里
+    /// 没有"这台机器是什么"。
+    ///
+    /// **这不等价于"键不重叠"**（先前这句注释这么写过，M1 独立复核实测后改正）：
+    /// 两份有 10 个同名骨架键（`schema` / `milestone` / `kind` / `unix_epoch_millis` …），
+    /// 其中 `kind` 与 `nondeterministic_fields` 两键值还不同。要守住的是下面那两组
+    /// 断言——**对方的专有内容不许出现在自己这里**；"这个数该信哪一份"因此不会
+    /// 变成问题。同一次运行的两份还必须能被认出来是一对（时间戳、后端名对齐）。
     #[test]
     fn the_two_records_do_not_answer_the_same_question() {
         let baseline = test_baseline();

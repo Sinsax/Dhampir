@@ -118,8 +118,9 @@ impl Args {
                          alpha_stack / blur 之一。**给了它就走 corpus 路径。**
   --frames <区间>        帧区间，半开：`0..16`（默认，正好是每个场景的整周期）。
                          也可以只给一帧：`5`。不认 `..=`。
-  --compare-run <dir>    与另一份记录逐帧比（读该目录下每个后端的
-                         <slug>/run.json），结论写进 <out>/<slug>/compare.json
+  --compare-run <dir>    与另一份记录逐帧比。<dir> 是**记录目录**（不是某个
+                         run.json 的路径）：读该目录下每个后端的 <slug>/run.json，
+                         结论写进 <out>/<slug>/compare.json
   --skip-timing          corpus 路径下不跑 1080p 计时（复现性检查用它）
   --probe-only           只跑纯逻辑探针，不碰 GPU
   -h, --help             显示本帮助";

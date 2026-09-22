@@ -61,8 +61,9 @@
 //   node scripts/check-m1-record.mjs --record records/m1
 //   node scripts/check-m1-record.mjs --self-test
 
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { deflateSync, inflateSync } from 'node:zlib';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -99,6 +100,36 @@ export const EXPECTED = {
 
 /** 每条腿必须有的文件：少一个就说明这条腿没跑完。 */
 const REQUIRED_ROOT_FILES = ['adapter.json', 'run.json', 'readings.txt', 'timing.json', 'compare.json'];
+
+/**
+ * 退出标准 ② 要的是**四种环境**：Win/DX12、Win/Vulkan、Linux/GPU、Linux/lavapipe。
+ *
+ * 两条 Windows 腿由 `main()` 硬性要求（缺一条就直接退出码 2，`loadLeg` 还会逐份读文件），
+ * 所以剩下唯一可能悄悄缺口的就是 Linux 这两条——`checkHonesty` 盯的就是它。
+ */
+const LINUX_LEGS = 2;
+
+/**
+ * 记录根下每个子目录，按"**完整**的腿 / 空壳"分类。
+ *
+ * 诚实性检查（checkHonesty）只认完整的腿：独立复核用 `mkdir records/m1/linux`
+ * （一个空目录）把"缺 Linux 两条腿"的闸门关掉过一次，所以这里先把"什么才算腿"
+ * 查清楚再交出去——必备文件与 `frames/` 里的 PNG 缺一不可。
+ */
+function inspectLegDirs(recordDir, subdirNames) {
+  const complete = [];
+  const incomplete = [];
+  for (const name of subdirNames) {
+    const dir = join(recordDir, name);
+    const missing = REQUIRED_ROOT_FILES.filter((file) => !existsSync(join(dir, file)));
+    const framesDir = join(dir, 'frames');
+    if (!existsSync(framesDir)) missing.push('frames/');
+    else if (!readdirSync(framesDir).some((file) => file.endsWith('.png'))) missing.push('frames/ 里的 PNG');
+    if (missing.length === 0) complete.push(name);
+    else incomplete.push({ name, missing });
+  }
+  return { complete, incomplete };
+}
 
 /**
  * 一条腿的检查项清单。`checkLegModel` 保证**每一项都有一条结论**——
@@ -1006,18 +1037,44 @@ export function checkCrossBackend(legs) {
  * M1 的退出标准要求四种环境全部记录。只跑了两条就归档，本身可以接受——但记录里
  * 必须把缺口标出来。悄悄只留两条、README 却写成"四种环境通过"，是这份守卫最该
  * 拦住的东西。
+ *
+ * 这条检查被独立复核用**一个空目录**绕过过一次：先前只要子目录名以 `linux` 开头
+ * 就算"这条腿在"，于是 `mkdir records/m1/linux` + 删掉 README 里全部 ⏳ 仍然全绿。
+ * 现在的口径是"**完整**的腿才算腿"（见 inspectLegDirs）：空壳目录本身要红——
+ * 它比没有更坏，把缺口伪装成了进展；缺口还必须由 README 里与 Linux **同一行**的
+ * ⏳ 标出来，藏在别处的 ⏳ 不算数。
+ *
+ * 于是这里是两条独立规则：
+ *   ① `linux*` 目录存在但不是完整腿 → 红（空壳本身就是问题，标了 ⏳ 也照红）；
+ *   ② 完整 Linux 腿不足 `LINUX_LEGS` 条 → README 必须有一行同时写 Linux 与 ⏳。
+ * 两条都不数"别的目录有几条"，因为 Windows 那两条腿已经被 `main()` 单独管住
+ * （缺 dx12/vulkan 直接退出码 2，且 `loadLeg` 会逐份读文件）。
  */
-export function checkHonesty({ readmeText, subdirNames }) {
+export function checkHonesty({ readmeText, subdirNames, completeLegDirs = [], incompleteLegDirs = [] }) {
   if (typeof readmeText !== 'string' || readmeText.trim().length === 0) {
     return ['records/m1/README.md 不存在或为空——记录必须有一份人读的说明'];
   }
   const messages = [];
-  const hasLinux = subdirNames.some((name) => /^linux/i.test(name));
-  if (!hasLinux && !readmeText.includes('⏳')) {
+  const isLinux = (name) => /^linux/i.test(name);
+
+  for (const { name, missing } of incompleteLegDirs.filter((entry) => isLinux(entry.name))) {
     messages.push(
-      `记录里只有 ${subdirNames.join('、')}，没有 Linux 那两条腿；README 里却没有用 ⏳ 标出缺口——` +
-        '退出标准要求四种环境全部记录，缺了就要写出来',
+      `records/m1/${name}/ 存在，但不是一条完整的腿（缺 ${missing.join('、')}）——` +
+        '空壳目录会把"Linux 那两条腿还缺着"伪装成已经补上：要么补全并归档，要么删掉它，' +
+        '缺口改用 README 的 ⏳ 说明',
     );
+  }
+
+  const completeLinux = completeLegDirs.filter(isLinux);
+  if (completeLinux.length < LINUX_LEGS) {
+    const marked = readmeText.split('\n').some((line) => /linux/i.test(line) && line.includes('⏳'));
+    if (!marked) {
+      messages.push(
+        `记录里完整的 Linux 腿只有 ${completeLinux.length} 条（要 ${LINUX_LEGS} 条；完整腿共 ` +
+          `${completeLegDirs.length} 条，子目录：${subdirNames.join('、') || '（空）'}）；` +
+          'README 里必须有一行**同时**写到 Linux 与 ⏳——退出标准要求四种环境全部记录，缺了就要写出来',
+      );
+    }
   }
   return messages;
 }
@@ -1573,21 +1630,97 @@ function runSelfTest() {
   );
   expect('少于两条腿要拒绝', checkCrossBackend([left]).length > 0, '只有一条腿却说一致');
 
+  // ---- 目录分类：什么才算"一条完整的腿" ----
+  // 这一组必须走**真文件系统**：`inspectLegDirs` 的失效模式是"把空壳看成腿"，
+  // 而那件事只能拿真目录试出来——独立复核正是用 `mkdir records/m1/linux` 绕过的。
+  const probeRoot = mkdtempSync(join(tmpdir(), 'dhampir-m1-legs-'));
+  try {
+    const completeDir = join(probeRoot, 'linux-gpu');
+    mkdirSync(join(completeDir, 'frames'), { recursive: true });
+    for (const file of REQUIRED_ROOT_FILES) writeFileSync(join(completeDir, file), '{}\n');
+    writeFileSync(join(completeDir, 'frames', 'gradient-f000.png'), Buffer.from(PNG_SIGNATURE));
+
+    const shellDir = join(probeRoot, 'linux');
+    mkdirSync(shellDir, { recursive: true });
+
+    const noPngDir = join(probeRoot, 'linux-lavapipe');
+    mkdirSync(join(noPngDir, 'frames'), { recursive: true });
+    for (const file of REQUIRED_ROOT_FILES) writeFileSync(join(noPngDir, file), '{}\n');
+
+    const inspect = inspectLegDirs(probeRoot, ['linux', 'linux-gpu', 'linux-lavapipe']);
+    expect(
+      '五份文件齐 + frames/ 里有 PNG 才算完整腿',
+      inspect.complete.join(',') === 'linux-gpu',
+      `判成完整的：${inspect.complete.join('、') || '（空）'}`,
+    );
+    expect(
+      '空壳目录判成不完整（缺全部必备文件 + frames/）',
+      inspect.incomplete.some((entry) => entry.name === 'linux' && entry.missing.length > REQUIRED_ROOT_FILES.length),
+      `不完整的：${inspect.incomplete.map((entry) => `${entry.name}(${entry.missing.length})`).join('、') || '（空）'}`,
+    );
+    expect(
+      'frames/ 里没有 PNG 也算不完整',
+      inspect.incomplete.some((entry) => entry.name === 'linux-lavapipe' && entry.missing.some((m) => m.includes('PNG'))),
+      `不完整的：${inspect.incomplete.map((entry) => entry.name).join('、') || '（空）'}`,
+    );
+  } finally {
+    rmSync(probeRoot, { recursive: true, force: true });
+  }
+
   // ---- 诚实性 ----
+  const noLinuxLegs = { completeLegDirs: ['dx12', 'vulkan'] };
   expect(
     '缺 Linux 腿且没标 ⏳ 必须报',
-    checkHonesty({ readmeText: '四种环境全部通过', subdirNames: ['dx12', 'vulkan'] }).length === 1,
+    checkHonesty({ readmeText: '四种环境全部通过', subdirNames: ['dx12', 'vulkan'], ...noLinuxLegs }).length === 1,
     '漏掉了缺口',
   );
   expect(
     '标了 ⏳ 就放行',
-    checkHonesty({ readmeText: 'Linux 两条腿 ⏳ 待补', subdirNames: ['dx12', 'vulkan'] }).length === 0,
+    checkHonesty({ readmeText: 'Linux 两条腿 ⏳ 待补', subdirNames: ['dx12', 'vulkan'], ...noLinuxLegs }).length === 0,
     '标了 ⏳ 还在报',
   );
   expect(
-    '有 linux 目录就不要求 ⏳',
-    checkHonesty({ readmeText: '四种环境都在', subdirNames: ['dx12', 'vulkan', 'linux-gpu'] }).length === 0,
-    '有 linux 腿还在报',
+    '⏳ 必须与 Linux 同行，藏在下几行不算',
+    checkHonesty({ readmeText: 'Linux 两条腿待补\n\n⏳\n', subdirNames: ['dx12', 'vulkan'], ...noLinuxLegs }).length === 1,
+    '不同行的 ⏳ 也被认了',
+  );
+  expect(
+    '两条完整的 Linux 腿才不要求 ⏳',
+    checkHonesty({
+      readmeText: '四种环境都在',
+      subdirNames: ['dx12', 'vulkan', 'linux-gpu', 'linux-lavapipe'],
+      completeLegDirs: ['dx12', 'vulkan', 'linux-gpu', 'linux-lavapipe'],
+    }).length === 0,
+    '四条腿齐了还在报',
+  );
+  expect(
+    '只有一条完整 Linux 腿仍要 ⏳（退出标准要的是四条环境）',
+    checkHonesty({
+      readmeText: 'Linux 都在了',
+      subdirNames: ['dx12', 'vulkan', 'linux-gpu'],
+      completeLegDirs: ['dx12', 'vulkan', 'linux-gpu'],
+    }).length === 1,
+    '一条 Linux 腿就放行了',
+  );
+  expect(
+    '空壳 linux/ 目录本身就是红——标了 ⏳ 也照红',
+    checkHonesty({
+      readmeText: 'Linux 两条腿 ⏳ 待补',
+      subdirNames: ['dx12', 'vulkan', 'linux'],
+      completeLegDirs: ['dx12', 'vulkan'],
+      incompleteLegDirs: [{ name: 'linux', missing: ['adapter.json'] }],
+    }).length === 1,
+    '空壳目录被放过了',
+  );
+  expect(
+    '非 Linux 命名的空壳目录不掺和这条判定',
+    checkHonesty({
+      readmeText: 'Linux 两条腿 ⏳ 待补',
+      subdirNames: ['dx12', 'vulkan', 'scratch'],
+      completeLegDirs: ['dx12', 'vulkan'],
+      incompleteLegDirs: [{ name: 'scratch', missing: ['frames/'] }],
+    }).length === 0,
+    '把只管 Linux 的判定扩大到了别的目录',
   );
   expect('README 空要报', checkHonesty({ readmeText: '', subdirNames: ['dx12'] }).length === 1, '空 README 放行了');
 
@@ -1642,7 +1775,7 @@ function main() {
   if (selfTest) {
     console.log(
       `✓ 守卫自检通过（${selfTestCount} 条用例：摘要标准向量、五种滤波器往返、`
-        + `${LEG_CHECKS.length} 个检查项各一条反向用例、跨后端与诚实性）`,
+        + `目录分类、${LEG_CHECKS.length} 个检查项各一条反向用例、跨后端与诚实性）`,
     );
     return 0;
   }
@@ -1652,8 +1785,9 @@ function main() {
     console.error(`✗ 没有 ${recordDir} 这个目录`);
     return 2;
   }
+  // 目录与符号链接都算候选腿：用 `ln -s` 造出来的"腿"同样要按完整腿的标准查一遍。
   const subdirNames = readdirSync(recordDir, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
+    .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
     .map((entry) => entry.name)
     .sort();
   const legs = [];
@@ -1712,7 +1846,15 @@ function main() {
     detail: probeMessages.slice(0, 6).join('；'),
   });
 
-  const honestyMessages = checkHonesty({ readmeText: readmeTextOf(recordDir), subdirNames });
+  // 诚实性判定要知道"哪些目录算一条完整的腿"（见 inspectLegDirs）——只数目录名
+  // 曾被一个空壳 `linux/` 骗过去。
+  const { complete: completeLegDirs, incomplete: incompleteLegDirs } = inspectLegDirs(recordDir, subdirNames);
+  const honestyMessages = checkHonesty({
+    readmeText: readmeTextOf(recordDir),
+    subdirNames,
+    completeLegDirs,
+    incompleteLegDirs,
+  });
   results.push({
     id: 'record-honesty',
     where: '记录根',

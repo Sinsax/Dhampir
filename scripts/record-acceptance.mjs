@@ -121,7 +121,7 @@ export const MILESTONES = {
       },
       {
         id: 'guard-m1-record-self-test',
-        says: '记录守卫自己的 40 条自检（含 14 个检查项各一条反向用例）',
+        says: '记录守卫自己的 47 条自检（含 14 个检查项各一条反向用例）',
         cmd: ['node', ['scripts/check-m1-record.mjs', '--self-test']],
       },
     ],

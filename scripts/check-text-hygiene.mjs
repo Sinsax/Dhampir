@@ -291,7 +291,13 @@ function main() {
     return exitCode;
   }
 
-  console.log(`✓ 文本卫生：${files.length} 个文件全是 LF、无 BOM、合法 UTF-8`);
+  // 报数时把**口径**一起写出来："57 个"这样的整树数字与"被跟踪面有几个"不是
+  // 一回事（未跟踪/被忽略的文本文件也算在内）。不写清楚，读记录的人会把前者
+  // 当成提交的属性——独立复核就为此在记录里专门解释过一遍。
+  console.log(
+    `✓ 文本卫生：${files.length} 个文本文件全是 LF、无 BOM、合法 UTF-8` +
+      '（整树口径：含未跟踪与被忽略的文件；records/、target/ 等 SKIP_DIRS 在外）',
+  );
   return exitCode;
 }
 

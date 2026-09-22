@@ -13,7 +13,12 @@
 //   - 反向的 `dhampir-timeline → anything` 会让时间轴不再能独立测试，
 //     而"帧号换算可以脱离 GPU 单测"是 M0 之后所有里程碑的底座。
 //
-// 所以这里检查三件事：**允许的边**、**纯层的隔离**、**无环**。
+// 所以这里检查四件事：**允许的边**、**纯层的隔离**、**无环**、**名单对应**。
+//
+// "名单对应"指 `crates/` 下的每个目录都在 workspace members 里。没登记的目录等于
+// 从守卫眼皮底下消失——先前只收"有 Cargo.toml 的目录"，于是 `crates/<dir>`
+// （没有清单、也不在 members）在两侧名单里都不存在、静默通过。细则见
+// compareDiskAndMembers。
 //
 // ---------------------------------------------------------------------------
 // 为什么是 Node 而不是脚本里的 shell
@@ -224,6 +229,57 @@ export function resolveMembers(members, hasManifest) {
   return { members: resolved, problems };
 }
 
+/**
+ * `crates/` 下的目录清单与 workspace members 必须**逐一对应**，返回问题清单。
+ *
+ * 为什么单独成函数：先前这段比对只看"有 Cargo.toml 的目录"，于是
+ * `crates/<dir>`（既没清单、也不在 members）在磁盘侧与成员侧**都不存在**——
+ * 守卫完全跳过它，退出码 0（独立复核抓到的盲区）。这种形态的目录要么是手滑
+ * 建出来的、要么是"想加个 crate 但没登记"，两种都该当场报出来。
+ *
+ * 判据抽成纯函数是为了能用合成输入钉住（见 DISK_MEMBERSHIP_SELF_TESTS）：
+ * 一段写坏的比对不会报错，只会让某些目录永远不被检查。
+ *
+ * `diskEntries` 是 `[{ path: 'crates/名字', hasManifest }]`；`memberPaths` 是
+ * 根清单里列出的路径（`crates/名字`）。"成员列了但缺清单"的正常报错路径在
+ * readEnvironment / resolveMembers（环境错 → 退出码 2），这里再兜一次底，
+ * 好让这个函数单独拿出来也是自洽的。
+ */
+export function compareDiskAndMembers(diskEntries, memberPaths) {
+  const problems = [];
+  const members = [...memberPaths].sort();
+  const onDisk = new Map(diskEntries.map((entry) => [entry.path, entry.hasManifest]));
+
+  for (const entry of diskEntries) {
+    if (members.includes(entry.path)) {
+      if (!entry.hasManifest) {
+        // 目录在、清单不在：正常路径上 resolveMembers 先报（环境错 → 退出码 2）；
+        // 这里兜底，让这个函数单独拿出来也自洽。
+        problems.push(`${entry.path} 在 workspace members 里，但没有 ${entry.path}/Cargo.toml——这个 crate 不参与构建。`);
+      }
+      continue;
+    }
+    if (entry.hasManifest) {
+      problems.push(
+        `${entry.path} 有 Cargo.toml，却不在 workspace members 里——它不参与构建，` +
+          `守卫也永远看不见它：要么把它登记进根 Cargo.toml，要么删掉这个目录。`,
+      );
+    } else {
+      problems.push(
+        `${entry.path} 既没有 Cargo.toml、也不在 workspace members 里——守卫完全看不见它` +
+          `（不是 crate，却占着 crates/ 的位置）：补一份清单并登记，或把它移出 crates/。`,
+      );
+    }
+  }
+
+  for (const member of members) {
+    if (!onDisk.has(member)) {
+      problems.push(`workspace members 列了 ${member}，磁盘上却没有这个目录——两份名单对不上。`);
+    }
+  }
+  return problems;
+}
+
 // ---------------------------------------------------------------------------
 // 检查
 // ---------------------------------------------------------------------------
@@ -390,6 +446,55 @@ const MEMBER_SELF_TESTS = [
   },
 ];
 
+/**
+ * 名单对应的自检：`crates/` 的目录清单 vs workspace members。
+ *
+ * 这一组是独立复核发现 2 的钉子。判据是纯函数（compareDiskAndMembers），
+ * 所以每条都用**合成输入**跑，不依赖这棵树当时长什么样。
+ */
+const DISK_MEMBERSHIP_SELF_TESTS = [
+  {
+    name: '逐一对应时不报',
+    disk: [{ path: 'crates/a', hasManifest: true }],
+    members: ['crates/a'],
+    expectProblems: 0,
+  },
+  {
+    name: '有清单但没登记到 members 要报',
+    disk: [{ path: 'crates/a', hasManifest: true }, { path: 'crates/b', hasManifest: true }],
+    members: ['crates/a'],
+    expectProblems: 1,
+    expectMentions: ['crates/b', 'members'],
+  },
+  {
+    name: '既没清单也没登记（先前的死角）要报',
+    disk: [{ path: 'crates/a', hasManifest: true }, { path: 'crates/scratch', hasManifest: false }],
+    members: ['crates/a'],
+    expectProblems: 1,
+    expectMentions: ['crates/scratch', 'Cargo.toml'],
+  },
+  {
+    name: 'members 列了磁盘却没有要报',
+    disk: [],
+    members: ['crates/a'],
+    expectProblems: 1,
+    expectMentions: ['crates/a'],
+  },
+  {
+    name: '登记了但清单不在要报',
+    disk: [{ path: 'crates/a', hasManifest: false }],
+    members: ['crates/a'],
+    expectProblems: 1,
+    expectMentions: ['Cargo.toml'],
+  },
+  {
+    name: '两侧都空 → 不报（空集合由 main 的成员闸门负责）',
+    disk: [],
+    members: [],
+    expectProblems: 0,
+  },
+];
+
 function runSelfTest() {
   const failures = [];
   let diskCases = 0;
@@ -415,6 +520,21 @@ function runSelfTest() {
     for (const needle of testCase.expectMentions ?? []) {
       if (!problems.some((p) => p.includes(needle))) {
         failures.push(`成员清单自检「${testCase.name}」的问题里没写清 ${needle}：${problems.join('；')}`);
+      }
+    }
+  }
+
+  for (const testCase of DISK_MEMBERSHIP_SELF_TESTS) {
+    const problems = compareDiskAndMembers(testCase.disk, testCase.members);
+    if (problems.length !== testCase.expectProblems) {
+      failures.push(
+        `名单对应自检「${testCase.name}」期望 ${testCase.expectProblems} 处问题，实际 ${problems.length} 处：${problems.join('；')}`,
+      );
+      continue;
+    }
+    for (const needle of testCase.expectMentions ?? []) {
+      if (!problems.some((p) => p.includes(needle))) {
+        failures.push(`名单对应自检「${testCase.name}」的问题里没写清 ${needle}：${problems.join('；')}`);
       }
     }
   }
@@ -484,6 +604,23 @@ function runSelfTest() {
         `磁盘自检「members 空表」期望 0 处环境错 / 0 个成员（好让空集合检查接手），实际 ${emptyEnv.errors.length} 处 / ${emptyEnv.graph.size} 个`,
       );
     }
+
+    // 名单对应的**磁盘路径**也要真的走一遍：上面那组是注入的表格，这里要证
+    // "crates/ 下一个没清单的目录会被 diskEntries 收进来、并对照出问题"——
+    // 先前 diskCrates 只收有清单的目录，这个形态的目录压根不会出现在比对里。
+    const cratesScan = join(dir, 'crates-scan');
+    mkdirSync(join(cratesScan, 'crates', 'dhampir-a'), { recursive: true });
+    writeFileSync(join(cratesScan, 'crates', 'dhampir-a', 'Cargo.toml'), '[package]\nname = "dhampir-a"\n');
+    mkdirSync(join(cratesScan, 'crates', 'scratch'), { recursive: true });
+    const scanned = diskEntries(cratesScan);
+    const scanProblems = compareDiskAndMembers(scanned, ['crates/dhampir-a']);
+    diskCases += 1;
+    if (scanned.length !== 2 || scanProblems.length !== 1 || !scanProblems[0].includes('crates/scratch')) {
+      failures.push(
+        `磁盘自检「没清单的目录要被抓」期望 2 个目录项 / 1 处问题且点名 crates/scratch，实际 ` +
+          `${scanned.length} 个 / ${scanProblems.length} 处：${scanProblems.join('；')}`,
+      );
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -539,13 +676,25 @@ function readEnvironment(root = REPO_ROOT) {
   return { listedPaths, graph, errors };
 }
 
-function diskCrates() {
-  const dir = join(REPO_ROOT, 'crates');
+/**
+ * `crates/` 下**每一个**目录项都要交代，不只是"看着像 crate"的那些。
+ *
+ * 先前这里只收"有 Cargo.toml 的目录"，于是没有清单的目录在磁盘侧与成员侧
+ * **都不存在**，守卫静默通过（见 compareDiskAndMembers）。目录与符号链接都算：
+ * 一个占着 `crates/<名字>` 的位置、却没人检查的目录，正是这条闸门要拦住的东西。
+ *
+ * `root` 可注入（默认本仓库），好让自检拿合成目录树跑真路径。
+ */
+function diskEntries(root = REPO_ROOT) {
+  const dir = join(root, 'crates');
   if (!existsSync(dir)) return [];
   return readdirSync(dir, { withFileTypes: true })
-    .filter((e) => e.isDirectory() && existsSync(join(dir, e.name, 'Cargo.toml')))
-    .map((e) => `crates/${e.name}`)
-    .sort();
+    .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
+    .map((entry) => ({
+      path: `crates/${entry.name}`,
+      hasManifest: existsSync(join(dir, entry.name, 'Cargo.toml')),
+    }))
+    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }
 
 function main() {
@@ -599,17 +748,13 @@ function main() {
 
   const problems = checkGraph(graph);
 
-  // workspace 成员表与磁盘上的 crate 目录必须一致。少一个成员意味着那个
-  // crate 根本不参与构建，而守卫也就永远看不见它——"没被检查"比"检查失败"更糟。
-  const onDisk = diskCrates();
+  // `crates/` 下的**每个**目录都要在 workspace members 里，不只是"有 Cargo.toml
+  // 的那些"。缺一个成员意味着那个 crate 根本不参与构建，而守卫也就永远看不见它；
+  // 一个既没清单又没登记的目录更糟：它在两侧名单里都不存在、被完全跳过
+  // （独立复核抓到的盲区，用 compareDiskAndMembers 的合成用例钉住）。
+  const onDisk = diskEntries();
   const listed = [...graph.keys()].length;
-  if (onDisk.join(',') !== environment.listedPaths.join(',')) {
-    problems.push(
-      `crates/ 下的目录与 workspace members 不一致：\n` +
-        `      磁盘：${onDisk.join(', ')}\n` +
-        `      成员：${environment.listedPaths.join(', ')}`,
-    );
-  }
+  problems.push(...compareDiskAndMembers(onDisk, environment.listedPaths));
 
   if (problems.length > 0) {
     console.error(`✗ 依赖方向有问题（检查了 ${listed} 个 crate）：`);

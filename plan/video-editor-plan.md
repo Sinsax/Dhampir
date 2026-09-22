@@ -185,7 +185,7 @@ FFmpeg 绑定（先造假帧源）、WebCodecs、任务队列、任何 UI、任�
   - `blur`：可分离高斯 —— 考浮点累加顺序
   - **全部确定性**：无时间、无随机；必须随机时用固定 seed 的确定性 PRNG
   - 场景代码进 `dhampir-core`（同一份代码两个宿主都要调）
-  - ✅ 全部落进 core：`render/scene.rs`（注册表 / 入口名 / 采样表 / 混合状态 / 容差）+ `render/scene_model.rs`（纯 `f64` 数值模型）+ `shaders/scene.wgsl`（254 行）——M2 的 wasm 侧直接复用，不需要第二份实现
+  - ✅ 全部落进 core：`render/scene.rs`（注册表 / 入口名 / 采样表 / 混合状态 / 容差）+ `render/scene_model.rs`（纯 `f64` 数值模型）+ `shaders/scene.wgsl`（253 行，`wc -l` 口径：`split('\n')` 会数出 254，文件以换行结尾）——M2 的 wasm 侧直接复用，不需要第二份实现
   - ✅ 确定性是构造出来的，不是靠 PRNG：五场景无时间无随机，**连 PRNG 都没用上**
   - ✅ 判据 = 与 clamp 模型的**字节距离 ≤ 1**（`byte_tolerance`）；故意的缺陷模型距离在 2–78 之间——容差没有宽到能放过缺陷
   - ✅ 预测表两张网：`PINNED` 逐点相等 + 整周期整表的 FNV-1a 64 摘要 `fff8d28ff54c24d8`；模型测试**必须包含"缺陷模型"的距离断言**，否则"模型正确"只是自说自话
@@ -193,7 +193,7 @@ FFmpeg 绑定（先造假帧源）、WebCodecs、任务队列、任何 UI、任�
   - ✅ `alpha_stack` 是直通 alpha 的 source-over，**不能用 `PREMILLIPLIED_ALPHA_BLENDING`**；blur 权重按 6 位小数四舍五入、Σ = 1.000000
 - [x] **T1.4 环境探针与复现性** —— Windows 两条腿全达成；Linux 两条腿 **⏳ 待补**（缺的是环境，不是代码路径）
   - 记录 `adapter.get_info()`（name / backend / driver）+ wgpu 版本 + 时间戳 → `adapter.json`
-    - ✅ 记的是 `describe_adapter` 的人类可读输出（name / backend / driver / device_type / subgroup / limits 摘要），不是 `wgpu::AdapterInfo` 的 Debug；`adapter.json` 与 `timing.json` **刻意拆开**（"几乎不变" vs "每次都变"），两份共用同一个 `unix_epoch_millis` 且键不重叠——守卫会真的比对这两个数
+    - ✅ 记的是 `describe_adapter` 的人类可读输出（name / backend / driver / device_type / subgroup / limits 摘要），不是 `wgpu::AdapterInfo` 的 Debug；`adapter.json` 与 `timing.json` **刻意拆开**（"几乎不变" vs "每次都变"），两份**共用同一个** `unix_epoch_millis`（守卫会真的比对这两个数，并校验 `unix_epoch_seconds === floor(ms / 1000)`）。**"拆开"不等于"键不重叠"**——先前这里写作"且键不重叠"，复核实测后改正：两份实测 18 / 15 个键里有 **10 个同名**，其中 `kind`（`"adapter"` vs `"timing"`）与 `nondeterministic_fields`（各自的非确定项清单）两键**值不同**，其余 8 个（`adapter_name`、`backend_slug`、`build_profile`、`milestone`、`requested_backends`、`schema`、`unix_epoch_millis`、`unix_epoch_seconds`）刻意取同值。"拆开"说的是**非确定项各归各**，不是"没有同名键"
   - 复现性检查：同机同后端，同帧渲染两次（同进程 + 跨进程）**逐字节相同**
     - ✅ 同进程：每帧渲染两次比字节，两条腿各 80 帧，`repeat_mismatches: []`；真不一致时**照记不误**、该帧不做颜色判定（`passed` 三态），不是失败而是发现
     - ✅ 跨进程：第二条腿带 `--compare-run` 与第一条腿比，`identical: true`、`matched_frames: 80`，两条腿整表摘要同为 `71ecc80cade3d73d`
@@ -208,7 +208,7 @@ FFmpeg 绑定（先造假帧源）、WebCodecs、任务队列、任何 UI、任�
 
 `frames/*.png` + `adapter.json` + 计时表 + 四种环境矩阵结果（**2/4，Linux 两条 ⏳**）。
 
-里程碑记录见 [`records/m1/`](../records/m1/README.md)：两条腿各 5 份 JSON/TXT + 80 张 PNG（全目录 183 文件 / 1.1 MB）、9 条判据的原始 stdout/stderr 与退出码、native 侧 72 行纯逻辑探针报告（摘要 `c3f0da6b37577e55`，与 M0 归档的那份**逐字节相同**——M1 往 core 里加了一整个渲染模块，这就是"探针契约没被碰坏"的直接证据）。
+里程碑记录见 [`records/m1/`](../records/m1/README.md)：两条腿各 5 份 JSON/TXT + 80 张 PNG（全目录 185 文件 / 1169175 字节，含本里程碑的独立复核报告 `review-independent.md`）、9 条判据的原始 stdout/stderr 与退出码、native 侧 72 行纯逻辑探针报告（摘要 `c3f0da6b37577e55`，与 M0 归档的那份**逐字节相同**——M1 往 core 里加了一整个渲染模块，这就是"探针契约没被碰坏"的直接证据）。
 
 - ✅ 帧文件名三位补零（`{scene}-f{frame:03}.png`）：字典序 == 帧号序，`ls` 一遍就是时间顺序
 - ✅ `records/m1/` 只归档一次运行的字节（第二条腿）；跨进程那一半靠 `compare.json` 的**双侧摘要** + 记录里的可重跑命令立住
@@ -226,8 +226,9 @@ FFmpeg 绑定（先造假帧源）、WebCodecs、任务队列、任何 UI、任�
 
 > 第 1 条是这一步真正的目的：headless wgpu 出图**稳定可复现**。而它最不确定的部分从来不是渲染逻辑，
 > 是**容器里的 GPU 注入**——所以 Windows 两条腿只是把链路先钉住了，Linux 两条腿（上面两处 ⏳）
-> 才是这条判据真正的考点；**在那之前不进 M2**。本机部分已由
-> `node scripts/record-acceptance.mjs --milestone m1` 落进 `records/m1/acceptance.json`
+> 才是这条判据真正的考点。**2026-09-22 用户明确决定：Linux 两条腿延期（⏳），以 Windows 两条腿的
+> 结论先进 M2**；有 Linux 环境时补跑并回填 ① ②（补跑命令见 `records/m1/README.md`「怎么重跑」）。
+> 本机部分已由 `node scripts/record-acceptance.mjs --milestone m1` 落进 `records/m1/acceptance.json`
 > （9 条判据全绿，每条都留了原始 stdout/stderr 与退出码）。
 
 ### 明确不做
