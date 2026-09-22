@@ -653,7 +653,19 @@ FFmpeg 绑定、解码、时间线、分片、任务队列。
 
 ### 任务
 
-- [ ] **T3.1 `web/` 骨架**：~~Vite + React + TS~~ → **零构建 ES module**（见下方 W0/W1；Vite/React 被有意去掉）
+- [x] **T3.1 `web/` 骨架**：~~Vite + React + TS~~ → **零构建 ES module**（Vite/React 被有意去掉）
+  - **为什么去掉 Vite/React**：wasm-pack `--target web` 的产物本身就是 ES module，浏览器可直接 import，
+    中间不需要打包；本机 **pnpm 是坏的**（WinGet shim 指向缺失的包目录），引 workspace 只是自找「第一天就红」；
+    少一层构建就少一层「改了没生效」——调试预览问题时这很值钱。
+  - **W1/W2 已落地**：`web/engine.js`（框架无关引擎：open/attach/bindSource/seek/evaluate）、
+    `web/index.html` + `web/app.js`（时间线视图、片段属性面板、播放头、结构化 Issue 展示）、
+    `scripts/web-check.mjs`（静态服务器 + 无头 Chrome 程序化验收）。
+  - **W3/W4 已落地**：`web/export/png-sequence.js`（**帧精确**逐帧导出）、
+    `web/export/http.js`（A 模式接口 + echo 假后端，契约写在文件头）。
+  - **W5 已落地并产出里程碑文件**：`milestones/edited-milestone.mp4`
+    —— h264 / 640×360 / 30fps / **90 帧**，与样本工程的时间线长度**完全一致**。
+    流程：浏览器逐帧渲染 → PNG 序列 → FFmpeg 编码。
+    **导出的视频与预览走的是同一条代码路径**（都经过 canvas 上屏），所以「所见即所得」是结构上成立的。
   - 🔵 **W0 已落地（2026-09-22）**：`dhampir_project_attach / bind_source / sources_for / draw / resize`，
     把**工程帧**画进 canvas（此前只有单片段 `<video>` 路径能上屏）。验收通过：
     第 0 帧选 1 个源、第 30 帧选 3 个源（冻帧层 a@29 + 入场 b@10 + 叠加 d@20），

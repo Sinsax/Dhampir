@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>dhampir 剪辑</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px/1.5 system-ui, sans-serif; background: #17181c; color: #e6e6e6; }
+  #layout { display: grid; grid-template-columns: 1fr 300px; grid-template-rows: auto auto 1fr auto; gap: 10px; padding: 10px; height: 100vh; }
+  #preview { grid-column: 1; background: #000; border: 1px solid #2c2e36; border-radius: 6px; width: 100%; max-height: 44vh; object-fit: contain; }
+  #inspector { grid-column: 2; grid-row: 1 / span 3; background: #1d1f25; border: 1px solid #2c2e36; border-radius: 6px; padding: 10px; overflow: auto; }
+  #transport { grid-column: 1; display: flex; align-items: center; gap: 8px; }
+  #timeline { grid-column: 1; overflow: auto; background: #1d1f25; border: 1px solid #2c2e36; border-radius: 6px; padding: 8px; }
+  #issues { grid-column: 1 / span 2; min-height: 32px; font-size: 12px; overflow: auto; max-height: 96px; }
+  .track { position: relative; height: 30px; margin: 5px 0; background: #24262d; border-radius: 4px; }
+  .track-label { position: absolute; left: 4px; top: 7px; font-size: 11px; color: #8b90a0; pointer-events: none; z-index: 2; }
+  .clip { position: absolute; top: 4px; height: 22px; background: #37507a; border: 1px solid #4f6da3; border-radius: 3px; font-size: 11px; padding: 2px 5px; overflow: hidden; white-space: nowrap; cursor: pointer; }
+  .clip.selected { background: #7a5a2c; border-color: #c99b48; }
+  .clip .tr { position: absolute; left: 0; top: 0; bottom: 0; background: #d09a3c; opacity: .6; }
+  input[type=number] { width: 92px; background: #12131a; color: #e6e6e6; border: 1px solid #34374a; border-radius: 3px; padding: 2px 4px; }
+  label { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin: 5px 0; }
+  h3 { margin: 4px 0 8px; font-size: 12px; color: #9aa0b0; text-transform: uppercase; letter-spacing: .06em; }
+  button { background: #2f4a75; color: #e6e6e6; border: 1px solid #4f6da3; border-radius: 4px; padding: 5px 10px; cursor: pointer; }
+  .bad { color: #ff8f8f; }
+  .ok { color: #8fd18f; }
+  video { display: none; }
+  code { color: #c9c9c9; }
+</style>
+</head>
+<body>
+<div id="layout">
+  <canvas id="preview" width="640" height="360"></canvas>
+  <div id="transport">
+    <button id="first">|&lt;</button>
+    <button id="prev">−1</button>
+    <input id="frame" type="range" min="0" max="89" value="0" style="flex:1">
+    <button id="next">+1</button>
+    <button id="last">&gt;|</button>
+    <span id="frameLabel">0</span>
+    <button id="export">导出视频</button>
+  </div>
+  <div id="timeline"></div>
+  <aside id="inspector"><h3>片段属性</h3><div id="props">（未选中片段）</div></aside>
+  <div id="issues"></div>
+  <!-- 导出范围。app.js 把 0..end-1 写进 data-*；hidden 是因为 v1 不做范围选择 UI。 -->
+  <div id="frameOnly" hidden data-from="0" data-to="0"></div>
+</div>
+<div id="videos"></div>
+<script type="module" src="/app.js"></script>
+</body>
+</html>
