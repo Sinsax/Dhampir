@@ -830,7 +830,23 @@ FFmpeg 绑定、解码、时间线、分片、任务队列。
 >  - `Easing::apply` 的公式**写在这里**，两端调同一个函数（各写一遍迟早在某个控制点差一个像素）；
 >  - schema 模块按 `feature = "serde"` 门控，`--no-default-features` 仍能编译（已验证）。
 >
-> ⏳ **未做**：TS 类型生成（`schemars` → `json-schema-to-typescript`）。
+> ✅ **TS 类型也生成了（2026-09-22）**：`schema/timeline-v1.schema.json` + `schema/timeline-v1.d.ts`。
+>
+> 链路：Rust 类型 →（`schemars`）→ JSON Schema →（自己写的发射器）→ `.d.ts`。
+> **没有引 `json-schema-to-typescript`**：那是一个构建期要联网拉的 JS 包，
+> 而这里要处理的构造只有对象 / 数组 / 字符串枚举 / 联合 / Record 这几种，自己写反而更可控
+> （与 MP4 分离器同一个判断：边界清楚就自己写，别为一件小事引一整个依赖）。
+>
+> `schemars` 是**可选依赖**（`--features json-schema`）：依赖 timeline 的 crate 不需要为一份 .d.ts 把它编进去。
+>
+> 一条意外的收获：Rust 的文档注释**原样流进了 .d.ts 的 JSDoc**——
+> 「整数帧号」「BTreeMap 是为了逐字节稳定」这些理由会跟着类型一起到前端。
+>
+> **守卫 `scripts/timeline-contract.mjs`**（12 条自检 + 正反用例都验过）：
+> 每次重新跑 cargo 导例程、重新推导 TS，与已提交的两份文件比对；不一致就红。
+> 反向用例：手改 `.d.ts`、或改 `.schema.json`，都当场 EXIT=1；还原后回到 0。
+> 顺带发现并修掉一个**BOM**：PowerShell `Out-File` 写出的 schema 带 BOM，违反仓库无 BOM 约定，
+> 现在两份派生物都由 Node 写（无 BOM、LF）。
 
 - [ ] **T4.1 schema v1 定稿（先定契约，再写两边）**（Rust 类型 + 校验 + 结构化错误**已落地**；TS 生成未做）
 > 🔵 **求值层已落地（2026-09-22）**：`dhampir-core/src/compose.rs` + `effects.rs`，**14 条单测全绿**。

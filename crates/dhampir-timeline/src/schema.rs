@@ -34,6 +34,7 @@ fn default_opacity() -> f32 {
 }
 
 /// 工程的根对象。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     /// 契约版本。解析后必须等于 SCHEMA_VERSION，否则拒绝。
@@ -44,6 +45,7 @@ pub struct Project {
 }
 
 /// Timebase 的传输形态。用 num/den 而不是浮点 29.97。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimebaseDto {
     pub num: u32,
@@ -69,6 +71,7 @@ impl From<Timebase> for TimebaseDto {
     }
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrackKind {
@@ -76,6 +79,7 @@ pub enum TrackKind {
     Audio,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     pub id: String,
@@ -85,6 +89,7 @@ pub struct Track {
 }
 
 /// 时间线上的一个片段。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Clip {
     pub id: String,
@@ -113,6 +118,7 @@ pub struct Clip {
 ///
 /// 用「挂在片段上」而不是「在轨道上单列一条」，是为了让**重叠规则保持简单**：
 /// 轨道内片段仍然不许重叠——转场不破坏这条不变量，也就不需要为它开特例。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct TransitionSpec {
     pub kind: TransitionKind,
@@ -120,12 +126,14 @@ pub struct TransitionSpec {
     pub duration: Frame,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransitionKind {
     CrossDissolve,
 }
 
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Transform {
     pub x: f32,
@@ -147,6 +155,7 @@ impl Default for Transform {
 }
 
 /// 特效：类型 + 参数。**不接受可上传的 shader**——那等于把两端一致性交给用户。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Effect {
     /// 类型串，对应 core 的特效注册表。
@@ -158,6 +167,7 @@ pub struct Effect {
 
 /// 关键帧。frame 是**相对片段起点**的偏移，不是绝对帧号——
 /// 这样片段一挪，关键帧跟着走，不会静默错位。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Keyframe {
     pub frame: Frame,
@@ -168,6 +178,7 @@ pub struct Keyframe {
 
 /// 缓动曲线。公式**写死在这里**，两端调同一个函数——
 /// 各写一遍迟早在某个控制点上差一个像素，而那种差异最难归因。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Easing {
@@ -199,6 +210,7 @@ impl Easing {
 
 /// 校验问题。**结构化**，不是一句话——UI 要能直接渲染成人话，
 /// 也要能按 code 分类（比如把警告和错误分开）。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Issue {
     /// 机器可读的错误码。
@@ -223,6 +235,7 @@ impl Issue {
 ///
 /// 放在参数里而不是写死在 timeline 里，是为了让"登记表"只有一份（在 core），
 /// 而这里只负责"照着表校对"。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EffectSpec {
     pub kind: &'static str,
