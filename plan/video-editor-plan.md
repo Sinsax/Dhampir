@@ -673,7 +673,18 @@ FFmpeg 绑定、解码、时间线、分片、任务队列。
     ② `textureLoad` **没有 external 重载**（实测编译失败：`no matching call to textureLoad(texture_external, …)`）。
     见 [`s3.1-source-frame-sampling.md`](./s3.1-source-frame-sampling.md) §2.2。
   - wasm 侧实现 `FrameSource` / `FrameSink`
-- [ ] **T3.4 帧缓存**：LRU + 显存上限（参考 MASterSelects 的 300 张 VRAM 纹理）+ RAM 预览缓存（参考 900 帧）
+> 🔵 **策略已落地（2026-09-22）**：`dhampir-core/src/cache.rs` —— `FrameCache` 两级 LRU（显存 / 内存各记各的账），
+> **13 条单测全绿**，且**不依赖 GPU**（纯策略模块，无显卡的机器上也能跑）。
+>
+> ⚠️ **记一处对 plan 原文的修正**：plan 说「参考 MASterSelects 的 300 张 VRAM 纹理」，
+> 但**按张数配预算是危险的**——300 张 1080p RGBA8 = **2.49 GB**，很多适配器给不了。
+> 所以实现只按**字节**记账，并给了 `rgba8_texture_capacity(budget, w, h)` 让宿主自己换算
+> （512 MB 预算 = 64 张 1080p RGBA8）。测试里把这个换算与那两个参考数都钉住了。
+>
+> ⏳ **未做**：宿主侧接线（把纹理 / VideoFrame 的生死挂到账上）。它要等 T3.2 的解码器——
+> 现在只有 `<video>` 元素的一帧，挂进去没有意义。
+
+- [x] ~~**T3.4 帧缓存**~~（策略部分；宿主接线随 T3.2 落地）
 - [ ] **T3.5 测量**：seek p50/p95、播放丢帧率、解码 → 上屏延迟、显存/内存曲线
 
 ### 退出标准
