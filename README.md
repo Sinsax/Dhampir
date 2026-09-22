@@ -1,41 +1,49 @@
 # dhampir
 
-浏览器端编辑 + 服务端渲染导出的视频编辑器引擎。
+**渲染与预览的共用底座**，外加配套的技术调研结论。
 
-同一个 `dhampir-core` 编译到两个宿主：**native**（headless wgpu，服务端出片）与
-**wasm32**（浏览器 WebGPU，实时预览）。项目的核心命题只有一句：
+目标形态：素材存在服务器，渲染导出由服务器处理；**浏览器只做剪辑编辑处理**。
+本质是 **render 与 preview 的分别处理**——但两者必须产出**可比的帧**。
+
+| | |
+|---|---|
+| 底座 | **Rust + wgpu** |
+| preview 侧 | **wasm32** 宿主（浏览器 WebGPU + WebCodecs） |
+| render 侧 | **native** 宿主（headless wgpu） |
+
+同一个 `dhampir-core` 编译到这两个宿主。底座的核心命题只有一句：
 
 > 同一份工程，在浏览器里看到的和服务器上导出的，是**可比的帧**。
 
-其余一切都是为这句话服务的工程手段。
+**本仓库不做**（那是下游工程的形态）：API 网关 / 任务队列 / 对象存储 / 部署与容器化 /
+分布式分片编排 / 编辑 UI 产品化。下游可以据此接成**客户端-服务端分离的架构**，
+也可以接成**本地预览 + 渲染的合并处理**。
+
+`dhampir` 是底座的名字。其余一切都是为上面那句话服务的工程手段。
 
 ---
 
-## 命名分层（别混用）
+## 名字
 
-| 层 | 名字 | 能出现在哪 |
-|---|---|---|
-| 引擎 | **dhampir** | crate 名、包名、CLI、文档。所有技术资产都用它 |
-| 上层应用 | **yeki** | 只用于产品/应用层。**不进引擎**：不进 crate 名，不进 API |
-| 词源彩蛋 | MyGO!!!!! | 只在设计讨论里当梗。**禁入**包名、crate 名、商标、README 首屏 |
+引擎名 **`dhampir`**：crate 名、包名、CLI、文档一律用它，不再引入第二套命名。
 
 「dhampir」是英语里半人半吸血鬼的存在——白天一侧（浏览器/预览）与夜晚一侧
 （服务端/出片）同源异形，且两边都得能活。词源到此为止，不要往外延伸。
+
+> **范围**：本项目**只做本地开发与本地验证**——不发布包、不建远端仓库、不接远端 CI。
 
 ---
 
 ## crate 地图与依赖方向
 
 ```
-dhampir-timeline   纯数据，零 GPU 依赖（帧号、时间基、时间码）
-      ↑
-dhampir-media      纯契约 trait，连 wgpu 都不依赖
-      ↑
-dhampir-core       ★ 最贵资产：渲染与契约实现。**零 `#[cfg]`**
-      ↑                    ↑
-dhampir-wasm        dhampir-worker
-（仅 wasm32 宿主）    （仅 native 宿主）
-      └──── 互不依赖 ────┘
+        dhampir-timeline          （纯数据：整数帧号 / 有理数时间基 / 时间码）
+           ↑          ↑
+   dhampir-media   dhampir-core    （CPU 编解码契约 ‖ 渲染图 + WGSL）
+           ↑          ↑             ← 两者是**兄弟**，互不依赖
+           └────┬─────┘
+        dhampir-wasm   dhampir-worker
+       （wasm32 宿主）    （native 宿主）   ← 两个宿主互不依赖
 ```
 
 几条硬规则：
@@ -45,8 +53,8 @@ dhampir-wasm        dhampir-worker
 - **`dhampir-core` 里不允许出现任何 `#[cfg]`**（`#[cfg(test)]` 除外）。
   平台差异用 Cargo 的 target-specific 依赖表达，不在代码里堆条件编译。
   理由：core 是两个宿主唯一的公共资产，它一有条件编译，"同一份源码"就不再是事实。
-- **`Instance` 的创建是唯一允许分叉的地方**，且它只出现在两个宿主里：
-  wasm 用 `Backends::BROWSER_WEBGPU`，worker 用 `NATIVE_BACKENDS`。
+- **分叉只有两处**：`Instance` 的后端选择（只在两个宿主里：wasm 用 `Backends::BROWSER_WEBGPU`，
+  worker 用 `NATIVE_BACKENDS`），以及 `core::io` 的 `FrameSource` / `FrameSink` 实现。
 - 上面每一条都有守卫脚本盯着，不靠自觉（见「验证」）。
 
 ### 五条铁律
@@ -64,17 +72,18 @@ dhampir-wasm        dhampir-worker
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
 | **M0** | 骨架与双编译贯通 | ✅ 见 [`records/m0/`](records/m0/) |
-| M1 | 服务端 headless wgpu 基线（离屏出图 + 合成 corpus + 复现性） | 进行中 |
-| M2 | 双运行时同帧 SSIM 比对（架构命门） | 未开始 |
-| M3 | 浏览器预览链路 | 未开始 |
-| M4 | 契约闭环：时间线 → 服务端出片 | 未开始 |
-| M5 | 分布式分片渲染 | 未开始 |
-| M6 | 一致性保障与发布流程 | 未开始 |
-| M7 | 产品化 | 未开始 |
+| **M1** | 服务端 headless wgpu 基线（离屏出图 + 合成 corpus + 复现性） | ✅ 已收官（Linux 两条腿延期，属已知缺口） |
+| **M2** | 双运行时同帧 SSIM 比对（架构命门） | ✅ 工程完成（退出标准 4/4）；收尾 4 件待做 |
+| M3 | 浏览器预览链路 | ⬜ 未开始（第一件事：S3.1 决策） |
+| M4 | 契约闭环：时间线 → 服务端出片 | ⬜ 未开始 |
+| ~~M5~~ | ~~分布式分片渲染~~ | ⛔ 移出范围（下游工程） |
+| M6 | 一致性保障与发布流程 | ⚠️ 部分移出（只留闸门与资产） |
+| ~~M7~~ | ~~产品化~~ | ⛔ 移出范围（下游工程） |
 
-真相文档在 [`plan/`](plan/)：`video-editor-plan.md` 是执行计划（任务、退出标准、
-明确不做、风险），`video-editor-tech-guide.md` 是决策真相。**改决策要改文档，
-不能只在代码里改。**
+文档在 [`plan/`](plan/)：`video-editor-plan.md` 是执行计划（任务、退出标准、明确不做、风险），
+`video-editor-tech-guide.md` 是决策真相，[`foundation-architecture.md`](plan/foundation-architecture.md)
+是**实测**的底座架构，[`remaining-work.md`](plan/remaining-work.md) 是交接记录。
+**改决策要改文档，不能只在代码里改。**
 
 ### M0 的结论
 
