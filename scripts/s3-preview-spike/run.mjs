@@ -105,6 +105,38 @@ export function validateReport(report, want = { w: WANT_W, h: WANT_H }) {
   return problems;
 }
 
+/** mode=4k 的结果自洽性：只验"上限 + LRU 在 4K 帧上是否生效"。 */
+export function validate4kReport(report, want = { w: 3840, h: 2160, frames: 180, span: 24 }) {
+  const problems = [];
+  if (report === null || typeof report !== 'object') return ['结果不是对象'];
+  if (report.ok !== true) problems.push('页面没有报 ok=true：' + JSON.stringify(report.error === undefined ? '(无 error 字段)' : report.error));
+  if (report.wasm_loaded !== true) problems.push('wasm 模块没加载成功');
+  const v = report.video === undefined ? {} : report.video;
+  if (v.w !== want.w || v.h !== want.h) problems.push('视频尺寸是 ' + v.w + 'x' + v.h + '，要求 ' + want.w + 'x' + want.h);
+  const d = report.demux === undefined ? {} : report.demux;
+  if (d.width !== want.w || d.height !== want.h) problems.push('分离器报的尺寸是 ' + d.width + 'x' + d.height);
+  if (d.samples !== want.frames) problems.push('分离器报的样本数是 ' + d.samples + '，要求 ' + want.frames);
+  if (d.samples_parsed !== d.samples) problems.push('样本表 JSON 的条数与元信息不一致');
+  if (d.sync_count !== 3) problems.push('同步样本数是 ' + d.sync_count + '，要求 3（3 秒、每 60 帧一个）');
+  if (typeof report.codec !== 'string' || !report.codec.startsWith('avc1.')) problems.push('codec 串不对：' + JSON.stringify(report.codec));
+  const c = report.cache === undefined ? {} : report.cache;
+  if (!(c.texture_capacity > 0)) problems.push('按预算换算出的纹理张数为 0');
+  if (report.four_k === undefined) problems.push('缺 four_k：4K 那一段没跑');
+  else {
+    const k = report.four_k;
+    if (k.frames_produced !== k.frames_requested) problems.push('4K 解码丢了帧：' + k.frames_produced + ' / ' + k.frames_requested);
+    if (k.frames_requested < 12) problems.push('4K 只解了 ' + k.frames_requested + ' 帧，样本太少不足以压出淘汰');
+    if (!Array.isArray(k.gpu_errors)) problems.push('four_k.gpu_errors 不是数组');
+    else if (k.gpu_errors.length > 0) problems.push('4K 那段有 ' + k.gpu_errors.length + ' 条 WebGPU 错误：' + k.gpu_errors[0]);
+    if (k.textures_alive_after_release !== 0) problems.push('释放后还剩 ' + k.textures_alive_after_release + ' 张纹理');
+    const fin = k.cache_final === undefined ? {} : k.cache_final;
+    if (fin.vram_over === true) problems.push('4K 下 VRAM 记账超预算——上限没守住');
+    if (!(fin.vram_bytes <= c.vram_budget)) problems.push('VRAM 用度 ' + fin.vram_bytes + ' 超过预算 ' + c.vram_budget);
+    if (!(fin.vram_len < k.frames_produced)) problems.push('4K 全过程一张都没淘汰（容量 ' + c.texture_capacity + '，放了 ' + k.frames_produced + ' 张）');
+    if (k.heap_before !== null && k.heap_peak !== null && k.heap_peak < k.heap_before) problems.push('堆峰值比初始还小，采样可疑');
+  }
+  return problems;
+}
 export function findBrowser() {
   const pf = process.env.ProgramFiles === undefined ? 'C:\\Program Files' : process.env.ProgramFiles;
   const pfx86 = process.env['ProgramFiles(x86)'] === undefined ? 'C:\\Program Files (x86)' : process.env['ProgramFiles(x86)'];
@@ -122,7 +154,7 @@ function parseArgs(argv) {
   const out = {
     media: join(REPO_ROOT, 'target', 's3', 'proxy720p.mp4'),
     headed: false, selfTest: false, timeoutMs: 600000, bad: false,
-    width: WANT_W, height: WANT_H,
+    width: WANT_W, height: WANT_H, mode: '',
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -132,6 +164,7 @@ function parseArgs(argv) {
     else if (arg === '--timeout') { out.timeoutMs = Number(argv[i + 1]) * 1000; i += 1; }
     else if (arg === '--width') { out.width = Number(argv[i + 1]); i += 1; }
     else if (arg === '--height') { out.height = Number(argv[i + 1]); i += 1; }
+    else if (arg === '--mode') { out.mode = String(argv[i + 1] === undefined ? '' : argv[i + 1]); i += 1; }
     else { console.error('✗ 不认识的参数：' + arg); out.bad = true; }
   }
   return out;
@@ -178,6 +211,19 @@ function selfTest() {
   expect('一帧没淘汰必须被抓', validateReport({ ...good, cache: { ...good.cache, evicted_frames: 0 } }).length > 0, '放过了零淘汰');
   expect('播放丢帧必须被抓', validateReport({ ...good, playback: { ...good.playback, frames: 239 } }).length > 0, '放过了丢帧');
   expect('播完还留纹理必须被抓', validateReport({ ...good, playback: { ...good.playback, vram_textures_alive: 3 } }).length > 0, '放过了纹理泄漏');
+  const good4k = {
+    ok: true, wasm_loaded: true, video: { w: 3840, h: 2160 }, codec: 'avc1.640020',
+    demux: { width: 3840, height: 2160, samples: 180, samples_parsed: 180, sync_count: 3 },
+    cache: { vram_budget: 268435456, texture_capacity: 8 },
+    four_k: {
+      frames_produced: 24, frames_requested: 24, gpu_errors: [], textures_alive_after_release: 0,
+      heap_before: 1000, heap_peak: 2000,
+      cache_final: { vram_bytes: 265420800, vram_len: 8, vram_over: false },
+    },
+  };
+  expect('4K 自洽结果必须过', validate4kReport(good4k).length === 0, validate4kReport(good4k).join(' | '));
+  expect('4K 超预算必须被抓', validate4kReport({ ...good4k, four_k: { ...good4k.four_k, cache_final: { vram_bytes: 999999999, vram_len: 8, vram_over: true } } }).length > 0, '放过了超预算');
+  expect('4K 一张没淘汰必须被抓', validate4kReport({ ...good4k, four_k: { ...good4k.four_k, cache_final: { vram_bytes: 796262400, vram_len: 24, vram_over: false } } }).length > 0, '放过了零淘汰');
   expect('记账超预算必须被抓', validateReport({ ...good, cache: { ...good.cache, final: { ...good.cache.final, ram_over: true } } }).length > 0, '放过了超预算');
   if (failures.length > 0) { for (const f of failures) console.error('  - ' + f); return 1; }
   console.log('✓ 驱动自检通过（' + count + ' 条断言：结果自洽性校验）');
@@ -243,7 +289,7 @@ async function main() {
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const port = server.address().port;
-  const url = 'http://127.0.0.1:' + port + '/';
+  const url = 'http://127.0.0.1:' + port + '/' + (args.mode === '' ? '' : '?mode=' + args.mode);
 
   const profile = join(REPO_ROOT, 'target', 's3', 'preview-chrome-profile');
   const chromeArgs = [];
@@ -270,7 +316,9 @@ async function main() {
     console.error(chromeErr.trim().split(String.fromCharCode(10)).slice(-10).join(String.fromCharCode(10)));
     return 1;
   }
-  const problems = validateReport(report, { w: args.width, h: args.height });
+  const problems = args.mode === '4k'
+    ? validate4kReport(report, { w: args.width, h: args.height, frames: 180, span: 24 })
+    : validateReport(report, { w: args.width, h: args.height });
   console.log('');
   if (problems.length > 0) {
     console.error('✗ 结果不自洽，拒绝给结论：');

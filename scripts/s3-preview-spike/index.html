@@ -57,6 +57,115 @@ const WGSL_VFLIP = [
 
 // 放到模块作用域：main() 中途抛错时，catch 也要能把已经量到的部分带出去——
 // 否则一次失败只会得到一句 error，连"卡在哪一步"都不知道。
+// mode=4k：只跑"上限 + LRU 在 4K 帧上是否生效"这一件事。
+// 4K 下连解码都贵（一帧 33.2 MB），所以不做 seek 等价性、不做 200 帧播放——
+// 那些是 1080p 那个模式的活。这里只看：纹理进账后会不会越界、淘汰有没有发生、堆有没有失控。
+async function main4k() {
+  const video = document.getElementById('v');
+  step('4k-load-video');
+  await new Promise((res, rej) => {
+    video.addEventListener('loadeddata', res, { once: true });
+    video.addEventListener('error', () => rej(new Error('video error')), { once: true });
+  });
+  video.pause();
+  const W = video.videoWidth;
+  const H = video.videoHeight;
+  report.video = { w: W, h: H, readyState: video.readyState };
+
+  step('4k-load-wasm');
+  const mod = await import('/pkg/dhampir_wasm.js');
+  await mod.default();
+  report.wasm_loaded = true;
+
+  step('4k-fetch');
+  const mp4 = new Uint8Array(await (await fetch('/media/proxy.mp4')).arrayBuffer());
+  report.mp4_bytes = mp4.length;
+  const meta = JSON.parse(mod.dhampir_demux_open(mp4));
+  const samples = JSON.parse(mod.dhampir_demux_samples());
+  const desc = mod.dhampir_demux_description();
+  const codec = 'avc1.' + Array.from(desc.slice(1, 4)).map((b) => b.toString(16).padStart(2, '0')).join('');
+  report.demux = {
+    width: meta.width, height: meta.height, timescale: meta.timescale,
+    samples: meta.samples, samples_parsed: samples.length,
+    sync_count: meta.sync_indices.length, first_sync: meta.sync_indices.slice(0, 3),
+    constant_rate: meta.constant_rate,
+  };
+  report.codec = codec;
+
+  const adapter = await navigator.gpu.requestAdapter();
+  const device = await adapter.requestDevice();
+  const gpuErrors = [];
+  device.onuncapturederror = (e) => { const err = e.error; gpuErrors.push(err && err.message ? String(err.message) : String(err)); };
+
+  const frameBytes = W * H * 4;
+  // 4K 一帧 33.2 MB：预算给 256 MiB，换算下来约 7 张。故意给小，好让淘汰真的发生。
+  const VRAM_BUDGET = 256 * 1024 * 1024;
+  const RAM_BUDGET = 256 * 1024 * 1024;
+  mod.dhampir_cache_open(VRAM_BUDGET, RAM_BUDGET);
+  report.cache = {
+    vram_budget: VRAM_BUDGET, ram_budget: RAM_BUDGET, frame_bytes: frameBytes,
+    texture_capacity: mod.dhampir_cache_texture_capacity(W, H),
+    initial: JSON.parse(mod.dhampir_cache_stats()),
+  };
+
+  const heapNow = () => (performance.memory ? performance.memory.usedJSHeapSize : null);
+  const heapBefore = heapNow();
+  let heapPeak = heapBefore;
+  const texMap = new Map();
+  const frames = [];
+  let produced = 0;
+  const span = Math.min(24, samples.length);
+
+  // 4K 这一节**故意逐帧同步**：它要证的是「上限 + LRU 生效」，不是吞吐。
+  // 前两版想在这儿也做流水线，结果是两次同类死锁——4K 的输出帧池比 1080p 更小，
+  // 攒批释放的阈值猜不准。既然这条测试不关心速度，就把在飞帧压到 1 张：
+  // 拷完 → 等这次提交完成 → 立刻 close。
+  const dec = new VideoDecoder({
+    output: async (f) => {
+      produced += 1;
+      const tex = device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+      device.queue.copyExternalImageToTexture({ source: f }, { texture: tex, premultipliedAlpha: false }, [W, H]);
+      const evT = JSON.parse(mod.dhampir_cache_note_vram(produced, frameBytes));
+      for (const k of evT) { const t = texMap.get(k); if (t !== undefined) { t.destroy(); texMap.delete(k); } }
+      texMap.set(produced, tex);
+      const evR = JSON.parse(mod.dhampir_cache_note_ram(produced, frameBytes));
+      for (const k of evR) { const idx = k - 1; if (frames[idx] !== undefined && frames[idx] !== null) { frames[idx].close(); frames[idx] = null; } }
+      await device.queue.onSubmittedWorkDone();
+      f.close();
+      frames.push(null);
+      const h = heapNow();
+      if (h !== null && (heapPeak === null || h > heapPeak)) heapPeak = h;
+    },
+    error: () => {},
+  });
+  dec.configure({ codec: codec, description: desc, codedWidth: meta.width, codedHeight: meta.height });
+  for (let i = 0; i < span; i += 1) {
+    const s = samples[i];
+    dec.decode(new EncodedVideoChunk({ type: s.k ? 'key' : 'delta', timestamp: Math.round((s.d / meta.timescale) * 1e6), duration: Math.round((s.u / meta.timescale) * 1e6), data: mp4.subarray(s.o, s.o + s.s) }));
+  }
+  await dec.flush();
+  await device.queue.onSubmittedWorkDone();
+
+  report.leak = { frames_alive: frames.filter((f) => f !== null).length, textures_alive: texMap.size };
+  for (const f of frames) { if (f !== null) { f.close(); } }
+  for (const [k, t] of texMap) { t.destroy(); mod.dhampir_cache_remove_vram(k); }
+  texMap.clear();
+  for (let i = 0; i < frames.length; i += 1) frames[i] = null;
+
+  report.four_k = {
+    frames_produced: produced,
+    frames_requested: span,
+    heap_before: heapBefore,
+    heap_peak: heapPeak,
+    heap_after: heapNow(),
+    textures_alive_after_release: texMap.size,
+    cache_final: JSON.parse(mod.dhampir_cache_stats()),
+    gpu_errors: gpuErrors,
+  };
+  step('4k-done');
+  report.ok = true;
+  await post(report);
+}
 async function main() {
   const video = document.getElementById('v');
   await new Promise((res, rej) => {
@@ -436,7 +545,8 @@ async function main() {
   log('完成');
   await post(report);
 }
-main().catch(async (e) => {
+const mode4k = new URLSearchParams(location.search).get('mode') === '4k';
+(mode4k ? main4k() : main()).catch(async (e) => {
   log('✗ ' + (e && e.stack ? e.stack : e));
   // 把已经量到的部分一并送出去：失败时最有用的信息是「走到哪一步了」。
   await post(Object.assign({ ok: false, error: String(e && e.message ? e.message : e), stack: String(e && e.stack ? e.stack : '') }, report));
