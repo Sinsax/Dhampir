@@ -164,6 +164,22 @@ impl CanvasFrameSink {
         })
     }
 
+    /// canvas 尺寸变了之后重新配置 surface。
+    ///
+    /// 先把 current 丢掉再 configure：SurfaceTexture 还活着时重配会在某些后端报错，
+    /// 而那个错误要到 present 时才显形，很难归因。
+    pub fn resize(&mut self, device: &wgpu::Device, size: (u32, u32)) -> Result<(), String> {
+        let (width, height) = size;
+        if width == 0 || height == 0 {
+            return Err("canvas 尺寸不能为 0".to_string());
+        }
+        self.current = None;
+        self.config.width = width;
+        self.config.height = height;
+        self.surface.configure(device, &self.config);
+        Ok(())
+    }
+
     /// canvas surface 的格式。BlitRenderer 必须用**同一个**格式建管线。
     pub fn format(&self) -> wgpu::TextureFormat {
         self.config.format

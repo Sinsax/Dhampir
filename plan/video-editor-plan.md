@@ -653,7 +653,14 @@ FFmpeg 绑定、解码、时间线、分片、任务队列。
 
 ### 任务
 
-- [ ] **T3.1 `web/` 骨架**：Vite + React + TS；加载 wasm-pack `--target web` 产物
+- [ ] **T3.1 `web/` 骨架**：~~Vite + React + TS~~ → **零构建 ES module**（见下方 W0/W1；Vite/React 被有意去掉）
+  - 🔵 **W0 已落地（2026-09-22）**：`dhampir_project_attach / bind_source / sources_for / draw / resize`，
+    把**工程帧**画进 canvas（此前只有单片段 `<video>` 路径能上屏）。验收通过：
+    第 0 帧选 1 个源、第 30 帧选 3 个源（冻帧层 a@29 + 入场 b@10 + 叠加 d@20），
+    秒数由整数帧号经时间基换算；`node scripts/web-check.mjs` 程序化验收。
+  - ⚠️ **当场修正了一条计划判据**：原写「canvas 路径与离屏路径逐字节一致」——**不成立**。
+    `CanvasFrameSink` 优先选 **sRGB**（预览侧消色彩差异），离屏是 **Rgba8Unorm 线性**；
+    目标格式不同，逐字节相等本来就不该成立。逐字节相等留在「同一格式、两个运行时」那条上（T4.5 已验）。
 > 🔵 **分离器已落地（2026-09-22）**：`dhampir-wasm/src/demux.rs` —— 自己写的最小 MP4 解析器，
 > **不引 mp4box.js**（理由见模块注释：底座里 `dhampir-media::Demuxer` 契约正缺实现，不该把
 > 「帧号 → 样本」这条契约留在 JS 里；且项目一贯不引第三方）。

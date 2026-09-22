@@ -14,21 +14,169 @@
 //! 对"单片段工程"这个最常见的退化情形，它是**精确**的。
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use dhampir_core::compose::{self, Composite};
+use dhampir_core::io::{FrameSink, FrameSource};
 use dhampir_core::render::SourceResolver;
-use dhampir_core::io::FrameSource;
 use dhampir_core::render::{Compositor, LayerDraw};
+use dhampir_core::wgpu;
 use dhampir_core::timeline::schema::{Project, validate_project_with_effects};
 use wasm_bindgen::prelude::*;
+use web_sys::{HtmlCanvasElement, HtmlVideoElement};
 
-use crate::preview::{PREVIEW_FORMAT, VideoFrameSource, element_by_id};
+use crate::preview::{CanvasFrameSink, PREVIEW_FORMAT, VideoFrameSource, element_by_id};
 use crate::web::{js_err, new_instance};
+
+thread_local! {
+    /// 工程预览宿主。与 PROJECT 分开：工程可以在没有 canvas 时先载入并校验。
+    static PROJECT_HOST: RefCell<Option<ProjectHost>> = const { RefCell::new(None) };
+}
 
 thread_local! {
     /// 当前载入的工程。**只有通过校验的工程才会被记住**——
     /// 让一份有问题的工程留在里面，只会让后面每一步都要重新判断"它到底能不能用"。
     static PROJECT: RefCell<Option<Project>> = const { RefCell::new(None) };
+}
+
+
+// ---------------------------------------------------------------------------
+// W0：工程帧上 canvas
+//
+// 与 preview.rs 那个宿主的区别：那个只认一路 <video> 与一条搬运管线；
+// 这个认的是**一份工程**，走求值 + TimelineRenderer（多轨、特效、转场、关键帧）。
+//
+// # 为什么 seek 在 JS 侧做
+//
+// <video> 的 seek 是**异步**的：set_current_time 立刻返回，那一帧还没解码出来。
+// 而 SourceResolver 是同步接口（渲染循环里不该 await）。所以拆成两步：
+//   1. JS 调 dhampir_project_sources_for(frame) 拿到这一帧需要的 (source, 秒数)，
+//      逐个 seek 并等 seeked；
+//   2. JS 再调 dhampir_project_draw(frame)，此时每个 video 都停在自己的那一帧上。
+// 异步的 DOM 舞蹈留在 JS，Rust 侧保持同步——两边都在自己擅长的形态上。
+
+/// 工程预览宿主。
+pub struct ProjectHost {
+    ctx: dhampir_core::gpu::GpuContext,
+    sink: CanvasFrameSink,
+    renderer: dhampir_core::render::TimelineRenderer,
+    /// source 标识 -> 对应的 <video>。v1 允许多路：一个 source 一个元素。
+    videos: HashMap<String, HtmlVideoElement>,
+    /// 预览尺寸。**由 canvas 决定**，不由工程决定——schema v1 里没有分辨率字段。
+    size: (u32, u32),
+}
+
+/// 渲染期的解析器：不 seek，只取「当前停在哪一帧」的纹理。
+struct BoundVideos<'a> {
+    device: &'a wgpu::Device,
+    queue: &'a wgpu::Queue,
+    videos: &'a HashMap<String, HtmlVideoElement>,
+    format: wgpu::TextureFormat,
+    /// 一份源纹理的缓存。缓存的是**纹理**不是像素：每次渲染仍重新拷一次。
+    textures: HashMap<String, (wgpu::Texture, wgpu::TextureView, (u32, u32))>,
+}
+
+impl SourceResolver for BoundVideos<'_> {
+    fn texture_for(
+        &mut self,
+        source: &str,
+        _source_frame: i64,
+    ) -> Option<(wgpu::TextureView, (u32, u32))> {
+        // 这里**不**按 source_frame 定位：那一帧已经由 JS 侧 seek 好了。
+        // source_frame 的意义体现在 sources_for 返回的秒数上。
+        let video = self.videos.get(source)?;
+        if !self.textures.contains_key(source) {
+            let width = video.video_width().max(1);
+            let height = video.video_height().max(1);
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("dhampir project source"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.format,
+                // RENDER_ATTACHMENT 不是可选的：Dawn 要求 copyExternalImageToTexture 的目标
+                // 同时带这个用途，少了它不报错而是**静默失败**（S3.1 与 preview.rs 都记过）。
+                usage: wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.textures
+                .insert(source.to_string(), (texture, view, (width, height)));
+        }
+        let (texture, view, size) = self.textures.get(source)?;
+        self.queue.copy_external_image_to_texture(
+            &wgpu::wgt::CopyExternalImageSourceInfo {
+                source: wgpu::wgt::ExternalImageSource::HTMLVideoElement(video.clone()),
+                origin: wgpu::wgt::Origin2d::ZERO,
+                flip_y: false,
+            },
+            wgpu::wgt::CopyExternalImageDestInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+                color_space: wgpu::wgt::PredefinedColorSpace::Srgb,
+                premultiplied_alpha: false,
+            },
+            wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+        );
+        Some((view.clone(), *size))
+    }
+}
+
+impl ProjectHost {
+    fn draw(&mut self, frame: i64) -> Result<(), String> {
+        let composite = PROJECT.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .map(|project| compose::evaluate(project, frame))
+        });
+        let Some(composite) = composite else {
+            return Err("还没有载入通过校验的工程".to_string());
+        };
+
+        // 拆分借用：四个字段互不相干，解析器只需要其中两个的不可变借用。
+        let Self { ctx, sink, renderer, videos, size } = self;
+        let (width, height) = *size;
+        let sink_format = sink.format();
+        let sink_view = sink.acquire(&ctx.device);
+        let mut resolver = BoundVideos {
+            device: &ctx.device,
+            queue: &ctx.queue,
+            videos,
+            format: sink_format,
+            textures: HashMap::new(),
+        };
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("dhampir project encoder"),
+            });
+        renderer.render_frame(
+            &ctx.device,
+            &ctx.queue,
+            &mut encoder,
+            &sink_view,
+            (width, height),
+            &composite,
+            &mut resolver,
+            wgpu::Color::TRANSPARENT,
+        );
+        ctx.queue.submit([encoder.finish()]);
+        sink.finish(frame);
+        Ok(())
+    }
 }
 
 fn composite_json(composite: &Composite) -> serde_json::Value {
@@ -348,3 +496,125 @@ impl SourceResolver for SyntheticSources<'_> {
             .map(|(_, view)| (view.clone(), self.size))
     }
 }
+
+// ---------------------------------------------------------------------------
+// W0 的四个导出：attach / bind_source / sources_for / draw / resize
+// ---------------------------------------------------------------------------
+
+/// 建工程预览宿主：canvas surface + sink + 时间线渲染器。
+#[wasm_bindgen]
+pub async fn dhampir_project_attach(canvas_id: String) -> Result<String, JsValue> {
+    if PROJECT_HOST.with(|h| h.borrow().is_some()) {
+        return Ok(String::from("{\"already\":true}"));
+    }
+    let canvas: HtmlCanvasElement = element_by_id(&canvas_id, "canvas")?;
+    let size = (canvas.width().max(1), canvas.height().max(1));
+    let instance = new_instance();
+    let surface = instance
+        .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+        .map_err(|e| js_err(format!("无法从 canvas 创建 surface：{e:?}")))?;
+    let ctx = dhampir_core::gpu::request_context(&instance, Some(&surface))
+        .await
+        .map_err(|e| js_err(e.to_string()))?;
+    let sink = CanvasFrameSink::new(surface, &ctx.adapter, &ctx.device, &ctx.queue, size)
+        .map_err(js_err)?;
+    let renderer = dhampir_core::render::TimelineRenderer::new(&ctx.device, sink.format());
+    let info = ctx.adapter.get_info();
+    let json = format!(
+        "{{\"name\":\"{}\",\"backend\":\"{:?}\",\"size\":\"{}x{}\"}}",
+        info.name, info.backend, size.0, size.1
+    );
+    PROJECT_HOST.with(|h| {
+        *h.borrow_mut() = Some(ProjectHost {
+            ctx,
+            sink,
+            renderer,
+            videos: HashMap::new(),
+            size,
+        });
+    });
+    Ok(json)
+}
+
+/// 把一个 source 标识绑定到页面上的一个 video 元素。
+///
+/// v1 允许多路：一个 source 一个元素。但**每路都要自己 seek 到自己那一帧**——
+/// 这是"帧号精确"在宿主接缝上的兑现，少做一步它就又变成假的。
+#[wasm_bindgen]
+pub fn dhampir_project_bind_source(source: String, video_id: String) -> Result<(), JsValue> {
+    let video: HtmlVideoElement = element_by_id(&video_id, "video")?;
+    PROJECT_HOST.with(|h| {
+        let mut borrowed = h.borrow_mut();
+        let host = borrowed
+            .as_mut()
+            .ok_or_else(|| js_err("工程预览宿主尚未初始化，先调 dhampir_project_attach"))?;
+        host.videos.insert(source, video);
+        Ok(())
+    })
+}
+
+/// 这一帧需要哪些源、各自停在**第几秒**。
+///
+/// 秒数由**整数帧号**与工程的时间基算出（frame * den / num）——
+/// 浮点只在这一步出现，而且是从整数推出来的，不是反过来。
+#[wasm_bindgen]
+pub fn dhampir_project_sources_for(frame: i32) -> String {
+    PROJECT.with(|slot| {
+        let borrowed = slot.borrow();
+        let Some(project) = borrowed.as_ref() else {
+            return String::from("{\"sources\":[],\"error\":\"还没有载入通过校验的工程\"}");
+        };
+        let (num, den) = match project.timebase.to_timebase() {
+            Ok(timebase) => (f64::from(timebase.num), f64::from(timebase.den)),
+            Err(error) => {
+                return serde_json::json!({ "sources": [], "error": error.to_string() })
+                    .to_string();
+            }
+        };
+        let composite = compose::evaluate(project, i64::from(frame));
+        // 去重：同一个 (source, 帧) 只该 seek 一次。
+        let mut seen = std::collections::BTreeSet::new();
+        let mut sources = Vec::new();
+        for layer in &composite.layers {
+            if !seen.insert((layer.source.clone(), layer.source_frame)) {
+                continue;
+            }
+            sources.push(serde_json::json!({
+                "source": layer.source,
+                "source_frame": layer.source_frame,
+                "seconds": (layer.source_frame as f64) * den / num,
+            }));
+        }
+        serde_json::json!({ "frame": frame, "sources": sources }).to_string()
+    })
+}
+
+/// 画一帧到 canvas。**调用前请先用 sources_for 把源 seek 到位。**
+#[wasm_bindgen]
+pub fn dhampir_project_draw(frame: i32) -> Result<(), JsValue> {
+    PROJECT_HOST.with(|h| {
+        let mut borrowed = h.borrow_mut();
+        let host = borrowed
+            .as_mut()
+            .ok_or_else(|| js_err("工程预览宿主尚未初始化，先调 dhampir_project_attach"))?;
+        host.draw(i64::from(frame)).map_err(js_err)
+    })
+}
+
+/// canvas 尺寸变了之后重新配置 surface。
+///
+/// 预览尺寸**由 canvas 决定**，不由工程决定——schema v1 里没有分辨率字段。
+#[wasm_bindgen]
+pub fn dhampir_project_resize(width: u32, height: u32) -> Result<(), JsValue> {
+    PROJECT_HOST.with(|h| {
+        let mut borrowed = h.borrow_mut();
+        let host = borrowed
+            .as_mut()
+            .ok_or_else(|| js_err("工程预览宿主尚未初始化，先调 dhampir_project_attach"))?;
+        let size = (width.max(1), height.max(1));
+        host.sink.resize(&host.ctx.device, size).map_err(js_err)?;
+        host.size = size;
+        Ok(())
+    })
+}
+

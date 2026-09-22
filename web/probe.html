@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>dhampir web 验收</title></head>
+<body>
+<canvas id="c" width="320" height="180"></canvas>
+<!-- 每个 source 一个 video 元素：每路自己 seek 到自己那一帧 -->
+<video id="v" muted playsinline preload="auto" src="/media/proxy.mp4"></video>
+<pre id="log"></pre>
+<script type="module">
+const report = { ok: false, frames: [], drawError: null };
+const log = (m) => { document.getElementById("log").textContent += m + "\n"; };
+const post = (o) => fetch("/result", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(o) });
+
+try {
+  const mod = await import("/pkg/dhampir_wasm.js");
+  await mod.default();
+
+  const json = await (await fetch("/sample-project.json")).text();
+  const opened = JSON.parse(mod.dhampir_project_open(json));
+  report.projectOk = opened.ok === true;
+  report.issues = opened.issues;
+  if (!report.projectOk) { await post(report); throw new Error("工程没通过校验"); }
+
+  // 视频要能解码才谈得上 seek
+  const video = document.getElementById("v");
+  await new Promise((res, rej) => {
+    video.addEventListener("loadeddata", res, { once: true });
+    video.addEventListener("error", () => rej(new Error("video error")), { once: true });
+  });
+  video.pause();
+
+  report.attach = JSON.parse(await mod.dhampir_project_attach("c"));
+  // 把工程里出现的每个 source 都绑到同一个 video 上（样本工程只有一个真实素材）
+  for (const track of ["a.mp4", "b.mp4", "c.mp4", "d.mp4"]) {
+    mod.dhampir_project_bind_source(track, "v");
+  }
+
+  for (const frame of [0, 30]) {
+    const info = JSON.parse(mod.dhampir_project_sources_for(frame));
+    // 逐个 seek 并等 seeked —— 异步的 DOM 舞蹈在这一侧做完
+    for (const entry of info.sources) {
+      await new Promise((res) => {
+        const done = () => { video.removeEventListener("seeked", done); res(); };
+        video.addEventListener("seeked", done);
+        video.currentTime = entry.seconds;
+        setTimeout(done, 3000);
+      });
+    }
+    mod.dhampir_project_draw(frame);
+    // 读回 canvas：WebGPU canvas 支持 toDataURL，用它拿一个"非空"的证明
+    const dataUrl = document.getElementById("c").toDataURL("image/png");
+    report.frames.push({ frame, sources: info.sources, pngLength: dataUrl.length });
+    log("frame " + frame + " -> " + info.sources.length + " 源, canvas " + dataUrl.length + " 字节");
+  }
+
+  report.ok = true;
+} catch (error) {
+  report.error = String(error && error.message ? error.message : error);
+  report.ok = false;
+}
+await post(report);
+</script>
+</body></html>
