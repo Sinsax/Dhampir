@@ -104,6 +104,26 @@ pub struct Clip {
     pub effects: Vec<Effect>,
     #[serde(default)]
     pub keyframes: Vec<Keyframe>,
+    /// 入场转场。挂在**后一个**片段上，占它开头的若干帧。
+    #[serde(default)]
+    pub transition_in: Option<TransitionSpec>,
+}
+
+/// 转场：把前一个相邻片段淡出的同时把自己淡入。
+///
+/// 用「挂在片段上」而不是「在轨道上单列一条」，是为了让**重叠规则保持简单**：
+/// 轨道内片段仍然不许重叠——转场不破坏这条不变量，也就不需要为它开特例。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TransitionSpec {
+    pub kind: TransitionKind,
+    /// 占多少帧。必须为正，且不超过本片段的时长。
+    pub duration: Frame,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransitionKind {
+    CrossDissolve,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -351,6 +371,34 @@ pub fn validate_project_with_effects(project: &Project, effects: &[EffectSpec]) 
                 }
             }
 
+            if let Some(transition) = &clip.transition_in {
+                if transition.duration <= 0 {
+                    issues.push(Issue::new(
+                        "transition_duration_invalid",
+                        &format!("{}.transition_in.duration", clip_path),
+                        format!("转场时长必须是正的帧数，得到 {}", transition.duration),
+                    ));
+                } else if transition.duration > clip.duration {
+                    issues.push(Issue::new(
+                        "transition_longer_than_clip",
+                        &format!("{}.transition_in.duration", clip_path),
+                        format!("转场要 {} 帧，而片段本身只有 {} 帧", transition.duration, clip.duration),
+                    ));
+                }
+                // 转场要和前一个片段**紧邻**——否则「淡出」的那一头根本不存在，
+                // 画面会凭空从黑里淡进来，而用户以为自己配了交叉溶解。
+                let has_previous = spans
+                    .iter()
+                    .any(|(_, end, index)| *index != clip_index && *end == clip.track_at);
+                if !has_previous {
+                    issues.push(Issue::new(
+                        "transition_without_previous",
+                        &format!("{}.transition_in", clip_path),
+                        format!("第 {} 帧之前没有紧邻的片段，转场无处淡出", clip.track_at),
+                    ));
+                }
+            }
+
             if !effects.is_empty() {
                 for (effect_index, effect) in clip.effects.iter().enumerate() {
                     let effect_path = format!("{}.effects[{}]", clip_path, effect_index);
@@ -416,6 +464,7 @@ mod tests {
                     opacity: 1.0,
                     effects: Vec::new(),
                     keyframes: Vec::new(),
+                    transition_in: None,
                 }],
             }],
         }
@@ -458,6 +507,7 @@ mod tests {
             opacity: 1.0,
             effects: Vec::new(),
             keyframes: Vec::new(),
+                    transition_in: None,
         });
         assert!(validate_project(&project).is_empty(), "紧邻不该算重叠");
 
@@ -563,6 +613,88 @@ mod tests {
         let mut project = minimal();
         project.timebase = TimebaseDto { num: 0, den: 1 };
         assert_eq!(codes(&validate_project(&project)), vec!["invalid_timebase"]);
+    }
+
+
+    #[test]
+    fn 转场必须紧邻前一片段() {
+        let mut project = minimal();
+        let mut second = project.tracks[0].clips[0].clone();
+        second.id = "c2".to_string();
+        second.track_at = 60;
+        second.duration = 30;
+        second.transition_in = Some(TransitionSpec {
+            kind: TransitionKind::CrossDissolve,
+            duration: 15,
+        });
+        project.tracks[0].clips.push(second);
+        assert!(validate_project(&project).is_empty(), "紧邻的转场应当合法");
+
+        project.tracks[0].clips[1].track_at = 70;
+        assert_eq!(
+            codes(&validate_project(&project)),
+            vec!["transition_without_previous"]
+        );
+    }
+
+    #[test]
+    fn 轨道首片段不能有入场转场() {
+        let mut project = minimal();
+        project.tracks[0].clips[0].transition_in = Some(TransitionSpec {
+            kind: TransitionKind::CrossDissolve,
+            duration: 10,
+        });
+        assert_eq!(
+            codes(&validate_project(&project)),
+            vec!["transition_without_previous"]
+        );
+    }
+
+    #[test]
+    fn 转场时长必须正且不超过片段() {
+        let mut project = minimal();
+        let mut second = project.tracks[0].clips[0].clone();
+        second.id = "c2".to_string();
+        second.track_at = 60;
+        second.duration = 30;
+        project.tracks[0].clips.push(second);
+
+        project.tracks[0].clips[1].transition_in = Some(TransitionSpec {
+            kind: TransitionKind::CrossDissolve,
+            duration: 0,
+        });
+        assert_eq!(codes(&validate_project(&project)), vec!["transition_duration_invalid"]);
+
+        project.tracks[0].clips[1].transition_in = Some(TransitionSpec {
+            kind: TransitionKind::CrossDissolve,
+            duration: 31,
+        });
+        assert_eq!(codes(&validate_project(&project)), vec!["transition_longer_than_clip"]);
+
+        project.tracks[0].clips[1].transition_in = Some(TransitionSpec {
+            kind: TransitionKind::CrossDissolve,
+            duration: 30,
+        });
+        assert!(validate_project(&project).is_empty());
+    }
+
+    #[test]
+    fn 转场不破坏不重叠这条不变量() {
+        let mut project = minimal();
+        let mut second = project.tracks[0].clips[0].clone();
+        second.id = "c2".to_string();
+        second.track_at = 60;
+        second.transition_in = Some(TransitionSpec {
+            kind: TransitionKind::CrossDissolve,
+            duration: 20,
+        });
+        project.tracks[0].clips.push(second);
+        let issues = validate_project(&project);
+        assert!(
+            !issues.iter().any(|i| i.code == "clip_overlap"),
+            "转场不该被当成重叠：{:?}",
+            codes(&issues)
+        );
     }
 
     #[test]

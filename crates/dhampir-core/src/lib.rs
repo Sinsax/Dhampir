@@ -34,6 +34,8 @@
 //! 宿主写 `dhampir_core::wgpu::...` 而不是自己 `use wgpu`，版本就不可能对不上。
 
 pub mod cache;
+pub mod compose;
+pub mod effects;
 pub mod gpu;
 pub mod io;
 pub mod readback;
