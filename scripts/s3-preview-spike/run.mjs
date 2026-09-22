@@ -92,6 +92,8 @@ export function validateReport(report, want = { w: WANT_W, h: WANT_H }) {
     if (perf.decode === undefined || !(perf.decode.n >= 5)) problems.push('解码样本数不足：' + JSON.stringify(perf.decode));
     else if (!(perf.decode.p95 > 0)) problems.push('decode p95 不是正数');
     if (perf.upload_render === undefined || !(perf.upload_render.p95 > 0)) problems.push('upload_render 没量到');
+    if (perf.seek === undefined || !(perf.seek.n >= 5)) problems.push('seek 样本数不足：' + JSON.stringify(perf.seek));
+    else if (!(perf.seek.p95 > 0)) problems.push('seek p95 不是正数');
   }
   if (report.playback === undefined) problems.push('缺 playback：流水线播放没跑');
   else {
@@ -191,7 +193,7 @@ function selfTest() {
       evicted_frames: 6, evicted_textures: 6, open_frames_after: 4,
       final: { ram_bytes: 14745600, vram_bytes: 14745600, ram_over: false, vram_over: false },
     },
-    perf: { targets: 10, decode: { n: 10, p50: 12, p95: 30, max: 40 }, upload_render: { n: 10, p50: 2, p95: 4, max: 6 } },
+    perf: { targets: 8, seek: { n: 8, p50: 30, p95: 45, max: 50 }, decode: { n: 8, p50: 12, p95: 30, max: 40 }, upload_render: { n: 8, p50: 2, p95: 4, max: 6 } },
     playback: {
       frames: 240, requested: 240, wall_ms: 1000, ideal_ms_at_60fps: 4000, fps: 240, drop_ratio: 0,
       heap_before: 1000, heap_peak: 2000, heap_after: 1500, vram_textures_alive: 0,

@@ -389,29 +389,41 @@ async function main() {
   const decodeTimes = [];
   const renderTimes = [];
 
+  // **复用一个解码器**：真实实现不会每拖一次就新建一个。
+  // 先前 seekTo 里每帧 seek 都 new + configure 一次，那笔固定开销被算进了 seek 延迟——
+  // 这也解释了为什么有头（硬件解码）与无头几乎一样（60.8 vs 60.3 ms）：贵的不是解码。
+  // 复用是安全的：每次都从同步样本喂起，喂一个新关键帧就等于重置了参考链。
+  let seekLast = null;
+  const seekDec = new VideoDecoder({
+    output: (f) => { if (seekLast !== null) seekLast.close(); seekLast = f; },
+    error: () => {},
+  });
+  seekDec.configure({ codec: codec, description: desc, codedWidth: meta.width, codedHeight: meta.height });
+
   // 一次 seek：从同步样本一路解到目标帧。只留最新一帧，避免输出帧池把它卡住。
   const seekTo = async (frame) => {
     const from = mod.dhampir_demux_sync_start(frame);
-    let last = null;
+    seekLast = null;
     const t0 = performance.now();
-    const dec = new VideoDecoder({
-      output: (f) => { if (last !== null) last.close(); last = f; },
-      error: () => {},
-    });
-    dec.configure({ codec: codec, description: desc, codedWidth: meta.width, codedHeight: meta.height });
+    const dec = seekDec;
     for (let i = from; i <= frame; i += 1) {
       const s = samples[i];
       dec.decode(new EncodedVideoChunk({ type: s.k ? 'key' : 'delta', timestamp: Math.round((s.d / meta.timescale) * 1e6), duration: Math.round((s.u / meta.timescale) * 1e6), data: mp4.subarray(s.o, s.o + s.s) }));
     }
     await dec.flush();
-    return { video: last, decode_ms: performance.now() - t0, sync_from: from };
+    return { video: seekLast, decode_ms: performance.now() - t0, sync_from: from };
   };
 
   step('section5-start');
-  // 抽样目标砍到 5 个：1080p 下每多一个目标就要多解最多 60 帧，
-  // 上一版 10 个目标在 1080p 上把整轮拖过了 7 分钟。
-  const targets = [10, 90, 200, 320, 420];
+  // 8 个抽样点：要给出像样的 p95，样本太少没有意义。
+  // （上一版 10 个在 1080p 上把整轮拖过 7 分钟，5 个又太少——8 是个折中。）
+  const targets = [10, 60, 130, 200, 280, 340, 400, 460];
+  const seekTimes = [];
   for (const target of targets) {
+    // 这一次计时覆盖**整条 scrub 路径**：从同步样本解码到目标帧 → 上传 → 搬运 → 提交 → 等 GPU 完成。
+    // 这才是用户拖动时真正等的那一下；先前把 decode 与 upload 分成两段各自同步，
+    // 多算了一次同步，而且给不出一个可定档的单一数字。
+    const tSeek = performance.now();
     const got = await seekTo(target);
     if (got.video === null) continue;
     decodeTimes.push(got.decode_ms);
@@ -428,6 +440,7 @@ async function main() {
     device.queue.submit([e5.finish()]);
     await device.queue.onSubmittedWorkDone();
     renderTimes.push(performance.now() - t1);
+    seekTimes.push(performance.now() - tSeek);
 
     openFrames.set(target, { video: got.video, tex: tex, out: out });
     // 记账：RAM 记 VideoFrame，VRAM 记纹理；淘汰谁由 Rust 的策略说了算
@@ -450,7 +463,7 @@ async function main() {
   report.cache.evicted_textures = clippedTotal;
   report.cache.open_frames_after = openFrames.size;
   report.cache.final = JSON.parse(mod.dhampir_cache_stats());
-  report.perf = { targets: targets.length, decode: pctl(decodeTimes), upload_render: pctl(renderTimes) };
+  report.perf = { targets: targets.length, seek: pctl(seekTimes), decode: pctl(decodeTimes), upload_render: pctl(renderTimes) };
   log('缓存与测量完成：淘汰 ' + evictedTotal + ' 帧，decode p95=' + report.perf.decode.p95 + 'ms');
 
   for (const entry of openFrames.values()) { entry.video.close(); if (entry.tex !== null) entry.tex.destroy(); }
