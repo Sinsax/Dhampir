@@ -93,6 +93,15 @@ export function validateReport(report, want = { w: WANT_W, h: WANT_H }) {
     else if (!(perf.decode.p95 > 0)) problems.push('decode p95 不是正数');
     if (perf.upload_render === undefined || !(perf.upload_render.p95 > 0)) problems.push('upload_render 没量到');
   }
+  if (report.playback === undefined) problems.push('缺 playback：流水线播放没跑');
+  else {
+    const pb = report.playback;
+    if (pb.frames !== pb.requested) problems.push('播放丢了帧：产出 ' + pb.frames + ' / 请求 ' + pb.requested);
+    if (!(pb.fps > 0)) problems.push('fps 不是正数：' + pb.fps);
+    if (!(pb.wall_ms > 0)) problems.push('播放耗时不是正数');
+    if (pb.cache_final === undefined || pb.cache_final.vram_over === true) problems.push('播放期间 VRAM 记账超预算');
+    if (pb.vram_textures_alive > 0) problems.push('播放结束后还留着 ' + pb.vram_textures_alive + ' 张纹理没释放');
+  }
   return problems;
 }
 
@@ -112,7 +121,8 @@ export function findBrowser() {
 function parseArgs(argv) {
   const out = {
     media: join(REPO_ROOT, 'target', 's3', 'proxy720p.mp4'),
-    headed: false, selfTest: false, timeoutMs: 420000, bad: false,
+    headed: false, selfTest: false, timeoutMs: 600000, bad: false,
+    width: WANT_W, height: WANT_H,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -120,6 +130,8 @@ function parseArgs(argv) {
     else if (arg === '--headed') out.headed = true;
     else if (arg === '--media') { out.media = resolve(REPO_ROOT, argv[i + 1] === undefined ? '' : argv[i + 1]); i += 1; }
     else if (arg === '--timeout') { out.timeoutMs = Number(argv[i + 1]) * 1000; i += 1; }
+    else if (arg === '--width') { out.width = Number(argv[i + 1]); i += 1; }
+    else if (arg === '--height') { out.height = Number(argv[i + 1]); i += 1; }
     else { console.error('✗ 不认识的参数：' + arg); out.bad = true; }
   }
   return out;
@@ -147,6 +159,11 @@ function selfTest() {
       final: { ram_bytes: 14745600, vram_bytes: 14745600, ram_over: false, vram_over: false },
     },
     perf: { targets: 10, decode: { n: 10, p50: 12, p95: 30, max: 40 }, upload_render: { n: 10, p50: 2, p95: 4, max: 6 } },
+    playback: {
+      frames: 240, requested: 240, wall_ms: 1000, ideal_ms_at_60fps: 4000, fps: 240, drop_ratio: 0,
+      heap_before: 1000, heap_peak: 2000, heap_after: 1500, vram_textures_alive: 0,
+      cache_final: { vram_over: false, ram_over: false },
+    },
   };
   expect('自洽的结果必须过', validateReport(good).length === 0, validateReport(good).join(' | '));
   expect('摘要不同必须被抓', validateReport({ ...good, digests_match: false }).length > 0, '放过了摘要不同');
@@ -159,6 +176,8 @@ function selfTest() {
   expect('同步样本回溯错必须被抓', validateReport({ ...good, demux: { ...good.demux, sync_start_of_130: 0 } }).length > 0, '放过了回溯错');
   expect('末帧不一致必须被抓', validateReport({ ...good, seek: { ...good.seek, equivalent: false } }).length > 0, '放过了末帧不一致');
   expect('一帧没淘汰必须被抓', validateReport({ ...good, cache: { ...good.cache, evicted_frames: 0 } }).length > 0, '放过了零淘汰');
+  expect('播放丢帧必须被抓', validateReport({ ...good, playback: { ...good.playback, frames: 239 } }).length > 0, '放过了丢帧');
+  expect('播完还留纹理必须被抓', validateReport({ ...good, playback: { ...good.playback, vram_textures_alive: 3 } }).length > 0, '放过了纹理泄漏');
   expect('记账超预算必须被抓', validateReport({ ...good, cache: { ...good.cache, final: { ...good.cache.final, ram_over: true } } }).length > 0, '放过了超预算');
   if (failures.length > 0) { for (const f of failures) console.error('  - ' + f); return 1; }
   console.log('✓ 驱动自检通过（' + count + ' 条断言：结果自洽性校验）');
@@ -182,9 +201,16 @@ async function main() {
   const html = readFileSync(PAGE);
   const mediaSize = statSync(args.media).size;
   let settle = null;
+  let lastProgress = '(页面还没报进度)';
   const gotResult = new Promise((res) => { settle = res; });
 
   const server = createServer((req, res) => {
+    if (req.method === 'POST' && req.url === '/progress') {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => { lastProgress = body; res.writeHead(204).end(); });
+      return;
+    }
     if (req.method === 'POST' && req.url === '/result') {
       let body = '';
       req.on('data', (c) => { body += c; });
@@ -239,11 +265,12 @@ async function main() {
   server.close();
 
   if (report === '__timeout__') {
-    console.error('✗ 等结果超时（' + args.timeoutMs + 'ms）。Chrome stderr 末尾：');
+    console.error('✗ 等结果超时（' + args.timeoutMs + 'ms）。页面最后报到的进度：' + lastProgress);
+    console.error('Chrome stderr 末尾：');
     console.error(chromeErr.trim().split(String.fromCharCode(10)).slice(-10).join(String.fromCharCode(10)));
     return 1;
   }
-  const problems = validateReport(report, { w: WANT_W, h: WANT_H });
+  const problems = validateReport(report, { w: args.width, h: args.height });
   console.log('');
   if (problems.length > 0) {
     console.error('✗ 结果不自洽，拒绝给结论：');

@@ -16,7 +16,11 @@ const logEl = document.getElementById('log');
 const log = (m) => { logEl.textContent += m + NL; };
 const post = (o) => fetch('/result', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(o) });
 const report = {};
-const step = (name) => { report.step = name; };
+const step = (name) => {
+  report.step = name;
+  // 进度信标：只用于"超时的时候知道卡在哪"，不参与结论。
+  fetch('/progress', { method: 'POST', body: name }).catch(() => {});
+};
 
 // 与 Rust 侧同参数的 FNV-1a 64（16 位小写十六进制）——摘要能跨语言直接比。
 function fnv1a64(bytes) {
@@ -294,7 +298,10 @@ async function main() {
     return { video: last, decode_ms: performance.now() - t0, sync_from: from };
   };
 
-  const targets = [10, 50, 90, 130, 200, 260, 320, 380, 420, 460];
+  step('section5-start');
+  // 抽样目标砍到 5 个：1080p 下每多一个目标就要多解最多 60 帧，
+  // 上一版 10 个目标在 1080p 上把整轮拖过了 7 分钟。
+  const targets = [10, 90, 200, 320, 420];
   for (const target of targets) {
     const got = await seekTo(target);
     if (got.video === null) continue;
@@ -339,7 +346,92 @@ async function main() {
 
   for (const entry of openFrames.values()) { entry.video.close(); if (entry.tex !== null) entry.tex.destroy(); }
   openFrames.clear();
+
+  // ---- (6) T3.5：流水线播放（不再每帧全同步）+ 内存曲线 ----
+  step('section6-start');
+  const playFrom = 60;
+  // 2 秒 @60fps 足够量吞吐；240 帧在 1080p 下太贵。
+  const playCount = 120;
+  const playTextures = new Map();
+  let pendingClose = [];
+  let produced = 0;
+  const heapNow = () => (performance.memory ? performance.memory.usedJSHeapSize : null);
+  const heapBefore = heapNow();
+  let heapPeak = heapBefore;
+  mod.dhampir_cache_open(VRAM_BUDGET, RAM_BUDGET);
+
+  const playDec = new VideoDecoder({
+    output: async (f) => {
+      produced += 1;
+      // 拷 + 搬 + 提交，**不等 GPU**——这正是流水线与上一节的区别
+      const tex = device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+      device.queue.copyExternalImageToTexture({ source: f }, { texture: tex, premultipliedAlpha: false }, [W, H]);
+      const out = device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+      const e6 = device.createCommandEncoder();
+      const p6 = e6.beginRenderPass({ colorAttachments: [{ view: out.createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+      const b6 = device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: tex.createView() }] });
+      p6.setPipeline(pipe); p6.setBindGroup(0, b6); p6.draw(3); p6.end();
+      device.queue.submit([e6.finish()]);
+
+      // 纹理进 VRAM 账：超过预算就把该淘汰的销毁掉
+      const evicted = JSON.parse(mod.dhampir_cache_note_vram(produced, frameBytes));
+      for (const k of evicted) { const t = playTextures.get(k); if (t !== undefined) { t.destroy(); playTextures.delete(k); } }
+      playTextures.set(produced, tex);
+
+      // 每 4 帧同步一次、把已提交的源帧关掉。**这个 4 是被卡死教出来的**：
+      // 上一版等攒够 16 帧才释放，而 1080p 下解码器的输出帧池比 16 小——
+      // 于是它等我们释放、我们等攒够 16，双方对等 = 死锁（整轮卡在 section6 十几分钟）。
+      // 批量越小越安全，代价只是多几次 onSubmittedWorkDone。
+      pendingClose.push(f);
+      if (pendingClose.length >= 4) {
+        await device.queue.onSubmittedWorkDone();
+        for (const x of pendingClose) x.close();
+        pendingClose = [];
+        const h = heapNow();
+        if (h !== null && (heapPeak === null || h > heapPeak)) heapPeak = h;
+      }
+    },
+    error: () => {},
+  });
+  playDec.configure({ codec: codec, description: desc, codedWidth: meta.width, codedHeight: meta.height });
+
+  const tPlay = performance.now();
+  for (let i = playFrom; i < playFrom + playCount; i += 1) {
+    const s = samples[i];
+    playDec.decode(new EncodedVideoChunk({ type: s.k ? 'key' : 'delta', timestamp: Math.round((s.d / meta.timescale) * 1e6), duration: Math.round((s.u / meta.timescale) * 1e6), data: mp4.subarray(s.o, s.o + s.s) }));
+  }
+  await playDec.flush();
+  await device.queue.onSubmittedWorkDone();
+  for (const x of pendingClose) x.close();
+  pendingClose = [];
+  const playMs = performance.now() - tPlay;
+  const heapAfter = heapNow();
+  const fps = produced / (playMs / 1000);
+  // 先释放、再记账：`vram_textures_alive` 要等于「漏没漏」，不是「释放前有几张」。
+  // 上一版写成释放前取值，驱动那条「播放结束后还留着 2 张纹理没释放」当场就报了——
+  // 那条闸是对的，错的是这个字段的位置。
+  for (const [k, t] of playTextures) {
+    t.destroy();
+    // 释放要**回报**给缓存账，否则账目比现实多留几张（这本账是用来防漏的，不能自己漏）。
+    mod.dhampir_cache_remove_vram(k);
+  }
+  playTextures.clear();
+  report.playback = {
+    frames: produced,
+    requested: playCount,
+    wall_ms: +playMs.toFixed(1),
+    ideal_ms_at_60fps: +((playCount / 60) * 1000).toFixed(1),
+    fps: +fps.toFixed(1),
+    drop_ratio: +Math.max(0, 1 - fps / 60).toFixed(3),
+    heap_before: heapBefore,
+    heap_peak: heapPeak,
+    heap_after: heapAfter,
+    vram_textures_alive: playTextures.size,
+    cache_final: JSON.parse(mod.dhampir_cache_stats()),
+  };
+  log('播放：' + report.playback.fps + ' fps 丢帧率 ' + report.playback.drop_ratio);
   log('seek 等价性：' + (report.seek.equivalent === true ? '一致' : '不一致'));
+  step('posting');
   report.ok = true;
   log('完成');
   await post(report);
