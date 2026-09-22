@@ -17,3 +17,7 @@ log = { workspace = true }
 # 比对在编码后的字节上进行，两端编码器不同的话归因就无从下手。
 # `png` 是纯 Rust，wasm32 上原样可用。
 png = "0.17"
+# 记录（`run.json` 那一套）的形状也归 core：M2 的两端要产出**同一张表**，
+# 而"同一张表"如果由两个宿主各拼一遍 JSON，比出来的就不只是渲染差异了。
+# `serde_json` 是纯 Rust，wasm32 上原样可用，且不引入任何执行器。
+serde_json = { workspace = true }

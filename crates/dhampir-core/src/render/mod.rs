@@ -16,6 +16,14 @@
 mod probe;
 mod scene;
 
+/// corpus 的公共部分：一帧怎么渲染、怎么判、整表摘要怎么算、**记录长什么样**。
+///
+/// `pub` 的理由与 [`scene_model`] 一样，而且更强：**两个宿主都要调它**。
+/// M2 要证明的是"同一份 WGSL 在两个运行时里画出同样的字节"，如果驱动这件事的
+/// 代码——以及"画完之后写成什么表"——在两端各写一遍，那个证明就退化成
+/// "两份驱动大致相当"。
+pub mod corpus;
+
 /// corpus 场景的**纯数值模型**：一堆 `f64` 算术，不碰 GPU、不碰 `wgpu`。
 ///
 /// `pub` 不是随手写的：worker 用它判定实测值，而复核者要能**站在 crate 外面**
@@ -26,6 +34,12 @@ pub mod scene_model;
 #[cfg(test)]
 mod wgsl_subset;
 
+pub use corpus::{
+    CORPUS_RECORD_KIND, CORPUS_RECORD_SCHEMA, CORPUS_TARGET_FORMAT, CORPUS_TABLE_MILESTONE, Counts,
+    CorpusError, PointReading, RenderPair, SceneFrame, SceneRun, TableRow, frame_json,
+    frame_rel_path, frames_digest, judge_frame, leg_json, point_json, render_frame,
+    render_frame_pair, render_frame_record, render_run, report_text, scene_json, table_digest,
+};
 pub use probe::{
     PROBE_CLEAR_COLOR, PROBE_TARGET_SIZE, PROBE_VERTICES, ProbeRenderer, ProbeSample, ProbeVertex,
     SampleExpectation, VERTEX_INSET, probe_samples, render_probe_frame,

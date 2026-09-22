@@ -1,35 +1,46 @@
-//! M1 corpus：core 的五个确定性场景 → PNG + 逐点判定 + 摘要。
+//! M1 corpus 的 **native 宿主侧**：解析命令行取值 → 交给 core 跑 → 落盘 → 跨进程比对。
 //!
-//! 与 M0 的 [`crate::offscreen`] 是同一个形状（建纹理 → 渲染 → 读回 → 判定 → 写记录），
-//! 差别只在"画什么"。**本模块不发明场景**：名字、尺寸、清屏色、入口、采样点全部来自
-//! [`SELECTABLE_SCENES`]——记录里出现的每个坐标都能在 core 里查到出处。M0 已经因为
-//! "记录写一套坐标、断言查另一套"吃过一次亏，这里不重演。
+//! 这里**不发明场景**：名字、尺寸、清屏色、入口、采样点全部来自 [`SELECTABLE_SCENES`]——
+//! 记录里出现的每个坐标都能在 core 里查到出处。M0 已经因为"记录写一套坐标、断言查
+//! 另一套"吃过一次亏，这里不重演。
+//!
+//! # 这个模块剩下的三件事
+//!
+//! M2 起，驱动与记录都住进了 [`dhampir_core::render::corpus`]，本模块只剩：
+//!
+//! 1. **解析命令行取值**（[`parse_selection`] / [`parse_frames`]）——只有 CLI 才需要；
+//! 2. **落盘**（[`write_frames`]）——浏览器宿主没有文件系统，它把字节交给 JS；
+//! 3. **跨进程比对**（[`compare_runs`]）——这是 `--compare-run` 这个 CLI 开关的服务对象。
+//!
+//! 搬走的每一个东西都带着同一个理由：**它必须只有一份实现**。两端各写一遍驱动代码，
+//! M2 那句"同一帧在两个运行时里画出同样的字节"就退化成"两份驱动大致相当"；
+//! 两端各写一遍记录的形状，比出来的就不只是渲染差异了。
 //!
 //! # 一帧画两遍
 //!
-//! 每一帧**渲染两次**（两块纹理、两条命令缓冲），比字节。这不是浪费：M1 的退出标准
-//! 就是"重复运行逐字节一致"，而一致性必须由**代码**去比，不能由"我看着一样"来宣布。
-//! 两次不一致时**照记不误**——那是一个发现（驱动？后端？提交顺序？），不是失败，
-//! 更不该用颜色断言把它盖过去：判定在这种帧上直接留空（`null`），
-//! 因为"没验"和"验过通过"是两件不同的事。
+//! 每一帧**渲染两次**再比字节，这件事在 core
+//! （[`dhampir_core::render::corpus::render_frame_pair`]）。两次不一致时**照记不误**——
+//! 那是一个发现（驱动？后端？提交顺序？），不是失败，更不该用颜色断言把它盖过去：
+//! 判定在这种帧上直接留空（`null`），因为"没验"和"验过通过"是两件不同的事。
 //!
 //! # 尺寸
 //!
 //! corpus 一律按 [`SceneSpec::size`]（256×256）渲染：采样点的坐标是按这个尺寸定的，
 //! `expected_bytes` 也只在这个尺寸上成立。1080p 的计时用的是
-//! [`SceneRenderer::new_at`]，在 [`crate::baseline`] 里——两处的尺寸是**两个不同的问题**，
-//! 不要为了让记录好看而把它们统一。
+//! [`dhampir_core::render::SceneRenderer::new_at`]，在 [`crate::baseline`] 里——
+//! 两处的尺寸是**两个不同的问题**，不要为了让记录好看而把它们统一。
 
 use std::path::{Path, PathBuf};
 
 use dhampir_core::gpu::GpuContext;
-use dhampir_core::readback::{self, Rgba8Image};
-use dhampir_core::render::{
-    BYTE_TOLERANCE, SCENE_TARGET_FORMAT, SCENE_TARGET_SIZE, SELECTABLE_SCENES, SamplePoint,
-    SampleVerdict, SceneRenderer, SceneSpec, expected_bytes, judge_sample, scene_by_name,
-};
-use dhampir_core::timeline::fnv1a64;
-use dhampir_core::wgpu;
+use dhampir_core::render::corpus;
+use dhampir_core::render::{SELECTABLE_SCENES, SceneSpec, scene_by_name};
+
+// 搬到 core 的那些类型与函数在这里**原样再导出一次**：本模块的调用方与测试不用改一个字，
+// 而"东西住在哪"这件事由 core 决定。M2 的浏览器宿主导的是同一批名字。
+pub use dhampir_core::render::corpus::{Counts, PointReading, SceneFrame, SceneRun, frame_rel_path};
+pub use dhampir_core::render::{leg_json, report_text};
+
 
 /// 跑满一个整周期需要的帧数：`gradient` 的平移周期是 16 帧，`checker` / `srgb_linear`
 /// / `alpha_stack` 的周期是 3 / 8 / 4——**都整除 16**。
@@ -167,263 +178,31 @@ fn parse_frame_index(text: &str, whole: &str) -> Result<u32, String> {
 }
 
 // ---------------------------------------------------------------------------
-// 一帧的读数与判定
+// 渲染：宿主侧只剩薄薄的一层
 // ---------------------------------------------------------------------------
-
-/// 一个采样点的**声明 + 实测 + 判定**。
-///
-/// `measured` 与 `verdict` 都可能是 `None`，两者的含义**不同**：
-///
-/// - `measured: None` —— 坐标越界。模型算得出期望值，硬件那边没这个点，是硬缺陷。
-/// - `verdict: None` —— 这一帧没被判（重复渲染两次不一致，或整帧作废）。
-///   `measured` 照样留着：**发现要能被看见**，不能因为"判不了"就把读数丢了。
-#[derive(Clone, Debug)]
-pub struct PointReading {
-    pub point: SamplePoint,
-    pub measured: Option<[u8; 4]>,
-    pub verdict: Option<SampleVerdict>,
-}
-
-/// 一帧的产物：像素摘要、PNG 字节、逐点读数。
-///
-/// 留着**编码后的 PNG 字节**而不是 `Rgba8Image`：写文件只需要字节，判定在渲染时
-/// 就已经做完了——再留一份 256 KiB 的原始像素，只是为了将来某天能用上。记录里要的是
-/// 文件，不是内存里的中间物。
-pub struct SceneFrame {
-    pub spec: &'static SceneSpec,
-    pub frame: u32,
-    /// 第一次渲染的像素字节摘要（FNV-1a 64，喂的是**紧密打包**的 RGBA8，
-    /// 不是带行填充的拷贝缓冲）。
-    pub digest: u64,
-    /// 第二次渲染的像素摘要。与 `digest` 相等才算"同进程内逐字节一致"。
-    pub repeat_digest: u64,
-    /// PNG **文件字节**的摘要。退出标准说的是"跑出来的 PNG 逐字节一致"，
-    /// 所以文件本身也要有一个可比的数——只比像素的话，编码器换了就没人发现。
-    pub png_digest: u64,
-    pub png: Vec<u8>,
-    pub points: Vec<PointReading>,
-}
-
-impl SceneFrame {
-    /// 同帧两次渲染是否逐字节相同。
-    pub fn repeat_identical(&self) -> bool {
-        self.digest == self.repeat_digest
-    }
-
-    /// 记录里那一行自报家门用的名字，例如 `gradient f003`。
-    pub fn label(&self) -> String {
-        format!("{} f{:03}", self.spec.name, self.frame)
-    }
-}
-
-/// 一次 corpus 运行的全部帧。
-pub struct SceneRun {
-    pub frames: Vec<SceneFrame>,
-}
-
-impl SceneRun {
-    /// 同帧两次渲染**不一致**的那些帧。
-    ///
-    /// 返回名字而不是布尔：不一致是发现，发现要能指名道姓——"有一帧不对"这句话
-    /// 没法让人去查。
-    pub fn in_process_mismatches(&self) -> Vec<String> {
-        self.frames
-            .iter()
-            .filter(|f| !f.repeat_identical())
-            .map(SceneFrame::label)
-            .collect()
-    }
-
-    /// 整轮（所有场景 × 所有帧）的摘要，跨进程比对用。
-    ///
-    /// 喂进去的是"场景名 + 帧号 + 像素摘要"，顺序由 [`SceneRun::frames`] 决定
-    /// （注册表顺序 × 帧号递增）——顺序一变摘要就变，所以它同时也是"跑的顺序没变"
-    /// 的一条证据。**刻意不喂 PNG 字节**：像素才是渲染的结果，PNG 是它的编码；
-    /// 两者都在记录里，比对时分开看，归因才有地方落脚。
-    pub fn frames_digest(&self) -> u64 {
-        frames_digest(&self.frames)
-    }
-
-    /// 逐点统计。（帧数、点数、失败数、越界数、未判定数）
-    pub fn counts(&self) -> Counts {
-        let mut counts = Counts {
-            frames: self.frames.len(),
-            ..Counts::default()
-        };
-        for frame in &self.frames {
-            for reading in &frame.points {
-                counts.points += 1;
-                match (&reading.verdict, reading.measured) {
-                    (_, None) => counts.out_of_range += 1,
-                    (None, Some(_)) => counts.unjudged += 1,
-                    (Some(v), Some(_)) if !v.passed => counts.failed += 1,
-                    (Some(_), Some(_)) => {}
-                }
-            }
-        }
-        counts
-    }
-}
-
-/// [`SceneRun::counts`] 的结果。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Counts {
-    pub frames: usize,
-    pub points: usize,
-    pub failed: usize,
-    pub out_of_range: usize,
-    pub unjudged: usize,
-}
-
-impl Counts {
-    /// 三个"不干净"的桶都空着，才算这一次跑干净了。
-    ///
-    /// 收敛成一个布尔是**给退出码用的**；记录里三个数照样分开写——"判错了"
-    /// （`failed`）与"校验不了"（`unjudged`）的归因方向完全不同，
-    /// 合成一个布尔就再也分不开了。
-    ///
-    /// 空集合（`frames == 0`）在这里**算干净**——它不是一个错误结论。拦住"零帧记录"
-    /// 是别处的事（[`parse_frames`] 不许空区间，调用方也不许什么都不选）。
-    pub fn clean(&self) -> bool {
-        self.failed == 0 && self.out_of_range == 0 && self.unjudged == 0
-    }
-}
-
-/// 把若干帧按固定规则摘要成一个 64 位整数。见 [`SceneRun::frames_digest`]。
-pub fn frames_digest(frames: &[SceneFrame]) -> u64 {
-    let mut bytes = Vec::with_capacity(frames.len() * 24);
-    for frame in frames {
-        bytes.extend_from_slice(frame.spec.name.as_bytes());
-        bytes.push(0);
-        bytes.extend_from_slice(&frame.frame.to_le_bytes());
-        bytes.extend_from_slice(&frame.digest.to_le_bytes());
-    }
-    fnv1a64(&bytes)
-}
-
-// ---------------------------------------------------------------------------
-// 渲染
-// ---------------------------------------------------------------------------
-
-/// 渲染一帧 corpus 场景并读回。
-///
-/// 每次都用**全新的纹理**：复用同一块纹理会把"上一帧的残留"和"这一帧真的画对了"
-/// 混在一起，而 M1 要判的正是后者。
-fn render_frame(
-    ctx: &GpuContext,
-    renderer: &SceneRenderer,
-    frame: u32,
-) -> Result<Rgba8Image, Box<dyn std::error::Error>> {
-    let (width, height) = renderer.size();
-    let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("dhampir scene target"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: SCENE_TARGET_FORMAT,
-        // COPY_SRC 是读回的前提：canvas 纹理通常没有这个用途，这也正是
-        // "wasm 侧不要从 canvas 抄像素"（M2）在 native 这边的同一条约束。
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-    let mut encoder = ctx
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("dhampir scene encoder"),
-        });
-    renderer.render(&mut encoder, &ctx.queue, &view, frame);
-    ctx.queue.submit([encoder.finish()]);
-
-    Ok(pollster::block_on(readback::read_texture_rgba8(
-        &ctx.device,
-        &ctx.queue,
-        &texture,
-    ))?)
-}
 
 /// 跑一组场景 × 一个帧区间，出图、读回、逐点判定。
+/// **实现搬去了 [`dhampir_core::render::corpus::render_run`]**。
+///
+/// 本模块只负责把它变成同步的：native 宿主用 `pollster` 把 future 跑完，浏览器宿主
+/// 编译的是同一份 core 代码、只是直接 `.await`。这一层薄得可以忽略，换来的是
+/// "两端的调用形状完全相同"。
 ///
 /// 管线与 uniform **每场景建一次**（不是每帧一次）：这才是真实运行的样子
 /// （M4 导出也是一个场景连续出多帧），而且"换帧不需要重建管线"这件事因此被真的走到。
+/// 这条纪律也在 core 里——宿主不该有机会把它写错。
 pub fn run_scenes(
     ctx: &GpuContext,
     specs: &[&'static SceneSpec],
     frames: (u32, u32),
 ) -> Result<SceneRun, Box<dyn std::error::Error>> {
-    let mut rendered = Vec::new();
-
-    for spec in specs {
-        let renderer = SceneRenderer::new(&ctx.device, SCENE_TARGET_FORMAT, spec);
-        for frame in frames.0..frames.1 {
-            let first = render_frame(ctx, &renderer, frame)?;
-            let second = render_frame(ctx, &renderer, frame)?;
-            let digest = fnv1a64(&first.pixels);
-            let repeat_digest = fnv1a64(&second.pixels);
-            let points = judge_frame(spec, frame, &first, digest == repeat_digest);
-            let png = first
-                .encode_png()
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
-            rendered.push(SceneFrame {
-                spec,
-                frame,
-                digest,
-                repeat_digest,
-                png_digest: fnv1a64(&png),
-                png,
-                points,
-            });
-        }
-    }
-
-    Ok(SceneRun { frames: rendered })
+    Ok(pollster::block_on(corpus::render_run(ctx, specs, frames))?)
 }
 
-/// 判定一帧的全部采样点。**纯函数**（不碰 GPU、不碰文件），所以能被单测钉住。
-///
-/// `repeat_identical` 为假时**不判**：那一帧的读数已经不是一个可信的观测了，
-/// 再用颜色断言去判它，等于用一个坏观测的结论去覆盖"这帧本身就不稳定"这个发现。
-pub fn judge_frame(
-    spec: &SceneSpec,
-    frame: u32,
-    image: &Rgba8Image,
-    repeat_identical: bool,
-) -> Vec<PointReading> {
-    spec.samples
-        .iter()
-        .map(|point| {
-            let point = *point;
-            let measured = image.pixel(point.x, point.y);
-            let verdict = match (repeat_identical, measured) {
-                (true, Some(rgba)) => Some(judge_sample(spec, frame, point, rgba)),
-                _ => None,
-            };
-            PointReading {
-                point,
-                measured,
-                verdict,
-            }
-        })
-        .collect()
-}
 
 // ---------------------------------------------------------------------------
 // 写记录
 // ---------------------------------------------------------------------------
-
-/// 一帧在记录目录里的相对路径，`/` 分隔（跨平台一致）。
-///
-/// 帧号固定三位：记录里的文件按**字典序**排要与帧号顺序一致，否则人一眼扫过去
-/// 看到的是 `f10` 排在 `f2` 前面——那种记录没人会认真读。
-pub fn frame_rel_path(spec_name: &str, frame: u32) -> String {
-    format!("frames/{spec_name}-f{frame:03}.png")
-}
 
 /// 把全部帧写成 PNG，返回写出的文件（含目录，供调用方打进记录）。
 pub fn write_frames(dir: &Path, run: &SceneRun) -> Result<Vec<PathBuf>, std::io::Error> {
@@ -436,214 +215,6 @@ pub fn write_frames(dir: &Path, run: &SceneRun) -> Result<Vec<PathBuf>, std::io:
         written.push(path);
     }
     Ok(written)
-}
-
-/// 逐点读数的人读版报告。
-///
-/// `run.json` 里已经有结构化的一份；这一份存在是因为**给人看的记录和给程序看的记录
-/// 不是同一种东西**：前者要能直接读出一行行"哪一帧、哪个点、实测多少、模型多少、
-/// 差几个字节"，后者要能稳定地被比对。
-pub fn report_text(run: &SceneRun) -> String {
-    let mut out = String::new();
-    let counts = run.counts();
-
-    out.push_str("dhampir M1 corpus 逐点读数\n");
-    out.push_str(&format!(
-        "帧 {}、采样点 {}、失败 {}、越界 {}、未判定 {}；容差 {} 字节\n\n",
-        counts.frames,
-        counts.points,
-        counts.failed,
-        counts.out_of_range,
-        counts.unjudged,
-        dhampir_core::render::BYTE_TOLERANCE,
-    ));
-
-    for frame in &run.frames {
-        out.push_str(&format!(
-            "--- {} （{}；同帧两次渲染{}）\n",
-            frame.label(),
-            frame.spec.description,
-            if frame.repeat_identical() {
-                "逐字节一致".to_string()
-            } else {
-                format!("不一致：{:016x} vs {:016x}", frame.digest, frame.repeat_digest)
-            }
-        ));
-        for reading in &frame.points {
-            let point = reading.point;
-            match (&reading.verdict, reading.measured) {
-                (Some(verdict), Some(measured)) => {
-                    out.push_str(&verdict.report_line(frame.spec, frame.frame, point, measured));
-                }
-                (_, None) => out.push_str(&format!(
-                    "{:<12} f{:<3} ({:>3},{:>3}) {:<14} 越界——采样表里的坐标落在图像外",
-                    frame.spec.name, frame.frame, point.x, point.y, point.label,
-                )),
-                (None, Some(measured)) => out.push_str(&format!(
-                    "{:<12} f{:<3} ({:>3},{:>3}) {:<14} 实测 {:>3} {:>3} {:>3} {:>3} \
-                     | 未判定：同帧两次渲染结果不一致",
-                    frame.spec.name,
-                    frame.frame,
-                    point.x,
-                    point.y,
-                    point.label,
-                    measured[0],
-                    measured[1],
-                    measured[2],
-                    measured[3],
-                )),
-            }
-            out.push('\n');
-        }
-        out.push('\n');
-    }
-    out
-}
-
-/// 一帧的结构化记录（`run.json` 里的 `frames[]`）。
-pub fn frame_json(frame: &SceneFrame) -> serde_json::Value {
-    let points: Vec<serde_json::Value> = frame.points.iter().map(point_json).collect();
-    serde_json::json!({
-        "scene": frame.spec.name,
-        "frame": frame.frame,
-        "png": frame_rel_path(frame.spec.name, frame.frame),
-        "pixel_digest": format!("{:016x}", frame.digest),
-        "repeat_pixel_digest": format!("{:016x}", frame.repeat_digest),
-        "repeat_identical": frame.repeat_identical(),
-        "png_digest": format!("{:016x}", frame.png_digest),
-        "png_bytes": frame.png.len(),
-        "points": points,
-    })
-}
-
-/// 一个采样点的结构化记录。
-///
-/// `passed` 是三态的：`true` / `false` / `null`（没判）。**"没判"绝不能写成 `true`。**
-pub fn point_json(reading: &PointReading) -> serde_json::Value {
-    let point = reading.point;
-    let (expected, distance, tolerance, passed, detail) = match &reading.verdict {
-        Some(v) => (
-            serde_json::Value::from(v.expected.to_vec()),
-            serde_json::Value::from(v.distance),
-            serde_json::Value::from(v.tolerance),
-            serde_json::Value::from(v.passed),
-            serde_json::Value::from(v.detail.clone()),
-        ),
-        None => (
-            serde_json::Value::Null,
-            serde_json::Value::Null,
-            serde_json::Value::from(dhampir_core::render::BYTE_TOLERANCE),
-            serde_json::Value::Null,
-            serde_json::Value::from(if reading.measured.is_none() {
-                "越界：采样坐标落在图像外".to_string()
-            } else {
-                "未判定：同帧两次渲染结果不一致".to_string()
-            }),
-        ),
-    };
-    serde_json::json!({
-        "label": point.label,
-        "x": point.x,
-        "y": point.y,
-        "purpose": point.purpose,
-        "measured": reading.measured.map(|p| p.to_vec()),
-        "expected": expected,
-        "distance": distance,
-        "tolerance": tolerance,
-        "passed": passed,
-        "detail": detail,
-    })
-}
-
-/// 场景注册表的结构化记录：**记录要能自解释**，复核的人不该被迫去读 core 的源码
-/// 才知道"gradient 是在考什么、几趟、尺寸多少"。
-pub fn scene_json(spec: &SceneSpec) -> serde_json::Value {
-    let samples: Vec<serde_json::Value> = spec
-        .samples
-        .iter()
-        .map(|s| {
-            serde_json::json!({
-                "label": s.label,
-                "x": s.x,
-                "y": s.y,
-                "purpose": s.purpose,
-                "expected": expected_bytes(spec, 0, *s).to_vec(),
-            })
-        })
-        .collect();
-    serde_json::json!({
-        "name": spec.name,
-        "description": spec.description,
-        "size": format!("{}x{}", spec.size.0, spec.size.1),
-        "passes": spec.pass_count(),
-        "fragment_entries": spec.fragment_entries(),
-        "uses_frame": spec.uses_frame,
-        "samples": samples,
-    })
-}
-
-/// 一条腿的 `run.json`：**这个后端这次画出了什么**。**纯函数**。
-///
-/// 一条腿一份、写在自己的目录里，而不是把两个后端塞进同一个文件。M0 的
-/// `run.json` 是一个文件装两个后端，靠**文件名**区分（`probe-native-dx12.png`）；
-/// 到 M1，一条腿有 80 张图，靠文件名区分已经不够了——一条腿一个目录，
-/// 目录里这份 `run.json` 说的就是这一条腿。
-///
-/// 形状是刻意对齐 [`compare_runs`] 的：它按 `backends[]` 里的 `requested` /
-/// `frames_digest` / `frames[]` 逐个比，所以这里必须给出一个**只有一条**的
-/// `backends` 数组。于是"跨进程比对"不需要知道目录结构，只需要两份 JSON。
-///
-/// `nondeterministic_fields` 是**空的**——这不是漏填：corpus 这一份里没有任何
-/// 一项被允许变化，退出标准那句"重复运行逐字节一致"说的就是它。会变的东西
-/// （时间戳、计时、adapter）在 `adapter.json` / `timing.json` 里，各有各的声明。
-pub fn leg_json(
-    run: &SceneRun,
-    specs: &[&'static SceneSpec],
-    requested: &str,
-    adapter_name: Option<&str>,
-    frames: (u32, u32),
-) -> serde_json::Value {
-    let counts = run.counts();
-    let frames_json: Vec<serde_json::Value> = run.frames.iter().map(frame_json).collect();
-    let scenes: Vec<serde_json::Value> = specs.iter().map(|s| scene_json(s)).collect();
-
-    serde_json::json!({
-        "schema": 1,
-        "milestone": "M1",
-        "kind": "corpus",
-        "frame_range": format!("{}..{}", frames.0, frames.1),
-        "frames_per_scene": frames.1 - frames.0,
-        "target_size": format!("{}x{}", SCENE_TARGET_SIZE.0, SCENE_TARGET_SIZE.1),
-        "target_format": format!("{SCENE_TARGET_FORMAT:?}"),
-        "byte_tolerance": BYTE_TOLERANCE,
-        // 场景注册表自述：记录要能自解释，复核的人不该被迫去读 core 的源码
-        // 才知道"gradient 在考什么"。
-        "scenes": scenes,
-        "artifacts": {
-            "adapter": "adapter.json",
-            "readings": "readings.txt",
-            "frames_dir": "frames",
-            "frame_count": run.frames.len(),
-            // `timing` 这一项由调用方在真写了计时表之后才插进来：
-            // 记录里**不许**出现一个并不存在的文件名。
-        },
-        "backends": [{
-            "requested": requested,
-            "adapter_name": adapter_name,
-            "frames_digest": format!("{:016x}", run.frames_digest()),
-            "counts": {
-                "frames": counts.frames,
-                "points": counts.points,
-                "failed": counts.failed,
-                "out_of_range": counts.out_of_range,
-                "unjudged": counts.unjudged,
-                "clean": counts.clean(),
-            },
-            "repeat_mismatches": run.in_process_mismatches(),
-            "frames": frames_json,
-        }],
-        "nondeterministic_fields": [],
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -886,6 +457,7 @@ fn frame_label(frame: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 注册表的名字来自 core：本模块的测试只拿它当"合法的场景名"用。
     use dhampir_core::render::scene_names;
 
     #[test]
@@ -916,28 +488,6 @@ mod tests {
         assert_eq!(names, scene_names());
     }
 
-    /// 帧文件名必须**按字典序 == 按帧号序**。这条到第 100 帧才会显形，
-    /// 而那正是没人会去看记录的时候。
-    #[test]
-    fn frame_paths_sort_in_numeric_order() {
-        assert_eq!(frame_rel_path("gradient", 0), "frames/gradient-f000.png");
-        assert_eq!(frame_rel_path("blur", 15), "frames/blur-f015.png");
-        let mut names = vec![
-            frame_rel_path("gradient", 2),
-            frame_rel_path("gradient", 10),
-            frame_rel_path("gradient", 1),
-        ];
-        names.sort();
-        assert_eq!(
-            names,
-            vec![
-                frame_rel_path("gradient", 1),
-                frame_rel_path("gradient", 2),
-                frame_rel_path("gradient", 10),
-            ]
-        );
-    }
-
     /// `--frames` 只认半开区间这一种写法，而且不许"跑出零帧还报绿"。
     #[test]
     fn frame_ranges_parse_only_the_half_open_form() {
@@ -958,290 +508,6 @@ mod tests {
         assert!(parse_frames("1000..2024").is_ok(), "正好 {MAX_FRAMES} 帧应当合规");
         assert!(parse_frames("1000..2025").is_err(), "多一帧就该被拦下");
         assert!(parse_frames("0..4294967295").is_err(), "端点顶到 u32 上限也要报错而不是回绕");
-    }
-
-    /// `Counts::clean` 是给退出码用的收敛——三个桶各自都要被算进去。
-    #[test]
-    fn clean_requires_all_three_buckets_empty() {
-        let clean = Counts {
-            frames: 1,
-            points: 4,
-            ..Counts::default()
-        };
-        assert!(clean.clean());
-
-        for dirty in [
-            Counts { failed: 1, ..clean },
-            Counts { out_of_range: 1, ..clean },
-            Counts { unjudged: 1, ..clean },
-        ] {
-            assert!(!dirty.clean(), "{dirty:?} 不该算干净");
-        }
-    }
-
-    /// 一条腿的记录要能被 [`compare_runs`] 读、也要能被人读。
-    #[test]
-    fn a_leg_record_is_shaped_for_the_comparison() {
-        let spec = scene_by_name("checker").unwrap();
-        let run = model_run(spec, 0, true);
-        let json = leg_json(&run, &[spec], "DX12", Some("测试 adapter"), (0, 16));
-
-        // 比对要读的那几个键必须真的在、且必须对得上。
-        let backend = &json["backends"][0];
-        assert_eq!(backend["requested"], "DX12");
-        assert_eq!(backend["adapter_name"], "测试 adapter");
-        assert_eq!(
-            backend["frames_digest"],
-            format!("{:016x}", run.frames_digest())
-        );
-        assert_eq!(backend["frames"][0]["scene"], "checker");
-        assert_eq!(backend["frames"][0]["frame"], 0);
-        assert_eq!(backend["frames"][0]["png"], "frames/checker-f000.png");
-        assert_eq!(
-            backend["frames"][0]["png_digest"],
-            format!("{:016x}", fnv1a64(&run.frames[0].png))
-        );
-
-        // 干净的那一轮：三个桶都是 0，`clean` 为真，没有不一致的帧。
-        assert!(backend["counts"]["clean"].as_bool().unwrap());
-        assert_eq!(backend["counts"]["failed"], 0);
-        assert_eq!(backend["counts"]["frames"], 1);
-        assert!(backend["repeat_mismatches"].as_array().unwrap().is_empty());
-
-        // corpus 这一份里**不许**有非确定项——有的话，"重复运行逐字节一致"
-        // 这条退出标准就失去意义了。会变的东西在 adapter/timing 那两份里。
-        assert!(json["nondeterministic_fields"].as_array().unwrap().is_empty());
-        assert_eq!(json["frame_range"], "0..16");
-        assert_eq!(json["frames_per_scene"], 16);
-        assert_eq!(json["scenes"][0]["name"], "checker");
-        assert_eq!(json["artifacts"]["frames_dir"], "frames");
-        assert_eq!(json["artifacts"]["frame_count"], 1);
-        // 计时表这一项此刻**不该**在：调用方还没写 timing.json。
-        assert!(json["artifacts"].get("timing").is_none());
-    }
-
-    /// 同帧两次不一致 → 那一帧的点**没被判**（既不是通过也不是失败），
-    /// 这一腿因此不干净，而且不一致的帧要被指名。
-    #[test]
-    fn an_unstable_frame_makes_the_leg_not_clean() {
-        let spec = scene_by_name("gradient").unwrap();
-        let run = model_run(spec, 0, false);
-        let counts = run.counts();
-        assert_eq!(counts.unjudged, spec.samples.len(), "不一致的帧不该被判");
-        assert_eq!(counts.failed, 0, "没判 ≠ 判错");
-        assert!(!counts.clean());
-
-        let json = leg_json(&run, &[spec], "DX12", Some("a"), (0, 16));
-        assert!(!json["backends"][0]["counts"]["clean"].as_bool().unwrap());
-        assert_eq!(json["backends"][0]["repeat_mismatches"][0], "gradient f000");
-    }
-
-    /// 填一张"每个采样点都恰好等于模型预测"的图。用来验证判定本身的接线：
-    /// 全对必须全绿。
-    fn ideal_image(spec: &SceneSpec, frame: u32) -> Rgba8Image {
-        let (width, height) = spec.size;
-        let mut image = Rgba8Image {
-            width,
-            height,
-            pixels: vec![0; (width * height * 4) as usize],
-        };
-        for point in spec.samples {
-            let bytes = expected_bytes(spec, frame, *point);
-            let index = ((point.y * width + point.x) * 4) as usize;
-            image.pixels[index..index + 4].copy_from_slice(&bytes);
-        }
-        image
-    }
-
-    /// 一条腿（一个后端的一轮 corpus）里的一帧 —— 用模型自己的预测值造的，
-    /// 所以"干净"是它的正常状态。`repeat_identical` 为假时，第二次的摘要真的不同，
-    /// 免得"不一致"是一条假的绿。
-    fn model_run(spec: &'static SceneSpec, frame: u32, repeat_identical: bool) -> SceneRun {
-        let image = ideal_image(spec, frame);
-        let digest = fnv1a64(&image.pixels);
-        let png = image.encode_png().unwrap();
-        SceneRun {
-            frames: vec![SceneFrame {
-                spec,
-                frame,
-                digest,
-                repeat_digest: if repeat_identical {
-                    digest
-                } else {
-                    digest ^ 0xdead_beef
-                },
-                png_digest: fnv1a64(&png),
-                png,
-                points: judge_frame(spec, frame, &image, repeat_identical),
-            }],
-        }
-    }
-
-    /// 每条场景的判定必须**会绿**：一个永远红的判据和永远绿的判据一样没用。
-    #[test]
-    fn every_scene_passes_on_its_own_model() {
-        for name in scene_names() {
-            let spec = scene_by_name(name).unwrap();
-            let frame = if spec.uses_frame { 5 } else { 0 };
-            let frame = frame % 16;
-            let readings = judge_frame(spec, frame, &ideal_image(spec, frame), true);
-            assert_eq!(readings.len(), spec.samples.len());
-            for reading in &readings {
-                let verdict = reading
-                    .verdict
-                    .as_ref()
-                    .unwrap_or_else(|| panic!("{} {} 没被判", name, reading.point.label));
-                assert!(
-                    verdict.passed,
-                    "{} f{} {} 用模型自己的预测值却没通过：距离 {}",
-                    name, frame, reading.point.label, verdict.distance
-                );
-                assert_eq!(verdict.distance, 0);
-            }
-        }
-    }
-
-    /// 把其中一个点改掉，必须**只有它**报错——否则"哪一点不对"这条信息就没了，
-    /// 而记录里最有用的恰恰是这一条。
-    #[test]
-    fn a_wrong_pixel_is_reported_and_named() {
-        let spec = scene_by_name("gradient").unwrap();
-        let frame = 5;
-        let mut image = ideal_image(spec, frame);
-        let point = spec.samples[2];
-        let index = ((point.y * spec.size.0 + point.x) * 4) as usize;
-        // 偏 40：远超容差（1），不是那种"擦着过的模糊状态"。
-        image.pixels[index] = image.pixels[index].saturating_sub(40);
-
-        let readings = judge_frame(spec, frame, &image, true);
-        let failed: Vec<&PointReading> =
-            readings.iter().filter(|r| !r.verdict.as_ref().unwrap().passed).collect();
-        assert_eq!(failed.len(), 1, "只有被改的那一点该失败");
-        assert_eq!(failed[0].point.label, point.label);
-        assert!(failed[0].verdict.as_ref().unwrap().distance >= 39);
-    }
-
-    /// 重复渲染不一致时**不判**，但读数照样留着。
-    ///
-    /// 这是本模块最容易写错的一处：把 `verdict` 留空是"没验"，把它填成"通过"是把
-    /// 一个坏观测记成合格。
-    #[test]
-    fn unstable_frames_are_left_unjudged() {
-        let spec = scene_by_name("checker").unwrap();
-        let readings = judge_frame(spec, 1, &ideal_image(spec, 1), false);
-        for reading in &readings {
-            assert!(reading.verdict.is_none(), "不一致的帧不该有判定");
-            assert!(reading.measured.is_some(), "读数要留着——发现要能被看见");
-        }
-        let json = point_json(&readings[0]);
-        assert_eq!(json["passed"], serde_json::Value::Null);
-        assert_eq!(json["expected"], serde_json::Value::Null);
-        assert!(json["detail"].as_str().unwrap().contains("未判定"));
-    }
-
-    /// 越界与"没判定"是两件事，记录里不能混成一句话。
-    #[test]
-    fn out_of_range_is_not_the_same_as_unjudged() {
-        let spec = scene_by_name("blur").unwrap();
-        let out_of_range = PointReading {
-            point: SamplePoint {
-                label: "越界点",
-                x: 9999,
-                y: 9999,
-                purpose: "测试用",
-            },
-            measured: None,
-            verdict: None,
-        };
-        let json = point_json(&out_of_range);
-        assert!(json["detail"].as_str().unwrap().contains("越界"));
-        assert_eq!(json["measured"], serde_json::Value::Null);
-        assert!(
-            !json["detail"].as_str().unwrap().contains("未判定"),
-            "越界不该被说成未判定：{json}"
-        );
-
-        // 顺便钉住"判定用的场景"这件事本身：blur 的采样坐标必须在图像里。
-        for point in spec.samples {
-            assert!(point.x < spec.size.0 && point.y < spec.size.1);
-        }
-    }
-
-    /// 摘要要对顺序敏感：顺序变了就是"跑法变了"，不该看起来一样。
-    #[test]
-    fn frames_digest_is_order_sensitive() {
-        let spec = scene_by_name("gradient").unwrap();
-        let make = |frame: u32, digest: u64| SceneFrame {
-            spec,
-            frame,
-            digest,
-            repeat_digest: digest,
-            png_digest: 0,
-            png: Vec::new(),
-            points: Vec::new(),
-        };
-        let forward = vec![make(0, 1), make(1, 2)];
-        let backward = vec![make(1, 2), make(0, 1)];
-        // 内容相同 → 摘要相同（摘要里不许有任何随指针、随分配地址变的东西）。
-        let same_contents = vec![make(0, 1), make(1, 2)];
-        assert_eq!(frames_digest(&forward), frames_digest(&same_contents));
-        // 顺序变了 → 摘要要变。
-        assert_ne!(frames_digest(&forward), frames_digest(&backward));
-
-        // 摘要必须真的吃到帧号：只吃像素摘要的话，"第 3 帧和第 4 帧画成了同一张"
-        // 这种错误在总摘要里看不出来。
-        let a = vec![make(3, 7)];
-        let b = vec![make(4, 7)];
-        assert_ne!(frames_digest(&a), frames_digest(&b));
-    }
-
-    /// 统计要把四种结局分开数：失败、越界、未判定、通过。
-    #[test]
-    fn counts_separate_the_four_outcomes() {
-        let spec = scene_by_name("gradient").unwrap();
-        let run = SceneRun {
-            frames: vec![SceneFrame {
-                spec,
-                frame: 0,
-                digest: 1,
-                repeat_digest: 1,
-                png_digest: 1,
-                png: Vec::new(),
-                points: vec![
-                    PointReading {
-                        point: spec.samples[0],
-                        measured: Some(expected_bytes(spec, 0, spec.samples[0])),
-                        verdict: Some(judge_sample(
-                            spec,
-                            0,
-                            spec.samples[0],
-                            expected_bytes(spec, 0, spec.samples[0]),
-                        )),
-                    },
-                    PointReading {
-                        point: spec.samples[1],
-                        measured: None,
-                        verdict: None,
-                    },
-                    PointReading {
-                        point: spec.samples[2],
-                        measured: Some([0, 0, 0, 255]),
-                        verdict: None,
-                    },
-                ],
-            }],
-        };
-        assert_eq!(
-            run.counts(),
-            Counts {
-                frames: 1,
-                points: 3,
-                failed: 0,
-                out_of_range: 1,
-                unjudged: 1,
-            }
-        );
-        assert!(run.in_process_mismatches().is_empty());
     }
 
     // ---- 跨进程比对 ------------------------------------------------------

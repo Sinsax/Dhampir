@@ -285,6 +285,7 @@ dependencies = [
  "dhampir-timeline",
  "log",
  "png",
+ "serde_json",
  "wgpu",
 ]
 

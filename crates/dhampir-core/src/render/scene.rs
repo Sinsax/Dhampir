@@ -776,6 +776,12 @@ pub struct SceneRenderer {
     /// `spec.size` 的话，换尺寸时漏改一处就会得到"中间纹理 256×256、目标 1920×1080"
     /// 这种不会报错、只是画面不对的组合。
     size: (u32, u32),
+    /// 目标格式。构造时给的那一个，不改。
+    ///
+    /// 存一份出来是因为宿主需要它：`render_frame`（[`super::corpus`]）要按这个格式
+    /// 建离屏纹理。宿主自己写 `SCENE_TARGET_FORMAT` 的话，"这两处什么时候会不一致"
+    /// 就成了一道要靠人记住的题。
+    format: wgpu::TextureFormat,
     uniform: wgpu::Buffer,
     pipeline: ScenePipeline,
     /// 中间纹理的视图（`blur` 是两张乒乓，其余场景是一张 1×1 占位）。
@@ -1010,6 +1016,7 @@ impl SceneRenderer {
         Self {
             spec,
             size,
+            format: target_format,
             uniform,
             pipeline,
             intermediate_views,
@@ -1028,6 +1035,15 @@ impl SceneRenderer {
     /// 的那个场景，而不是调用方以为自己传进去的那个名字。
     pub fn spec(&self) -> &'static SceneSpec {
         self.spec
+    }
+
+    /// 构造时给的目标格式。
+    ///
+    /// 离屏读回（[`super::corpus::render_frame`]）按它建纹理：渲染器是按这个格式
+    /// 建的管线，纹理用了别的格式就是"管线与附件不匹配"，而 wgpu 只会在
+    /// 提交时才报出来。
+    pub fn format(&self) -> wgpu::TextureFormat {
+        self.format
     }
 
     /// 把这一帧画进 `target`。
