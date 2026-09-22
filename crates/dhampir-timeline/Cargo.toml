@@ -14,3 +14,9 @@ default = ["serde"]
 # `Timebase` 要能直接进出时间线 JSON（指导文档 §5.2 的 `"timebase": {"num":…,"den":…}`），
 # 所以 serde 是默认开的；但关掉它这个 crate 依然完整可用（零依赖）。
 serde = ["dep:serde"]
+
+[dev-dependencies]
+# 契约层的核心承诺是「能序列化成 JSON、且同一份数据序列化逐字节稳定」，
+# 所以测试必须真的解析一遍，不能只靠类型定义看着像对。
+# dev-dependency 不会传播给依赖 timeline 的 crate（core 不受影响）。
+serde_json = { workspace = true }

@@ -27,6 +27,9 @@
 //! 时间码（只影响显示与解析，M4）、帧号解析（`FromStr`）。
 
 pub mod golden;
+// schema 整个模块都建立在 serde 上（类型要能进 JSON），所以关掉 serde 就没它。
+#[cfg(feature = "serde")]
+pub mod schema;
 pub mod selfcheck;
 pub mod timebase;
 pub mod timecode;

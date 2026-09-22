@@ -815,12 +815,24 @@ FFmpeg 绑定、解码、时间线、分片、任务队列。
 
 ### 任务
 
-- [ ] **T4.1 schema v1 定稿（先定契约，再写两边）**
-  - Rust 类型（serde）+ 校验：轨道内重叠、`source_in + duration` 越界、效果参数范围、timebase 兼容性
-  - 校验错误输出**结构化 JSON**，UI 能直接渲染成人话
-  - TS 类型生成：`schemars` 出 JSON Schema → `json-schema-to-typescript`（备选 `typeshare`）
-  - `schema` 版本号 + 迁移策略：不兼容就 +1，服务端**拒绝未知版本**
-  - 铁律（指导文档 §5.1）：**时间用帧号，不用浮点秒**；特效走"类型 + 参数"声明式，不做可上传 shader
+> 🔵 **契约层已落地（2026-09-22）**：`dhampir-timeline/src/schema.rs`，**13 条单测全绿**。
+>
+> 已做：Rust 类型（`Project` / `Track` / `Clip` / `Transform` / `Effect` / `Keyframe` / `Easing`）
+> + 校验（同轨重叠、时长非正、负数帧号、不透明度与缩放范围、关键帧越界、片段 id 重复、
+> 帧率合法性、特效照登记表校对）+ **结构化 JSON 问题清单**（`code` / `path` / `message`）。
+>
+> 几处刻意的设计：
+>  - **特效登记表由 core 提供**（`EffectSpec` 作为参数传入），timeline 不依赖 core——
+>    登记表只有一份，timeline 只负责照着表校对；
+>  - `Effect.params` 用 **BTreeMap**：同一份工程序列化必须逐字节一致，HashMap 做不到；
+>  - **未知版本直接返回、不产生二次错误**——版本都不认，后面字段的含义无从谈起；
+>  - `opacity` 用 `is_finite()` 挡 NaN：NaN 会让所有比较都为假，静默穿过去；
+>  - `Easing::apply` 的公式**写在这里**，两端调同一个函数（各写一遍迟早在某个控制点差一个像素）；
+>  - schema 模块按 `feature = "serde"` 门控，`--no-default-features` 仍能编译（已验证）。
+>
+> ⏳ **未做**：TS 类型生成（`schemars` → `json-schema-to-typescript`）。
+
+- [ ] **T4.1 schema v1 定稿（先定契约，再写两边）**（Rust 类型 + 校验 + 结构化错误**已落地**；TS 生成未做）
 - [ ] **T4.2 `dhampir-core` 渲染图 v1**
   - 多轨合成、transform / opacity、**1 个特效**（建议 `gaussian_blur`）、`cross_dissolve` 转场、关键帧 + easing
   - **所有时间参数从整数帧号推导，不碰 wall clock**；easing 公式写死并保证两端一致
