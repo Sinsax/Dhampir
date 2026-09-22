@@ -25,7 +25,11 @@ struct OneSource {
 }
 
 impl SourceResolver for OneSource {
-    fn texture_for(&mut self, _source: &str) -> Option<(wgpu::TextureView, (u32, u32))> {
+    fn texture_for(
+        &mut self,
+        _source: &str,
+        _source_frame: i64,
+    ) -> Option<(wgpu::TextureView, (u32, u32))> {
         Some((self.view.clone(), self.size))
     }
 }
@@ -166,7 +170,11 @@ fn 多轨合成加模糊能被调度起来() {
 fn 源解析不出来时跳过该层而不是整帧失败() {
     struct Nothing;
     impl SourceResolver for Nothing {
-        fn texture_for(&mut self, _source: &str) -> Option<(wgpu::TextureView, (u32, u32))> {
+        fn texture_for(
+            &mut self,
+            _source: &str,
+            _source_frame: i64,
+        ) -> Option<(wgpu::TextureView, (u32, u32))> {
             None
         }
     }

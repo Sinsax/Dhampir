@@ -47,7 +47,10 @@ pub use corpus::{
 pub use blit::{BLIT_WGSL, BlitRenderer};
 pub use blur::{BLUR_WGSL, BlurRenderer, MAX_RADIUS as BLUR_MAX_RADIUS, TAPS as BLUR_TAPS, gaussian_weights_1d};
 pub use compose::{COMPOSE_WGSL, Compositor, LayerDraw, inverse_affine};
-pub use timeline::{SourceResolver, TimelineRenderer, blur_radius, synthetic_source_rgba8};
+pub use timeline::{
+    SourceResolver, TimelineRenderer, blur_radius, synthetic_seed_for_source,
+    synthetic_seed_for_source_frame, synthetic_source_rgba8,
+};
 pub use probe::{
     PROBE_CLEAR_COLOR, PROBE_TARGET_SIZE, PROBE_VERTICES, ProbeRenderer, ProbeSample, ProbeVertex,
     SampleExpectation, VERTEX_INSET, probe_samples, render_probe_frame,

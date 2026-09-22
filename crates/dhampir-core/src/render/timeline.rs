@@ -26,8 +26,17 @@ use crate::wgpu;
 
 /// 源纹理的提供者。宿主实现它——浏览器那边是 video 元素，native 那边是解码器或文件。
 pub trait SourceResolver {
-    /// 给出这个 source 标识对应的纹理与尺寸。给不出来就返回 None（该层会被跳过）。
-    fn texture_for(&mut self, source: &str) -> Option<(wgpu::TextureView, (u32, u32))>;
+    /// 给出这个 source 在**这一帧**上对应的纹理与尺寸。给不出来就返回 None（该层会被跳过）。
+    ///
+    /// `source_frame` **必须**在参数里：这是「帧号精确」这条铁律在宿主接缝上的兑现。
+    /// 只给 source 名字的话，宿主只能按名字返回一张静态纹理——
+    /// 于是源内帧号被悄悄忽略，而画面看起来完全正常。
+    /// （这个洞是被样本工程比出来的：不同帧算出的摘要一模一样。）
+    fn texture_for(
+        &mut self,
+        source: &str,
+        source_frame: i64,
+    ) -> Option<(wgpu::TextureView, (u32, u32))>;
 }
 
 /// 图层要用的模糊半径。0 表示这层不需要模糊。
@@ -88,7 +97,7 @@ impl TimelineRenderer {
         let mut prepared: Vec<(wgpu::TextureView, (u32, u32))> = Vec::new();
 
         for layer in &composite.layers {
-            let Some((view, size)) = resolver.texture_for(&layer.source) else {
+            let Some((view, size)) = resolver.texture_for(&layer.source, layer.source_frame) else {
                 continue;
             };
             let radius = blur_radius(&layer.effects);
@@ -170,6 +179,27 @@ impl TimelineRenderer {
         drop(keep_alive);
         draws.len()
     }
+}
+
+/// 由源标识推出一个稳定的 seed。
+///
+/// 两端对同一个 source 名字必须生成**同一张**源图，所以这个映射必须是纯函数，
+/// 而且不能依赖任何运行时的哈希实现（Rust 的 DefaultHasher 每次进程启动都可能不同）。
+/// 这里用 FNV-1a 32 位——写死算法，换版本也不会变。
+pub fn synthetic_seed_for_source(source: &str) -> u32 {
+    let mut hash = 0x811c_9dc5_u32;
+    for byte in source.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
+}
+
+/// 源内**帧号**也要参与 seed：否则同一素材的每一帧长得一模一样，
+/// 「帧号精确」这件事在比对里就完全压不到（样本工程第一次跑出来的
+/// 不同帧摘要相同，就是这个原因）。
+pub fn synthetic_seed_for_source_frame(source: &str, frame: i64) -> u32 {
+    synthetic_seed_for_source(source) ^ (frame as u32).wrapping_mul(0x9e37_79b9)
 }
 
 /// 确定性源图：两端调**同一个函数**生成源像素，于是输入逐字节相同。

@@ -1,0 +1,77 @@
+{
+  "schema": 1,
+  "timebase": { "num": 30, "den": 1 },
+  "tracks": [
+    {
+      "id": "v1",
+      "kind": "video",
+      "clips": [
+        {
+          "id": "a",
+          "source": "a.mp4",
+          "source_in": 0,
+          "track_at": 0,
+          "duration": 30,
+          "transform": { "x": 0.0, "y": 0.0, "scale": 1.0, "rotation_deg": 0.0 },
+          "opacity": 1.0
+        },
+        {
+          "id": "b",
+          "source": "b.mp4",
+          "source_in": 10,
+          "track_at": 30,
+          "duration": 30,
+          "transform": { "x": 0.0, "y": 0.0, "scale": 1.0, "rotation_deg": 0.0 },
+          "opacity": 1.0,
+          "transition_in": { "kind": "cross_dissolve", "duration": 10 }
+        },
+        {
+          "id": "c",
+          "source": "c.mp4",
+          "source_in": 5,
+          "track_at": 60,
+          "duration": 30,
+          "transform": { "x": 0.0, "y": 0.0, "scale": 1.0, "rotation_deg": 0.0 },
+          "opacity": 0.8,
+          "effects": [{ "kind": "gaussian_blur", "params": { "radius": 4.0 } }],
+          "keyframes": [
+            { "frame": 0, "value": 0.0, "easing": "linear" },
+            { "frame": 15, "value": 1.0, "easing": "ease_in_out" },
+            { "frame": 29, "value": 0.5, "easing": "ease_out" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "v2",
+      "kind": "video",
+      "clips": [
+        {
+          "id": "d",
+          "source": "d.mp4",
+          "source_in": 0,
+          "track_at": 10,
+          "duration": 40,
+          "transform": { "x": 100.0, "y": -50.0, "scale": 0.5, "rotation_deg": 15.0 },
+          "opacity": 0.6,
+          "effects": [{ "kind": "gaussian_blur", "params": { "radius": 2.0 } }]
+        }
+      ]
+    },
+    {
+      "id": "a1",
+      "kind": "audio",
+      "clips": [
+        {
+          "id": "e",
+          "source": "e.wav",
+          "source_in": 0,
+          "track_at": 0,
+          "duration": 90,
+          "transform": { "x": 0.0, "y": 0.0, "scale": 1.0, "rotation_deg": 0.0 },
+          "opacity": 1.0
+        }
+      ]
+    }
+  ]
+}
