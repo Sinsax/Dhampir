@@ -432,6 +432,11 @@ async function main() {
   // 驱动那条闸当场报红。闸是对的：我不该把固定资源混进逐帧账里。
   let poolIdx = 0;
   const seekTimes = [];
+  // 两个口径一起量：
+  //   seek_submit = 到「提交完」为止 —— 用户拖动时实际要等的那一下（画面随即交给合成器）；
+  //   seek_synced = 再等到「GPU 完成」—— 上界，因为真实预览不会为每一帧付这个整往返。
+  // 只报一个都会失真：只报前者会偏乐观，只报后者会把量法本身的等待算成渲染开销。
+  const seekSubmitTimes = [];
   for (const target of targets) {
     // 这一次计时覆盖**整条 scrub 路径**：从同步样本解码到目标帧 → 上传 → 搬运 → 提交 → 等 GPU 完成。
     // 这才是用户拖动时真正等的那一下；先前把 decode 与 upload 分成两段各自同步，
@@ -451,6 +456,7 @@ async function main() {
     const b5 = device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: tex.createView() }] });
     p5.setPipeline(pipe); p5.setBindGroup(0, b5); p5.draw(3); p5.end();
     device.queue.submit([e5.finish()]);
+    seekSubmitTimes.push(performance.now() - tSeek);
     await device.queue.onSubmittedWorkDone();
     renderTimes.push(performance.now() - t1);
     seekTimes.push(performance.now() - tSeek);
@@ -471,8 +477,14 @@ async function main() {
   report.cache.evicted_frames = evictedTotal;
   report.cache.open_frames_after = openFrames.size;
   report.cache.final = JSON.parse(mod.dhampir_cache_stats());
-  report.perf = { targets: targets.length, seek: pctl(seekTimes), decode: pctl(decodeTimes), upload_render: pctl(renderTimes) };
-  log('缓存与测量完成：淘汰 ' + evictedTotal + ' 帧，decode p95=' + report.perf.decode.p95 + 'ms');
+  report.perf = {
+    targets: targets.length,
+    seek_submit: pctl(seekSubmitTimes),
+    seek_synced: pctl(seekTimes),
+    decode: pctl(decodeTimes),
+    upload_render: pctl(renderTimes),
+  };
+  log('缓存与测量完成：淘汰 ' + evictedTotal + ' 帧，seek(提交) p95=' + report.perf.seek_submit.p95 + 'ms，seek(同步) p95=' + report.perf.seek_synced.p95 + 'ms');
 
   for (const entry of openFrames.values()) entry.video.close();
   openFrames.clear();
