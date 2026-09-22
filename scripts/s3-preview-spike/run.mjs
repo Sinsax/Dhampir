@@ -15,7 +15,7 @@
 // 退出码：0 实测完成且自洽；1 页面报错或结果不自洽；2 参数/环境问题。
 
 import { createServer } from 'node:http';
-import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -164,6 +164,25 @@ export function validate4kReport(report, want = { w: 3840, h: 2160, frames: 180,
   }
   return problems;
 }
+/** mode=sample 的结果判据：只验浏览器侧把样本工程渲出来了。 */
+export function validateSampleReport(report, want = { frames: [0, 15, 30, 45, 75] }) {
+  const problems = [];
+  if (report === null || typeof report !== 'object') return ['结果不是对象'];
+  if (report.ok !== true) problems.push('页面没有报 ok=true：' + JSON.stringify(report.error));
+  if (report.wasm_loaded !== true) problems.push('wasm 模块没加载成功');
+  const s = report.sample === undefined ? {} : report.sample;
+  if (s.ok !== true) problems.push('样本工程没通过校验：' + JSON.stringify(s.issues));
+  if (!Array.isArray(s.rendered)) problems.push('缺 rendered 列表');
+  else {
+    const got = s.rendered.map((row) => row.frame).join(',');
+    const expected = want.frames.join(',');
+    if (got !== expected) problems.push('渲染的帧号不对：' + got + '，要求 ' + expected);
+    for (const row of s.rendered) {
+      if (!(row.bytes > 0)) problems.push('第 ' + row.frame + ' 帧的 PNG 字节数为 ' + row.bytes);
+    }
+  }
+  return problems;
+}
 export function findBrowser() {
   const pf = process.env.ProgramFiles === undefined ? 'C:\\Program Files' : process.env.ProgramFiles;
   const pfx86 = process.env['ProgramFiles(x86)'] === undefined ? 'C:\\Program Files (x86)' : process.env['ProgramFiles(x86)'];
@@ -282,9 +301,27 @@ async function main() {
   const mediaSize = statSync(args.media).size;
   let settle = null;
   let lastProgress = '(页面还没报进度)';
+  const sampleDir = resolve(REPO_ROOT, 'target', 's4', 'browser');
+  const sampleFrames = [];
   const gotResult = new Promise((res) => { settle = res; });
 
   const server = createServer((req, res) => {
+    if (req.method === 'POST' && req.url.startsWith('/sample-png')) {
+      const frame = Number(new URL(req.url, 'http://x').searchParams.get('frame'));
+      const chunks = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        try {
+          mkdirSync(sampleDir, { recursive: true });
+          writeFileSync(join(sampleDir, 'frame-' + String(frame).padStart(4, '0') + '.png'), Buffer.concat(chunks));
+          sampleFrames.push(frame);
+        } catch (error) {
+          console.error('写样本 PNG 失败：' + error.message);
+        }
+        res.writeHead(204).end();
+      });
+      return;
+    }
     if (req.method === 'POST' && req.url === '/progress') {
       let body = '';
       req.on('data', (c) => { body += c; });
@@ -304,6 +341,13 @@ async function main() {
     }
     if (req.url === '/' || req.url.startsWith('/?')) {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(html);
+      return;
+    }
+    if (req.url === '/sample-project.json') {
+      // 样本工程由 fixtures/ 提供：页面与 native 用的是**同一个文件**，
+      // 否则「同一份工程两端各渲一遍」这句话就不成立了。
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(readFileSync(join(REPO_ROOT, 'fixtures', 'sample-project.json')));
       return;
     }
     if (req.url === '/media/proxy.mp4') {
@@ -352,7 +396,9 @@ async function main() {
   }
   const problems = args.mode === '4k'
     ? validate4kReport(report, { w: args.width, h: args.height, frames: 180, span: 24 })
-    : validateReport(report, { w: args.width, h: args.height });
+    : args.mode === 'sample'
+      ? validateSampleReport(report)
+      : validateReport(report, { w: args.width, h: args.height });
   console.log('');
   if (problems.length > 0) {
     console.error('✗ 结果不自洽，拒绝给结论：');

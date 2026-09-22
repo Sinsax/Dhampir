@@ -16,6 +16,7 @@
 use std::cell::RefCell;
 
 use dhampir_core::compose::{self, Composite};
+use dhampir_core::render::SourceResolver;
 use dhampir_core::io::FrameSource;
 use dhampir_core::render::{Compositor, LayerDraw};
 use dhampir_core::timeline::schema::{Project, validate_project_with_effects};
@@ -211,4 +212,139 @@ pub async fn dhampir_project_render_probe(
         "digest": format!("{digest:016x}"),
     })
     .to_string())
+}
+
+// ---------------------------------------------------------------------------
+// 双端比对用的入口：按**同一份合成源**渲染样本工程，返回 PNG 字节。
+//
+// 为什么源要用合成图而不是 video 元素：比对的结论只有在**两端输入逐字节相同**时
+// 才有归因价值。源图由 core 的 synthetic_source_rgba8 + synthetic_seed_for_source_frame
+// 生成，native 一侧调的是同一对函数——所以比出来的差异只可能来自渲染与运行时。
+// ---------------------------------------------------------------------------
+
+#[wasm_bindgen]
+pub async fn dhampir_sample_project_render_png(
+    project_json: String,
+    frame: i32,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, JsValue> {
+    // 刻意**不碰** thread_local 里的工程：这个入口要能被独立调用（驱动直接喂 JSON），
+    // 免得比对结果依赖"页面之前打开了什么"。
+    let project: Project = serde_json::from_str(&project_json)
+        .map_err(|e| js_err(format!("工程 JSON 解析失败：{e}")))?;
+    let issues = validate_project_with_effects(&project, dhampir_core::effects::REGISTRY);
+    if !issues.is_empty() {
+        return Err(js_err(format!("工程没通过校验：{}", issues.len())));
+    }
+
+    let composite = compose::evaluate(&project, i64::from(frame));
+    let instance = new_instance();
+    let ctx = dhampir_core::gpu::request_context(&instance, None)
+        .await
+        .map_err(|e| js_err(e.to_string()))?;
+
+    let mut resolver = SyntheticSources {
+        device: &ctx.device,
+        queue: &ctx.queue,
+        cache: std::collections::HashMap::new(),
+        size: (width.max(1), height.max(1)),
+    };
+    let target = ctx.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("dhampir sample probe target"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: PREVIEW_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let renderer = dhampir_core::render::TimelineRenderer::new(&ctx.device, PREVIEW_FORMAT);
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    renderer.render_frame(
+        &ctx.device,
+        &ctx.queue,
+        &mut encoder,
+        &target_view,
+        (width.max(1), height.max(1)),
+        &composite,
+        &mut resolver,
+        wgpu::Color::TRANSPARENT,
+    );
+    ctx.queue.submit([encoder.finish()]);
+
+    let image = dhampir_core::readback::read_texture_rgba8(&ctx.device, &ctx.queue, &target)
+        .await
+        .map_err(|e| js_err(e.to_string()))?;
+    image
+        .encode_png()
+        .map_err(|e| js_err(format!("PNG 编码失败：{e}")))
+}
+
+/// 与 native 一侧 `render_project` 里那个缓存器**同构**：同一对 core 函数生成源图。
+struct SyntheticSources<'a> {
+    device: &'a wgpu::Device,
+    queue: &'a wgpu::Queue,
+    cache: std::collections::HashMap<(String, i64), (wgpu::Texture, wgpu::TextureView)>,
+    size: (u32, u32),
+}
+
+impl SourceResolver for SyntheticSources<'_> {
+    fn texture_for(
+        &mut self,
+        source: &str,
+        source_frame: i64,
+    ) -> Option<(wgpu::TextureView, (u32, u32))> {
+        let key = (source.to_string(), source_frame);
+        if !self.cache.contains_key(&key) {
+            let (width, height) = self.size;
+            let pixels = dhampir_core::render::synthetic_source_rgba8(
+                width,
+                height,
+                dhampir_core::render::synthetic_seed_for_source_frame(source, source_frame),
+            );
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("dhampir sample source"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: PREVIEW_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &pixels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: Some(height),
+                },
+                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            );
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.cache.insert(key.clone(), (texture, view));
+        }
+        self.cache
+            .get(&key)
+            .map(|(_, view)| (view.clone(), self.size))
+    }
 }

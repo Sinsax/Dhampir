@@ -51,7 +51,33 @@ impl Rgba8Image {
         ])
     }
 
-    /// 把像素编码成 PNG 字节。
+    /// 解码 PNG 成 [`Rgba8Image`]。
+///
+/// **为什么解码也在 core**：双端比对要读**另一侧**的产物，而"读得对不对"这件事
+/// 同样不该两边各写一遍。用同一个 `png` crate，编解码都在这里，
+/// 于是"两边看到的是同一批像素"是代码保证的，不是约定。
+///
+/// 只接受 8 位 RGBA：比对器认的就是这个格式，悄悄转换会把差异藏进转换里。
+pub fn decode_png(bytes: &[u8]) -> Result<Rgba8Image, String> {
+    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    let mut reader = decoder.read_info().map_err(|e| e.to_string())?;
+    let mut buffer = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buffer).map_err(|e| e.to_string())?;
+    if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
+        return Err(format!(
+            "只支持 8 位 RGBA，得到 {:?}/{:?}",
+            info.color_type, info.bit_depth
+        ));
+    }
+    buffer.truncate(info.buffer_size());
+    Ok(Rgba8Image {
+        width: info.width,
+        height: info.height,
+        pixels: buffer,
+    })
+}
+
+/// 把像素编码成 PNG 字节。
     ///
     /// **为什么编码器住在 core**：M2 的比对规则是"在编码后的字节上进行"
     /// （指导文档 §5 设计要点 3）——两端渲染完各自编码，编出来的字节直接比。

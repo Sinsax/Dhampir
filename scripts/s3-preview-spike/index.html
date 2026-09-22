@@ -651,8 +651,43 @@ async function main() {
   log('完成');
   await post(report);
 }
-const mode4k = new URLSearchParams(location.search).get('mode') === '4k';
-(mode4k ? main4k() : main()).catch(async (e) => {
+// mode=sample：只渲样本工程并交 PNG 给驱动 —— 给双端比对用。
+// 刻意跑得短：这条要能反复跑（每轮比对都要重来），不该拖上七分钟。
+async function mainSample() {
+  step('sample-load-wasm');
+  const mod = await import('/pkg/dhampir_wasm.js');
+  await mod.default();
+  report.wasm_loaded = true;
+
+  step('sample-fetch-project');
+  const json = await (await fetch('/sample-project.json')).text();
+  const opened = JSON.parse(mod.dhampir_project_open(json));
+  const frames = [0, 15, 30, 45, 75];
+  report.sample = { ok: opened.ok === true, issues: Array.isArray(opened.issues) ? opened.issues.length : -1, rendered: [] };
+  if (opened.ok !== true) {
+    report.ok = false;
+    await post(report);
+    return;
+  }
+
+  const W = 320;
+  const H = 180;
+  for (const frame of frames) {
+    step('sample-render-' + frame);
+    // 不传 video：这个入口用的是 core 生成的合成源，两端输入逐字节相同。
+    const png = await mod.dhampir_sample_project_render_png(json, frame, W, H);
+    const bytes = png instanceof Uint8Array ? png : new Uint8Array(png);
+    await fetch('/sample-png?frame=' + frame, { method: 'POST', body: bytes });
+    report.sample.rendered.push({ frame: frame, bytes: bytes.length });
+  }
+
+  step('sample-posting');
+  report.ok = true;
+  await post(report);
+}
+const mode = new URLSearchParams(location.search).get('mode');
+const entry = mode === '4k' ? main4k : mode === 'sample' ? mainSample : main;
+entry().catch(async (e) => {
   log('✗ ' + (e && e.stack ? e.stack : e));
   // 把已经量到的部分一并送出去：失败时最有用的信息是「走到哪一步了」。
   await post(Object.assign({ ok: false, error: String(e && e.message ? e.message : e), stack: String(e && e.stack ? e.stack : '') }, report));

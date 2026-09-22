@@ -991,7 +991,27 @@ FFmpeg 绑定、解码、时间线、分片、任务队列。
 > 这是「帧号精确」这条铁律在**宿主接缝**上没有兑现。已把 `source_frame` 加进签名；
 > 同一素材的不同帧现在参与 seed，5 帧摘要各不相同。
 >
-> ⏳ **未做**：双端各渲一遍并比 SSIM、阈值标定、差异样本进 bad case 库。
+> ✅ **双端比对跑通了（2026-09-22）**——**SSIM = 1.000000，PSNR = ∞，MAE = 0**，5 帧全部如此。
+>
+> 流程：浏览器（wasm/WebGPU）与 native（worker/wgpu）各自渲染**同一份** `fixtures/sample-project.json`，
+> 源图由 core 的 `synthetic_source_rgba8` + `synthetic_seed_for_source_frame` 生成——
+> **两端输入逐字节相同**，所以差异只可能来自渲染与运行时。
+>
+> 压到的东西：多轨合成、transform（缩放/平移/旋转）、不透明度、`gaussian_blur`、
+> `cross_dissolve` 转场（含冻帧层）、关键帧 + easing。
+>
+> 新增：`dhampir_sample_project_render_png`（wasm 导出，返回 PNG 字节）、
+> `Rgba8Image::decode_png`（core，解码也在 core 里，两边看到的像素是代码保证的）、
+> `examples/compare_project.rs`（读两个目录的同帧 PNG 算 SSIM）。
+>
+> **阈值来源（plan 要求写清）**：实测就是**逐字节相同**，所以阈值不需要留余量——
+> 定为「SSIM = 1.000000 且 PSNR = ∞ 且 MAE = 0」。
+> ⚠️ 但这条基准**绑定在本机与当前驱动**上：换 GPU/驱动后重心可能落在不同位置，
+> 那时必须**重新标定**，而不是把这条断言直接搬过去。
+>
+> ⚠️ **一处已知问题**：`--mode sample` 那一轮 5 张 PNG 都写出来了，但页面没有走到最后的 `/result`，
+> 驱动一直等到超时。产物与比对本身有效（比对读的是文件），但**harness 的收尾路径要修**。
+> ⏳ **未做**：bad case 库（当前没有差异样本——两端逐字节相同）。
 
 - [ ] **T4.5 样本工程 + 双端比对**（比对指标已落地；样本工程与标定未做）
   - 样本：3–5 片段 + 1 转场 + 2 特效 + 关键帧
