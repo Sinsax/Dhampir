@@ -37,4 +37,7 @@ pub mod demux_wasm;
 pub mod preview;
 
 #[cfg(target_arch = "wasm32")]
+pub mod timeline_host;
+
+#[cfg(target_arch = "wasm32")]
 pub mod web;

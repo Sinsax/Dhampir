@@ -110,6 +110,25 @@ export function validateReport(report, want = { w: WANT_W, h: WANT_H }) {
     if (pb.cache_final === undefined || pb.cache_final.vram_over === true) problems.push('播放期间 VRAM 记账超预算');
     if (pb.vram_textures_alive > 0) problems.push('播放结束后还留着 ' + pb.vram_textures_alive + ' 张纹理没释放');
   }
+  // T4.3：按工程渲染
+  if (report.project === undefined) problems.push('缺 project：T4.3 的工程路径没跑');
+  else {
+    if (report.project.parsed !== true) problems.push('工程 JSON 没解析成功');
+    if (report.project.ok !== true) problems.push('工程没通过校验，问题数 ' + report.project.issues);
+    if (report.project.first_frame !== 0) problems.push('首帧应当是 0，得到 ' + report.project.first_frame);
+    if (report.project.end_frame !== 60) problems.push('末帧应当是 60，得到 ' + report.project.end_frame);
+  }
+  const pf0 = report.project_frame0 === undefined ? {} : report.project_frame0;
+  if (pf0.layers !== 1) problems.push('第 0 帧应当只有 1 层，得到 ' + pf0.layers);
+  if (pf0.first_opacity !== 1) problems.push('第 0 帧那层的不透明度应当是 1，得到 ' + pf0.first_opacity);
+  if (pf0.first_source_frame !== 0) problems.push('第 0 帧该取源的第 0 帧，得到 ' + pf0.first_source_frame);
+  if (report.project_matches_m3 !== true) {
+    problems.push('工程路径与 M3 单片段路径摘要不同：' + JSON.stringify(report.project_probe) + ' vs rust=' + (report.rust === undefined ? '?' : report.rust.digest));
+  }
+  const pt = report.project_transition === undefined ? {} : report.project_transition;
+  if (pt.ok !== true) problems.push('带转场的工程没通过校验');
+  if (pt.layers !== 2) problems.push('转场中应当是 2 层，得到 ' + pt.layers);
+  if (pt.any_frozen !== true) problems.push('转场里应当有一层是冻帧');
   return problems;
 }
 
@@ -192,6 +211,11 @@ function selfTest() {
     decode: { produced: 6, error: null },
     decoded_frame0: { bytes: 3686400, digest: '0123456789abcdef' },
     frame0_matches_video_path: true,
+    project: { parsed: true, ok: true, issues: 0, first_frame: 0, end_frame: 60 },
+    project_frame0: { frame: 0, layers: 1, first_opacity: 1, first_source_frame: 0 },
+    project_probe: { frame: 0, digest: '0123456789abcdef' },
+    project_matches_m3: true,
+    project_transition: { ok: true, layers: 2, any_frozen: true, opacities: [0.5, 0.5] },
     seek: { target_frame: 130, sync_from: 120, from_sync_frames: 11, from_start_frames: 131, equivalent: true },
     cache: {
       vram_budget: 16777216, ram_budget: 16777216, frame_bytes: 3686400, texture_capacity: 4,
@@ -230,6 +254,8 @@ function selfTest() {
     },
   };
   expect('4K 自洽结果必须过', validate4kReport(good4k).length === 0, validate4kReport(good4k).join(' | '));
+  expect('工程路径与 M3 不一致必须被抓', validateReport({ ...good, project_matches_m3: false }).length > 0, '放过了工程路径不一致');
+  expect('转场层数不对必须被抓', validateReport({ ...good, project_transition: { ...good.project_transition, layers: 1 } }).length > 0, '放过了转场层数不对');
   expect('4K 超预算必须被抓', validate4kReport({ ...good4k, four_k: { ...good4k.four_k, cache_final: { vram_bytes: 999999999, vram_len: 8, vram_over: true } } }).length > 0, '放过了超预算');
   expect('4K 一张没淘汰必须被抓', validate4kReport({ ...good4k, four_k: { ...good4k.four_k, cache_final: { vram_bytes: 796262400, vram_len: 24, vram_over: false } } }).length > 0, '放过了零淘汰');
   expect('记账超预算必须被抓', validateReport({ ...good, cache: { ...good.cache, final: { ...good.cache.final, ram_over: true } } }).length > 0, '放过了超预算');

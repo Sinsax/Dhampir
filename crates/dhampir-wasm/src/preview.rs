@@ -198,7 +198,7 @@ impl PreviewHost {
     }
 }
 
-fn element_by_id<T: JsCast>(id: &str, what: &str) -> Result<T, JsValue> {
+pub(crate) fn element_by_id<T: JsCast>(id: &str, what: &str) -> Result<T, JsValue> {
     let window = web_sys::window().ok_or_else(|| js_err("没有 window 对象"))?;
     let document = window
         .document()

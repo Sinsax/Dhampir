@@ -578,6 +578,74 @@ async function main() {
   };
   log('播放：' + report.playback.fps + ' fps 丢帧率 ' + report.playback.drop_ratio);
   log('seek 等价性：' + (report.seek.equivalent === true ? '一致' : '不一致'));
+
+  // ---- (7) T4.3：按**工程**渲染，而不是按视频文件 ----
+  step('section7-start');
+  const single = {
+    schema: 1,
+    timebase: { num: 30, den: 1 },
+    tracks: [{
+      id: 'v1',
+      kind: 'video',
+      clips: [{
+        id: 'c1',
+        source: 'proxy.mp4',
+        source_in: 0,
+        track_at: 0,
+        duration: 60,
+        transform: { x: 0, y: 0, scale: 1, rotation_deg: 0 },
+        opacity: 1,
+        effects: [],
+        keyframes: [],
+      }],
+    }],
+  };
+  const opened = JSON.parse(mod.dhampir_project_open(JSON.stringify(single)));
+  report.project = {
+    parsed: opened.parsed,
+    ok: opened.ok,
+    issues: Array.isArray(opened.issues) ? opened.issues.length : -1,
+    first_frame: mod.dhampir_project_first_frame(),
+    end_frame: mod.dhampir_project_end_frame(),
+  };
+  const layersAt0 = JSON.parse(mod.dhampir_project_frame(0));
+  report.project_frame0 = {
+    frame: layersAt0.frame,
+    layers: layersAt0.layers.length,
+    first_opacity: layersAt0.layers.length > 0 ? layersAt0.layers[0].opacity : null,
+    first_source_frame: layersAt0.layers.length > 0 ? layersAt0.layers[0].source_frame : null,
+  };
+
+  // 关键判据：**退化工程走时间线这条路，必须与 M3 的单片段路径逐字节相同。**
+  // 这条证明「把预览换成按工程渲染」没有把原来对的东西弄坏。
+  const probe = JSON.parse(await mod.dhampir_project_render_probe('v', 0, W, H));
+  report.project_probe = probe;
+  report.project_matches_m3 = probe.digest === report.rust.digest;
+  log('工程路径：' + probe.digest + ' / M3 路径：' + report.rust.digest);
+
+  // 再验一个**带转场**的工程：结构上该是两层，下面那层是冻帧。
+  // 这条不需要 GPU —— 它验的是「求值层真的被宿主接上了」，而不是只接了单片段那条。
+  const withTransition = JSON.parse(JSON.stringify(single));
+  withTransition.tracks[0].clips.push({
+    id: 'c2',
+    source: 'proxy.mp4',
+    source_in: 0,
+    track_at: 60,
+    duration: 30,
+    transform: { x: 0, y: 0, scale: 1, rotation_deg: 0 },
+    opacity: 1,
+    effects: [],
+    keyframes: [],
+    transition_in: { kind: 'cross_dissolve', duration: 10 },
+  });
+  const opened2 = JSON.parse(mod.dhampir_project_open(JSON.stringify(withTransition)));
+  const midTransition = JSON.parse(mod.dhampir_project_frame(65));
+  report.project_transition = {
+    ok: opened2.ok,
+    layers: midTransition.layers.length,
+    any_frozen: midTransition.layers.some((l) => l.frozen_for_transition === true),
+    opacities: midTransition.layers.map((l) => l.opacity),
+  };
   step('posting');
   report.ok = true;
   log('完成');
