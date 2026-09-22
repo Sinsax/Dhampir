@@ -1,6 +1,9 @@
-# dhampir · 剩余任务交接记录（M2 暂停点）
+# dhampir · 剩余任务交接记录（M2 收官后）
 
-写于 **2026-09-22** ｜ HEAD `63782435ffa2e0c2bf923f503919b60da45a7f5a`（`6378243`）｜ 工作区 **27 项未提交**（含本文件）
+写于 **2026-09-22** ｜ 工作区**干净**（M2 收尾共 8 个提交）
+
+> **当前状态**：M2 的工程活与收尾**已全部做完并提交**，记录能自证、验收快照全绿；
+> 只剩独立复核（P1）在跑。下一站是 **M3**，第一件事是 **S3.1 源帧采样策略决策**。
 
 > **2026-09-22 后续重整（两轮）**：
 > ① 交付物收窄为**技术调研 + 一个底座**——不需要服务器的整体架构；M5/M7 移出，M6 部分移出。
@@ -18,15 +21,15 @@
 
 ## 0. 一分钟版本
 
-- **M0、M1 已收官并已提交**（`records/m0/`、`records/m1/` 都在库里，M1 守卫 `scripts/check-m1-record.mjs` 跑真记录应 EXIT=0）。
-- **M2 的工程活已全部做完**，plan §5「退出标准」**4/4 已勾**，证据落在 `records/m2/`（**230 个文件**）。
-  （**引用一律用 § 与任务号，不再写行号**——plan 本轮被重整过，行号会漂。）
-- **M2 只剩四件收尾**，其中**代码活只有第一件**（守卫下半截），其余是跑验收、提交、独立复核。
-- ⚠️ **最危险的一条**：`scripts/check-m2-record.mjs` 现在**没有 `main()`** ——
-  `node scripts/check-m2-record.mjs`、`--self-test`、`--help` 三条命令**全是零输出、EXIT=0**（实测）。
-  此刻跑 `node scripts/record-acceptance.mjs --milestone m2`，会把 `guard-m2-record` 与
-  `guard-m2-record-self-test` 两条判据记成 `ok: true` —— **产出一份假绿的验收快照**。
-  **顺序不能颠倒：先补 `main()`，再跑验收。**
+- **M0、M1、M2 已收官并已提交**（`records/m0/`、`records/m1/`、`records/m2/` 都在库里）。
+- **M2 的记录现在能自证**：`node scripts/check-m2-record.mjs --record records/m2` → **EXIT=0**（60/60）；
+  `--self-test` → **EXIT=0**（53 条断言、37 个检查项各一条反向用例）。
+  （**引用一律用 § 与任务号**——plan 被重整过，行号会漂。）
+- **M2 验收快照已落**：`records/m2/acceptance.json` **13/13 全绿、`dirty=false`、commit `a35f535f0906`**，
+  13 份判据各留了原样 stdout / stderr。
+- ⚠️ **本轮修掉 4 个只在「真的执行守卫」之后才暴露的缺陷**（守卫此前从未跑过）：3 处**守卫与产出工具的
+  契约不一致**（截图 json 的 `leg.slug`、`browser.revision`、`rerun-repro.json` 的 `question` 键），
+  外加**两处自指死锁**（自检基线含 `acceptance.json`；验收工具边跑边写 `.txt`）。详见 §3.6。
 - **M3–M4 未开始**（plan §6–§7）；**M5–M7 已移出本仓库**（plan §8–§10 保留为下游形态参考）。
 - 另有**两项早先挂起的作业**：M1 的 Linux 两条腿（用户已决定延期）、plan §5 T2.6 一处疑似陈旧的 ⏳ 标记。
 - **本轮已重整**（2026-09-22）：plan §1 重写为「带状态的总览 + 当前进度 + 采纳的建议」；
@@ -44,12 +47,12 @@
 
 | 项 | 真实值 |
 |---|---|
-| HEAD | `63782435ffa2e0c2bf923f503919b60da45a7f5a` |
-| 工作区 | 27 项未提交：**13 改 + 1 删 + 13 新**（文档重整后：+`README.md`、+`plan/video-editor-tech-guide.md`） |
-| `records/m2/` | 230 个文件：`browser/` 86、`browser-amd/` 87、`framediff/` 3、`framediff-crossvendor/` 52、根 `README.md`(7952 B) + `wasm-tests.json`(3959 B) |
-| 守卫脚本 | `scripts/check-m2-record.mjs`：**184617 字节 / 3816 行 / 61 个具名导出**，LF、无 BOM、结尾停在第 3813 行 `}`（`checkRecordHonesty`）——**不可执行** |
-| 缺的记录件 | `records/m2/acceptance.json`、13 份 `<判据 id>.txt`、`records/m2/review-independent.md` |
-| 退出标准 | M2 4/4 ✅；M3–M4 未开始；M5–M7 移出范围 |
+| HEAD | 见 `git rev-parse --short HEAD`（M2 收尾共 8 个提交） |
+| 工作区 | **干净**（`git status --porcelain` 为空） |
+| `records/m2/` | **244 个文件** = 原 230 + `acceptance.json` + 13 份 `<判据 id>.txt` |
+| 守卫脚本 | `scripts/check-m2-record.mjs`：**约 4200 行**，**可执行**、带 `--self-test`；只设 `process.exitCode`，绝不 `process.exit()` |
+| 记录件 | 齐：`acceptance.json` + 13 份 txt ✅；`review-independent.md` ⏳ 复核中 |
+| 退出标准 | M2 **4/4** ✅；M3–M4 未开始；M5–M7 移出范围 |
 
 **未提交清单**（`git status --porcelain` 实测）：
 
@@ -276,9 +279,23 @@ M2 这次还没发起。产出 `records/m2/review-independent.md`，守卫对它
 - 一次性探查脚本放已忽略的 `target/` 下（现有探针：`m2-*.mjs`、`m2-backup/`）；`records/` 在 text-hygiene 的 `SKIP_DIRS` 里，
   **记录里的证据文件自己管编码**（BOM/CR 由守卫的 `recordByteHygiene` 查）。
 
+### 3.6 本轮修掉的 4 个缺陷（都只在「真的执行守卫」之后才暴露）
+
+守卫此前**从未被执行过**（没有 `main()`），所以下面这些一直藏着——它们不是记录的问题，是工具的问题。
+
+| # | 症状 | 根因 | 处置 |
+|---|---|---|---|
+| 1 | `screenshot` 红：`leg.slug="m2"，锚是 "browser"` | 守卫拿**目录名**去比截图 json 里的**记录内腿名**；产出脚本写的是后者 | 改判 `legSlugInRecord`（目录名本就由 `out_dir` 那一栏查） |
+| 2 | `screenshot` 红：`browser.revision="@792bf67…"` | 守卫要求整数；CDP 的 `Browser.getVersion().revision` 是**字符串**，采集脚本原样落盘 | 改判「非空字符串」 |
+| 3 | `rerun-repro` 红：顶层键多了 `question` | 守卫的 `KEYS` 没跟上产出脚本 | 加入 KEY 并断言非空 |
+| 4 | 自检永远失败（守卫退 2）／`guard-m2-record` 永远失败（退 1） | **两处自指死锁**：① 自检基线含 `acceptance.json`，而其中一条判据就是「跑守卫」；② 验收工具**边跑边写** `.txt`，守卫在自己的判据上必然看到「半份记录」 | ① 自检基线摘掉「后到的、自指的」产物（真跑照原样加载、红的照红）；② 验收工具改为**所有判据跑完再落盘** |
+
+**教训（写给下一个人）**：一个从未被执行过的守卫，其"检查项"与"产出工具"的契约从未被验证过。
+**先把守卫跑起来，再去信它报的任何一个数。**
+
 ### 3.5 别重走的两条弯路
 
-- **不要现在跑验收**：守卫没有 `main()`，跑出来的 `acceptance.json` 一定假绿（见 §0）。
+- ~~**不要现在跑验收**~~ —— 本条已解除：守卫已可执行，验收快照已全绿（见 §0）。
 - **不要往 `records/m2/` 根目录或新增子目录放文件**：`root-listing` 把根目录钉死成
   「4 个子目录 + `README.md` + `wasm-tests.json` (+ 允许 `acceptance.json`、`review-independent.md`、13 份 `<id>.txt`)」，
   多一个没人认领的文件就红。**本文件因此放在 `plan/` 下**，不进记录目录。

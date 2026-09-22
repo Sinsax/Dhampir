@@ -53,24 +53,34 @@
 | M0 | `records/m0/` |
 | M1 | `records/m1/`；`check-m1-record.mjs --record records/m1` → EXIT=0（160 张 PNG 逐张重算一致） |
 | M2 工程活 | `records/m2/` 230 个文件；本文件 §5 退出标准 4/4 已勾 |
+| **M2 记录自证** | `check-m2-record.mjs --record records/m2` → **EXIT=0**（60/60）；`--self-test` → **EXIT=0**（53 条断言 / 37 项反向用例全覆盖） |
+| **M2 验收快照** | `records/m2/acceptance.json`：**13/13 全绿、`dirty=false`、commit `a35f535f0906`**，每份判据都留了原样 stdout/stderr |
 | 底座依赖方向 | `check-dep-graph.mjs` → EXIT=0（5 个 crate，无环） |
-| 文本卫生 | `check-text-hygiene.mjs` → EXIT=0 |
+| 文本卫生 | `check-text-hygiene.mjs` → EXIT=0（70 个文件） |
 
-**M2 收尾 4 件（1/4）**：
+**M2 收尾 4 件（3/4）**：
 
-| # | 任务 | 性质 | 状态 |
-|---|---|---|---|
-| P0-1 | 给 `scripts/check-m2-record.mjs` 补 `runSelfTest()` + 37 条反向用例 + `main()` + `process.exitCode` | **代码（唯一一件）** | ✅ **已完成**：自检 53 条断言 / 37 项全覆盖；`--record records/m2` → **EXIT=0**（60/60） |
-| **P0-3** | 按主题拆提交 | git | ⬜ **下一步** |
-| P0-2 | `node scripts/record-acceptance.mjs --milestone m2` → `acceptance.json` + 13 份 `<判据 id>.txt` | 验收 | ⬜ 须在 P0-3 之后 |
-| P1 | 独立复核 → `records/m2/review-independent.md` | 子代理 | ⬜ |
+| # | 任务 | 状态 |
+|---|---|---|
+| P0-1 | 守卫可执行化（`runSelfTest()` + 37 条反向用例 + `main()` + `process.exitCode`） | ✅ **已完成** |
+| P0-3 | 按主题拆提交 | ✅ **已完成**（7 个提交） |
+| P0-2 | 验收快照 `acceptance.json` + 13 份判据 | ✅ **已完成**（13/13、`dirty=false`） |
+| P1 | 独立复核 → `records/m2/review-independent.md` | ⏳ **进行中** |
+
+**本轮另修掉 4 个只在「真的执行守卫」之后才暴露的缺陷**（守卫此前从未跑过，所以一直没被发现）：
+
+| # | 缺陷 | 性质 |
+|---|---|---|
+| 1 | 截图 json 的 `leg.slug` 被拿**目录名**去比（记录里写的是记录内腿名 `m2`） | 守卫与产出工具的契约不一致 |
+| 2 | `browser.revision` 被要求是**整数**（CDP 给的是字符串 `@792bf67…`） | 同上 |
+| 3 | `rerun-repro.json` 的 `question` 键不被 `KEYS` 接受 | 同上 |
+| 4 | **自指死锁两处**：守卫自检的基线含 `acceptance.json`（而它的一条判据就是「跑守卫」）；验收工具边跑边写 `.txt`，让守卫在自己的判据上必然看到「半份记录」 | 设计缺陷 |
 
 ⚠️ **两条顺序约束（都是实测出来的，别再颠倒）**：
 
 1. 守卫没有 `main()` 之前跑验收会产出**假绿快照**（已解除）。
 2. **提交（P0-3）必须排在验收（P0-2）之前**：`acceptance.json` 的 `dirty` 剔除 `records/`，
-   而工作区现有 28 项未提交 → 此刻跑出来就是 `dirty: true`，守卫按红判
-   （`dirty=true——记录是在一棵脏树上跑的`）。原计划把 P0-2 排在 P0-3 前面，**顺序反了**。
+   树脏就会写出 `dirty: true`，守卫按红判（`dirty=true——记录是在一棵脏树上跑的`）。
 
 **未开始**：M3、M4。逐条交接见 [`remaining-work.md`](./remaining-work.md)。
 
@@ -442,8 +452,10 @@ FFmpeg 绑定、解码、时间线、分片、任务队列。
     `min PSNR 9.29031166980374 dB`、`max|Δ| 174`、差异像素 472000、**15 张**差异图。
     15 而不是 16 有出处：`checker` 场景的动画周期是 **3**（`f000=f003=f006=…=f015`，三种图案循环），
     错开一相位后 `f015→f000` 那一对正好落回同一相位——**不是工具漏判**
-  - ⏳ 留给 T2.6 的两件事：跨厂商腿的 `[scenario.*]` 定档（按实测写，见上面"故意不写"那条），
-    以及"这些差异算结构性缺陷还是均匀低幅噪声"的归因（T2.5 的活）
+  - ✅ **原留给 T2.6 的两件事都已兑现**（本行原为 ⏳，属陈旧标记）：
+    跨厂商腿的 `[scenario.*]` 定档见 T2.4 回填与 T2.6 的实测表（`0.9995` / `max_abs_diff_max = 1`，
+    `checker` 与 `srgb_linear` 各写 0）；"这些差异算结构性缺陷还是均匀低幅噪声"的归因见
+    T2.5 与 [`wgsl-portable-subset.md`](./wgsl-portable-subset.md) §6
 - [x] **T2.5 差异归因与固化**
   - **结构性差异（边缘错位、色块偏移）一律当 bug 修**，不接受"浮点误差"解释
     - ✅ M2 没有触发这一条——但**"没触发"本身不是判据**，判据是下面那件承重墙：差异的**形状**成为可复核产物
