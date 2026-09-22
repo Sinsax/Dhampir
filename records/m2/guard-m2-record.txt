@@ -1,0 +1,16 @@
+$ node scripts/check-m2-record.mjs --record records/m2
+exit: 0
+
+----- stdout -----
+✓ 腿 browser：15/15
+✓ 腿 browser-amd：15/15
+✓ native 归档（native-dx12-nvidia）：3/3
+✓ 跨腿：6/6
+✓ 比对记录 framediff：8/8
+✓ 比对记录 framediff-crossvendor：8/8
+✓ 诚实性：5/5
+————————————————————————————————————————————————————————————
+合计 60/60 项绿
+✓ records/m2 复核通过：160 张 PNG 的像素摘要逐张重算、整表摘要与档位判定重拼、比对记录逐字节对账，全部一致
+
+----- stderr -----

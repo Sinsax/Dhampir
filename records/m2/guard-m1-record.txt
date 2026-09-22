@@ -1,0 +1,7 @@
+$ node scripts/check-m1-record.mjs --record records/m1
+exit: 0
+
+----- stdout -----
+✓ records/m1 复核通过：2 条腿 × 80 张 PNG（共 160 张），每张的 png_digest 与 pixel_digest 都由本守卫自行重算并一致；整表摘要 71ecc80cade3d73d 由重算结果复现；跨后端逐字节一致；31 项检查全绿
+
+----- stderr -----

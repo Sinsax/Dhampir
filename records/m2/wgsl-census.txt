@@ -1,0 +1,54 @@
+$ node scripts/dhampir-wgsl-census.mjs --declared plan/wgsl-portable-subset.md
+exit: 0
+
+----- stdout -----
+dhampir · WGSL 构造普查
+扫描：2 份文件
+  F:/para/Code/Dhampir/crates/dhampir-core/src/shaders/probe.wgsl
+    1579 字节、去注释后 19 行非空、用了 11 种构造
+  F:/para/Code/Dhampir/crates/dhampir-core/src/shaders/scene.wgsl
+    14141 字节、去注释后 108 行非空、用了 28 种构造
+
+构造总表（28 种，按计数降序）：
+     56  f32
+     31  vec2<
+     29  vec4<
+     26  i32
+     25  let 
+     14  fn 
+     13  @location(
+     12  vec3<
+     11  @builtin(
+      8  @fragment
+      7  var 
+      6  i32(
+      5  floor(
+      4  select(
+      4  struct 
+      4  u32
+      3  @vertex
+      3  f32(
+      3  fract(
+      2  @binding(
+      2  @group(
+      2  array<
+      2  textureDimensions(
+      1  clamp(
+      1  pow(
+      1  textureLoad(
+      1  texture_2d<
+      1  var<uniform>
+
+禁词（来源 crates/dhampir-core/src/render/wgsl_subset.rs，共 6 条）：
+  · fwidth             出现 0 次  —— 导数：结果允许因实现而异，基准用例里不能出现
+  · dpdx               出现 0 次  —— 导数：结果允许因实现而异
+  · dpdy               出现 0 次  —— 导数：结果允许因实现而异
+  · textureSample(     出现 0 次  —— 隐式 LOD 采样：它内部要导数；采样一律走 textureLoad
+  · loop               出现 0 次  —— 循环：累加顺序会交给编译器，而顺序必须由文本决定
+  · atomic             出现 0 次  —— 原子：跨运行时的结果不可预期
+
+与文档的「允许」表核对（plan/wgsl-portable-subset.md）：申报 28 条；用了但没申报 0 条；申报了但当前没用 0 条
+
+  明细 → target/wgsl-census/wgsl-census.json ／ target/wgsl-census/wgsl-census.txt
+
+----- stderr -----
