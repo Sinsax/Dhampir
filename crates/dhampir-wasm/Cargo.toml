@@ -40,6 +40,9 @@ web-sys = { workspace = true, features = [
     "Element",
     "HtmlCanvasElement",
     "CanvasRenderingContext2d",
+    # 预览链路的源帧来自 <video> 元素：Rust 侧要拿到它才能走
+    # copy_external_image_to_texture（见 preview.rs）。
+    "HtmlVideoElement",
     # `window.performance().now()`——计时用。web-sys 每个类型一个 feature，
     # 少了它 `Window::performance` 根本不存在（报 "method not found"）。
     "Performance",

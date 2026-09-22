@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>M3 预览链路 · 实测</title>
+<style>body { font: 13px/1.5 ui-monospace, Consolas, monospace; margin: 12px; } video { width: 320px; } canvas { width: 320px; border: 1px solid #ccc; } #log { white-space: pre-wrap; }</style>
+</head>
+<body>
+<h1>M3 预览链路实测：Rust 侧 FrameSource（拷贝路线）与 JS 参考逐字节比</h1>
+<video id="v" src="/media/proxy.mp4" muted playsinline preload="auto"></video>
+<canvas id="c" width="1280" height="720"></canvas>
+<pre id="log"></pre>
+<script type="module">
+const NL = String.fromCharCode(10);
+const logEl = document.getElementById('log');
+const log = (m) => { logEl.textContent += m + NL; };
+const post = (o) => fetch('/result', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(o) });
+
+// 与 Rust 侧同参数的 FNV-1a 64（16 位小写十六进制）——摘要能跨语言直接比。
+function fnv1a64(bytes) {
+  let h = 0xcbf29ce484222325n;
+  const prime = 0x100000001b3n;
+  const mask = (1n << 64n) - 1n;
+  for (let i = 0; i < bytes.length; i += 1) { h = ((h ^ BigInt(bytes[i])) * prime) & mask; }
+  return h.toString(16).padStart(16, '0');
+}
+
+// JS 参考实现：自己走一遍「拷贝 + textureLoad 搬运」，与 Rust 侧比摘要。
+const WGSL = [
+  '@group(0) @binding(0) var t: texture_2d<f32>;',
+  '@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {',
+  '  var c = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));',
+  '  return vec4<f32>(c[i], 0.0, 1.0);',
+  '}',
+  '@fragment fn fs(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {',
+  '  return textureLoad(t, vec2<i32>(p.xy), 0);',
+  '}',
+].join(NL);
+// 翻转版：只把 V 反过来取。用来判断「差的到底是不是方向」。
+const WGSL_VFLIP = [
+  '@group(0) @binding(0) var t: texture_2d<f32>;',
+  '@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {',
+  '  var c = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));',
+  '  return vec4<f32>(c[i], 0.0, 1.0);',
+  '}',
+  '@fragment fn fs(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {',
+  '  let h = i32(textureDimensions(t).y);',
+  '  return textureLoad(t, vec2<i32>(i32(p.x), h - 1 - i32(p.y)), 0);',
+  '}',
+].join(NL);
+
+async function main() {
+  const report = {};
+  const video = document.getElementById('v');
+  await new Promise((res, rej) => {
+    video.addEventListener('loadeddata', res, { once: true });
+    video.addEventListener('error', () => rej(new Error('video error')), { once: true });
+  });
+  video.pause();
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  const W = video.videoWidth, H = video.videoHeight;
+  report.video = { w: W, h: H, readyState: video.readyState };
+
+  const mod = await import('/pkg/dhampir_wasm.js');
+  await mod.default();
+  report.wasm_loaded = true;
+
+  // (1) Rust 侧：copy_external_image_to_texture + BlitRenderer + 读回 + FNV
+  report.rust = JSON.parse(await mod.dhampir_preview_probe_digest('v'));
+
+  // (2) JS 参考：同一条路再走一遍
+  const adapter = await navigator.gpu.requestAdapter();
+  const device = await adapter.requestDevice();
+  const errors = [];
+  device.onuncapturederror = (e) => { const err = e.error; errors.push(err && err.message ? String(err.message) : String(err)); };
+  const src = device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+  const dst = device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+  device.queue.copyExternalImageToTexture({ source: video }, { texture: src, premultipliedAlpha: false }, [W, H]);
+  const shader = device.createShaderModule({ code: WGSL });
+  const pipe = device.createRenderPipeline({ layout: 'auto', vertex: { module: shader, entryPoint: 'vs' }, fragment: { module: shader, entryPoint: 'fs', targets: [{ format: 'rgba8unorm' }] }, primitive: { topology: 'triangle-list' } });
+  const bind = device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: src.createView() }] });
+  const enc = device.createCommandEncoder();
+  const pass = enc.beginRenderPass({ colorAttachments: [{ view: dst.createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+  pass.setPipeline(pipe); pass.setBindGroup(0, bind); pass.draw(3); pass.end();
+  device.queue.submit([enc.finish()]);
+  const readTexture = async (tex) => {
+    const buf = device.createBuffer({ size: W * H * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const e = device.createCommandEncoder();
+    e.copyTextureToBuffer({ texture: tex }, { buffer: buf, bytesPerRow: W * 4 }, [W, H]);
+    device.queue.submit([e.finish()]);
+    await buf.mapAsync(GPUMapMode.READ);
+    return new Uint8Array(buf.getMappedRange()).slice();
+  };
+  const normal = await readTexture(dst);
+  const raw = await readTexture(src);
+  report.js = { width: W, height: H, bytes: normal.length, digest: fnv1a64(normal) };
+  report.js_raw = { width: W, height: H, bytes: raw.length, digest: fnv1a64(raw) };
+
+  // 翻转版：判断差异是不是「方向」
+  const dstFlip = device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+  const shaderFlip = device.createShaderModule({ code: WGSL_VFLIP });
+  const pipeFlip = device.createRenderPipeline({ layout: 'auto', vertex: { module: shaderFlip, entryPoint: 'vs' }, fragment: { module: shaderFlip, entryPoint: 'fs', targets: [{ format: 'rgba8unorm' }] }, primitive: { topology: 'triangle-list' } });
+  const bindFlip = device.createBindGroup({ layout: pipeFlip.getBindGroupLayout(0), entries: [{ binding: 0, resource: src.createView() }] });
+  const enc3 = device.createCommandEncoder();
+  const pass3 = enc3.beginRenderPass({ colorAttachments: [{ view: dstFlip.createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+  pass3.setPipeline(pipeFlip); pass3.setBindGroup(0, bindFlip); pass3.draw(3); pass3.end();
+  device.queue.submit([enc3.finish()]);
+  const flipped = await readTexture(dstFlip);
+  report.js_vflip = { width: W, height: H, bytes: flipped.length, digest: fnv1a64(flipped) };
+
+  // 对照：一张「清屏色」也有摘要。不把它算出来，就会把「谁渲染成了空图」看成结论。
+  const blank = new Uint8Array(W * H * 4);
+  for (let i = 0; i < blank.length; i += 4) { blank[i + 3] = 255; }
+  report.js_clear = { bytes: blank.length, digest: fnv1a64(blank) };
+  report.is_clear = {
+    rust: report.rust.digest === report.js_clear.digest,
+    js_normal: report.js.digest === report.js_clear.digest,
+    js_vflip: report.js_vflip.digest === report.js_clear.digest,
+  };
+
+  report.match = {
+    rust_vs_js_normal: report.rust.digest === report.js.digest,
+    rust_vs_js_raw: report.rust.digest === report.js_raw.digest,
+    rust_vs_js_vflip: report.rust.digest === report.js_vflip.digest,
+    js_raw_vs_js_normal: report.js_raw.digest === report.js.digest,
+  };
+  report.digests_match = report.match.rust_vs_js_normal;
+  report.js_gpu_errors = errors;
+
+  // (3) canvas 上屏链路：初始化 + 画一帧。不抛错就说明 surface/配置/present 通了。
+  try {
+    report.canvas_init = await mod.dhampir_preview_init('c', 'v');
+    mod.dhampir_preview_draw(0);
+    report.canvas_draw = 'ok';
+  } catch (e) {
+    report.canvas_draw = 'err: ' + (e && e.message ? e.message : String(e));
+  }
+
+  report.ok = true;
+  log('完成');
+  await post(report);
+}
+main().catch(async (e) => { log('✗ ' + (e && e.stack ? e.stack : e)); await post({ ok: false, error: String(e && e.message ? e.message : e) }); });
+</script>
+</body>
+</html>

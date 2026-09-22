@@ -661,7 +661,13 @@ FFmpeg 绑定、解码、时间线、分片、任务队列。
     全屏三角形 + `textureLoad(src, vec2<i32>(pos.xy), 0)` 逐纹素恒等搬运；**真机验证通过**
     （`cargo test -p dhampir-worker --test blit -- --ignored`：16×16 全不相同图案，读出逐字节相等）。
     该测试默认 `#[ignore]`，**不把 GPU 依赖塞进 `cargo test --workspace`**（默认套件仍是 148 passed / 1 ignored）。
-    子集普查 EXIT=0（用了但没申报 0 条）；**wasm 侧 `FrameSource` / `FrameSink` 与 canvas 上屏还未做**。
+    子集普查 EXIT=0（用了但没申报 0 条）。
+  - ✅ **第二级也落地了（同一轮）**：wasm 侧 `preview.rs` 里两个接缝都实现了——
+    `VideoFrameSource`（`copy_external_image_to_texture` 把 `<video>` 的当前帧拷进普通 `texture_2d`）
+    与 `CanvasFrameSink`（canvas surface，`acquire` = `get_current_texture`，`finish` = `queue.present`）。
+    **实测通过**（`node scripts/s3-preview-spike/run.mjs`）：Rust 侧渲染读回的摘要与 JS 参考路径
+    **逐字节相同**（`43e1f1a6619d9b6b`），canvas 上屏 `BrowserWebGpu` 1280×720 成功，0 条 WebGPU 错误；
+    另有翻转对照（`a79f683f78ac8443`）与清屏色对照（`52bda05e66a4a325`）证明「相同」不是空图造成的假象。
   - ⚠️ 按 S3.1 的结论改了做法。两条实测理由：① 子集**禁隐式 LOD 采样**（`textureSample(`），
     而 `texture_external` **只能**用 `textureSampleBaseClampToEdge` 采——选外部纹理就等于给子集开例外；
     ② `textureLoad` **没有 external 重载**（实测编译失败：`no matching call to textureLoad(texture_external, …)`）。
