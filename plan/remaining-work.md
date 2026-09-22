@@ -273,6 +273,12 @@ M2 这次还没发起。产出 `records/m2/review-independent.md`，守卫对它
 
 ### 3.4 环境与工具坑（本机 win32 + PowerShell）
 
+- **JS 工具链（M3 起要用）**：`node v25.5.0` ✅、**`npm 11.8.0` ✅**、`npx` ✅；
+  **`pnpm` 是坏的**——`C:\Users\para\AppData\Local\Microsoft\WinGet\Links\pnpm.exe` 是个指向
+  `…\WinGet\Packages\pnpm.pnpm_…\pnpm.exe` 的 shim，而那个包目录**不存在**（实测「系统找不到指定的路径」）。
+  registry 可达（`npm ping` 有响应），所以 `npm i -g pnpm` 是修复路径；但 M3 的预览链路harness
+  沿用 M2/S3.1 那套**纯 HTML + 本地服务 + 无头 Chrome**，**不依赖任何打包器**——React/Vite 骨架属下游 UI，不在本仓库交付。
+
 - 逻辑一律用 **Node**，不用 PowerShell 做判定；判据看 `$LASTEXITCODE`；跑工具时 `$ErrorActionPreference='Continue'`。
 - **不跑 `cargo fmt` / `clippy --fix`** 之类批量改写命令（会和在建改动互相踩）；清理用 `rm`。
 - `git status --porcelain` / `record-acceptance` 的 `dirty` 都**剔除 `records/`**。

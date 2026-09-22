@@ -41,7 +41,7 @@ export function validateReport(report, want = { w: WANT_W, h: WANT_H, n: WANT_N 
   if (v.videoWidth !== want.w || v.videoHeight !== want.h) {
     problems.push('视频尺寸是 ' + v.videoWidth + 'x' + v.videoHeight + '，要求 ' + want.w + 'x' + want.h);
   }
-  for (const key of ['a_import_render', 'b_copy_only', 'b_copy_render']) {
+  for (const key of ['a_import_render', 'b_copy_only', 'b_copy_render', 'c_copy_textureload']) {
     const s = report[key];
     if (s === undefined || s === null) { problems.push('缺基准 ' + key); continue; }
     if (s.n !== want.n) problems.push(key + ' 的样本数是 ' + s.n + '，要求 ' + want.n);
@@ -53,6 +53,11 @@ export function validateReport(report, want = { w: WANT_W, h: WANT_H, n: WANT_N 
     problems.push('像素比对覆盖了 ' + p.total_bytes + ' 字节，要求 ' + (want.w * want.h * 4) + '（整幅 RGBA8）');
   }
   if (typeof p.differing_bytes !== 'number') problems.push('pixels.differing_bytes 不是数');
+  if (p.a_vs_c === undefined || typeof p.a_vs_c.differing_bytes !== 'number') {
+    problems.push('缺 pixels.a_vs_c——子集合规那条路（textureLoad）没被比对');
+  }
+  // texture_external 上 textureLoad 的结果是**结论**不是错误：编不过就说明子集路线只能走拷贝。
+  if (report.external_texture_load === undefined) problems.push('缺 external_texture_load 探针');
   // 测量必须**零 WebGPU 错误**：校验失败时渲染会被丢掉，量出来的是"失败调用"的耗时，
   // 而像素上看起来只是"两条路不一样"。这一条是踩过一次才知道要加的。
   const ge = report.gpu_errors;
@@ -112,7 +117,9 @@ function selfTest() {
     a_import_render: { n: 200, mean_ms: 1, median_ms: 1, p95_ms: 1 },
     b_copy_only: { n: 200, mean_ms: 2, median_ms: 2, p95_ms: 2 },
     b_copy_render: { n: 200, mean_ms: 3, median_ms: 3, p95_ms: 3 },
-    pixels: { total_bytes: 1920 * 1080 * 4, differing_bytes: 0 },
+    c_copy_textureload: { n: 200, mean_ms: 3, median_ms: 3, p95_ms: 3 },
+    pixels: { total_bytes: 1920 * 1080 * 4, differing_bytes: 0, a_vs_c: { differing_bytes: 0 } },
+    external_texture_load: { ok: false, errors: ['nope'] },
     gpu_errors: [],
     lifetime: {
       close_before_gpu_done: { differing_bytes: 0, identical: true },

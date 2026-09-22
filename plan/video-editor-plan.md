@@ -656,7 +656,11 @@ FFmpeg 绑定、解码、时间线、分片、任务队列。
 - [ ] **T3.1 `web/` 骨架**：Vite + React + TS；加载 wasm-pack `--target web` 产物
 - [ ] **T3.2 demux + 解码**：mp4box.js 取样本 → `VideoDecoder` → VideoFrame
   - **只解 H.264，不引 FFmpeg WASM**（有意取舍：WASM 那 0.3x 性能和几十兆包体积不值得，异构格式交服务端）
-- [ ] **T3.3 上屏链路**：`import_external_texture` → core 渲染图 → canvas surface
+- [ ] **T3.3 上屏链路**：~~`import_external_texture`~~ → **拷贝进 `texture_2d` + `textureLoad`** → core 渲染图 → canvas surface
+  - ⚠️ 按 S3.1 的结论改了做法。两条实测理由：① 子集**禁隐式 LOD 采样**（`textureSample(`），
+    而 `texture_external` **只能**用 `textureSampleBaseClampToEdge` 采——选外部纹理就等于给子集开例外；
+    ② `textureLoad` **没有 external 重载**（实测编译失败：`no matching call to textureLoad(texture_external, …)`）。
+    见 [`s3.1-source-frame-sampling.md`](./s3.1-source-frame-sampling.md) §2.2。
   - wasm 侧实现 `FrameSource` / `FrameSink`
 - [ ] **T3.4 帧缓存**：LRU + 显存上限（参考 MASterSelects 的 300 张 VRAM 纹理）+ RAM 预览缓存（参考 900 帧）
 - [ ] **T3.5 测量**：seek p50/p95、播放丢帧率、解码 → 上屏延迟、显存/内存曲线

@@ -37,6 +37,12 @@ const HEAD = [
 const FS_A = '@group(0) @binding(0) var t: texture_external; @group(0) @binding(1) var s: sampler; @fragment fn fs(i: VOut) -> @location(0) vec4f { return textureSampleBaseClampToEdge(t, s, i.uv); }';
 const FS_B = '@group(0) @binding(0) var t: texture_2d<f32>; @group(0) @binding(1) var s: sampler; @fragment fn fs(i: VOut) -> @location(0) vec4f { return textureSample(t, s, i.uv); }';
 const FS_BV = '@group(0) @binding(0) var t: texture_2d<f32>; @group(0) @binding(1) var s: sampler; @fragment fn fs(i: VOut) -> @location(0) vec4f { return textureSample(t, s, vec2f(i.uv.x, 1.0 - i.uv.y)); }';
+// 路径 C：**符合《WGSL 可移植性子集》**的写法。子集禁 textureSample(（隐式 LOD），
+// 采样一律走 textureLoad + 显式 mip 0。textureLoad 只能用在 texture_2d 上。
+const FS_C = '@group(0) @binding(0) var t: texture_2d<f32>; @fragment fn fsC(@builtin(position) p: vec4f) -> @location(0) vec4f { return textureLoad(t, vec2<i32>(p.xy), 0); }';
+// 探针：同一件事写在 texture_external 上，看它编不编得过。
+const EXT_LOAD = HEAD + NL + '@group(0) @binding(0) var t: texture_external; @fragment fn fsLoad(@builtin(position) p: vec4f) -> @location(0) vec4f { return textureLoad(t, vec2<i32>(p.xy), 0); }';
+const WGSL_C = HEAD + NL + FS_C;
 const WGSL_A = HEAD + NL + FS_A;
 const WGSL_B = HEAD + NL + FS_B;
 const WGSL_BV = HEAD + NL + FS_BV;
@@ -66,7 +72,7 @@ async function main() {
   const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
   const USAGE = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC;
   const mk = () => device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: USAGE });
-  const targetA = mk(), targetB = mk(), targetBV = mk();
+  const targetA = mk(), targetB = mk(), targetBV = mk(), targetC = mk();
   // Dawn 要求 copyExternalImageToTexture 的目标纹理**同时带 RenderAttachment**。
   // 少这一位它会**静默失败**：只有 onuncapturederror 收得到，纹理保持未初始化，
   // 于是"B 渲染出黑图"、"翻 V 不变"、"量到的是失败调用的耗时"三件事同时发生。
@@ -74,7 +80,9 @@ async function main() {
   const srcView = srcTex.createView();
 
   const mkPipe = (code) => device.createRenderPipeline({ layout: 'auto', vertex: { module: device.createShaderModule({ code }), entryPoint: 'vs' }, fragment: { module: device.createShaderModule({ code }), entryPoint: 'fs', targets: [{ format: 'rgba8unorm' }] }, primitive: { topology: 'triangle-list' } });
+  const mkPipeC = (code, entry) => device.createRenderPipeline({ layout: 'auto', vertex: { module: device.createShaderModule({ code }), entryPoint: 'vs' }, fragment: { module: device.createShaderModule({ code }), entryPoint: entry, targets: [{ format: 'rgba8unorm' }] }, primitive: { topology: 'triangle-list' } });
   const pipeA = mkPipe(WGSL_A), pipeB = mkPipe(WGSL_B), pipeBV = mkPipe(WGSL_BV);
+  const pipeC = mkPipeC(WGSL_C, 'fsC');
 
   const draw = (pipe, bind, view) => {
     const enc = device.createCommandEncoder();
@@ -89,6 +97,8 @@ async function main() {
   const copyOnly = () => device.queue.copyExternalImageToTexture({ source: video }, { texture: srcTex }, [W, H]);
   const frameB = () => { copyOnly(); draw(pipeB, device.createBindGroup({ layout: pipeB.getBindGroupLayout(0), entries: [{ binding: 0, resource: srcView }, { binding: 1, resource: sampler }] }), targetB.createView()); };
   const frameBV = () => { draw(pipeBV, device.createBindGroup({ layout: pipeBV.getBindGroupLayout(0), entries: [{ binding: 0, resource: srcView }, { binding: 1, resource: sampler }] }), targetBV.createView()); };
+  // 路径 C：拷贝 + textureLoad 渲染（子集合规，不需要 sampler）
+  const frameC = () => { copyOnly(); draw(pipeC, device.createBindGroup({ layout: pipeC.getBindGroupLayout(0), entries: [{ binding: 0, resource: srcView }] }), targetC.createView()); };
 
   const bench = async (fn, label) => {
     for (let i = 0; i < WARMUP; i += 1) fn();
@@ -100,9 +110,10 @@ async function main() {
   report.a_import_render = await bench(frameA, 'A 零拷贝外部纹理 + 渲染');
   report.b_copy_only = await bench(copyOnly, 'B 仅 copyExternalImageToTexture');
   report.b_copy_render = await bench(frameB, 'B 拷贝 + 渲染');
+  report.c_copy_textureload = await bench(frameC, 'C 拷贝 + textureLoad 渲染（子集合规）');
   report.derived = { copy_cost_ms: report.b_copy_only.mean_ms, copy_render_minus_import_render_ms: +(report.b_copy_render.mean_ms - report.a_import_render.mean_ms).toFixed(4) };
 
-  frameA(); copyOnly(); frameB(); await device.queue.onSubmittedWorkDone();
+  frameA(); copyOnly(); frameB(); await device.queue.onSubmittedWorkDone(); frameC(); await device.queue.onSubmittedWorkDone();
   frameBV(); await device.queue.onSubmittedWorkDone();
 
   const read = async (tex) => {
@@ -115,7 +126,14 @@ async function main() {
     return new Uint8Array(buf.getMappedRange()).slice();
   };
   const cmp = (a, b) => { let d = 0, m = 0; for (let i = 0; i < a.length; i += 1) { const x = Math.abs(a[i] - b[i]); if (x !== 0) d += 1; if (x > m) m = x; } return { differing_bytes: d, max_abs_diff: m, identical: d === 0 }; };
-  const [a, b, bv] = [await read(targetA), await read(targetB), await read(targetBV)];
+  const [a, b, bv, c] = [await read(targetA), await read(targetB), await read(targetBV), await read(targetC)];
+
+  // texture_external 上能不能用 textureLoad？编不过就是硬约束（子集合规路线只能走拷贝）。
+  const extLoadInfo = await device.createShaderModule({ code: EXT_LOAD }).getCompilationInfo();
+  report.external_texture_load = {
+    ok: !extLoadInfo.messages.some((m) => m.type === 'error'),
+    errors: extLoadInfo.messages.filter((m) => m.type === 'error').map((m) => m.message),
+  };
   const imageStats = (px) => {
     let min = 255, max = 0;
     for (let i = 0; i < px.length; i += 4) { const v = px[i]; if (v < min) min = v; if (v > max) max = v; }
@@ -123,7 +141,7 @@ async function main() {
     return { r_min: min, r_max: max, constant: min === max, tl: at(2, 2), center: at(W >> 1, H >> 1), br: at(W - 3, H - 3) };
   };
   report.images = { a: imageStats(a), b: imageStats(b), b_vflipped: imageStats(bv) };
-  report.pixels = { total_bytes: a.length, a_vs_b: cmp(a, b), a_vs_b_vflipped: cmp(a, bv), b_vs_b_vflipped: cmp(b, bv) };
+  report.pixels = { total_bytes: a.length, a_vs_b: cmp(a, b), a_vs_c: cmp(a, c), a_vs_b_vflipped: cmp(a, bv), b_vs_b_vflipped: cmp(b, bv) };
   report.pixels.differing_bytes = report.pixels.a_vs_b.differing_bytes;
 
   // ---- S3.3：VideoFrame 生命周期 ----
