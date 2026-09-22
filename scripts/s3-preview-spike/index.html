@@ -385,7 +385,6 @@ async function main() {
 
   const openFrames = new Map();
   let evictedTotal = 0;
-  let clippedTotal = 0;
   const decodeTimes = [];
   const renderTimes = [];
 
@@ -418,6 +417,20 @@ async function main() {
   // 8 个抽样点：要给出像样的 p95，样本太少没有意义。
   // （上一版 10 个在 1080p 上把整轮拖过 7 分钟，5 个又太少——8 是个折中。）
   const targets = [10, 60, 130, 200, 280, 340, 400, 460];
+  // **纹理池**：真实实现不会每拖一次就新分配一张 8.29 MB 纹理。
+  // 先前 tex / out 都在计时窗口里 new，那笔分配被算进了 scrub 延迟——
+  // 这是继「每 seek 新建解码器」之后排掉的第二个同类假象。
+  const POOL = 3;
+  const texPool = [];
+  for (let i = 0; i < POOL; i += 1) {
+    texPool.push(device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING }));
+  }
+  const outTex = device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+  const outView = outTex.createView();
+  // 池**不入缓存账**：这本账是给「逐帧缓存」用的，而池是 harness 的固定开销。
+  // 先前把它按 frameBytes*(POOL+1) 记了进去，而预算只够 2 张 —— 于是 vram_over 变 true，
+  // 驱动那条闸当场报红。闸是对的：我不该把固定资源混进逐帧账里。
+  let poolIdx = 0;
   const seekTimes = [];
   for (const target of targets) {
     // 这一次计时覆盖**整条 scrub 路径**：从同步样本解码到目标帧 → 上传 → 搬运 → 提交 → 等 GPU 完成。
@@ -430,11 +443,11 @@ async function main() {
 
     // 上传 + 搬运 + 等 GPU 完成：这才是「上屏」那一步的代价（不含读回）
     const t1 = performance.now();
-    const tex = device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+    const tex = texPool[poolIdx % POOL];
+    poolIdx += 1;
     device.queue.copyExternalImageToTexture({ source: got.video }, { texture: tex, premultipliedAlpha: false }, [W, H]);
-    const out = device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: GPUTextureUsage.RENDER_ATTACHMENT });
     const e5 = device.createCommandEncoder();
-    const p5 = e5.beginRenderPass({ colorAttachments: [{ view: out.createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+    const p5 = e5.beginRenderPass({ colorAttachments: [{ view: outView, loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
     const b5 = device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: tex.createView() }] });
     p5.setPipeline(pipe); p5.setBindGroup(0, b5); p5.draw(3); p5.end();
     device.queue.submit([e5.finish()]);
@@ -442,32 +455,29 @@ async function main() {
     renderTimes.push(performance.now() - t1);
     seekTimes.push(performance.now() - tSeek);
 
-    openFrames.set(target, { video: got.video, tex: tex, out: out });
-    // 记账：RAM 记 VideoFrame，VRAM 记纹理；淘汰谁由 Rust 的策略说了算
+    // 帧仍然逐张入 RAM 账（VideoFrame 是真的会积累的那种资源）；
+    // 纹理已由固定池承担，不再逐帧记账，也就没有「淘汰哪张纹理」这回事了。
+    openFrames.set(target, { video: got.video });
     const evictRam = new Set(JSON.parse(mod.dhampir_cache_note_ram(target, frameBytes)));
-    const evictVram = new Set(JSON.parse(mod.dhampir_cache_note_vram(target, frameBytes)));
-    // 两层要**一起**处理再决定要不要丢掉这条记录。
-    // 先前写成「先遍历 RAM 淘汰（顺带 delete），再遍历 VRAM 淘汰」——结果 VRAM 那轮
-    // 在 map 里已经找不到人，一张纹理都没销毁。驱动那条「一张纹理都没淘汰」就是抓这个的。
-    for (const f of new Set([...evictRam, ...evictVram])) {
+    for (const f of evictRam) {
       const entry = openFrames.get(f);
       if (entry === undefined) continue;
-      if (evictRam.has(f)) { entry.video.close(); evictedTotal += 1; }
-      if (evictVram.has(f) && entry.tex !== null) { entry.tex.destroy(); entry.tex = null; clippedTotal += 1; }
-      // 两样都释放了才把记录删掉；只释放了一样就留着，免得另一种资源失去追踪。
-      if (evictRam.has(f) && entry.tex === null) openFrames.delete(f);
+      entry.video.close();
+      openFrames.delete(f);
+      evictedTotal += 1;
     }
   }
 
   report.cache.evicted_frames = evictedTotal;
-  report.cache.evicted_textures = clippedTotal;
   report.cache.open_frames_after = openFrames.size;
   report.cache.final = JSON.parse(mod.dhampir_cache_stats());
   report.perf = { targets: targets.length, seek: pctl(seekTimes), decode: pctl(decodeTimes), upload_render: pctl(renderTimes) };
   log('缓存与测量完成：淘汰 ' + evictedTotal + ' 帧，decode p95=' + report.perf.decode.p95 + 'ms');
 
-  for (const entry of openFrames.values()) { entry.video.close(); if (entry.tex !== null) entry.tex.destroy(); }
+  for (const entry of openFrames.values()) entry.video.close();
   openFrames.clear();
+  for (const t of texPool) t.destroy();
+  outTex.destroy();
 
   // ---- (6) T3.5：流水线播放（不再每帧全同步）+ 内存曲线 ----
   step('section6-start');
@@ -477,6 +487,7 @@ async function main() {
   const playTextures = new Map();
   let pendingClose = [];
   let produced = 0;
+  let playEvictedTex = 0;
   const heapNow = () => (performance.memory ? performance.memory.usedJSHeapSize : null);
   const heapBefore = heapNow();
   let heapPeak = heapBefore;
@@ -497,7 +508,7 @@ async function main() {
 
       // 纹理进 VRAM 账：超过预算就把该淘汰的销毁掉
       const evicted = JSON.parse(mod.dhampir_cache_note_vram(produced, frameBytes));
-      for (const k of evicted) { const t = playTextures.get(k); if (t !== undefined) { t.destroy(); playTextures.delete(k); } }
+      for (const k of evicted) { const t = playTextures.get(k); if (t !== undefined) { t.destroy(); playTextures.delete(k); playEvictedTex += 1; } }
       playTextures.set(produced, tex);
 
       // 每 4 帧同步一次、把已提交的源帧关掉。**这个 4 是被卡死教出来的**：
@@ -538,6 +549,8 @@ async function main() {
     mod.dhampir_cache_remove_vram(k);
   }
   playTextures.clear();
+  // 纹理淘汰的证据由这一节提供（第 5 节改用固定池之后不再逐帧淘汰纹理）。
+  report.cache.evicted_textures = playEvictedTex;
   report.playback = {
     frames: produced,
     requested: playCount,
