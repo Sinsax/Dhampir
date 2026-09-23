@@ -75,6 +75,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if width == 0 || height == 0 {
         return Err("ffprobe 没给出尺寸，无法按帧切分".into());
     }
+    // **输出帧率要从源取，不能写死。**
+    // 源是 60fps 而编码写死 30 的话，480 帧会被编成 16 秒而不是 8 秒 ——
+    // 时长就错了，而帧数还是对的，所以只看帧数不会发现。
+    // 单独再问一次：单字段的 csv 没有「列序」问题（我在帧数上已经栽过一次）。
+    let fps_probe = Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", "v:0",
+               "-show_entries", "stream=avg_frame_rate", "-of", "csv=p=0", &media])
+        .output()?;
+    let fps_text = String::from_utf8(fps_probe.stdout)?;
+    let fps_fields: Vec<&str> = fps_text.trim().split('/').collect();
+    let fps_num: f64 = fps_fields.first().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    let fps_den: f64 = fps_fields.get(1).and_then(|v| v.parse().ok()).unwrap_or(1.0);
+    let source_fps = if fps_den > 0.0 { fps_num / fps_den } else { 30.0 };
+    if !(source_fps > 0.0) {
+        return Err("ffprobe 没给出帧率".into());
+    }
+
     let frame_bytes = width * height * 4;
     let size = (width as u32, height as u32);
 
@@ -136,7 +153,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .args([
             "-v", "error",
             "-f", "rawvideo", "-pix_fmt", "rgba",
-            "-s", &format!("{width}x{height}"), "-r", "30",
+            "-s", &format!("{width}x{height}"), "-r", &format!("{source_fps}"),
             "-i", "-",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
             "-y", out_path,
@@ -226,7 +243,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // **同样是 width,height,nb_read_frames 的列序**：帧数在第三列。
     let encoded: usize = parts[2].parse()?;
 
-    println!("媒体：{media}  {width}x{height}");
+    println!("媒体：{media}  {width}x{height} @{source_fps}fps");
     println!("处理 {frames} 帧，耗时 {:.0} ms -> 每帧 {:.2} ms（解码+上传+渲染+读回+编码）",
         elapsed.as_millis() as f64, elapsed.as_secs_f64() * 1000.0 / frames.max(1) as f64);
     println!("产物：{out_path}  编码帧数 {encoded}  尺寸 {}x{}", parts[0], parts[1]);
