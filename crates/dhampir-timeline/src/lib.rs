@@ -43,6 +43,9 @@ pub mod project;
 // schema 整个模块都建立在 serde 上（类型要能进 JSON），所以关掉 serde 就没它。
 #[cfg(feature = "serde")]
 pub mod schema;
+// 字幕与弹幕：**解析只有这一份实现**，两端都调它（纯文本，零依赖）。
+#[cfg(feature = "serde")]
+pub mod subtitle;
 pub mod selfcheck;
 pub mod timebase;
 pub mod timecode;
