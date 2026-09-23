@@ -24,7 +24,7 @@
 //   node scripts/dhampir-local.mjs --port 8787
 //   node scripts/dhampir-local.mjs --self-test     只跑自检
 
-import { createReadStream, existsSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -58,6 +58,18 @@ export function canTransition(from, to) {
   if (from === 'queued') return ['running', 'succeeded', 'failed', 'cancelled'].includes(to);
   if (from === 'running') return ['succeeded', 'failed', 'cancelled'].includes(to);
   return false;
+}
+
+/** 资产登记表：id -> 文件。**占位**，等工程文件壳接上后由它生成。 */
+function loadAssetRegistry() {
+  const file = join(REPO_ROOT, 'fixtures', 'local-assets.json');
+  if (!existsSync(file)) return {};
+  try {
+    return JSON.parse(readFileSync(file, 'utf8')).assets || {};
+  } catch (error) {
+    console.error('资产登记表解析失败：' + error.message);
+    return {};
+  }
 }
 
 /** 能力声明。**从"本实现实际能做到什么"出发**，不抄一份好看的清单。 */
@@ -122,16 +134,30 @@ function handle(req, res, backend, url) {
   // 这里直接从 assets/ 里按 id 找文件 —— 是**占位**，等工程文件壳接上后换掉。
   const asset = path.match(/^\/assets\/([A-Za-z0-9_.-]+)\/media$/);
   if (req.method === 'GET' && asset) {
-    const file = join(REPO_ROOT, 'target', 's3', asset[1]);
+    // **按登记表解析**，而不是假定 id 就是文件名 ——
+    // 样本工程引用 a.mp4，而文件叫 proxy1080p.mp4；id 与位置本来就是两件事。
+    const entry = loadAssetRegistry()[asset[1]];
+    if (!entry) {
+      return sendJson(res, 404, { error: issue('no_such_asset', path, '登记表里没有：' + asset[1]) });
+    }
+    const file = join(REPO_ROOT, 'target', 's3', entry.file);
     if (!existsSync(file)) {
-      return sendJson(res, 404, { error: issue('no_such_asset', path, '找不到素材文件：' + asset[1]) });
+      return sendJson(res, 404, {
+        error: issue('asset_file_missing', path, '登记表说在 ' + entry.file + '，但文件不在'),
+      });
     }
     return sendFile(res, file, 'video/mp4');
   }
 
   // info 与 gop 要 MP4 分离器 —— 那是 Rust 侧的实现，
   // 在 Node 里重写一份就正好犯了「两份实现」的忌讳。所以明说没接。
-  if (req.method === 'GET' && /^\/assets\/[A-Za-z0-9_.-]+\/(info|gop)$/.test(path)) {
+  const infoRoute = path.match(/^\/assets\/([A-Za-z0-9_.-]+)\/(info|gop)$/);
+  if (req.method === 'GET' && infoRoute) {
+    // **先分清两件事**：id 不存在（404，是客户端的错）
+    // 与 id 存在但功能没接（501，是后端的账）。混成一种会让前端无从判断该不该重试。
+    if (!loadAssetRegistry()[infoRoute[1]]) {
+      return sendJson(res, 404, { error: issue('no_such_asset', path, '登记表里没有：' + infoRoute[1]) });
+    }
     return sendJson(res, 501, {
       error: issue('backend_incomplete', path, '素材 info 与 GOP 分片要调用 Rust 侧的分离器；形状已定，接线待做'),
     });

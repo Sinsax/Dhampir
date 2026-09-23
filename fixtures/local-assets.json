@@ -1,0 +1,20 @@
+{
+  "_comment": [
+    "本机后端的资产登记表。",
+    "",
+    "它是**占位**，不是工程文件里的 assets 表 —— 后者在契约层（dhampir-timeline 的 project 模块），",
+    "到时候这张表由它生成，而不是手写。现在手写是因为壳还没有接到本机后端。",
+    "",
+    "为什么要这一层：之前素材路由是「按 id 去 target/s3 找同名文件」，",
+    "而样本工程引用的是 a.mp4 / b.mp4 这些名字，实际文件叫 proxy1080p.mp4 ——",
+    "于是本机模式根本取不到素材。**id 与位置本来就是两件事**，",
+    "这正是工程文件壳里 assets 表存在的理由。"
+  ],
+  "assets": {
+    "a.mp4": { "file": "proxy1080p.mp4", "kind": "video" },
+    "b.mp4": { "file": "proxy1080p.mp4", "kind": "video" },
+    "c.mp4": { "file": "proxy1080p.mp4", "kind": "video" },
+    "d.mp4": { "file": "proxy1080p.mp4", "kind": "video" },
+    "e.mp4": { "file": "proxy1080p.mp4", "kind": "audio" }
+  }
+}
