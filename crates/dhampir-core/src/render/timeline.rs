@@ -284,3 +284,165 @@ mod tests {
         assert!(synthetic_source_rgba8(0, 0, 0).is_empty());
     }
 }
+
+/// 渲染图的**分段计划**。
+///
+/// # 为什么需要它
+///
+/// 调整图层要求「先合成一部分 → 对结果跑特效 → 再继续」，而**一次 render pass 表达不了**
+/// 这件事。所以必须先把图层清单切成段：
+///
+/// ```text
+/// 原来： [层1][层2][调整A][层3]
+/// 改成： Draw(0,1) → Adjust(2) → Draw(3)
+///        段1 合成到中间纹理 t1
+///        t1 过 A 的特效 → t2
+///        t2 + 层3 → 最终
+/// ```
+///
+/// # 为什么是「下标」而不是复制图层
+///
+/// 计划是**纯数据**：只描述「按什么顺序做什么」，不持有任何 GPU 资源。
+/// 渲染时才根据它去建纹理、切 pass。这样计划本身可以脱离 GPU 单测。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Step {
+    /// 把这几层依次画到当前底上（下标指向原清单）。
+    Draw(Vec<usize>),
+    /// 对**当前已经画好的结果**跑这一层（调整图层）的特效。
+    Adjust {
+        layer: usize,
+        effects: Vec<dhampir_timeline::schema::Effect>,
+    },
+}
+
+/// 把图层清单切成渲染步骤。
+///
+/// 语义上有一处刻意的地方：**调整图层永远不会出现在 `Draw` 里**。
+/// 它没有素材、不产生像素，只对「已经画上去的东西」施加影响 ——
+/// 如果把它塞进 Draw，渲染器就得在 `Draw` 里再判断一次「这层到底要不要采素材」，
+/// 而那正是「用 source 是否为空来区分」那种隐晦写法的来源。
+pub fn plan_steps(layers: &[crate::compose::Layer]) -> Vec<Step> {
+    let mut steps = Vec::new();
+    let mut pending: Vec<usize> = Vec::new();
+
+    for (index, layer) in layers.iter().enumerate() {
+        if layer.is_adjustment {
+            if !pending.is_empty() {
+                steps.push(Step::Draw(std::mem::take(&mut pending)));
+            }
+            steps.push(Step::Adjust {
+                layer: index,
+                effects: layer.effects.clone(),
+            });
+        } else {
+            pending.push(index);
+        }
+    }
+    if !pending.is_empty() {
+        steps.push(Step::Draw(pending));
+    }
+    steps
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+    use dhampir_timeline::layer::BlendMode;
+    use dhampir_timeline::schema::{Effect, Transform};
+
+    fn layer(id: &str, adjustment: bool) -> crate::compose::Layer {
+        crate::compose::Layer {
+            clip_id: id.to_string(),
+            source: if adjustment { String::new() } else { format!("{id}.mp4") },
+            source_frame: 0,
+            opacity: 1.0,
+            transform: Transform { x: 0.0, y: 0.0, scale: 1.0, rotation_deg: 0.0 },
+            effects: if adjustment {
+                vec![Effect { kind: "gaussian_blur".to_string(), params: Default::default() }]
+            } else {
+                Vec::new()
+            },
+            frozen_for_transition: false,
+            blend: BlendMode::Normal,
+            is_adjustment: adjustment,
+        }
+    }
+
+    #[test]
+    fn 没有调整图层时就是一个_Draw() {
+        let layers = vec![layer("a", false), layer("b", false)];
+        assert_eq!(plan_steps(&layers), vec![Step::Draw(vec![0, 1])]);
+    }
+
+    #[test]
+    fn 调整图层把清单切成三段() {
+        let layers = vec![layer("a", false), layer("b", false), layer("adj", true), layer("c", false)];
+        let steps = plan_steps(&layers);
+        assert_eq!(steps.len(), 3);
+        assert_eq!(steps[0], Step::Draw(vec![0, 1]));
+        match &steps[1] {
+            Step::Adjust { layer: index, effects } => {
+                assert_eq!(*index, 2);
+                assert_eq!(effects.len(), 1, "调整图层的特效要跟着计划走");
+            }
+            other => panic!("第二段应当是 Adjust，得到 {other:?}"),
+        }
+        assert_eq!(steps[2], Step::Draw(vec![3]));
+    }
+
+    #[test]
+    fn 调整图层在最后时它影响的是前面全部() {
+        let layers = vec![layer("a", false), layer("b", false), layer("adj", true)];
+        let steps = plan_steps(&layers);
+        assert_eq!(steps[0], Step::Draw(vec![0, 1]));
+        assert!(matches!(steps[1], Step::Adjust { layer: 2, .. }));
+    }
+
+    #[test]
+    fn 调整图层在最前时下面是空的() {
+        // 退化情形：它下面什么都没有。计划照常给出 Adjust，
+        // 渲染器要对**空底**跑特效 —— 不崩、也不该凭空产生内容。
+        let layers = vec![layer("adj", true), layer("a", false)];
+        let steps = plan_steps(&layers);
+        assert!(matches!(steps[0], Step::Adjust { layer: 0, .. }));
+        assert_eq!(steps[1], Step::Draw(vec![1]));
+    }
+
+    #[test]
+    fn 每一层恰好被计划一次() {
+        // **这条是最有价值的不变量**：漏一层 = 画面少东西，
+        // 多一次 = 同一层被画两遍（叠加会变浓）。两种都不会崩，只会画错。
+        let layers = vec![
+            layer("a", false),
+            layer("adj1", true),
+            layer("b", false),
+            layer("c", false),
+            layer("adj2", true),
+            layer("d", false),
+        ];
+        let steps = plan_steps(&layers);
+        let mut seen: Vec<usize> = Vec::new();
+        for step in &steps {
+            match step {
+                Step::Draw(indices) => seen.extend(indices),
+                Step::Adjust { layer, .. } => seen.push(*layer),
+            }
+        }
+        seen.sort_unstable();
+        assert_eq!(seen, vec![0, 1, 2, 3, 4, 5], "每一层都要恰好出现一次");
+    }
+
+    #[test]
+    fn 调整图层绝不出现在_Draw_里() {
+        // 它没有素材、不产生像素。塞进 Draw 会逼渲染器在 Draw 里再判断一次
+        // 「这层要不要采素材」—— 那正是隐晦写法的来源。
+        let layers = vec![layer("a", false), layer("adj", true), layer("b", false)];
+        for step in plan_steps(&layers) {
+            if let Step::Draw(indices) = step {
+                for index in indices {
+                    assert!(!layers[index].is_adjustment, "第 {index} 层是调整图层，不该进 Draw");
+                }
+            }
+        }
+    }
+}
