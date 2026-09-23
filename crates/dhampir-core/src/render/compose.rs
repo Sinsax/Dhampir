@@ -42,6 +42,66 @@ pub struct LayerDraw<'a> {
     pub opacity: f32,
 }
 
+/// 把混合模式映射成**固定的混合方程**。
+///
+/// 返回 `None` 表示**这个模式做不到** —— 它要算 f(src, dst)，
+/// 而同一 pass 的片元着色器读不到目标纹理。要做得走 ping-pong。
+///
+/// **调用方必须先问再走，不许静默按 normal 画** —— 静默降级正是这个项目最要避免的。
+///
+/// 方程表（color 的 src/dst 因子）：
+///
+/// | 模式     | src            | dst                 |
+/// |----------|----------------|---------------------|
+/// | normal   | SrcAlpha       | OneMinusSrcAlpha    |
+/// | add      | One            | One                 |
+/// | multiply | Dst            | OneMinusSrcAlpha    |
+/// | screen   | One            | OneMinusSrc         |
+pub fn blend_state(mode: dhampir_timeline::layer::BlendMode) -> Option<wgpu::BlendState> {
+    use dhampir_timeline::layer::BlendMode;
+    // alpha 通道**一律**按普通叠加走。这些模式说的是「颜色怎么合」，
+    // 覆盖度不该跟着变 —— 否则半透明层连不透明度都会变味。
+    let alpha = wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+        operation: wgpu::BlendOperation::Add,
+    };
+    let add = wgpu::BlendOperation::Add;
+    let color = match mode {
+        BlendMode::Normal => wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::SrcAlpha,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: add,
+        },
+        BlendMode::Add => wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: add,
+        },
+        BlendMode::Multiply => wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Dst,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: add,
+        },
+        BlendMode::Screen => wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            // WebGPU 的因子集里**没有** `OneMinusSrcColor`，所以用 `OneMinusSrc`。
+            // 对**不透明**的源这恰好是 screen（src + dst*(1-src)）；
+            // 源的 alpha < 1 时它不按覆盖度加权 —— 这是**已知的近似**，不是疏漏。
+            // 两端用的是同一个方程，所以一致性不受影响；但画质上要知道这个边界。
+            dst_factor: wgpu::BlendFactor::OneMinusSrc,
+            operation: add,
+        },
+        // 以下五种需要读目标像素 —— 同一 pass 内拿不到。
+        BlendMode::Darken
+        | BlendMode::Lighten
+        | BlendMode::Overlay
+        | BlendMode::SoftLight
+        | BlendMode::Difference => return None,
+    };
+    Some(wgpu::BlendState { color, alpha })
+}
+
 /// 一层的仿射逆变换：输出像素 -> 源像素。
 ///
 /// 定义（写死在这里，两端照抄）：
@@ -323,6 +383,61 @@ mod tests {
         let (row0, _) = inverse_affine(t, (100, 100), (100, 100));
         let src_x = row0[0] * 0.0 + row0[1] * 0.0 + row0[2];
         assert!(src_x < 0.0 || src_x >= 100.0, "目标左上角应当落在源纹理之外，得到 {src_x}");
+    }
+
+    #[test]
+    fn 四种混合模式都有方程_五种没有() {
+        use dhampir_timeline::layer::BlendMode;
+        let normal = blend_state(BlendMode::Normal).expect("normal 必须有");
+        assert_eq!(normal.color.src_factor, wgpu::BlendFactor::SrcAlpha);
+        assert_eq!(normal.color.dst_factor, wgpu::BlendFactor::OneMinusSrcAlpha);
+
+        let add = blend_state(BlendMode::Add).unwrap();
+        assert_eq!(add.color.src_factor, wgpu::BlendFactor::One);
+        assert_eq!(add.color.dst_factor, wgpu::BlendFactor::One);
+
+        let multiply = blend_state(BlendMode::Multiply).unwrap();
+        assert_eq!(multiply.color.src_factor, wgpu::BlendFactor::Dst);
+
+        let screen = blend_state(BlendMode::Screen).unwrap();
+        assert_eq!(screen.color.dst_factor, wgpu::BlendFactor::OneMinusSrc);
+
+        for mode in [
+            BlendMode::Darken,
+            BlendMode::Lighten,
+            BlendMode::Overlay,
+            BlendMode::SoftLight,
+            BlendMode::Difference,
+        ] {
+            assert!(blend_state(mode).is_none(), "需要读目标像素，不该有方程");
+        }
+    }
+
+    #[test]
+    fn 方程的有无必须与_is_implemented_完全一致() {
+        use dhampir_timeline::layer::BlendMode;
+        // 这条是本步最重要的一致性约束：「能做」有两个出处
+        // （契约层的谓词、渲染器的方程表），它们一旦对不上，
+        // 就会出现「说能做但画不出来」或者「画得出来但契约说不行」。
+        for mode in BlendMode::ALL {
+            assert_eq!(
+                blend_state(mode).is_some(),
+                mode.is_implemented(),
+                "方程有无与 is_implemented() 不一致"
+            );
+        }
+    }
+
+    #[test]
+    fn alpha_通道一律按普通叠加走() {
+        use dhampir_timeline::layer::BlendMode;
+        // 这些模式说的是「颜色怎么合」，覆盖度不该跟着变 ——
+        // 否则半透明层连不透明度都会变味。
+        for mode in [BlendMode::Normal, BlendMode::Add, BlendMode::Multiply, BlendMode::Screen] {
+            let state = blend_state(mode).unwrap();
+            assert_eq!(state.alpha.src_factor, wgpu::BlendFactor::One);
+            assert_eq!(state.alpha.dst_factor, wgpu::BlendFactor::OneMinusSrcAlpha);
+        }
     }
 }
 
