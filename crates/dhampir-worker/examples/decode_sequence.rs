@@ -20,7 +20,8 @@
 //! 默认媒体 `target/s3/proxy1080p.mp4`，默认取 30 帧（1080p 每帧读回 8 MB，
 //! 帧数太大会很慢，而那与「管道通不通」无关）。
 
-use dhampir_core::compose::{Composite, Layer};
+use dhampir_core::compose::{self, Composite, Layer};
+use dhampir_core::timeline::schema::Project;
 use dhampir_core::gpu::NATIVE_BACKENDS;
 use dhampir_core::readback;
 use dhampir_core::render::{SourceResolver, TimelineRenderer};
@@ -55,6 +56,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .cloned()
         .unwrap_or_else(|| "target/s3/proxy1080p.mp4".to_string());
     let limit: usize = args.get(1).and_then(|text| text.parse().ok()).unwrap_or(30);
+    // 第三个参数给了工程文件的话，就**按工程求值**，而不是渲那张硬编码的单层。
+    // 这样这条管道才能与浏览器那条（样本工程）比。
+    let project: Option<Project> = match args.get(2) {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)?;
+            Some(serde_json::from_str(&text)?)
+        }
+        None => None,
+    };
 
     let probe = Command::new("ffprobe")
         .args([
@@ -92,6 +102,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("ffprobe 没给出帧率".into());
     }
 
+    // **输出帧率必须跟着「在渲什么」走。**
+    //
+    // 渲裸视频时它该是源视频的 fps；**渲工程时它必须是工程的 timebase** ——
+    // 因为那时我们渲的是**时间线的帧**，而时间线的帧率由 timebase 定义。
+    //
+    // 这一条我上一轮修错过一次：当时把「从源取帧率」当成了通用修法，
+    // 于是 90 帧被编成 60fps / 1.5 秒，而浏览器那条是 30fps / 3.0 秒 ——
+    // **帧数一样、时长差一半**。只看帧数发现不了。
+    let encoder_fps = match &project {
+        Some(loaded) => {
+            let timebase = &loaded.timebase;
+            if timebase.den == 0 {
+                return Err("工程的 timebase 分母为 0".into());
+            }
+            f64::from(timebase.num) / f64::from(timebase.den)
+        }
+        None => source_fps,
+    };
+
     let frame_bytes = width * height * 4;
     let size = (width as u32, height as u32);
 
@@ -122,7 +151,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let render_view = render_target.create_view(&wgpu::TextureViewDescriptor::default());
     let renderer = TimelineRenderer::new(&ctx.device, wgpu::TextureFormat::Rgba8Unorm);
 
-    let composite = Composite {
+    let single_layer = Composite {
         frame: 0,
         layers: vec![Layer {
             clip_id: "decoded".to_string(),
@@ -153,7 +182,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .args([
             "-v", "error",
             "-f", "rawvideo", "-pix_fmt", "rgba",
-            "-s", &format!("{width}x{height}"), "-r", &format!("{source_fps}"),
+            "-s", &format!("{width}x{height}"), "-r", &format!("{encoder_fps}"),
             "-i", "-",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
             "-y", out_path,
@@ -193,6 +222,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
 
         // 2) 渲染（走 core 的同一个入口，与两个宿主一致）
+        // **按工程求值**（给了工程的话）：这正是浏览器那条路调的东西，
+        // 所以两边的差异只可能来自渲染与运行时，而不是「求值不同」。
+        let composite = match &project {
+            Some(loaded) => compose::evaluate(loaded, frames as i64),
+            None => single_layer.clone(),
+        };
+
         let mut resolver = SequenceSource {
             view: upload_target.create_view(&wgpu::TextureViewDescriptor::default()),
             size,
@@ -244,6 +280,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let encoded: usize = parts[2].parse()?;
 
     println!("媒体：{media}  {width}x{height} @{source_fps}fps");
+    println!("输出帧率 {encoder_fps}（来源：{}）",
+        if project.is_some() { "工程 timebase" } else { "源视频" });
     println!("处理 {frames} 帧，耗时 {:.0} ms -> 每帧 {:.2} ms（解码+上传+渲染+读回+编码）",
         elapsed.as_millis() as f64, elapsed.as_secs_f64() * 1000.0 / frames.max(1) as f64);
     println!("产物：{out_path}  编码帧数 {encoded}  尺寸 {}x{}", parts[0], parts[1]);
