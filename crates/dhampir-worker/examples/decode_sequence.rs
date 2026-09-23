@@ -22,7 +22,7 @@ use dhampir_core::gpu::NATIVE_BACKENDS;
 use dhampir_core::readback;
 use dhampir_core::render::{SourceResolver, TimelineRenderer};
 use dhampir_worker::baseline::open_leg;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
@@ -208,6 +208,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("渲染结果是纯色 —— 解码出来的像素没有真正进渲染".into());
     }
 
-    println!("✓ 顺序解码管道（解码 + 上传 + 渲染）跑通");
+
+    // ---- 第四段：**把渲染结果交给 FFmpeg 编码** ----
+    //
+    // 到这里为止只证明了「渲染结果有内容」。要证明它**能成为成片**，
+    // 得让它过一遍编码器并核对产物。
+    //
+    // 这一步先只编**一帧**：目的是验证三段之间的**接口**（RGBA 进、mp4 出），
+    // 不是验证吞吐。逐帧串联是下一步 —— 那需要把上面那个解码循环改成
+    // 「边解边渲边编」，是一次结构改动。
+    let out_path = "target/decode-pipeline-out.mp4";
+    let mut encoder_child = Command::new("ffmpeg")
+        .args([
+            "-v", "error",
+            // 输入是裸 RGBA 帧流，所以尺寸与帧率都得显式告诉它。
+            "-f", "rawvideo",
+            "-pix_fmt", "rgba",
+            "-s", &format!("{width}x{height}"),
+            "-r", "30",
+            "-i", "-",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "20",
+            "-pix_fmt", "yuv420p",
+            "-y", out_path,
+        ])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+    {
+        let stdin = encoder_child.stdin.as_mut().ok_or("拿不到编码器的 stdin")?;
+        stdin.write_all(&image.pixels)?;
+    }
+    let _ = encoder_child.wait();
+
+    // 核对产物：帧数必须是 1 —— 这正是「三段接口接上了」的判据。
+    let check = Command::new("ffprobe")
+        .args([
+            "-v", "error", "-select_streams", "v:0",
+            "-count_frames", "-show_entries", "stream=nb_read_frames,width,height",
+            "-of", "csv=p=0", out_path,
+        ])
+        .output()?;
+    let summary = String::from_utf8(check.stdout)?;
+    // **`-of csv` 的字段顺序是 width,height,nb_read_frames，不是请求里的顺序。**
+    // 我第一次按「第一个字段是帧数」解析，把 1920（宽度）当成了帧数，
+    // 于是报出「产物 1920 帧」—— 而产物其实**正好 1 帧**。
+    // 教训：**别猜 csv 的列序，按名字取**。下面显式断言字段数，顺序才有据可依。
+    let parts: Vec<&str> = summary.trim().split(',').collect();
+    if parts.len() != 3 {
+        return Err(format!("ffprobe 的字段数不是 3，而是 {} —— 解析的前提不成立", parts.len()).into());
+    }
+    let encoded_frames: usize = parts[2].parse()?;
+    println!("编码：{out_path}  帧数 {encoded_frames}  尺寸 {}", summary.trim());
+    if encoded_frames != 1 {
+        return Err(format!("编码产物应当是 1 帧，实际 {encoded_frames} 帧").into());
+    }
+
+    println!("✓ 顺序解码管道（解码 + 上传 + 渲染 + 编码接口）跑通");
     Ok(())
 }
