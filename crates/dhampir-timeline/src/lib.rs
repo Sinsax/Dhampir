@@ -46,6 +46,10 @@ pub mod schema;
 // 字幕与弹幕：**解析只有这一份实现**，两端都调它（纯文本，零依赖）。
 #[cfg(feature = "serde")]
 pub mod subtitle;
+// 弹幕的**共享泳道分配**与滚动落点。与字幕的 text_layout 是同一条分工：
+// 结构由这里算一份，宿主只负责把字画进给定的矩形。
+#[cfg(feature = "serde")]
+pub mod danmaku;
 pub mod text_layout;
 pub mod selfcheck;
 pub mod timebase;

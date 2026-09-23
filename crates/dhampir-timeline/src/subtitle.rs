@@ -282,7 +282,7 @@ impl Default for AssStyle {
 }
 
 /// ASS 的 Events 段默认字段序（几乎所有工具都是这一个）。
-const ASS_FIELDS: [&str; 10] = [
+pub(crate) const ASS_FIELDS: [&str; 10] = [
     "Layer", "Start", "End", "Style", "Name", "MarginL", "MarginR", "MarginV", "Effect", "Text",
 ];
 
@@ -342,8 +342,12 @@ pub fn parse_ass(text: &str) -> Result<ParseReport, String> {
     Ok(report.sorted())
 }
 
-/// 写成 ASS（供旁挂导出）。
-pub fn to_ass(cues: &[Cue], style: &AssStyle) -> String {
+/// ASS 文件的头：Script Info 段 + 一个 Default 样式。
+///
+/// 单独抽出来是因为**弹幕那份也用它**（`danmaku::to_ass_danmaku`）：两种文件在
+/// 播放器眼里是同一种东西，头各写一份的结果是"改了一处漏了另一处"，
+/// 而症状是"弹幕文件能开、字幕文件打不开"（或者反过来）。
+pub(crate) fn ass_header(font: &str, font_size: u32, margin_v: u32) -> String {
     let mut out = String::new();
     out.push_str("[Script Info]\n");
     out.push_str("ScriptType: v4.00+\n");
@@ -353,8 +357,14 @@ pub fn to_ass(cues: &[Cue], style: &AssStyle) -> String {
     out.push_str(&format!("Format: {}\n", ASS_FIELDS.join(", ")));
     out.push_str(&format!(
         "Style: Default,{}, {}, &H00FFFFFF, &H000000FF, &H00000000, &H80000000, 0, 0, 0, 0, 100, 100, 0, 0, 1, 2, 1, 2, 10, 10, {}, 1\n\n",
-        style.font, style.font_size, style.margin_v
+        font, font_size, margin_v
     ));
+    out
+}
+
+/// 写成 ASS（供旁挂导出）。
+pub fn to_ass(cues: &[Cue], style: &AssStyle) -> String {
+    let mut out = ass_header(&style.font, style.font_size, style.margin_v);
     out.push_str("[Events]\n");
     out.push_str(&format!("Format: {}\n", ASS_FIELDS.join(", ")));
     for cue in cues {

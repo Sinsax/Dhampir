@@ -388,9 +388,11 @@ mod tests {
                     rect: *rect,
                 })
                 .collect(),
+            danmaku: Vec::new(),
             color: [255, 255, 255, 255],
             outline: true,
             dropped_lines: dropped,
+            dropped_danmaku: 0,
         }
     }
 

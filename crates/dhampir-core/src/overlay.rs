@@ -25,7 +25,23 @@
 //! 归一化矩形依赖文档坐标系：字号是按**高度**的比例算的，而宽度是按**宽度**归一化的，
 //! 所以同一段文字在 4:3 与 16:9 里的归一化宽度不同。这与 T1 确立的口径一致 ——
 //! 归一化不是「与一切无关」，而是「与渲染目标尺寸无关」。
+//!
+//! # 弹幕走同一条路
+//!
+//! 弹幕与字幕在这层**没有分家**：同一张表（素材 id -> 已解析的条），同一个入口
+//! （[`evaluate_overlay`]），出同一个结构。理由是两者对下游是同一种东西 ——
+//! 「要画的一行字 + 它占的归一化矩形」，宿主那一侧的画字路径一个字都不用改。
+//!
+//! 差异只在两处，都放在 [`TextOverlay`] 的 `danmaku` 那半边：
+//!
+//! * 弹幕的矩形**随帧变化**（从右滚到左），由 `dhampir_timeline::danmaku::rect_at` 现算；
+//! * 弹幕的泳道与在屏区间是**结构**，由 `dhampir_timeline::danmaku::layout` 分配 ——
+//!   两端要报出同一张表，所以分配只能有一份实现。
+//!
+//! **颜色与描边两者共用**：`DanmakuSpec` 没有颜色字段（要分开就得动契约）。
+//! 只有弹幕的工程看不出这件事（默认白字带描边）。
 
+use dhampir_timeline::danmaku::{layout as layout_danmaku, rect_at};
 use dhampir_timeline::layer::{SubtitleStyle, TimelineV2};
 use dhampir_timeline::schema::{Frame, TimebaseDto, TrackKind};
 use dhampir_timeline::subtitle::{Cue, frame_at_ms};
@@ -39,12 +55,32 @@ pub struct TextItem {
     pub rect: NormalizedRect,
 }
 
+/// 一条要画的弹幕：内容 + **这一帧**的矩形 + 泳道与在屏区间。
+///
+/// 矩形与另外三个字段放一起，是为了让「两端给出同一张表」这件事**能逐字段对账**：
+/// 只比矩形的话，泳道被分配错了（两条换了位置）在单帧里可能看不出来。
+#[derive(Debug, Clone, PartialEq)]
+pub struct DanmakuTextItem {
+    pub text: String,
+    /// 这一帧的归一化矩形（滚动位置是帧的函数）。
+    pub rect: NormalizedRect,
+    pub lane: u32,
+    pub enter: Frame,
+    pub exit: Frame,
+}
+
 /// 某一帧的文字覆盖层。
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextOverlay {
     /// 按轨道顺序（先画的在前），轨内按行。
     pub items: Vec<TextItem>,
-    /// 文字颜色，RGBA。来自轨道样式。
+    /// 字幕之外还有弹幕：同一帧里活着的弹幕条，按轨道顺序、轨内按分配顺序。
+    ///
+    /// 与 `items` 分开而不是混在一起：两者的**落点规则不同**（字幕居中于整条目标宽，
+    /// 弹幕按自己的宽度左对齐），宿主据此选不同的画法。混在一起就得在每个元素上带一个
+    /// 种类标签，而那与"这里是纯结构"的定位冲突。
+    pub danmaku: Vec<DanmakuTextItem>,
+    /// 文字颜色，RGBA。来自轨道样式。**弹幕也用它**（见模块文档）。
     pub color: [u8; 4],
     /// 是否描边。来自轨道样式。
     pub outline: bool,
@@ -53,11 +89,15 @@ pub struct TextOverlay {
     /// 与 text_layout 的口径一致：丢弃必须计数，否则「字幕只显示了一半」
     /// 看起来和「字幕就是这样」一样。
     pub dropped_lines: usize,
+    /// 因为泳道排不下被丢弃的**弹幕条数**（所有弹幕轨加起来）。
+    ///
+    /// 与 `dropped_lines` 同款：少的几条看起来和「素材里就那几条」一样。
+    pub dropped_danmaku: usize,
 }
 
 impl TextOverlay {
     pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
+        self.items.is_empty() && self.danmaku.is_empty()
     }
 }
 
@@ -67,10 +107,14 @@ impl TextOverlay {
 /// 这与 AssetTimebases 是同一个缝。
 pub type SubtitleTable = BTreeMap<String, Vec<Cue>>;
 
-/// 算某一帧的文字覆盖层。没有字幕轨、或者这一帧没有活着的字幕时返回 None。
+/// 算某一帧的文字覆盖层。没有字幕/弹幕轨、或者这一帧没有活着的字时返回 None。
 ///
-/// 返回 None 而不是空结构，是为了让调用方**不必区分**「没有字幕」与
-/// 「有字幕但这一帧是空的」—— 两种情况的处理完全一样：什么都不画。
+/// 返回 None 而不是空结构，是为了让调用方**不必区分**「没有字」与
+/// 「有字但这一帧是空的」—— 两种情况的处理完全一样：什么都不画。
+///
+/// 判据是「**字幕与弹幕两半都空**才 None」：只有弹幕的一帧照样要画，
+/// 只有字幕的一帧也照样要画。没有任何弹幕轨的工程走的是与 T2 完全相同的分支
+/// （弹幕那半边恒空），所以无弹幕工程的输出逐字节不变。
 pub fn evaluate_overlay(
     timeline: &TimelineV2,
     frame: Frame,
@@ -84,11 +128,14 @@ pub fn evaluate_overlay(
 
     let timebase: TimebaseDto = timeline.timebase;
     let mut items: Vec<TextItem> = Vec::new();
+    let mut danmaku: Vec<DanmakuTextItem> = Vec::new();
     let mut dropped_lines = 0_usize;
+    let mut dropped_danmaku = 0_usize;
     // 默认值只是为了「一条轨都没命中」时结构上仍是确定的；命中时会被轨道样式覆盖。
     let mut color = [255_u8, 255, 255, 255];
     let mut outline = true;
     let mut styled = false;
+    let mut danmaku_styled = false;
 
     for track in &timeline.tracks {
         if track.kind != TrackKind::Subtitle {
@@ -130,10 +177,56 @@ pub fn evaluate_overlay(
         }
     }
 
-    if !styled || items.is_empty() {
+    for track in &timeline.tracks {
+        if track.kind != TrackKind::Danmaku {
+            continue;
+        }
+        // 泳道参数在轨道级（一条弹幕轨 = 一份素材 + 一套泳道参数）。
+        let Some(spec) = track.danmaku.as_ref() else {
+            continue;
+        };
+        // 与字幕同一条：轨内活着的元素至多一个，且要 enabled。
+        let Some(element) = track.layers.iter().find(|layer| layer.covers(frame)) else {
+            continue;
+        };
+        if !element.enabled {
+            continue;
+        }
+        let Some(source) = element.source.as_ref() else {
+            continue;
+        };
+        let Some(cues) = table.get(&source.asset_id) else {
+            continue;
+        };
+        // 泳道分配**整条素材算一次**（与帧无关），再挑这一帧活着的那些。
+        // 每帧重算是纯函数的天性；素材几百条时这是 O(条数 × 泳道数)，写进边界。
+        let laid: dhampir_timeline::danmaku::DanmakuLayout = layout_danmaku(cues, spec, &timebase);
+        dropped_danmaku += laid.dropped;
+        for item in laid.items {
+            if frame < item.enter || frame > item.exit {
+                continue;
+            }
+            let Some(rect) = rect_at(&item, frame, spec, sequence) else {
+                continue;
+            };
+            danmaku.push(DanmakuTextItem {
+                text: item.text,
+                rect,
+                lane: item.lane,
+                enter: item.enter,
+                exit: item.exit,
+            });
+        }
+        danmaku_styled = true;
+    }
+
+    // 两半都空才是 None —— 只有弹幕的一帧不能被当成"没有字"。
+    let has_subtitle = styled && !items.is_empty();
+    let has_danmaku = danmaku_styled && !danmaku.is_empty();
+    if !has_subtitle && !has_danmaku {
         return None;
     }
-    Some(TextOverlay { items, color, outline, dropped_lines })
+    Some(TextOverlay { items, danmaku, color, outline, dropped_lines, dropped_danmaku })
 }
 
 /// 这条字幕在这一帧显示吗。
