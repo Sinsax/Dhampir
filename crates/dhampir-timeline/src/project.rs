@@ -26,7 +26,7 @@ use crate::layer::{
     AssetTimebases, LAYER_SCHEMA_VERSION, LAYER_SCHEMA_VERSION_V2, TimelineV2, migrate_v1_to_v2,
     migrate_v2_to_v3, source_frame_at, validate_timeline_v2,
 };
-use crate::schema::{EffectSpec, Frame, Issue, Project, TimebaseDto};
+use crate::schema::{EffectSpec, Frame, Issue, Project, TimebaseDto, TrackKind};
 
 /// 壳的版本。与契约版本**互相独立**：壳可以到 v3 而契约还在 v2。
 pub const PROJECT_SCHEMA_VERSION: u32 = 1;
@@ -246,6 +246,13 @@ pub fn asset_reference_counts(doc: &ProjectDoc) -> BTreeMap<String, usize> {
                 *counts.entry(source.asset_id.clone()).or_insert(0) += 1;
             }
         }
+        // 弹幕轨的素材是在**轨道级**引用的。不算进来，一份正在用的弹幕素材
+        // 会被报成 unused_asset —— 而那种误报会让人去删掉它。
+        if let Some(spec) = &track.danmaku {
+            if !spec.asset_id.is_empty() {
+                *counts.entry(spec.asset_id.clone()).or_insert(0) += 1;
+            }
+        }
     }
     counts
 }
@@ -455,6 +462,61 @@ pub fn validate_project_doc(doc: &ProjectDoc, effects: &[EffectSpec]) -> DocIssu
         }
     }
 
+    // ---- 字幕 / 弹幕轨：素材种类要对得上 ----
+    //
+    // 这两条是**新的轨类型带来的新契约**：字幕轨只能引用字幕素材，
+    // 弹幕轨必须带参数。不查的话，把一段 mp4 挂到字幕轨上会一路静默到渲染，
+    // 而那时的表现是"什么都没有"。
+    for (track_index, track) in doc.timeline.tracks.iter().enumerate() {
+        let path = format!("tracks[{track_index}]");
+        match track.kind {
+            TrackKind::Subtitle => {
+                for (layer_index, layer) in track.layers.iter().enumerate() {
+                    let Some(source) = &layer.source else { continue };
+                    let kind = index_of
+                        .get(source.asset_id.as_str())
+                        .map(|index| doc.assets[*index].kind);
+                    match kind {
+                        Some(AssetKind::Subtitle) => {}
+                        Some(_) => errors.push(Issue::new(
+                            "subtitle_asset_kind",
+                            &format!("{path}.layers[{layer_index}].source.asset_id"),
+                            format!("字幕轨只能引用 subtitle 素材，而 {} 不是", source.asset_id),
+                        )),
+                        // 资产根本不存在时 unknown_asset 已经报过，这里不重复报。
+                        None => {}
+                    }
+                }
+            }
+            TrackKind::Danmaku => match &track.danmaku {
+                None => errors.push(Issue::new(
+                    "missing_danmaku_spec",
+                    &path,
+                    "弹幕轨必须有 danmaku 参数（它指向弹幕素材）".to_string(),
+                )),
+                Some(spec) => {
+                    let kind = index_of
+                        .get(spec.asset_id.as_str())
+                        .map(|index| doc.assets[*index].kind);
+                    match kind {
+                        Some(AssetKind::Subtitle) => {}
+                        Some(_) => errors.push(Issue::new(
+                            "danmaku_asset_kind",
+                            &format!("{path}.danmaku.asset_id"),
+                            format!("弹幕必须指向 subtitle 素材，而 {} 不是", spec.asset_id),
+                        )),
+                        None => errors.push(Issue::new(
+                            "unknown_asset",
+                            &format!("{path}.danmaku.asset_id"),
+                            format!("引用了登记表里没有的资产：{}", spec.asset_id),
+                        )),
+                    }
+                }
+            },
+            TrackKind::Video | TrackKind::Audio => {}
+        }
+    }
+
     // ---- 契约层：错误原样冒泡，path 前缀由它自己给出 ----
     errors.extend(validate_timeline_v2(&doc.timeline, effects));
 
@@ -492,7 +554,13 @@ mod tests {
             schema: LAYER_SCHEMA_VERSION,
             timebase: TimebaseDto { num: 60, den: 1 },
             markers: Vec::new(),
-            tracks: vec![TrackV2 { id: "v1".to_string(), kind: TrackKind::Video, layers }],
+            tracks: vec![TrackV2 {
+                id: "v1".to_string(),
+                kind: TrackKind::Video,
+                layers,
+                subtitle: None,
+                danmaku: None,
+            }],
         }
     }
 

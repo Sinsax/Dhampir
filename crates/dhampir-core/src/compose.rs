@@ -655,6 +655,8 @@ mod tests {
                 id: "v1".to_string(),
                 kind: TrackKind::Video,
                 layers: vec![adjustment.clone()],
+                subtitle: None,
+                danmaku: None,
             }],
         };
         let composite = evaluate_v2(&timeline, 0);
@@ -673,6 +675,8 @@ mod tests {
                 id: "v1".to_string(),
                 kind: TrackKind::Video,
                 layers: vec![adjustment],
+                subtitle: None,
+                danmaku: None,
             }],
         };
         assert!(evaluate_v2(&off, 0).layers.is_empty(), "关掉的层不该出现在清单里");

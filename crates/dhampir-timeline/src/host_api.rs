@@ -486,6 +486,8 @@ mod tests {
             id: "v".to_string(),
             kind: crate::schema::TrackKind::Video,
             layers: Vec::new(),
+            subtitle: None,
+            danmaku: None,
         });
         let issues = precheck(&timeline, &caps);
         assert_eq!(issues.len(), 1);
@@ -526,6 +528,8 @@ mod tests {
                 id: "v".to_string(),
                 kind: crate::schema::TrackKind::Video,
                 layers: vec![layer],
+                subtitle: None,
+                danmaku: None,
             }],
         };
         // 对端：支持模糊但半径上限只有 16；没有 vignette。

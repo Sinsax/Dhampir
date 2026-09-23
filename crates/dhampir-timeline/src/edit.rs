@@ -672,6 +672,8 @@ mod tests {
                 id: "v1".to_string(),
                 kind: TrackKind::Video,
                 layers,
+                subtitle: None,
+                danmaku: None,
             }],
         });
         built.assets = vec![clip_asset()];

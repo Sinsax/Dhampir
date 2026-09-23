@@ -77,6 +77,10 @@ impl From<Timebase> for TimebaseDto {
 pub enum TrackKind {
     Video,
     Audio,
+    /// 字幕轨：轨上的元素引用 .srt / .ass 素材，样式在**轨道级**。
+    Subtitle,
+    /// 弹幕轨：轨上带一个 DanmakuSpec，指向 .ass 弹幕素材。
+    Danmaku,
 }
 
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]

@@ -202,7 +202,84 @@ impl Layer {
     }
 }
 
-/// v2 的轨道：v1 是 `clips`，v2 是 `layers`。
+/// 字幕样式。**放在轨道级，不是元素级。**
+///
+/// 理由：一条字幕轨 = 一个字幕素材 + 一套样式。想要两套样式就开两条轨 ——
+/// 这正是 PR 里字幕轨的做法。放元素级会让每个 Layer 字面量都多一个字段，
+/// 而换来的只是"同一条轨上两种样式"，那件事本来就该用两条轨表达。
+///
+/// 字号与边距用**比例**（相对目标高度），不用像素：像素在预览（640x360）与
+/// 成片（1920x1080）里含义不同，两端就不一致了。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SubtitleStyle {
+    /// 字号 = 目标高度 * 这个比例。
+    #[serde(default = "subtitle_font_ratio")]
+    pub font_ratio: f32,
+    /// 底边距 = 目标高度 * 这个比例。
+    #[serde(default = "subtitle_bottom_margin")]
+    pub bottom_margin: f32,
+    /// 最多几行（超出的行丢掉 —— 字幕不该盖住半屏）。
+    #[serde(default = "subtitle_max_lines")]
+    pub max_lines: u32,
+    /// 文字颜色，RGBA。
+    #[serde(default = "subtitle_color")]
+    pub color: [u8; 4],
+    /// 是否加描边（压住亮背景）。
+    #[serde(default = "yes")]
+    pub outline: bool,
+}
+
+fn subtitle_font_ratio() -> f32 { 0.055 }
+fn subtitle_bottom_margin() -> f32 { 0.06 }
+fn subtitle_max_lines() -> u32 { 2 }
+fn subtitle_color() -> [u8; 4] { [255, 255, 255, 255] }
+
+impl Default for SubtitleStyle {
+    fn default() -> Self {
+        Self {
+            font_ratio: subtitle_font_ratio(),
+            bottom_margin: subtitle_bottom_margin(),
+            max_lines: subtitle_max_lines(),
+            color: subtitle_color(),
+            outline: true,
+        }
+    }
+}
+
+/// 弹幕参数。**放在轨道级**：一条弹幕轨 = 一份弹幕素材 + 一套泳道参数。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DanmakuSpec {
+    /// 指向弹幕素材（AssetKind::Subtitle，内容是 ASS）。
+    pub asset_id: String,
+    /// 泳道数。排不下就**丢该条并计数**，不叠在一起。
+    #[serde(default = "danmaku_lanes")]
+    pub lanes: u32,
+    /// 一条弹幕从右滚到左要多久（毫秒）。
+    #[serde(default = "danmaku_duration")]
+    pub duration_ms: u64,
+    /// 字号 = 目标高度 * 这个比例。
+    #[serde(default = "danmaku_font_ratio")]
+    pub font_ratio: f32,
+}
+
+fn danmaku_lanes() -> u32 { 8 }
+fn danmaku_duration() -> u64 { 8000 }
+fn danmaku_font_ratio() -> f32 { 0.04 }
+
+impl Default for DanmakuSpec {
+    fn default() -> Self {
+        Self {
+            asset_id: String::new(),
+            lanes: danmaku_lanes(),
+            duration_ms: danmaku_duration(),
+            font_ratio: danmaku_font_ratio(),
+        }
+    }
+}
+
+/// v2 的轨道：v1 是 clips，v2 是 layers。
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackV2 {
@@ -210,6 +287,12 @@ pub struct TrackV2 {
     pub kind: TrackKind,
 #[serde(default)]
     pub layers: Vec<Layer>,
+    /// 字幕轨的样式。非字幕轨忽略它。
+#[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle: Option<SubtitleStyle>,
+    /// 弹幕轨的参数。非弹幕轨忽略它。
+#[serde(default, skip_serializing_if = "Option::is_none")]
+    pub danmaku: Option<DanmakuSpec>,
 }
 
 /// v2 契约：与 v1 同形，但 `tracks` 用 v2 轨道，并多了工程级标记。
@@ -292,6 +375,9 @@ pub fn migrate_v1_to_v2(project: &Project) -> Result<TimelineV2, MigrateError> {
             id: track.id.clone(),
             kind: track.kind,
             layers,
+            // v1 没有字幕/弹幕的概念，如实留空。
+            subtitle: None,
+            danmaku: None,
         });
     }
     Ok(TimelineV2 {
@@ -825,7 +911,13 @@ mod v2_tests {
     }
 
     fn track(id: &str, layers: Vec<Layer>) -> TrackV2 {
-        TrackV2 { id: id.to_string(), kind: crate::schema::TrackKind::Video, layers }
+        TrackV2 {
+            id: id.to_string(),
+            kind: crate::schema::TrackKind::Video,
+            layers,
+            subtitle: None,
+            danmaku: None,
+        }
     }
 
     fn timeline(tracks: Vec<TrackV2>) -> TimelineV2 {
