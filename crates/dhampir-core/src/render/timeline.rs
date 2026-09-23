@@ -111,7 +111,15 @@ impl TimelineRenderer {
         // 先把每层要采的纹理备好：需要模糊的层先画进临时纹理。
         // 临时纹理与视图都要活到 compose 之后，所以放在这两个 Vec 里。
         let mut keep_alive: Vec<wgpu::Texture> = Vec::new();
-        let mut prepared: Vec<(wgpu::TextureView, (u32, u32))> = Vec::new();
+        // **把图层与它的纹理配成一对**，而不是分两个 Vec 靠下标对齐。
+        //
+        // 分两个 Vec 会有一个很安静的错：源解析不出来的层会被 continue 掉，
+        // 于是 prepared 比 composite.layers 短，下面那个 zip 就**错位**了 ——
+        // 结果是 **B 层的纹理配上 A 层的变换**。画面会错，但不崩、也不报错。
+        // 配成对之后，错位在类型上就不可能发生。
+        #[allow(clippy::type_complexity)]
+        let mut prepared: Vec<(&crate::compose::Layer, wgpu::TextureView, (u32, u32))> =
+            Vec::new();
 
         for layer in &composite.layers {
             let Some((view, size)) = resolver.texture_for(&layer.source, layer.source_frame) else {
@@ -119,7 +127,7 @@ impl TimelineRenderer {
             };
             let radius = blur_radius(&layer.effects);
             if radius == 0 {
-                prepared.push((view, size));
+                prepared.push((layer, view, size));
                 continue;
             }
             let blurred = device.create_texture(&wgpu::TextureDescriptor {
@@ -167,14 +175,13 @@ impl TimelineRenderer {
             );
             keep_alive.push(blurred);
             keep_alive.push(intermediate);
-            prepared.push((blurred_view, size));
+            prepared.push((layer, blurred_view, size));
         }
 
-        let draws: Vec<LayerDraw<'_>> = composite
-            .layers
+        // 不再 zip 两个序列 —— 直接从成对的 prepared 来，错位不可能发生。
+        let draws: Vec<LayerDraw<'_>> = prepared
             .iter()
-            .zip(prepared.iter())
-            .map(|(layer, (view, size))| LayerDraw {
+            .map(|(layer, view, size)| LayerDraw {
                 view,
                 source_size: *size,
                 transform: layer.transform,
