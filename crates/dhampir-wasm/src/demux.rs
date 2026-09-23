@@ -577,5 +577,53 @@ mod tests {
         broken[at..at + 4].copy_from_slice(b"xxxx");
         assert!(matches!(parse_video_track(&broken), Err(DemuxError::NoMoov)));
     }
+
+    #[test]
+    fn 真实解析出的样本表能切成首尾相接的_gop_段() {
+        // 这条是 P4.1 的**端到端数据断言**：用的不是手搭的样本数组，
+        // 而是走真正的 MP4 解析器 —— 从字节到样本表到 GOP 段。
+        // 它比纯粹测 gop_slices 强的地方在于：样本表本身也是被解析出来的，
+        // 只有解析与切片**两头都对**，这条才过得去。
+        use dhampir_core::timeline::host_api::{SampleView, gop_slices};
+
+        let track = parse_video_track(&tiny_mp4()).expect("应当能解析");
+        let samples: Vec<SampleView> = track
+            .samples
+            .iter()
+            .map(|s| SampleView {
+                offset: s.offset,
+                size: s.size,
+                dts: s.dts,
+                duration: s.duration,
+                is_sync: s.is_sync,
+            })
+            .collect();
+        let slices = gop_slices(&samples);
+
+        let sync_count = samples.iter().filter(|s| s.is_sync).count();
+        assert!(sync_count > 0, "夹具里应当有关键帧，否则这条测试是空转");
+        assert_eq!(slices.len(), sync_count, "段数应当等于同步样本数");
+
+        // 每一段的第一个样本**必须**是同步样本 ——
+        // 这是「起点是关键帧」的直接证据，也是前端能不能解出第一帧的前提。
+        for slice in &slices {
+            let head = &samples[slice.first_sample as usize];
+            assert!(head.is_sync, "第 {} 段的起点不是关键帧", slice.index);
+        }
+
+        // 首尾相接：有空洞会让前端少一帧，重叠会让同一帧被取两次。
+        for pair in slices.windows(2) {
+            assert_eq!(
+                pair[0].first_sample + pair[0].sample_count,
+                pair[1].first_sample,
+                "第 {} 段与下一段不相接",
+                pair[0].index
+            );
+        }
+
+        // 最后一段一直延伸到样本表末尾（末段的关键帧之后没有下一个关键帧）。
+        let last = slices.last().expect("至少有一段");
+        assert_eq!(last.first_sample + last.sample_count, samples.len() as u32);
+    }
 }
 
