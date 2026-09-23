@@ -32,6 +32,65 @@ struct LayerUniform {
     _padding: f32,
 }
 
+/// 渲染空间：**文档坐标系**与**实际目标尺寸**是两件事。
+///
+/// # 为什么必须分开
+///
+/// 契约里的像素量（现在只有 transform.x/y）是以**文档坐标系**度量的，
+/// 而「这一帧渲染到多大」是宿主的事：预览渲染到画布后备尺寸，出片渲染到导出尺寸。
+/// 两者不等时，直接把 transform.x 当目标像素用，会让同一个工程在不同尺寸下
+/// **位移的相对位置不同** —— 也就是「预览所见 != 成片所得」。
+///
+/// 修法是把两者显式分开，并在目标 != 文档时按比例缩放像素量。
+/// **相等时比例是 1.0，那条路上的行为与从前逐字节一致** —— 出片的默认路径
+/// （导出尺寸取 render_hints）就走在那条路上。
+///
+/// 度量归属（实核过，不是猜的）：
+///   * transform.x / transform.y —— **文档像素**，按比例缩放；
+///   * 每层的 gaussian_blur.radius —— **源纹理像素**（模糊跑在源尺寸的纹理上），不缩放；
+///   * 调整图层的模糊半径 —— **文档像素**（模糊跑在目标尺寸的中间纹理上），要缩放。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RenderSpace {
+    /// 文档坐标系（工程声明的序列分辨率）。
+    pub sequence: (u32, u32),
+    /// 这一帧实际渲染到的尺寸。
+    pub target: (u32, u32),
+}
+
+impl RenderSpace {
+    /// 文档坐标系 == 目标尺寸。
+    ///
+    /// **合成源、探针、语料这类「没有工程」的路径用它**：那种情况下没有文档坐标系可言，
+    /// 目标尺寸就是它自己的坐标系，于是比例是 1.0，行为与引入本结构之前一致。
+    pub fn square(size: (u32, u32)) -> Self {
+        Self { sequence: size, target: size }
+    }
+
+    /// 目标/文档 的比例。1.0 表示两者相同。
+    ///
+    /// 尺寸为 0 时退化成 1.0：除零会让整帧变成 NaN 垃圾，
+    /// 而尺寸为 0 本来就该由调用方拦住（这里只兜底）。
+    pub fn pixel_scale(&self) -> (f32, f32) {
+        let sx = if self.sequence.0 == 0 {
+            1.0
+        } else {
+            self.target.0 as f32 / self.sequence.0 as f32
+        };
+        let sy = if self.sequence.1 == 0 {
+            1.0
+        } else {
+            self.target.1 as f32 / self.sequence.1 as f32
+        };
+        (sx, sy)
+    }
+
+    /// 把文档像素量换算成目标像素量。
+    pub fn offset(&self, transform: Transform) -> (f32, f32) {
+        let (sx, sy) = self.pixel_scale();
+        (transform.x * sx, transform.y * sy)
+    }
+}
+
 /// 要画的一层。
 pub struct LayerDraw<'a> {
     pub view: &'a wgpu::TextureView,
@@ -110,7 +169,8 @@ pub fn blend_state(mode: dhampir_timeline::layer::BlendMode) -> Option<wgpu::Ble
 ///   正向  p_out = R(rot) * ((p_src - c_src) * scale) + c_out + offset
 ///   于是  p_src = R(-rot) * (p_out - c_out - offset) / scale + c_src
 ///
-/// 变换参数一律以**输出像素**为单位（offset 是平移的像素数）。
+/// **入参一定是输出像素**：文档坐标系与目标尺寸不一致时，比例换算由调用方
+/// 用 RenderSpace 做完（见那里的说明）。这个函数只做纯几何，不听两套单位。
 pub fn inverse_affine(
     transform: Transform,
     source_size: (u32, u32),
@@ -260,7 +320,7 @@ impl Compositor {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
-        target_size: (u32, u32),
+        space: RenderSpace,
         layers: &[LayerDraw<'_>],
         // **None = 不清屏，叠到已有内容上。**
         //
@@ -294,7 +354,13 @@ impl Compositor {
         // 但先把正确性做对：48 字节 × 层数的分配，比一个只在某些驱动上才显形的错误便宜。
         let mut bind_groups = Vec::with_capacity(layers.len());
         for layer in layers {
-            let (row0, row1) = inverse_affine(layer.transform, layer.source_size, target_size);
+            // **像素量按文档坐标系度量，这里换算成目标像素。**
+            // 相同尺寸时 offset 与 transform.x/y 逐位相等，所以那条路逐字节不变。
+            let mut documented = layer.transform;
+            let (offset_x, offset_y) = space.offset(layer.transform);
+            documented.x = offset_x;
+            documented.y = offset_y;
+            let (row0, row1) = inverse_affine(documented, layer.source_size, space.target);
             let uniform = LayerUniform {
                 inv_row0: row0,
                 inv_row1: row1,
@@ -479,5 +545,108 @@ mod tests {
             assert_eq!(state.alpha.dst_factor, wgpu::BlendFactor::OneMinusSrcAlpha);
         }
     }
+
+    // ---- RenderSpace：文档坐标系与目标尺寸是两件事 ----
+
+    #[test]
+    fn 相同尺寸时比例是_1_且不改变任何像素量() {
+        let space = RenderSpace::square((640, 360));
+        assert_eq!(space.pixel_scale(), (1.0, 1.0));
+        let mut transform = Transform::default();
+        transform.x = 160.0;
+        transform.y = 90.0;
+        assert_eq!(space.offset(transform), (160.0, 90.0));
+        let same = RenderSpace { sequence: (640, 360), target: (640, 360) };
+        assert_eq!(same.offset(transform), space.offset(transform));
+    }
+
+    #[test]
+    fn 文档尺寸为零时兜到_1_而不是除零() {
+        let space = RenderSpace { sequence: (0, 0), target: (640, 360) };
+        assert_eq!(space.pixel_scale(), (1.0, 1.0));
+        assert!(space.pixel_scale().0.is_finite());
+    }
+
+    /// **这条就是 D1 的判据。**
+    ///
+    /// 「预览所见 != 成片所得」在数学上就是：同一个工程在不同目标尺寸下，
+    /// 一层的**归一化**落点不一样。这里把四种目标尺寸跑一遍，要求归一化落点完全相同，
+    /// 且等于 0.5 + transform.x / sequence.x。
+    #[test]
+    fn 位移的归一化落点与目标尺寸无关() {
+        let sequence = (640_u32, 360_u32);
+        let source = (1920_u32, 1080_u32);
+        let mut transform = Transform::default();
+        transform.x = 160.0;
+        transform.y = 90.0;
+
+        let expected = (
+            0.5 + transform.x / sequence.0 as f32,
+            0.5 + transform.y / sequence.1 as f32,
+        );
+
+        let mut first: Option<(f32, f32)> = None;
+        for target in [(640_u32, 360_u32), (320, 180), (1280, 720), (960, 540)] {
+            let space = RenderSpace { sequence, target };
+            // 与 Compositor::compose 里做的换算**同一段代码路径**：
+            // 先把文档像素换成目标像素，再交给 inverse_affine 这个纯几何函数。
+            let (offset_x, offset_y) = space.offset(transform);
+            let mut documented = transform;
+            documented.x = offset_x;
+            documented.y = offset_y;
+            let (row0, row1) = inverse_affine(documented, source, space.target);
+
+            // inverse_affine 给的是「输出像素 -> 源像素」。把源中心代进去反解输出位置，
+            // 就得到这一层中心实际落在输出的哪里。
+            //
+            // **旋转为 0 时两行各自退化成「对角元 + 常数项」**：
+            // row0 的 x 系数在下标 0（cos/scale），row1 的 y 系数在下标 1（cos/scale）——
+            // 写成 row1[0] 会拿到 -sin/scale == 0，除出来是 inf（这条测试自己踩过）。
+            let source_centre = (source.0 as f32 / 2.0, source.1 as f32 / 2.0);
+            let out_x = (source_centre.0 - row0[2]) / row0[0];
+            let out_y = (source_centre.1 - row1[2]) / row1[1];
+            let normalized = (out_x / target.0 as f32, out_y / target.1 as f32);
+
+            assert!(
+                (normalized.0 - expected.0).abs() < 1e-5 && (normalized.1 - expected.1).abs() < 1e-5,
+                "目标 {target:?} 的归一化落点是 {normalized:?}，期望 {expected:?}"
+            );
+            if let Some(previous) = first {
+                assert!(
+                    (normalized.0 - previous.0).abs() < 1e-5
+                        && (normalized.1 - previous.1).abs() < 1e-5,
+                    "不同目标尺寸给出了不同的归一化落点：{previous:?} 与 {normalized:?}"
+                );
+            } else {
+                first = Some(normalized);
+            }
+        }
+    }
+
+    /// 反向验证：**不换算**就会掉进「预览所见 != 成片所得」。
+    /// 这个测试自己造那个错误，要求它必须被抓出来 —— 否则上面那条判据可能是恒真的。
+    #[test]
+    fn 不换算文档像素时归一化落点会随目标尺寸变() {
+        let sequence = (640_u32, 360_u32);
+        let source = (1920_u32, 1080_u32);
+        let mut transform = Transform::default();
+        transform.x = 160.0;
+
+        let mut normalized = Vec::new();
+        for target in [(640_u32, 360_u32), (320, 180)] {
+            // 故意不换算：这就是修复前的行为。
+            let space = RenderSpace { sequence, target };
+            let (row0, _) = inverse_affine(transform, source, space.target);
+            let out_x = (source.0 as f32 / 2.0 - row0[2]) / row0[0];
+            normalized.push(out_x / target.0 as f32);
+        }
+        assert!(
+            (normalized[0] - normalized[1]).abs() > 1e-3,
+            "不换算时两种目标尺寸给出了相同的归一化落点（{normalized:?}）—— 那说明这条判据抓不到 bug"
+        );
+        // 而且错的正是「小的目标里位移占比更大」这个方向。
+        assert!(normalized[1] > normalized[0], "640 宽的位移在 320 宽里应该占更大比例");
+    }
 }
+
 

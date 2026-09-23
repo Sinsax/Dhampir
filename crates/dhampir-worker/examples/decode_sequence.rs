@@ -24,7 +24,7 @@ use dhampir_core::compose::{self, Composite, Layer};
 use dhampir_core::timeline::schema::Project;
 use dhampir_core::gpu::NATIVE_BACKENDS;
 use dhampir_core::readback;
-use dhampir_core::render::{SourceResolver, TimelineRenderer};
+use dhampir_core::render::{RenderSpace, SourceResolver, TimelineRenderer};
 use dhampir_worker::baseline::open_leg;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
@@ -251,7 +251,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
         let drawn = renderer.render_frame(
             &ctx.device, &ctx.queue, &mut command, &render_view,
-            size, &composite, &mut resolver, wgpu::Color::TRANSPARENT,
+            RenderSpace::square(size), &composite, &mut resolver, wgpu::Color::TRANSPARENT,
         );
         ctx.queue.submit([command.finish()]);
         if drawn == 0 {

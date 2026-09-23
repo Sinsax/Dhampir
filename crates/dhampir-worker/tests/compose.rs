@@ -8,7 +8,7 @@
 
 use dhampir_core::gpu::NATIVE_BACKENDS;
 use dhampir_core::readback;
-use dhampir_core::render::{Compositor, LayerDraw};
+use dhampir_core::render::{Compositor, LayerDraw, RenderSpace};
 use dhampir_core::timeline::schema::Transform;
 use dhampir_core::wgpu;
 use dhampir_worker::baseline::open_leg;
@@ -95,7 +95,7 @@ fn 两层按不透明度叠加() {
         &ctx.queue,
         &mut encoder,
         &out.create_view(&wgpu::TextureViewDescriptor::default()),
-        (SIZE, SIZE),
+        RenderSpace::square((SIZE, SIZE)),
         &[
             LayerDraw { view: &red_view, source_size: (SIZE, SIZE), transform: Transform::default(), opacity: 1.0, blend: dhampir_core::timeline::layer::BlendMode::Normal },
             LayerDraw { view: &blue_view, source_size: (SIZE, SIZE), transform: Transform::default(), opacity: 0.5, blend: dhampir_core::timeline::layer::BlendMode::Normal },
@@ -145,7 +145,7 @@ fn 缩放把层缩到中心而四周保持背景() {
         &ctx.queue,
         &mut encoder,
         &out.create_view(&wgpu::TextureViewDescriptor::default()),
-        (SIZE, SIZE),
+        RenderSpace::square((SIZE, SIZE)),
         &[LayerDraw {
             view: &red_view,
             source_size: (SIZE, SIZE),

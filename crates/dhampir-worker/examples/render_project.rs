@@ -21,7 +21,8 @@ use dhampir_core::effects::REGISTRY;
 use dhampir_core::gpu::NATIVE_BACKENDS;
 use dhampir_core::readback;
 use dhampir_core::render::{
-    SourceResolver, TimelineRenderer, synthetic_seed_for_source_frame, synthetic_source_rgba8,
+    RenderSpace, SourceResolver, TimelineRenderer, synthetic_seed_for_source_frame,
+    synthetic_source_rgba8,
 };
 use dhampir_core::timeline::schema::{Project, validate_project_with_effects};
 use dhampir_core::wgpu;
@@ -152,7 +153,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &ctx.queue,
             &mut encoder,
             &target_view,
-            (WIDTH, HEIGHT),
+            RenderSpace::square((WIDTH, HEIGHT)),
             &composite,
             &mut resolver,
             wgpu::Color::TRANSPARENT,

@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use dhampir_core::compose::{Composite, Layer};
 use dhampir_core::gpu::NATIVE_BACKENDS;
 use dhampir_core::readback;
-use dhampir_core::render::{SourceResolver, TimelineRenderer, synthetic_source_rgba8};
+use dhampir_core::render::{RenderSpace, SourceResolver, TimelineRenderer, synthetic_source_rgba8};
 use dhampir_core::timeline::schema::{Effect, Transform};
 use dhampir_core::wgpu;
 use dhampir_worker::baseline::open_leg;
@@ -81,7 +81,7 @@ fn render(ctx: &dhampir_core::gpu::GpuContext, source: &wgpu::Texture, composite
         &ctx.queue,
         &mut encoder,
         &target_view,
-        (SIZE, SIZE),
+        RenderSpace::square((SIZE, SIZE)),
         composite,
         &mut resolver,
         wgpu::Color::TRANSPARENT,
@@ -240,7 +240,7 @@ fn 源解析不出来时跳过该层而不是整帧失败() {
     let drawn = renderer.render_frame(
         &ctx.device, &ctx.queue, &mut encoder,
         &target.create_view(&wgpu::TextureViewDescriptor::default()),
-        (SIZE, SIZE), &composite, &mut Nothing, wgpu::Color::TRANSPARENT,
+        RenderSpace::square((SIZE, SIZE)), &composite, &mut Nothing, wgpu::Color::TRANSPARENT,
     );
     assert_eq!(drawn, 0, "解析不出源就不该画任何一层");
     ctx.queue.submit([encoder.finish()]);
@@ -295,7 +295,7 @@ fn 遇到调整图层时整帧不画而不是悄悄画错() {
     let drawn = renderer.render_frame(
         &ctx.device, &ctx.queue, &mut encoder,
         &target.create_view(&wgpu::TextureViewDescriptor::default()),
-        (SIZE, SIZE), &composite, &mut Nothing, wgpu::Color::TRANSPARENT,
+        RenderSpace::square((SIZE, SIZE)), &composite, &mut Nothing, wgpu::Color::TRANSPARENT,
     );
     assert_eq!(drawn, 0, "分段合成还没实现，就该一帧都不画，而不是画出一张看不出错的图");
     ctx.queue.submit([encoder.finish()]);

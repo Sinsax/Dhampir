@@ -46,7 +46,7 @@ use std::time::Instant;
 use dhampir_core::compose;
 use dhampir_core::gpu::NATIVE_BACKENDS;
 use dhampir_core::readback;
-use dhampir_core::render::{SourceResolver, TimelineRenderer};
+use dhampir_core::render::{RenderSpace, SourceResolver, TimelineRenderer};
 use dhampir_core::timeline::layer::{AssetTimebases, TimelineV2};
 use dhampir_core::timeline::schema::{Frame, Issue, TimebaseDto};
 use dhampir_core::wgpu;
@@ -614,6 +614,12 @@ pub struct RenderPlan<'a> {
     pub to: Frame,
     pub width: u32,
     pub height: u32,
+    /// **文档坐标系**（工程的 render_hints）。transform.x/y 这类像素量以它度量。
+    ///
+    /// 默认路径上 width/height 就等于它（导出尺寸取 render_hints），于是比例是 1.0、
+    /// 行为与引入 RenderSpace 之前逐字节一致。显式指定了别的导出尺寸时才发生缩放 ——
+    /// 那正是「同一个工程在不同尺寸下位移比例不同」被修掉的地方。
+    pub sequence: (u32, u32),
     pub output: &'a Path,
 }
 
@@ -764,7 +770,7 @@ pub fn render_plan(
             &ctx.queue,
             &mut command,
             &target_view,
-            (plan.width, plan.height),
+            RenderSpace { sequence: plan.sequence, target: (plan.width, plan.height) },
             &composite,
             &mut sources,
             wgpu::Color::TRANSPARENT,
@@ -883,7 +889,7 @@ pub fn render_frames_png(
             &ctx.queue,
             &mut command,
             &target_view,
-            (plan.width, plan.height),
+            RenderSpace { sequence: plan.sequence, target: (plan.width, plan.height) },
             &composite,
             &mut sources,
             wgpu::Color::TRANSPARENT,

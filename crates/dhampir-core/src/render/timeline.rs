@@ -59,6 +59,27 @@ pub fn blur_radius(effects: &[Effect]) -> u32 {
     radius.max(0.0).round().min(crate::render::BLUR_MAX_RADIUS as f32) as u32
 }
 
+/// 把**文档像素**的模糊半径换算到目标像素。
+///
+/// 与 transform 同样的道理，但**只对调整图层成立**：那个模糊跑在目标尺寸的中间纹理上，
+/// 所以同一个半径在不同目标尺寸下看起来不一样。每层的 gaussian_blur 跑在**源**纹理上，
+/// 半径是源像素，与文档坐标系无关，因此不换算。
+///
+/// 用一个标量（取宽度比例）而不是各轴一个：核是各向同性的，
+/// 给两个比例反而要定义"用哪个"。
+pub fn scale_document_radius(radius: u32, space: crate::render::RenderSpace) -> u32 {
+    if radius == 0 {
+        return 0;
+    }
+    let (sx, _) = space.pixel_scale();
+    if !sx.is_finite() || sx <= 0.0 {
+        return radius;
+    }
+    // 夹回核表上界：核是**定长展开**的（TAPS 个抽头），超了不会更糊，只会悄悄退化。
+    let scaled = (radius as f32 * sx).round();
+    scaled.max(0.0).min(crate::render::BLUR_MAX_RADIUS as f32) as u32
+}
+
 /// 时间线渲染器：合成 + 特效的调度。构造一次、每帧复用。
 pub struct TimelineRenderer {
     compositor: Compositor,
@@ -128,7 +149,7 @@ impl TimelineRenderer {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
-        target_size: (u32, u32),
+        space: crate::render::RenderSpace,
         composite: &Composite,
         resolver: &mut dyn SourceResolver,
         clear: wgpu::Color,
@@ -142,14 +163,14 @@ impl TimelineRenderer {
                 queue,
                 encoder,
                 target,
-                target_size,
+                space,
                 &composite.layers,
                 resolver,
                 Some(clear),
             );
         }
         self.render_segmented(
-            device, queue, encoder, target, target_size, composite, resolver, clear, &plan,
+            device, queue, encoder, target, space, composite, resolver, clear, &plan,
         )
     }
 
@@ -166,15 +187,15 @@ impl TimelineRenderer {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
-        target_size: (u32, u32),
+        space: crate::render::RenderSpace,
         composite: &Composite,
         resolver: &mut dyn SourceResolver,
         clear: wgpu::Color,
         plan: &[Step],
     ) -> usize {
         let extent = wgpu::Extent3d {
-            width: target_size.0.max(1),
-            height: target_size.1.max(1),
+            width: space.target.0.max(1),
+            height: space.target.1.max(1),
             depth_or_array_layers: 1,
         };
         let mut textures: Vec<wgpu::Texture> = Vec::new();
@@ -227,7 +248,7 @@ impl TimelineRenderer {
                         queue,
                         encoder,
                         &base,
-                        target_size,
+                        space,
                         &layers,
                         resolver,
                         if fresh { Some(clear) } else { None },
@@ -235,7 +256,10 @@ impl TimelineRenderer {
                     current = Some(dest);
                 }
                 Step::Adjust { effects, .. } => {
-                    let radius = blur_radius(effects);
+                    // **调整图层的模糊半径是文档像素**：它跑在目标尺寸的中间纹理上，
+                    // 所以目标尺寸一变，同一个半径看起来就不一样了 —— 必须按比例换算。
+                    // （每层的 gaussian_blur 不是这个情况：它跑在**源**纹理上，见 compose_layers。）
+                    let radius = scale_document_radius(blur_radius(effects), space);
                     let Some(from) = current else { continue };
                     if radius == 0 {
                         continue;
@@ -251,7 +275,7 @@ impl TimelineRenderer {
                     let mid = views[middle].clone();
                     let to = views[out].clone();
                     self.blur.blur_separable(
-                        device, queue, encoder, &source, &mid, &to, target_size, radius,
+                        device, queue, encoder, &source, &mid, &to, space.target, radius,
                     );
                     current = Some(out);
                 }
@@ -266,11 +290,11 @@ impl TimelineRenderer {
         let result_view = views[result].clone();
         let mut fixed = FixedSource {
             view: &result_view,
-            size: target_size,
+            size: space.target,
         };
         let blit = [identity_layer()];
         drawn += self.compose_layers(
-            device, queue, encoder, target, target_size, &blit, &mut fixed, Some(clear),
+            device, queue, encoder, target, space, &blit, &mut fixed, Some(clear),
         );
         drop(textures);
         drawn
@@ -287,7 +311,7 @@ impl TimelineRenderer {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         dest: &wgpu::TextureView,
-        dest_size: (u32, u32),
+        space: crate::render::RenderSpace,
         layers: &[crate::compose::Layer],
         resolver: &mut dyn SourceResolver,
         clear: Option<wgpu::Color>,
@@ -326,6 +350,8 @@ impl TimelineRenderer {
             let Some((view, size)) = resolver.texture_for(&layer.source, layer.source_frame) else {
                 continue;
             };
+            // **这里不换算半径。** 模糊跑在**源**纹理上（下面两张纹理都是 size = 源尺寸），
+            // 所以半径是源像素，与文档坐标系无关。换算它反而会让同一个源在不同导出尺寸下糊得不一样。
             let radius = blur_radius(&layer.effects);
             if radius == 0 {
                 prepared.push((layer, view, size));
@@ -396,7 +422,7 @@ impl TimelineRenderer {
             queue,
             encoder,
             dest,
-            dest_size,
+            space,
             &draws,
             clear,
         );

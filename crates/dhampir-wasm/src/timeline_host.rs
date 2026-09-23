@@ -25,7 +25,7 @@ use std::collections::HashMap;
 
 use dhampir_core::compose::{self, Composite};
 use dhampir_core::io::{FrameSink, FrameSource};
-use dhampir_core::render::SourceResolver;
+use dhampir_core::render::{RenderSpace, SourceResolver};
 // 宿主 API 的返回体形状：**有名字、有测试钉住**，不再用宏手写。
 use dhampir_core::timeline::host_api;
 use dhampir_core::wgpu;
@@ -239,15 +239,19 @@ impl SourceResolver for BoundVideos<'_> {
 
 impl ProjectHost {
     fn draw(&mut self, frame: i64) -> Result<(), String> {
-        let composite = PROJECT.with(|slot| {
-            slot.borrow()
-                .as_ref()
-                .map(|doc| {
+        // **顺带把文档坐标系取出来。** 预览的渲染目标是画布，而契约里的像素量
+        // （transform.x/y、调整图层的模糊半径）以 render_hints 度量 —— 两者不等时
+        // 由 RenderSpace 按比例换算。少了这一步，同一个工程在不同画布尺寸下
+        // 位移的相对位置就不一样，也就是「预览所见 != 成片所得」。
+        let loaded = PROJECT.with(|slot| {
+            slot.borrow().as_ref().map(|doc| {
                 let assets = doc.asset_timebases();
-                compose::evaluate_v2_with_assets(&doc.timeline, frame, Some(&assets))
+                let composite =
+                    compose::evaluate_v2_with_assets(&doc.timeline, frame, Some(&assets));
+                (composite, doc.sequence_size())
             })
         });
-        let Some(composite) = composite else {
+        let Some((composite, sequence)) = loaded else {
             return Err("还没有载入通过校验的工程".to_string());
         };
 
@@ -256,6 +260,7 @@ impl ProjectHost {
         let (width, height) = *size;
         let sink_format = sink.format();
         let sink_view = sink.acquire(&ctx.device);
+        let space = RenderSpace { sequence: sequence, target: (width, height) };
         let mut resolver = BoundVideos {
             device: &ctx.device,
             queue: &ctx.queue,
@@ -275,7 +280,7 @@ impl ProjectHost {
             &ctx.queue,
             &mut encoder,
             &sink_view,
-            (width, height),
+            space,
             &composite,
             &mut resolver,
             wgpu::Color::TRANSPARENT,
@@ -536,7 +541,7 @@ pub async fn dhampir_project_render_probe(
         &ctx.queue,
         &mut encoder,
         &target_view,
-        (width.max(1), height.max(1)),
+        RenderSpace::square((width.max(1), height.max(1))),
         &composite,
         &mut resolver,
         wgpu::Color::TRANSPARENT,
@@ -625,7 +630,7 @@ pub async fn dhampir_sample_project_render_png(
         &ctx.queue,
         &mut encoder,
         &target_view,
-        (width.max(1), height.max(1)),
+        RenderSpace::square((width.max(1), height.max(1))),
         &composite,
         &mut resolver,
         wgpu::Color::TRANSPARENT,
@@ -872,7 +877,10 @@ pub fn dhampir_project_draw(frame: i32) -> Result<(), JsValue> {
 
 /// canvas 尺寸变了之后重新配置 surface。
 ///
-/// 预览尺寸**由 canvas 决定**，不由工程决定——schema v1 里没有分辨率字段。
+/// **画布决定的是「渲染到多大」，不是「坐标系是什么」。** 坐标系来自工程的 render_hints
+/// （见 ProjectDoc::sequence_size），两者不一致时由 RenderSpace 按比例换算。
+/// 早先这里写的是一句「预览尺寸由宿主决定」——那句话本身没错，但它被读成了
+/// 「宿主也是坐标系」，于是 transform 的像素量跟着画布尺寸变，预览与成片对不上。
 #[wasm_bindgen]
 pub fn dhampir_project_resize(width: u32, height: u32) -> Result<(), JsValue> {
     PROJECT_HOST.with(|h| {

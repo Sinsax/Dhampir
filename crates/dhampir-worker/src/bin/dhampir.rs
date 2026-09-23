@@ -580,6 +580,7 @@ fn cmd_frame(args: &Args) -> Result<ExitCode, String> {
         to: frame,
         width,
         height,
+        sequence: doc.sequence_size(),
         output: &output,
     };
     let written = render_frames_png(&plan, &[frame])?;
@@ -642,6 +643,7 @@ fn cmd_render(args: &Args) -> Result<ExitCode, String> {
         to,
         width,
         height,
+        sequence: doc.sequence_size(),
         output: &output,
     };
     let report = render_plan(&plan, |done, total| {
