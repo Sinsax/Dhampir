@@ -171,7 +171,10 @@ if (mode === 'serve') {
   const profile = join(REPO_ROOT, 'target', 'web-check-profile');
   const child = spawn(findChrome(), [
     '--headless=new', '--disable-gpu-sandbox', '--no-first-run', '--no-default-browser-check',
-    '--user-data-dir=' + profile, '--enable-unsafe-webgpu', '--use-angle=default', url,
+    '--user-data-dir=' + profile, '--enable-unsafe-webgpu', '--use-angle=default',
+    // **把页面的 console 转到 stderr** —— 没有它，页面里抛的错在外面看不到，
+    // 而表现是「什么都没发生」。这是上一轮 --local 诊断不出来的直接原因。
+    '--enable-logging=stderr', '--v=0', url,
   ], { stdio: ['ignore', 'ignore', 'pipe'] });
   let stderr = '';
   child.stderr.on('data', (chunk) => { stderr += chunk; });
@@ -219,7 +222,8 @@ function reportApp(stderr) {
   // **预检到底跑没跑**：跳过、通过、还是拦下 —— 没有这一行，三者在外部看起来一样。
   console.log('预检回报: ' + (state.precheck.length ? state.precheck.join(' | ') : '（页面没有回报 —— 说明根本没走到预检）'));
   if (state.failed !== null) { console.error('✗ 页面报导出失败：' + state.failed); process.exitCode = 1; return; }
-  if (!state.done) { console.error('✗ 等导出完成超时（收到 ' + state.frames + ' 帧）'); console.error(stderr.slice(-500)); process.exitCode = 1; return; }
+  if (!state.done) { console.error('✗ 等导出完成超时（收到 ' + state.frames + ' 帧）'); console.error('--- 页面与浏览器输出（尾部 4000 字符）---');
+    console.error(stderr.slice(-4000)); process.exitCode = 1; return; }
 
   const expected = expectedFrames();
   console.log('收到帧数 ' + state.frames + '，期望 ' + expected);
