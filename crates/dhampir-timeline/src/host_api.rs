@@ -52,6 +52,19 @@ pub struct CacheStatsView {
     pub vram_over: bool,
     pub ram_over: bool,
 }
+/// `dhampir_project_render_probe` 的返回体（离屏渲染的像素摘要）。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProbeResult {
+    pub frame: Frame,
+    pub width: u32,
+    pub height: u32,
+    /// 这一帧实际画了几层。
+    pub layers: usize,
+    pub bytes: usize,
+    /// 像素的 FNV-1a 64，十六进制。
+    pub digest: String,
+}
 /// 序列化成 JSON 字符串。
 ///
 /// 所有字段都可序列化，所以这里的兜底**理论上不可达** ——

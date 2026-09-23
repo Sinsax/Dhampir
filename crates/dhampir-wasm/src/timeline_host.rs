@@ -372,15 +372,14 @@ pub async fn dhampir_project_render_probe(
         .await
         .map_err(|e| js_err(e.to_string()))?;
     let digest = dhampir_core::timeline::selfcheck::fnv1a64(&image.pixels);
-    Ok(serde_json::json!({
-        "frame": frame,
-        "width": width,
-        "height": height,
-        "layers": composite.layers.len(),
-        "bytes": image.pixels.len(),
-        "digest": format!("{digest:016x}"),
-    })
-    .to_string())
+    Ok(host_api::to_json(&host_api::ProbeResult {
+        frame: i64::from(frame),
+        width,
+        height,
+        layers: composite.layers.len(),
+        bytes: image.pixels.len(),
+        digest: format!("{digest:016x}"),
+    }))
 }
 
 // ---------------------------------------------------------------------------
