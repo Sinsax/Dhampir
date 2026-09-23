@@ -58,6 +58,21 @@ pub enum BlendMode {
 }
 
 impl BlendMode {
+    /// 全部变体。给「从 is_implemented() 生成能力清单」用 ——
+    /// **手写一份支持清单一定会与渲染器漂开**，所以这里只列枚举，能力由谓词推出来。
+    pub const ALL: [BlendMode; 9] = [
+        BlendMode::Normal,
+        BlendMode::Add,
+        BlendMode::Multiply,
+        BlendMode::Screen,
+        // 以下需要读取目标像素，v2 不实现（枚举先占位，与上面同因）。
+        BlendMode::Darken,
+        BlendMode::Lighten,
+        BlendMode::Overlay,
+        BlendMode::SoftLight,
+        BlendMode::Difference,
+    ];
+
     /// 能不能用固定混合方程表达。
     ///
     /// 渲染器**必须**先问这个，再决定要不要往下走 —— 让「做不到」在渲染前就显形，

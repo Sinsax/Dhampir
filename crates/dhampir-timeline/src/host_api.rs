@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::layer::{BlendMode, LAYER_SCHEMA_VERSION, TimelineV2};
 use crate::schema::{Frame, Issue};
 
 /// `dhampir_demux_samples` 里的一条样本。
@@ -65,6 +66,115 @@ pub struct ProbeResult {
     /// 像素的 FNV-1a 64，十六进制。
     pub digest: String,
 }
+/// 一份实现的能力声明。
+///
+/// **为什么需要它**：`BlendMode::is_implemented()` 是**编译期**的知识，
+/// 而分离模式下「对方能不能做」是**运行期**的事实 —— 前端新、后端旧是常态。
+/// 把编译期的假设当成运行期的保证，正是那种「在自己机器上永远测不出来」的坑。
+///
+/// 没有它，用户配了一个后端不支持的东西，要等**分钟级任务跑完**才报错。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Capabilities {
+    /// 对端支持的契约版本。
+    pub timeline_versions: Vec<u32>,
+    /// **只列真正实现的**混合模式。
+    pub blend_modes: Vec<BlendMode>,
+    /// 支持的特效 kind。
+    pub effects: Vec<String>,
+    /// 能渲染的最大模糊半径（0 = 不支持模糊）。
+    pub max_blur_radius: u32,
+    /// 有没有解码器。
+    pub has_decoder: bool,
+    /// 能不能编码成片（浏览器只有 PNG 序列，所以这里是 false）。
+    pub has_encoder: bool,
+}
+
+impl Capabilities {
+    /// 由**编译期的谓词**推出可推的部分；宿主特有的事实由调用方给。
+    ///
+    /// 特效清单之所以要调用方给：timeline 不能依赖 core（方向是 core → timeline），
+    /// 所以这里读不到特效登记表。这是方向约束，不是偷懒。
+    pub fn new(
+        effects: Vec<String>,
+        max_blur_radius: u32,
+        has_decoder: bool,
+        has_encoder: bool,
+    ) -> Self {
+        Self {
+            timeline_versions: vec![LAYER_SCHEMA_VERSION],
+            // **从谓词筛，不手写** —— 手写一份支持清单一定会与渲染器漂开。
+            blend_modes: BlendMode::ALL
+                .into_iter()
+                .filter(|mode| mode.is_implemented())
+                .collect(),
+            effects,
+            max_blur_radius,
+            has_decoder,
+            has_encoder,
+        }
+    }
+}
+
+/// **出片前的预检**：这份工程里有没有超出对端能力的东西。
+///
+/// 与 `unimplemented_blends()` 的区别很重要：那个问「**我自己**能不能做」，
+/// 这个问「**对端**能不能做」。分离模式下这是两个不同的问题。
+///
+/// 返回的是**提交前**就能报的错，而不是等任务跑完。
+pub fn precheck(timeline: &TimelineV2, capabilities: &Capabilities) -> Vec<Issue> {
+    let mut issues = Vec::new();
+    if !capabilities.timeline_versions.contains(&timeline.schema) {
+        issues.push(Issue::new(
+            "schema_unsupported_by_peer",
+            "timeline.schema",
+            format!(
+                "对端只认契约 v{:?}，而这份是 v{}",
+                capabilities.timeline_versions, timeline.schema
+            ),
+        ));
+        // 版本都不认，字段的含义无从谈起 —— 直接返回，别给一堆二次错误。
+        return issues;
+    }
+    for (track_index, track) in timeline.tracks.iter().enumerate() {
+        for (layer_index, layer) in track.layers.iter().enumerate() {
+            let path = format!("tracks[{track_index}].layers[{layer_index}]");
+            if !capabilities.blend_modes.contains(&layer.blend) {
+                issues.push(Issue::new(
+                    "blend_unsupported_by_peer",
+                    &format!("{path}.blend"),
+                    format!("对端不支持混合模式 {:?}", layer.blend),
+                ));
+            }
+            for (effect_index, effect) in layer.effects.iter().enumerate() {
+                let effect_path = format!("{path}.effects[{effect_index}]");
+                if !capabilities.effects.iter().any(|kind| kind == &effect.kind) {
+                    issues.push(Issue::new(
+                        "effect_unsupported_by_peer",
+                        &effect_path,
+                        format!("对端不支持特效 {}", effect.kind),
+                    ));
+                    continue;
+                }
+                // 参数上限也属于能力：登记表知道契约允许到哪，对端才知道自己做到哪。
+                if let Some(radius) = effect.params.get("radius") {
+                    if radius.is_finite() && *radius > capabilities.max_blur_radius as f32 {
+                        issues.push(Issue::new(
+                            "effect_exceeds_capability",
+                            &format!("{effect_path}.params.radius"),
+                            format!(
+                                "半径 {radius} 超出对端上限 {}",
+                                capabilities.max_blur_radius
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    issues
+}
+
 /// 序列化成 JSON 字符串。
 ///
 /// 所有字段都可序列化，所以这里的兜底**理论上不可达** ——
@@ -312,5 +422,96 @@ mod tests {
             keys(&value),
             sorted(&["vram_bytes", "ram_bytes", "vram_len", "ram_len", "vram_over", "ram_over"])
         );
+    }
+
+    #[test]
+    fn 能力声明里的混合模式是从谓词推出来的() {
+        // **不是手写的清单** —— 手写一份一定会与渲染器漂开。
+        let caps = Capabilities::new(Vec::new(), 16, false, false);
+        assert_eq!(caps.blend_modes, vec![BlendMode::Normal, BlendMode::Add, BlendMode::Multiply, BlendMode::Screen]);
+        assert_eq!(caps.timeline_versions, vec![LAYER_SCHEMA_VERSION]);
+    }
+
+    #[test]
+    fn 对端版本不认就只报一条() {
+        let caps = Capabilities::new(Vec::new(), 16, false, false);
+        let mut timeline = TimelineV2 {
+            schema: 99,
+            timebase: crate::schema::TimebaseDto { num: 60, den: 1 },
+            markers: Vec::new(),
+            tracks: Vec::new(),
+        };
+        timeline.tracks.push(crate::layer::TrackV2 {
+            id: "v".to_string(),
+            kind: crate::schema::TrackKind::Video,
+            layers: Vec::new(),
+        });
+        let issues = precheck(&timeline, &caps);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].code, "schema_unsupported_by_peer");
+    }
+
+    #[test]
+    fn 预检能指出是对端的哪一项不支持() {
+        let mut layer = crate::layer::Layer {
+            id: "l1".to_string(),
+            start: 0,
+            end: 10,
+            transform: crate::layer::TransformV2::default(),
+            opacity: 1.0,
+            blend: BlendMode::Overlay, // 对端不支持
+            enabled: true,
+            recorded: crate::layer::Recorded::default(),
+            source: None,
+            effects: vec![
+                crate::schema::Effect {
+                    kind: "gaussian_blur".to_string(),
+                    params: std::collections::BTreeMap::from([("radius".to_string(), 64.0_f32)]),
+                },
+                crate::schema::Effect {
+                    kind: "vignette".to_string(), // 对端没有这个特效
+                    params: std::collections::BTreeMap::new(),
+                },
+            ],
+            transition_in: None,
+            keyframes: Vec::new(),
+        };
+        layer.blend = BlendMode::Overlay;
+        let timeline = TimelineV2 {
+            schema: LAYER_SCHEMA_VERSION,
+            timebase: crate::schema::TimebaseDto { num: 60, den: 1 },
+            markers: Vec::new(),
+            tracks: vec![crate::layer::TrackV2 {
+                id: "v".to_string(),
+                kind: crate::schema::TrackKind::Video,
+                layers: vec![layer],
+            }],
+        };
+        // 对端：支持模糊但半径上限只有 16；没有 vignette。
+        let caps = Capabilities::new(vec!["gaussian_blur".to_string()], 16, true, true);
+        let issues = precheck(&timeline, &caps);
+        let mut codes: Vec<&str> = issues.iter().map(|i| i.code.as_str()).collect();
+        codes.sort();
+        assert_eq!(
+            codes,
+            vec!["blend_unsupported_by_peer", "effect_exceeds_capability", "effect_unsupported_by_peer"]
+        );
+        // path 要指到具体字段，否则用户不知道该改哪一项。
+        assert!(issues.iter().any(|i| i.path.ends_with(".blend")));
+        assert!(issues.iter().any(|i| i.path.ends_with(".params.radius")));
+        // 半径那条要带上对端上限，否则用户不知道怎么改。
+        assert!(issues.iter().any(|i| i.message.contains("16")));
+    }
+
+    #[test]
+    fn 对端全支持时预检是空的() {
+        let timeline = TimelineV2 {
+            schema: LAYER_SCHEMA_VERSION,
+            timebase: crate::schema::TimebaseDto { num: 60, den: 1 },
+            markers: Vec::new(),
+            tracks: Vec::new(),
+        };
+        let caps = Capabilities::new(vec!["gaussian_blur".to_string()], 16, true, true);
+        assert!(precheck(&timeline, &caps).is_empty());
     }
 }
