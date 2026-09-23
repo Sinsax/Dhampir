@@ -53,7 +53,7 @@ rmSync(OUT_DIR, { recursive: true, force: true });
 mkdirSync(FRAMES_DIR, { recursive: true });
 mkdirSync(dirname(VIDEO_PATH), { recursive: true });
 
-const state = { frames: 0, done: false, failed: null, settle: null, diag: [] };
+const state = { frames: 0, done: false, failed: null, settle: null, diag: [], precheck: [] };
 const finished = new Promise((resolveFinished) => { state.settle = resolveFinished; });
 
 const server = createServer((req, res) => {
@@ -73,6 +73,10 @@ const server = createServer((req, res) => {
       state.frames += 1;
       res.writeHead(204).end();
     });
+    return;
+  }
+  if (req.method === 'POST' && path === '/precheck-result') {
+    readBody((body) => { state.precheck.push(body.toString()); res.writeHead(204).end(); });
     return;
   }
   if (req.method === 'POST' && path === '/diag') {
@@ -128,7 +132,13 @@ else if (path === '/app.js' || path === '/engine.js' || path === '/backend.js') 
 
 await new Promise((resolveListen) => server.listen(0, '127.0.0.1', resolveListen));
 const port = server.address().port;
-const suffix = mode === 'probe' ? '/probe.html' : mode === 'app' ? '/?export=1' : '/';
+const localPort = 8796;
+let localBackend = null;
+if (mode === 'app' && argv.includes('--local')) {
+  localBackend = spawn(process.execPath, ['scripts/dhampir-local.mjs', '--port', String(localPort)], { stdio: ['ignore', 'ignore', 'inherit'] });
+}
+const suffix = mode === 'probe' ? '/probe.html' : mode === 'app' ? (argv.includes('--local') ? '/?export=1&backend=local&port=' + localPort + '&project=sample-project' : '/?export=1') : '/';
+process.on('exit', () => { if (localBackend) localBackend.kill(); });
 const url = 'http://127.0.0.1:' + port + suffix;
 console.log('→ ' + url);
 
@@ -181,6 +191,8 @@ function reportProbe() {
 
 /** app 验收：逐帧导出 → FFmpeg 编码 → ffprobe 核对帧数 → 出里程碑视频。 */
 function reportApp(stderr) {
+  // **预检到底跑没跑**：跳过、通过、还是拦下 —— 没有这一行，三者在外部看起来一样。
+  console.log('预检回报: ' + (state.precheck.length ? state.precheck.join(' | ') : '（页面没有回报 —— 说明根本没走到预检）'));
   if (state.failed !== null) { console.error('✗ 页面报导出失败：' + state.failed); process.exitCode = 1; return; }
   if (!state.done) { console.error('✗ 等导出完成超时（收到 ' + state.frames + ' 帧）'); console.error(stderr.slice(-500)); process.exitCode = 1; return; }
 

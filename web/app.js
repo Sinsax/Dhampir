@@ -187,6 +187,19 @@ async function seekTo(frame) {
 // 没有这一步，用户要等**分钟级任务跑完**才被告知"某一条对端不支持"。
 // 而能力声明从哪来、规则是什么，都不在这个文件里：
 // 前者问 backend，后者由 Rust 给出 —— 这里只负责把它们接上并显示。
+/** 把预检结果回报给验收驱动。**没有这一步，「跑过」与「跳过」在外部看起来一样。** */
+async function reportPrecheck(outcome, issues) {
+  try {
+    await fetch("/precheck-result", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ outcome: outcome, issues: issues || [] }),
+    });
+  } catch (error) {
+    // 回报失败**不能**影响导出本身 —— 它是观测手段，不是功能。
+  }
+}
+
 async function precheckBeforeExport() {
   let capabilities = null;
   try {
@@ -197,15 +210,18 @@ async function precheckBeforeExport() {
     // 和"预检通过"看起来一模一样。
     $("issues").innerHTML =
       "<div>拿不到对端能力声明，本次跳过预检：" + String(error) + "</div>";
+    await reportPrecheck("error", []);
     return false;
   }
   if (capabilities === null) {
     // 降级模式：对端不渲染也不出片，无从预检。
+    await reportPrecheck("skipped", []);
     return false;
   }
   const issues = state.engine.precheck(capabilities);
   if (issues.length === 0) {
     $("issues").innerHTML = "<div class=\"ok\">提交前预检通过</div>";
+    await reportPrecheck("passed", []);
     return false;
   }
   const lines = issues.map(function (issue) {
@@ -213,6 +229,7 @@ async function precheckBeforeExport() {
   }).join("");
   $("issues").innerHTML =
     "<div class=\"bad\">提交前预检拦下了这次导出（对端做不了这些）：</div>" + lines;
+  await reportPrecheck("blocked", issues);
   return true;
 }
 

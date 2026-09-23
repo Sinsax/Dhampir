@@ -39,14 +39,16 @@ function issue(code, path, message) {
 /** 流式发文件。用 content-length 而不是 chunked，前端好做进度。 */
 function sendFile(res, file, contentType) {
   const size = statSync(file).size;
-  res.writeHead(200, { 'content-type': contentType, 'content-length': size });
+  res.writeHead(200, { ...CORS, 'content-type': contentType, 'content-length': size });
   createReadStream(file).pipe(res);
 }
+
+const CORS = { 'access-control-allow-origin': '*' };
 
 function sendJson(res, status, body) {
   const text = JSON.stringify(body);
   const bytes = Buffer.byteLength(text);
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': bytes });
+  res.writeHead(status, { ...CORS, 'content-type': 'application/json; charset=utf-8', 'content-length': bytes });
   res.end(text);
 }
 
