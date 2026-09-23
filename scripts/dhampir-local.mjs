@@ -37,9 +37,48 @@ function issue(code, path, message) {
 }
 
 /** 流式发文件。用 content-length 而不是 chunked，前端好做进度。 */
-function sendFile(res, file, contentType) {
+function sendFile(req, res, file, contentType) {
   const size = statSync(file).size;
-  res.writeHead(200, { ...CORS, 'content-type': contentType, 'content-length': size });
+  // **必须支持 Range。** <video> 一定会发 Range 请求，而不支持它的媒体路由
+  // 会让浏览器拿不到「读到哪一段」的确认 —— 表现是**卡住而不报错**，
+  // 那种状态最难查（本次 --local 卡住就是这个原因）。
+  const range = req.headers.range;
+  if (range) {
+    const match = /^bytes=(\d*)-(\d*)$/.exec(String(range).trim());
+    if (match) {
+      let start = match[1] === '' ? null : Number(match[1]);
+      let end = match[2] === '' ? null : Number(match[2]);
+      if (start === null && end !== null) {
+        // `bytes=-N`：最后 N 字节。
+        start = Math.max(0, size - end);
+        end = size - 1;
+      } else {
+        if (start === null) start = 0;
+        if (end === null || end >= size) end = size - 1;
+      }
+      if (start >= 0 && start <= end && start < size) {
+        const length = end - start + 1;
+        res.writeHead(206, {
+          ...CORS,
+          'content-type': contentType,
+          'content-length': length,
+          'content-range': 'bytes ' + start + '-' + end + '/' + size,
+          'accept-ranges': 'bytes',
+        });
+        createReadStream(file, { start: start, end: end }).pipe(res);
+        return;
+      }
+      res.writeHead(416, { ...CORS, 'content-range': 'bytes */' + size });
+      res.end();
+      return;
+    }
+  }
+  res.writeHead(200, {
+    ...CORS,
+    'content-type': contentType,
+    'content-length': size,
+    'accept-ranges': 'bytes',
+  });
   createReadStream(file).pipe(res);
 }
 
@@ -129,7 +168,7 @@ function handle(req, res, backend, url) {
     if (!existsSync(file)) {
       return sendJson(res, 404, { error: issue('no_such_project', path, '没有这份工程：' + project[1]) });
     }
-    return sendFile(res, file, 'application/json; charset=utf-8');
+    return sendFile(req, res, file, 'application/json; charset=utf-8');
   }
 
   // 素材字节。真实实现应当先查资产登记表再解析位置；
@@ -148,7 +187,7 @@ function handle(req, res, backend, url) {
         error: issue('asset_file_missing', path, '登记表说在 ' + entry.file + '，但文件不在'),
       });
     }
-    return sendFile(res, file, 'video/mp4');
+    return sendFile(req, res, file, 'video/mp4');
   }
 
   // info 与 gop 要 MP4 分离器 —— 那是 Rust 侧的实现，

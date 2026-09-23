@@ -47,6 +47,20 @@
   <div id="frameOnly" hidden data-from="0" data-to="0"></div>
 </div>
 <div id="videos"></div>
+<script>
+// **页面里的错要发得出去。**
+// 没有这段，页面里抛的错在外面只能表现为「什么都没发生」——
+// 而那种状态无法诊断，只能靠猜。用 sendBeacon 是因为它在页面正在卸载时也能发。
+function dhampirReport(text) {
+  try { navigator.sendBeacon("/page-error", String(text).slice(0, 2000)); } catch (e) {}
+}
+window.addEventListener("error", function (event) {
+  dhampirReport(event.message + " @ " + event.filename + ":" + event.lineno + ":" + event.colno);
+});
+window.addEventListener("unhandledrejection", function (event) {
+  dhampirReport("unhandledrejection: " + (event.reason && event.reason.message ? event.reason.message : String(event.reason)));
+});
+</script>
 <script type="module" src="/app.js"></script>
 </body>
 </html>
