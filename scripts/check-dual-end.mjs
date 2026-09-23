@@ -118,20 +118,10 @@ function main() {
 
   console.log('抽取 ' + frames.length + ' 帧做双端比对：' + frames.join(', '));
 
-  // **先确认这次比对的前提成立**：两端得吃同一份输入。
-  // 默认它们不是 —— 所以默认拒绝，并说清楚各自吃什么。
-  if (!argv.includes('--inputs-identical')) {
-    console.log('');
-    console.log('拒绝比对：两端消费的输入不同。');
-    console.log('  浏览器侧：' + INPUT_SOURCES.browser);
-    console.log('  worker 侧：' + INPUT_SOURCES.worker);
-    console.log('');
-    console.log('这个前提下给出的 SSIM **没有意义** —— 它量的是「输入不同」，');
-    console.log('不是「渲染不一致」。要让它有意义，先做出一条两端吃同一份像素的路径，');
-    console.log('再用 --inputs-identical 显式声明。');
-    process.exitCode = 1;
-    return;
-  }
+  // **不再需要拒绝**：编排器现在两侧都走合成源 ——
+  // 浏览器侧调 dhampir_sample_project_render_png，worker 侧调 render_project，
+  // 它们用 core 的同一对函数（synthetic_source_rgba8 + synthetic_seed_for_source_frame）造源图。
+  // 所以「输入逐字节相同」是**构造出来的**，不是声明出来的。
 
 
   // 浏览器侧：**空目录不能算通过**，所以先清掉旧帧。
@@ -142,7 +132,10 @@ function main() {
   console.log('\n[1/3] 浏览器逐帧导出 …');
   const browser = // **--frames-only：验收工具不该改动交付物** —— 不加这个参数，
   // 跑一次比对就会把 milestones/edited-milestone.mp4 覆盖掉。
-  run(process.execPath, ['scripts/web-check.mjs', '--frames-only', '--canvas', '320x180']);
+  // **走合成源出口**：那个页面调 dhampir_sample_project_render_png，
+  // 与 native 的 render_project 用**同一对 core 函数**造源图 ——
+  // 所以「输入逐字节相同」是**构造出来的**，不是声明出来的。
+  run(process.execPath, ['scripts/web-check.mjs', '--frames-only', '--synthetic', frames.join(',')]);
   if (browser.status !== 0 || !browser.stdout.includes('帧已就绪')) {
     console.error('浏览器侧导出没成功（退出码 ' + browser.status + '）');
     console.error((browser.stdout + browser.stderr).slice(-2000));
@@ -184,8 +177,13 @@ function main() {
   //
   // **上一轮这里只有用法、没有定义** —— 于是脚本一跑到这里就 ReferenceError，
   // 而「崩溃」在外面看起来与「没输出」一样。修的时候顺带补上定义。
-  const REACHED = /最差 SSIM = inf/;
-  if (!REACHED.test(compare.stdout)) {
+  // **解析数字来判，不用「含 inf 就算过」。**
+  // compare_project 即使每一帧都是 inf，也会打印「最差 SSIM = 1.000000」——
+  // 我原来的正则只认 inf，于是「全部完全一致」被判成了「没达到」。
+  // **这类错只有看到真实输出才会发现**：光看代码会觉得它是对的。
+  const worstMatch = /最差 SSIM = ([0-9.]+|inf)/.exec(compare.stdout);
+  const worstSsim = worstMatch === null ? null : (worstMatch[1] === 'inf' ? 1 : Number(worstMatch[1]));
+  if (worstSsim === null || worstSsim < 1) {
     problems.push("SSIM 没有达到 1.000000（通过线出处：M4 记录）");
     problems.push("若两边输入本就不同源（浏览器解码真视频、worker 用合成源），这个数没有意义 —— 先对齐输入，再谈一致性");
   }

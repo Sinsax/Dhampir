@@ -118,6 +118,7 @@ const server = createServer((req, res) => {
   let file = null;
   if (path === '/' || path === '/index.html') file = join(WEB_DIR, 'index.html');
   else if (path === '/probe.html') file = join(WEB_DIR, 'probe.html');
+  else if (path === '/synthetic.html') file = join(WEB_DIR, 'synthetic.html');
   else if (path.startsWith('/pkg/')) file = join(PKG_DIR, path.slice('/pkg/'.length));
   else if (path === '/sample-project.json') file = join(REPO_ROOT, 'fixtures', 'sample-project.json');
   else if (path === '/media/proxy.mp4') file = join(REPO_ROOT, MEDIA);
@@ -162,7 +163,7 @@ if (mode === 'app' && argv.includes('--local')) {
 }
 const canvasIndex = argv.indexOf('--canvas');
 const canvasArg = canvasIndex >= 0 ? '&canvas=' + argv[canvasIndex + 1] : '';
-const suffix = mode === 'probe' ? '/probe.html' : mode === 'app' ? (argv.includes('--local') ? '/?export=1&backend=local&port=' + localPort + '&project=sample-project' + canvasArg : '/?export=1' + canvasArg) : '/';
+const suffix = argv.includes('--synthetic') ? ('/synthetic.html?frames=' + (argv[argv.indexOf('--synthetic') + 1] || '0') + '&width=320&height=180') : mode === 'probe' ? '/probe.html' : mode === 'app' ? (argv.includes('--local') ? '/?export=1&backend=local&port=' + localPort + '&project=sample-project' + canvasArg : '/?export=1' + canvasArg) : '/';
 process.on('exit', () => { if (localBackend) localBackend.kill(); });
 const url = 'http://127.0.0.1:' + port + suffix;
 console.log('→ ' + url);
@@ -241,9 +242,12 @@ function reportApp(stderr) {
   // 双端比对的编排器会调这个脚本，而验收工具**不该改动交付物** ——
   // 否则跑一次比对就把 milestones/edited-milestone.mp4 覆盖了。
   if (argv.includes('--frames-only')) {
+    // **合成模式只出请求的那几帧**，所以不能按整段长度检查 ——
+    // 该不该完整出片是调用方的事，这个脚本只负责把帧交出去。
+    const synthetic = argv.includes('--synthetic');
     console.log('--frames-only：跳过编码与里程碑写入');
     console.log('收到帧数 ' + state.frames + '，期望 ' + expected);
-    if (state.frames !== expected) {
+    if (!synthetic && state.frames !== expected) {
       console.error('帧数与工程长度不符');
       process.exitCode = 1;
       return;

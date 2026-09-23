@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>dhampir 合成源导出（双端比对用）</title></head>
+<body>
+<script type="module">
+// **双端比对用的浏览器侧出口。**
+//
+// 它与 web/app.js 那条路的关键区别：**不吃 <video>**，
+// 而是调 dhampir_sample_project_render_png —— 那个函数用 core 的
+// synthetic_source_rgba8 + synthetic_seed_for_source_frame 造源图，
+// 与 native 的 render_project 是**同一对函数**。
+//
+// 所以两边输入逐字节相同，比出来的差异才只可能来自渲染与运行时。
+// 用 app.js 那条路（<video> 真解码）比，量的是「输入不同」，没有归因价值。
+import init, { dhampir_sample_project_render_png } from "/pkg/dhampir_wasm.js";
+
+const params = new URLSearchParams(location.search);
+const frames = (params.get("frames") || "0").split(",").map(Number);
+const width = Number(params.get("width") || "320");
+const height = Number(params.get("height") || "180");
+
+async function main() {
+  await init();
+  const project = await (await fetch("/sample-project.json")).text();
+  for (const frame of frames) {
+    const bytes = await dhampir_sample_project_render_png(project, frame, width, height);
+    await fetch("/frame-png?frame=" + frame, { method: "POST", body: bytes });
+  }
+  await fetch("/export-done", { method: "POST", body: JSON.stringify({ frames: frames, width: width, height: height }) });
+}
+
+main().catch((error) => {
+  try { navigator.sendBeacon("/page-error", "合成源导出失败: " + String(error && error.message ? error.message : error)); } catch (e) {}
+});
+</script>
+</body>
+</html>
