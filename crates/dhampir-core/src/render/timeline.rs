@@ -594,7 +594,7 @@ mod plan_tests {
     }
 
     #[test]
-    fn 没有调整图层时就是一个_Draw() {
+    fn 没有调整图层时就是一个_draw() {
         let layers = vec![layer("a", false), layer("b", false)];
         assert_eq!(plan_steps(&layers), vec![Step::Draw(vec![0, 1])]);
     }
@@ -658,7 +658,7 @@ mod plan_tests {
     }
 
     #[test]
-    fn 调整图层绝不出现在_Draw_里() {
+    fn 调整图层绝不出现在_draw_里() {
         // 它没有素材、不产生像素。塞进 Draw 会逼渲染器在 Draw 里再判断一次
         // 「这层要不要采素材」—— 那正是隐晦写法的来源。
         let layers = vec![layer("a", false), layer("adj", true), layer("b", false)];

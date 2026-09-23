@@ -604,7 +604,7 @@ mod asset_tests {
     use super::*;
 
     #[test]
-    fn 第k个GOP恰好覆盖k乘gop到k加1乘gop() {
+    fn 第k个gop恰好覆盖k乘gop到k加1乘gop() {
         // 这是「帧号精确」在分片这一层的最低要求：
         // 取第 k 段，解出来的帧号必须**不多不少**。
         for k in 0..8u64 {
@@ -623,7 +623,7 @@ mod asset_tests {
     }
 
     #[test]
-    fn 帧号到_GOP_下标的换算与区间互为逆() {
+    fn 帧号到_gop_下标的换算与区间互为逆() {
         for frame in 0..300i64 {
             let index = gop_index_for_frame(frame, 60).unwrap();
             let (start, end) = gop_frame_range(index, 60, 480).unwrap();
@@ -632,7 +632,7 @@ mod asset_tests {
     }
 
     #[test]
-    fn gop_长度未知时返回_None_而不是除零或退回按帧切() {
+    fn gop_长度未知时返回_none_而不是除零或退回按帧切() {
         // 0 表示"未知"。退回按帧切会破坏「只有关键帧能起解」这个前提，
         // 于是前端拿到解不了的片段 —— 那比明确失败更糟。
         assert!(gop_index_for_frame(10, 0).is_none());
@@ -1072,7 +1072,7 @@ mod export_tests {
     }
 
     #[test]
-    fn 失败时带的是同一套_Issue_而不是自定义错误串() {
+    fn 失败时带的是同一套_issue_而不是自定义错误串() {
         let status = ExportStatusView {
             job_id: "j1".to_string(),
             state: ExportState::Failed,
