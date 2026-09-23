@@ -70,7 +70,21 @@ export function judge(sources) {
       }
     }
     // 顺序管道的标志：把裸帧从 stdout 接出来。
-    if (text.includes('rawvideo')) sawSequential += 1;
+    if (text.includes('rawvideo')) {
+      sawSequential += 1;
+      // **色彩矩阵也必须显式。**
+      //
+      // 不显式的话，FFmpeg 从容器元数据里猜、浏览器也有自己的一套猜法，
+      // 两边默认值不一定相同（BT.601 vs 709），于是同一帧偏色 —— 而那不是渲染 bug。
+      // P5.3 的口径要求「同矩阵、同上采样」，所以这里把它变成**可检查**的。
+      if (!text.includes('out_color_matrix')) {
+        problems.push(
+          name + ' 的 ffmpeg 把视频解成 RGB，却**没有显式声明色彩矩阵** —— ' +
+          'FFmpeg 与浏览器各自猜默认值（BT.601 vs 709），同一帧会偏色。' +
+          'P5.3 要求「同矩阵、同上采样」，请显式给 out_color_matrix。'
+        );
+      }
+    }
   }
 
   if (sawFfmpeg === 0) {
@@ -92,17 +106,21 @@ function runSelfTest() {
     passed += 1;
   };
 
-  const good = [['a.rs', 'Command::new("ffmpeg").args(["-i", "in.mp4", "-f", "rawvideo", "-pix_fmt", "rgba", "-"]);']];
+  // 「好」的样本必须**同时**满足两条判据：顺序管道 + 显式色彩矩阵。
+  const good = [['a.rs', 'Command::new("ffmpeg").args(["-i", "in.mp4", "-vf", "scale=out_color_matrix=bt709", "-f", "rawvideo", "-pix_fmt", "rgba", "-"]);']];
   expect('顺序管道 -> 通过', judge(good), true);
 
-  const seek = [['a.rs', 'Command::new("ffmpeg").args(["-ss", "1.0", "-i", "in.mp4", "-f", "rawvideo", "-"]);']];
+  const seek = [['a.rs', 'Command::new("ffmpeg").args(["-ss", "1.0", "-i", "in.mp4", "-vf", "scale=out_color_matrix=bt709", "-f", "rawvideo", "-"]);']];
   expect('出现 -ss -> 必须红', judge(seek), false);
 
-  const seek2 = [['a.rs', 'Command::new("ffmpeg").args(["-seek_timestamp", "1", "-i", "in.mp4", "-f", "rawvideo"]);']];
+  const seek2 = [['a.rs', 'Command::new("ffmpeg").args(["-seek_timestamp", "1", "-i", "in.mp4", "-vf", "scale=out_color_matrix=bt709", "-f", "rawvideo"]);']];
   expect('出现 -seek_timestamp -> 必须红', judge(seek2), false);
 
   const noPipe = [['a.rs', 'Command::new("ffmpeg").args(["-i", "in.mp4", "out.png"]);']];
   expect('有 ffmpeg 但没走顺序管道 -> 必须红', judge(noPipe), false);
+
+  const noMatrix = [['a.rs', 'Command::new("ffmpeg").args(["-i", "in.mp4", "-f", "rawvideo", "-pix_fmt", "rgba", "-"]);']];
+  expect('顺序管道但没声明色彩矩阵 -> 必须红', judge(noMatrix), false);
 
   expect('空集 -> 必须红（不能空转）', judge([]), false);
   expect('没有 ffmpeg 的文件 -> 必须红（同为空集）', judge([['a.rs', 'fn main() {}']]), false);

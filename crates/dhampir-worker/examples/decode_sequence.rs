@@ -170,7 +170,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 解码器：吐裸 RGBA。
     let mut decoder = Command::new("ffmpeg")
-        .args(["-v", "error", "-i", &media, "-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+        .args([
+            "-v", "error",
+            "-i", &media,
+            // **显式声明色彩矩阵。**
+            //
+            // 不写的话 FFmpeg 从容器元数据里「猜」，而浏览器（WebCodecs）也有一套自己的猜法 ——
+            // 两边的默认值不一定相同（BT.601 vs 709），于是同一帧看起来偏色，
+            // 而那不是渲染 bug。P5.3 的口径要求「同矩阵、同上采样」，
+            // 所以这里把它**写死**，并由 check-sequential-decode 守卫确保它一直显式。
+            "-vf", "scale=out_color_matrix=bt709",
+            "-f", "rawvideo",
+            "-pix_fmt", "rgba",
+            "-",
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()?;
