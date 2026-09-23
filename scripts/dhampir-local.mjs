@@ -24,11 +24,23 @@
 //   node scripts/dhampir-local.mjs --port 8787
 //   node scripts/dhampir-local.mjs --self-test     只跑自检
 
+import { createReadStream, existsSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** 错误一律走这个形状 —— 与 Rust 侧的 Issue 同一套，前端只认一种。 */
 function issue(code, path, message) {
   return { code: code, path: path, message: message };
+}
+
+/** 流式发文件。用 content-length 而不是 chunked，前端好做进度。 */
+function sendFile(res, file, contentType) {
+  const size = statSync(file).size;
+  res.writeHead(200, { 'content-type': contentType, 'content-length': size });
+  createReadStream(file).pipe(res);
 }
 
 function sendJson(res, status, body) {
@@ -96,6 +108,35 @@ function handle(req, res, backend, url) {
   if (req.method === 'GET' && path === '/capabilities') {
     return sendJson(res, 200, capabilities());
   }
+  // 工程：从 fixtures/ 取。**id 要过白名单**，否则就是任意文件读取。
+  const project = path.match(/^\/projects\/([A-Za-z0-9_-]+)$/);
+  if (req.method === 'GET' && project) {
+    const file = join(REPO_ROOT, 'fixtures', project[1] + '.json');
+    if (!existsSync(file)) {
+      return sendJson(res, 404, { error: issue('no_such_project', path, '没有这份工程：' + project[1]) });
+    }
+    return sendFile(res, file, 'application/json; charset=utf-8');
+  }
+
+  // 素材字节。真实实现应当先查资产登记表再解析位置；
+  // 这里直接从 assets/ 里按 id 找文件 —— 是**占位**，等工程文件壳接上后换掉。
+  const asset = path.match(/^\/assets\/([A-Za-z0-9_.-]+)\/media$/);
+  if (req.method === 'GET' && asset) {
+    const file = join(REPO_ROOT, 'target', 's3', asset[1]);
+    if (!existsSync(file)) {
+      return sendJson(res, 404, { error: issue('no_such_asset', path, '找不到素材文件：' + asset[1]) });
+    }
+    return sendFile(res, file, 'video/mp4');
+  }
+
+  // info 与 gop 要 MP4 分离器 —— 那是 Rust 侧的实现，
+  // 在 Node 里重写一份就正好犯了「两份实现」的忌讳。所以明说没接。
+  if (req.method === 'GET' && /^\/assets\/[A-Za-z0-9_.-]+\/(info|gop)$/.test(path)) {
+    return sendJson(res, 501, {
+      error: issue('backend_incomplete', path, '素材 info 与 GOP 分片要调用 Rust 侧的分离器；形状已定，接线待做'),
+    });
+  }
+
   if (req.method === 'POST' && (path === '/validate' || path === '/export')) {
     // **没接上就明说**，而不是假装成功。
     return sendJson(res, 501, {
