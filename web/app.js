@@ -5,9 +5,13 @@
 
 import { loadEngine } from "/engine.js";
 import { exportPngSequence } from "/export/png-sequence.js";
+import { activeBackendFrom } from "/backend.js";
 import { createHttpBackend } from "/export/http.js";
 
-const SAMPLE_URL = "/sample-project.json";
+// 工程与素材**一律问 backend**，页面不许自己知道它们从哪来。
+// 默认是降级模式（同一源下的固定 URL，不依赖服务）；
+// 带 ?backend=local&port=... 就切到本机后端。
+const backend = activeBackendFrom(location.search);
 const FRAME_W = 640;
 const FRAME_H = 360;
 
@@ -200,7 +204,7 @@ async function runExport() {
 async function main() {
   const engine = await loadEngine("/pkg/dhampir_wasm.js");
   state.engine = engine;
-  const text = await (await fetch(SAMPLE_URL)).text();
+  const text = await backend.loadProject();
   const opened = engine.open(text);
   if (opened.ok !== true) { log("<span class=\"bad\">样本工程没通过校验</span>"); return; }
   // 复制一份给 UI 改：engine 里那份是"最后一份通过校验的"，两者职责不同。
@@ -208,7 +212,7 @@ async function main() {
 
   const canvas = $("preview");
   await engine.attach("preview");
-  await bindAllSources(engine, state.project, "/media/proxy.mp4");
+  await bindAllSources(engine, state.project, await backend.mediaUrlFor("a.mp4"));
 
   const end = engine.endFrame();
   $("frame").max = String(Math.max(0, end - 1));

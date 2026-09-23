@@ -113,7 +113,9 @@ const server = createServer((req, res) => {
   else if (path.startsWith('/pkg/')) file = join(PKG_DIR, path.slice('/pkg/'.length));
   else if (path === '/sample-project.json') file = join(REPO_ROOT, 'fixtures', 'sample-project.json');
   else if (path === '/media/proxy.mp4') file = join(REPO_ROOT, MEDIA);
-  else if (path === '/app.js' || path === '/engine.js') file = join(WEB_DIR, path.slice(1));
+  // web/ 下的前端模块一律照原样服务。写死清单会在加文件时静默 404 ——
+// 而 404 的表现是「页面白屏」，不是「少一个文件」，很难查。
+else if (path === '/app.js' || path === '/engine.js' || path === '/backend.js') file = join(WEB_DIR, path.slice(1));
   else if (path.startsWith('/export/')) file = join(WEB_DIR, path.slice(1));
 
   if (file === null || !existsSync(file) || !statSync(file).isFile()) {
