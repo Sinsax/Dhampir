@@ -76,6 +76,8 @@ scripts/check-preview-parity.mjs 与它的 12 条自检断言全绿。
 
 ## T2 文字与字幕上屏（P7.4b） → 依赖 T1
 
+**状态：进行中**（T2.2 已完成）。
+
 没有 T1 就不能做这段：文字位置在归一化坐标下是对的，一换成像素就会跟着分辨率漂。
 
 **开工决定（先落文档，再写代码）**：共享布局的字形度量用**按字宽分类的模型**，
@@ -98,7 +100,9 @@ scripts/check-preview-parity.mjs 与它的 12 条自检断言全绿。
 而 T2 的验收口径要的正是「结构一致、字形允许不同」。
 
 - T2.1（A4、D5）契约：Composite.overlay 加 TextItem（**归一化矩形**）加 TextOverlay。
-- T2.2（A3）共享布局：dhampir-timeline 里零依赖的换行/对齐/行高；
+- T2.2（A3）共享布局 —— **已完成**（见 [t2-evidence.md](./t2-evidence.md)）：
+  crates/dhampir-timeline/src/text_layout.rs，零依赖，17 条单测含 2 条反向用例；
+  参照输出 crates/dhampir-timeline/examples/layout_subtitles.rs（宿主与它不一致就是宿主错）。
   字形由宿主栅格化，但**结构与归一化矩形必须一致**。
 - T2.3（A4）两宿主都追加 overlay：**单趟与分段两条路径都要**，各留一个用例（这里最容易漏）。
 - T2.4 CLI：text_raster.rs，每项一张 PNG（ffmpeg drawtext textfile=...）、带缓存、自做 alpha 合成；

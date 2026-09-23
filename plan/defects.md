@@ -135,11 +135,11 @@
   验收: dhampir-timeline::history（零依赖）提供 push/undo/redo 与上限，CLI 与预览共用
   证据: -
 
-- [A3] status=todo phase=T2
+- [A3] status=done phase=T2
   症状: 没有共享文本布局层（换行/对齐/行高需要字形度量，两端各做必然结构分叉）
   根因: crates/dhampir-timeline/src/subtitle.rs:1
-  验收: 布局算在 dhampir-timeline 里（零依赖）；字形由宿主栅格化，但结构与归一化矩形必须一致
-  证据: -
+  验收: 布局层已落在 dhampir-timeline::text_layout（零依赖、17 条单测含 2 条反向用例），并有参照输出 examples/layout_subtitles.rs；**宿主消费同一条路径**属 A4/D5 的验收，不在本条的范围内
+  证据: plan/t2-evidence.md
 
 - [A4] status=todo phase=T2
   症状: 没有 overlay 渲染阶段，HOST_API_VERSION 停在 1
