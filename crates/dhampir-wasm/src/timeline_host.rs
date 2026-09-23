@@ -19,6 +19,8 @@ use std::collections::HashMap;
 use dhampir_core::compose::{self, Composite};
 use dhampir_core::io::{FrameSink, FrameSource};
 use dhampir_core::render::SourceResolver;
+// 宿主 API 的返回体形状：**有名字、有测试钉住**，不再用宏手写。
+use dhampir_core::timeline::host_api;
 use dhampir_core::wgpu;
 use dhampir_core::timeline::schema::{Project, validate_project_with_effects};
 use wasm_bindgen::prelude::*;
@@ -197,32 +199,36 @@ impl SourceResolver for FixedSource {
     }
 }
 
-fn composite_json(composite: &Composite) -> serde_json::Value {
-    let layers: Vec<serde_json::Value> = composite
-        .layers
-        .iter()
-        .map(|layer| {
-            serde_json::json!({
-                "clip_id": layer.clip_id,
-                "source": layer.source,
-                "source_frame": layer.source_frame,
-                "opacity": layer.opacity,
-                "frozen_for_transition": layer.frozen_for_transition,
-                "transform": {
-                    "x": layer.transform.x,
-                    "y": layer.transform.y,
-                    "scale": layer.transform.scale,
-                    "rotation_deg": layer.transform.rotation_deg,
+fn composite_result(composite: &Composite) -> dhampir_core::timeline::host_api::FrameResult {
+    dhampir_core::timeline::host_api::FrameResult {
+        frame: composite.frame,
+        layers: composite
+            .layers
+            .iter()
+            .map(|layer| dhampir_core::timeline::host_api::LayerView {
+                clip_id: layer.clip_id.clone(),
+                source: layer.source.clone(),
+                source_frame: layer.source_frame,
+                opacity: layer.opacity,
+                frozen_for_transition: layer.frozen_for_transition,
+                transform: dhampir_core::timeline::host_api::TransformView {
+                    x: layer.transform.x,
+                    y: layer.transform.y,
+                    scale: layer.transform.scale,
+                    rotation_deg: layer.transform.rotation_deg,
                 },
-                "effects": layer
+                effects: layer
                     .effects
                     .iter()
-                    .map(|effect| serde_json::json!({ "kind": effect.kind, "params": effect.params }))
-                    .collect::<Vec<_>>(),
+                    .map(|effect| dhampir_core::timeline::host_api::EffectView {
+                        kind: effect.kind.clone(),
+                        params: effect.params.clone(),
+                    })
+                    .collect(),
             })
-        })
-        .collect();
-    serde_json::json!({ "frame": composite.frame, "layers": layers })
+            .collect(),
+        error: None,
+    }
 }
 
 /// 载入一份工程：解析 + 校验，返回结构化结果。
@@ -233,12 +239,7 @@ fn composite_json(composite: &Composite) -> serde_json::Value {
 pub fn dhampir_project_open(json: &str) -> String {
     let parsed: Result<Project, _> = serde_json::from_str(json);
     match parsed {
-        Err(error) => serde_json::json!({
-            "parsed": false,
-            "ok": false,
-            "error": error.to_string(),
-        })
-        .to_string(),
+        Err(error) => dhampir_core::timeline::host_api::to_json(&host_api::OpenResult::unparsed(error.to_string())),
         Ok(project) => {
             let issues =
                 validate_project_with_effects(&project, dhampir_core::effects::REGISTRY);
@@ -246,7 +247,7 @@ pub fn dhampir_project_open(json: &str) -> String {
             PROJECT.with(|slot| {
                 *slot.borrow_mut() = if ok { Some(project) } else { None };
             });
-            serde_json::json!({ "parsed": true, "ok": ok, "issues": issues }).to_string()
+            dhampir_core::timeline::host_api::to_json(&dhampir_core::timeline::host_api::OpenResult::opened(issues))
         }
     }
 }
@@ -257,13 +258,12 @@ pub fn dhampir_project_frame(frame: i32) -> String {
     PROJECT.with(|slot| {
         let borrowed = slot.borrow();
         match borrowed.as_ref() {
-            None => serde_json::json!({
-                "frame": frame,
-                "layers": [],
-                "error": "还没有载入通过校验的工程",
-            })
-            .to_string(),
-            Some(project) => composite_json(&compose::evaluate(project, i64::from(frame))).to_string(),
+            None => dhampir_core::timeline::host_api::to_json(&dhampir_core::timeline::host_api::FrameResult {
+                frame: i64::from(frame),
+                layers: Vec::new(),
+                error: Some("还没有载入通过校验的工程".to_string()),
+            }),
+            Some(project) => dhampir_core::timeline::host_api::to_json(&composite_result(&compose::evaluate(project, i64::from(frame)))),
         }
     })
 }
@@ -583,13 +583,20 @@ pub fn dhampir_project_sources_for(frame: i32) -> String {
     PROJECT.with(|slot| {
         let borrowed = slot.borrow();
         let Some(project) = borrowed.as_ref() else {
-            return String::from("{\"sources\":[],\"error\":\"还没有载入通过校验的工程\"}");
+            return dhampir_core::timeline::host_api::to_json(&dhampir_core::timeline::host_api::SourcesResult {
+                frame: i64::from(frame),
+                sources: Vec::new(),
+                error: Some("还没有载入通过校验的工程".to_string()),
+            });
         };
         let (num, den) = match project.timebase.to_timebase() {
             Ok(timebase) => (f64::from(timebase.num), f64::from(timebase.den)),
             Err(error) => {
-                return serde_json::json!({ "sources": [], "error": error.to_string() })
-                    .to_string();
+                return dhampir_core::timeline::host_api::to_json(&dhampir_core::timeline::host_api::SourcesResult {
+                    frame: i64::from(frame),
+                    sources: Vec::new(),
+                    error: Some(error.to_string()),
+                });
             }
         };
         let composite = compose::evaluate(project, i64::from(frame));
@@ -600,13 +607,17 @@ pub fn dhampir_project_sources_for(frame: i32) -> String {
             if !seen.insert((layer.source.clone(), layer.source_frame)) {
                 continue;
             }
-            sources.push(serde_json::json!({
-                "source": layer.source,
-                "source_frame": layer.source_frame,
-                "seconds": (layer.source_frame as f64) * den / num,
-            }));
+            sources.push(dhampir_core::timeline::host_api::SourceView {
+                source: layer.source.clone(),
+                source_frame: layer.source_frame,
+                seconds: (layer.source_frame as f64) * den / num,
+            });
         }
-        serde_json::json!({ "frame": frame, "sources": sources }).to_string()
+        dhampir_core::timeline::host_api::to_json(&dhampir_core::timeline::host_api::SourcesResult {
+            frame: i64::from(frame),
+            sources,
+            error: None,
+        })
     })
 }
 

@@ -31,6 +31,8 @@ pub mod golden;
 // 这样每个提交都是绿的，而不是把仓库停在「改了一半」的状态。
 // 同样建立在 serde 上，所以跟 schema 一起按 feature 门控。
 #[cfg(feature = "serde")]
+pub mod host_api;
+#[cfg(feature = "serde")]
 pub mod layer;
 // 工程文件（壳）：渲染契约的超集（契约 + 资产表 + 元信息 + 应用状态）。
 #[cfg(feature = "serde")]
