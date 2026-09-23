@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::layer::{BlendMode, LAYER_SCHEMA_VERSION, TimelineV2};
-use crate::schema::{Frame, Issue};
+use crate::schema::{Frame, Issue, TimebaseDto};
 
 /// `dhampir_demux_samples` 里的一条样本。
 ///
@@ -513,5 +513,147 @@ mod tests {
         };
         let caps = Capabilities::new(vec!["gaussian_blur".to_string()], 16, true, true);
         assert!(precheck(&timeline, &caps).is_empty());
+    }
+}
+
+// ============================================================================
+// 素材取用契约
+// ============================================================================
+//
+// 远端模式下前端**不能下载整片**（几 GB），只能"只取我需要的这一段"。
+// 而"最小可解单位"在 H.264 里就是 **GOP** —— 只有关键帧能起解，
+// 想解第 N 帧必须从它前面最近的关键帧开始喂。
+//
+// 所以分片按 GOP 切，不是按字节切。按字节切会让前端拿到"起点不是关键帧"的片段，
+// **解不出第一帧**。
+//
+// 而 S3.2 定的 proxy 规格本身就是关键帧对齐的（-g 60 -keyint_min 60 -sc_threshold 0），
+// 所以切片天然对齐 —— 不需要额外算索引。
+
+/// 后端**现在能提供**的素材信息。
+///
+/// 与工程文件里资产表的关系：资产表是「工程里记了什么」，
+/// 这一份是「后端现在能提供什么」。两者**信息重叠但不相同** ——
+/// 例如工程里登记了原片，而原片离线、只剩 proxy。
+///
+/// **不一致时以后端为准**，且前端要能把差异报给用户，而不是默默用另一份。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssetInfoView {
+    pub id: String,
+    pub kind: String,
+    /// 总帧数。**没有它就无法校验素材内越界**（见 project::validate_project_doc）。
+    pub frame_count: Frame,
+    pub timebase: TimebaseDto,
+    pub width: u32,
+    pub height: u32,
+    /// 关键帧间隔（帧）。切片按它对齐；0 表示未知，此时**不能**按 GOP 切。
+    pub gop_length: u32,
+    /// 后端有没有可编辑用的低码率代理。
+    pub proxy_available: bool,
+}
+
+/// 一个 GOP 切片。
+///
+/// **服务器零计算**：它只是「字节范围 + 样本表下标」——
+/// 不需要解码、不需要转码、不需要重新封装。
+/// 前端拿原始字节范围 + 自己的 MP4 分离器就能喂给解码器。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GopSliceView {
+    /// 第几个 GOP（从 0 起）。
+    pub index: u64,
+    /// 这一段在样本表里的起点下标。
+    pub first_sample: u32,
+    pub sample_count: u32,
+    /// 这一段在文件里的字节范围。
+    pub byte_offset: u64,
+    pub byte_length: u64,
+}
+
+/// 帧号 -> 它所在 GOP 的下标。
+///
+/// gop_length 为 0 表示未知 —— 返回 None 而不是除零，
+/// 也**不是**退回"按帧切"（那会破坏"从关键帧起解"的前提）。
+pub fn gop_index_for_frame(frame: Frame, gop_length: u32) -> Option<u64> {
+    if gop_length == 0 || frame < 0 {
+        return None;
+    }
+    Some(frame as u64 / u64::from(gop_length))
+}
+
+/// 第 index 个 GOP 覆盖的帧区间，**左闭右开**。
+///
+/// 最后一段会被 frame_count 截断（素材长度通常不是 GOP 长度的整数倍）。
+/// 返回 None 表示这个 GOP 完全在素材之外。
+pub fn gop_frame_range(index: u64, gop_length: u32, frame_count: Frame) -> Option<(Frame, Frame)> {
+    if gop_length == 0 || frame_count <= 0 {
+        return None;
+    }
+    let length = i64::from(gop_length);
+    let start = (index as i64).checked_mul(length)?;
+    if start >= frame_count {
+        return None;
+    }
+    let end = start.saturating_add(length).min(frame_count);
+    Some((start, end))
+}
+
+#[cfg(test)]
+mod asset_tests {
+    use super::*;
+
+    #[test]
+    fn 第k个GOP恰好覆盖k乘gop到k加1乘gop() {
+        // 这是「帧号精确」在分片这一层的最低要求：
+        // 取第 k 段，解出来的帧号必须**不多不少**。
+        for k in 0..8u64 {
+            let (start, end) = gop_frame_range(k, 60, 480).expect("在范围内");
+            assert_eq!(start, (k as i64) * 60);
+            assert_eq!(end, (k as i64 + 1) * 60);
+        }
+    }
+
+    #[test]
+    fn 最后一段被素材长度截断() {
+        let (start, end) = gop_frame_range(2, 60, 155).unwrap();
+        assert_eq!((start, end), (120, 155));
+        assert!(gop_frame_range(3, 60, 155).is_none());
+        assert!(gop_frame_range(0, 60, 0).is_none());
+    }
+
+    #[test]
+    fn 帧号到_GOP_下标的换算与区间互为逆() {
+        for frame in 0..300i64 {
+            let index = gop_index_for_frame(frame, 60).unwrap();
+            let (start, end) = gop_frame_range(index, 60, 480).unwrap();
+            assert!(frame >= start && frame < end, "第 {frame} 帧不在它自己的 GOP 区间里");
+        }
+    }
+
+    #[test]
+    fn gop_长度未知时返回_None_而不是除零或退回按帧切() {
+        // 0 表示"未知"。退回按帧切会破坏「只有关键帧能起解」这个前提，
+        // 于是前端拿到解不了的片段 —— 那比明确失败更糟。
+        assert!(gop_index_for_frame(10, 0).is_none());
+        assert!(gop_frame_range(0, 0, 480).is_none());
+    }
+
+    #[test]
+    fn 负帧号不参与换算() {
+        assert!(gop_index_for_frame(-1, 60).is_none());
+    }
+
+    #[test]
+    fn 相邻两段首尾相接不重叠() {
+        // 漏一帧会让拖动时"跳帧"，重叠一帧会让同一帧被取两次。
+        let mut previous_end = 0;
+        for k in 0..8u64 {
+            let (start, end) = gop_frame_range(k, 60, 480).unwrap();
+            if k > 0 {
+                assert_eq!(start, previous_end, "第 {k} 段与上一段不相接");
+            }
+            previous_end = end;
+        }
     }
 }
