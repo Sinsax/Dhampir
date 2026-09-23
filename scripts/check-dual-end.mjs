@@ -27,6 +27,20 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
+/** 两端各吃什么输入。**这是比对能不能成立的前提。**
+ *
+ * M4 得到过 SSIM=1.000000，那必然是在**两边输入一致**的路径上得到的 ——
+ * 但那条路径**没有被记住**。于是后来的人（我）拿默认参数一跑，
+ * 比的是「浏览器经 <video> 解码的真视频」与「worker 的合成源」，
+ * **两个不同的东西**，而那个 SSIM 就成了一句没有意义的话。
+ *
+ * 所以本编排器**默认拒绝比对**，除非调用方显式声明输入一致（--inputs-identical）。
+ * 等真有一条让两端吃同一份像素的路径时，再用那个开关。 */
+export const INPUT_SOURCES = {
+  browser: '<video> 解码 proxy.mp4（真实视频帧）',
+  worker: 'core 的 synthetic_source_rgba8（合成源，不解码）',
+};
 const BROWSER_DIR = join(REPO_ROOT, 'target', 'export', 'frames');
 const NATIVE_DIR = join(REPO_ROOT, 'target', 'native-frames');
 
@@ -103,6 +117,22 @@ function main() {
   const frames = framesIndex >= 0 ? argv[framesIndex + 1].split(',') : ['0', '30', '60', '89'];
 
   console.log('抽取 ' + frames.length + ' 帧做双端比对：' + frames.join(', '));
+
+  // **先确认这次比对的前提成立**：两端得吃同一份输入。
+  // 默认它们不是 —— 所以默认拒绝，并说清楚各自吃什么。
+  if (!argv.includes('--inputs-identical')) {
+    console.log('');
+    console.log('拒绝比对：两端消费的输入不同。');
+    console.log('  浏览器侧：' + INPUT_SOURCES.browser);
+    console.log('  worker 侧：' + INPUT_SOURCES.worker);
+    console.log('');
+    console.log('这个前提下给出的 SSIM **没有意义** —— 它量的是「输入不同」，');
+    console.log('不是「渲染不一致」。要让它有意义，先做出一条两端吃同一份像素的路径，');
+    console.log('再用 --inputs-identical 显式声明。');
+    process.exitCode = 1;
+    return;
+  }
+
 
   // 浏览器侧：**空目录不能算通过**，所以先清掉旧帧。
   rmSync(BROWSER_DIR, { recursive: true, force: true });
