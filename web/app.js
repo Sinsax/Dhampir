@@ -254,19 +254,38 @@ async function runExport() {
   }
 }
 
+// **启动里程碑回报。**
+//
+// 为什么需要它：--local 卡住的那几轮，页面**不抛错也不进展** ——
+// 没有栈、没有消息，外部只能看到「什么都没发生」。
+// 卡住比失败难查，所以要在每一步留一个脚印，把「卡在哪」变成可观测的事实。
+function mark(name) {
+  try {
+    navigator.sendBeacon("/page-error", "里程碑:" + name);
+  } catch (error) {
+    // 观测手段失败不能影响启动。
+  }
+}
+
 // --- 启动 -------------------------------------------------------------------------
 async function main() {
+  mark("main 进入");
   const engine = await loadEngine("/pkg/dhampir_wasm.js");
   state.engine = engine;
+  mark("wasm 已加载");
   const text = await backend.loadProject();
+  mark("工程文本已取到");
   const opened = engine.open(text);
+  mark("工程已解析");
   if (opened.ok !== true) { log("<span class=\"bad\">样本工程没通过校验</span>"); return; }
   // 复制一份给 UI 改：engine 里那份是"最后一份通过校验的"，两者职责不同。
   state.project = JSON.parse(JSON.stringify(engine.project));
 
   const canvas = $("preview");
   await engine.attach("preview");
+  mark("已上屏到 canvas");
   await bindAllSources(engine, state.project, await backend.mediaUrlFor("a.mp4"));
+  mark("视频源已绑定");
 
   const end = engine.endFrame();
   $("frame").max = String(Math.max(0, end - 1));
@@ -277,6 +296,7 @@ async function main() {
   renderInspector();
   renderIssues();
   await seekTo(0);
+  mark("首帧已上屏");
 
   $("first").addEventListener("click", () => seekTo(0));
   $("prev").addEventListener("click", () => seekTo(state.frame - 1));
@@ -287,6 +307,7 @@ async function main() {
   only.dataset.ready = "1";
   canvas.dataset.ready = "1";
   window.dhampirReady = true;
+  mark("启动完成");
 
   // 程序化验收用的自动导出钩子：driver 无法点按钮，用查询参数触发。
   // 这是"给测试用的入口"，不是产品功能——所以只在显式带上参数时才生效。

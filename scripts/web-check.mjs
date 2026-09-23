@@ -224,7 +224,7 @@ function reportProbe() {
 /** app 验收：逐帧导出 → FFmpeg 编码 → ffprobe 核对帧数 → 出里程碑视频。 */
 function reportApp(stderr) {
   // **预检到底跑没跑**：跳过、通过、还是拦下 —— 没有这一行，三者在外部看起来一样。
-  console.log('页面错误: ' + (state.pageErrors.length ? state.pageErrors.join(' || ') : '（无）'));
+  console.log('页面信号: ' + (state.pageErrors.length ? state.pageErrors.join(' || ') : '（无）'));
   console.log('预检回报: ' + (state.precheck.length ? state.precheck.join(' | ') : '（页面没有回报 —— 说明根本没走到预检）'));
   if (state.failed !== null) { console.error('✗ 页面报导出失败：' + state.failed); process.exitCode = 1; return; }
   if (!state.done) { console.error('✗ 等导出完成超时（收到 ' + state.frames + ' 帧）'); console.error('--- 页面与浏览器输出（尾部 4000 字符）---');
