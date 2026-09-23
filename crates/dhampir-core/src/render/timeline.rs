@@ -91,6 +91,23 @@ impl TimelineRenderer {
         resolver: &mut dyn SourceResolver,
         clear: wgpu::Color,
     ) -> usize {
+        // **先看分段计划。** 调整图层要求「先合成一部分 -> 对结果跑特效 -> 再继续」，
+        // 那需要中间纹理与多次 pass，而这里现在只有一次 pass。
+        //
+        // 在把那段实现出来之前，遇到调整图层就**整帧不画并返回 0**：
+        // 返回 0 是调用方看得见的信号（画面空），好过悄悄画一张
+        // 「特效没生效但看不出哪里不对」的图。
+        //
+        // 这正是本项目一以贯之的取舍：**明确失败优于静默降级。**
+        let plan = plan_steps(&composite.layers);
+        if plan.iter().any(|step| matches!(step, Step::Adjust { .. })) {
+            debug_assert!(
+                false,
+                "调整图层的分段合成还没实现；这条路径不该在测试里被走到"
+            );
+            return 0;
+        }
+
         // 先把每层要采的纹理备好：需要模糊的层先画进临时纹理。
         // 临时纹理与视图都要活到 compose 之后，所以放在这两个 Vec 里。
         let mut keep_alive: Vec<wgpu::Texture> = Vec::new();
