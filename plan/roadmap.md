@@ -43,13 +43,21 @@ trim 指纹判据给出明确结论并留下证据文件。
 
 ## T1 文档坐标系（正确性，最高优先） → 依赖 T0
 
-这一段是**唯一可能动摇已验收字节**的一段，动前先跑 G5，动后立刻复跑。
+**状态：已完成**（见 [t1-evidence.md](./t1-evidence.md)；D1、A1 已转 done）。
+实际做法与开工时的设想有两处不同，都记在下面 —— **计划与事实不一致时改计划**：
+
+1. 没有让「预览也按 render_hints 渲染再缩放到画布」，而是**让 core 收下坐标系**
+   （RenderSpace{sequence,target}），预览仍在画布尺寸上渲染、只换算一次比例。
+   结果是**零额外像素开销**，所以 T1.4 担心的「1080p 预览变慢」没有发生，
+   逃生口 preview_scale **不需要**。
+2. 台账里「gaussian_blur.radius 也要换算」是**错的**：每层那个半径跑在**源**纹理上，
+   是源像素、不换算；只有调整图层的模糊半径是文档像素、要换算。
 
 - T1.1（A1、D1）dhampir-core 接收 sequence_size：
   inverse_affine(transform, source_size, sequence_size, target_size)；
   当 target != sequence 时按 target/sequence 缩放**全部像素量**。
-  实核目前只有两处像素量：transform.x/y 与 gaussian_blur.radius
-  （SubtitleStyle 已经全用比例，说明这个结论此前被局部发现过，但没上升为架构）。
+  实核只有 transform.x/y 是**文档像素**（SubtitleStyle 已经全用比例，说明这个结论
+  此前被局部发现过，但没上升为架构）。adjst 图层的模糊半径也是文档像素，一并换算。
 - T1.2 规则：**文档坐标系 = render_hints**（缺省 1920x1080）。
   导出默认 = render_hints；预览默认按 render_hints 渲染，显示层只做缩放。
 - T1.3 显式给不同导出尺寸 -> 走 T1.1 的缩放路径，并在渲染报告里点明"这是缩放输出"。
@@ -57,8 +65,11 @@ trim 指纹判据给出明确结论并留下证据文件。
   它走同一条缩放路径，因此几何仍一致。**先测量再定默认档**。
 - T1.5 新守卫 scripts/check-preview-parity.mjs（--self-test 加反向用例）。
 
-**验收**：G5 字节不变（640x360 恰好 == 样本工程的 render_hints）；新守卫绿；
-预览在 640x480 画布下与 640x360 导出的几何一致（实测）。
+**验收（已达成）**：里程碑 milestones/edited-milestone.mp4 逐字节未变（33287 字节）；
+G5 SSIM 1.000000；core 单元测试四种目标尺寸下归一化落点一致 + 一条反向用例；
+scripts/check-preview-parity.mjs 与它的 12 条自检断言全绿。
+**未达成（留给 T2 开工前）**：没有做「640x480 画布与该画出片之间」的端到端像素比对 ——
+现有样本工程是一张满帧视频，位移不体现在画面上，需要一块有区分度的夹具。
 
 ---
 

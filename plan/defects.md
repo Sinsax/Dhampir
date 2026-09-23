@@ -25,11 +25,11 @@
 
 ## 缺陷（D）
 
-- [D1] status=todo phase=T1
+- [D1] status=done phase=T1
   症状: 同一工程在 640x480 预览与 640x360 成片里，图层位移的相对位置不同（预览所见 != 成片所得）
   根因: crates/dhampir-core/src/render/compose.rs:107 web/app.js:592
-  验收: 新守卫 scripts/check-preview-parity.mjs —— 同一 doc 在 640x360 / 960x540 / 1920x1080 三个目标尺寸下，采样点的归一化坐标一致（容差写死并说明理由）
-  证据: -
+  验收: core 单元测试「位移的归一化落点与目标尺寸无关」（640x360/320x180/1280x720/960x540 四种目标，容差 1e-5）加一条反向用例；接线由 scripts/check-preview-parity.mjs 钉（自检 12 条断言，10 条是反向用例）
+  证据: plan/t1-evidence.md
 
 - [D2] status=todo phase=T4
   症状: 带关键帧的元素不能剃刀（split 直接拒绝，不是悄悄切歪）
@@ -123,11 +123,11 @@
 
 ## 架构缺失（A）
 
-- [A1] status=todo phase=T1
+- [A1] status=done phase=T1
   症状: 文档坐标系没有建模 —— render_hints 只是元数据，渲染器不认它；预览把"显示尺寸"当"渲染尺寸"
   根因: crates/dhampir-core/src/render/compose.rs:107 web/app.js:592
-  验收: core 接收 sequence_size；target != sequence 时按比例缩放全部像素量（实核只有 transform.x/y 与 gaussian_blur.radius）；G5 字节不变
-  证据: -
+  验收: core 新增 RenderSpace{sequence,target}（必填形参，8 个调用点都要说清坐标系）；target != sequence 时换算像素量。**台账原先写「gaussian_blur.radius 也要换」是错的**：每层那个半径是源纹理像素、不换，只有调整图层的模糊半径是文档像素、要换。默认路径逐字节不变：里程碑 33287 字节未变、G5 SSIM 1.000000
+  证据: plan/t1-evidence.md
 
 - [A2] status=todo phase=T4
   症状: 没有文档历史层，edit::apply 已经是纯函数却没有安放"前后 doc"的地方
