@@ -16,6 +16,7 @@
 mod blit;
 mod blur;
 mod compose;
+mod overlay;
 mod probe;
 mod timeline;
 mod scene;
@@ -47,6 +48,10 @@ pub use corpus::{
 pub use blit::{BLIT_WGSL, BlitRenderer};
 pub use blur::{BLUR_WGSL, BlurRenderer, MAX_RADIUS as BLUR_MAX_RADIUS, TAPS as BLUR_TAPS, gaussian_weights_1d};
 pub use compose::{COMPOSE_WGSL, Compositor, LayerDraw, RenderSpace, inverse_affine};
+pub use overlay::{
+    InkBounds, InkReport, OverlayItem, OverlayReport, compose_overlay, ink_report,
+    placement_transform,
+};
 pub use timeline::{
     SourceResolver, TimelineRenderer, blur_radius, scale_document_radius, synthetic_seed_for_source,
     synthetic_seed_for_source_frame, synthetic_source_rgba8,

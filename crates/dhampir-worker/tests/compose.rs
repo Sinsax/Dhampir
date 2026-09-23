@@ -8,8 +8,11 @@
 
 use dhampir_core::gpu::NATIVE_BACKENDS;
 use dhampir_core::readback;
-use dhampir_core::render::{Compositor, LayerDraw, RenderSpace};
+use dhampir_core::render::{
+    Compositor, InkBounds, LayerDraw, OverlayItem, RenderSpace, compose_overlay, ink_report,
+};
 use dhampir_core::timeline::schema::Transform;
+use dhampir_core::timeline::text_layout::{LinePlacement, NormalizedRect, place_line};
 use dhampir_core::wgpu;
 use dhampir_worker::baseline::open_leg;
 
@@ -18,9 +21,21 @@ use dhampir_worker::baseline::open_leg;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 fn solid(device: &wgpu::Device, queue: &wgpu::Queue, size: u32, rgba: [u8; 4], label: &str) -> wgpu::Texture {
+    solid_rect(device, queue, size, size, rgba, label)
+}
+
+/// 非方形的一块实心纹理：文字位图就是这种形状（宽取整条目标宽、高只有几十像素）。
+fn solid_rect(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    width: u32,
+    height: u32,
+    rgba: [u8; 4],
+    label: &str,
+) -> wgpu::Texture {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
-        size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -28,8 +43,8 @@ fn solid(device: &wgpu::Device, queue: &wgpu::Queue, size: u32, rgba: [u8; 4], l
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    let mut pixels = Vec::with_capacity((size * size * 4) as usize);
-    for _ in 0..(size * size) {
+    let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+    for _ in 0..(width * height) {
         pixels.extend_from_slice(&rgba);
     }
     queue.write_texture(
@@ -42,18 +57,22 @@ fn solid(device: &wgpu::Device, queue: &wgpu::Queue, size: u32, rgba: [u8; 4], l
         &pixels,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(size * 4),
-            rows_per_image: Some(size),
+            bytes_per_row: Some(width * 4),
+            rows_per_image: Some(height),
         },
-        wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
     );
     texture
 }
 
 fn target(device: &wgpu::Device, size: u32) -> wgpu::Texture {
+    target_rect(device, size, size)
+}
+
+fn target_rect(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dhampir compose test target"),
-        size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -173,4 +192,301 @@ fn 缩放把层缩到中心而四周保持背景() {
             "角 ({x},{y}) 应当保持背景，得到 {got:?}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// 文字叠加（T2.5）：core 的 render::overlay 原语在真 GPU 上的行为。
+//
+// 浏览器那半的验收走 `node scripts/web-check.mjs --verdict text`（canvas 栅格化 +
+// 一次 GPU 叠加 + 读回像素）。这里证的是**叠加原语本身**、而且不需要浏览器：
+// 落点与行盒逐个像素一致、空清单不改动一个字节、尺寸不符时拦住不画。
+// ---------------------------------------------------------------------------
+
+/// 文字叠加测试用的目标尺寸：**非方形**，而位图宽度取整条目标宽。
+const TEXT_TARGET: (u32, u32) = (64, 32);
+
+/// 三条位置不同的行盒（归一化，文档坐标）。**故意重叠**：重叠处同时验「后一行盖住前一行」。
+const TEXT_RECTS: [(f32, f32, f32, f32); 3] = [
+    (0.0, 0.0, 1.0, 0.25),   // 贴顶、整条宽：落点 y 会是负数
+    (0.5, 0.3, 0.25, 0.12),  // 中间偏右
+    (0.25, 0.55, 0.5, 0.15), // 底部居中
+];
+
+const TEXT_COLORS: [[u8; 4]; 3] = [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255]];
+
+/// 这个目标像素在不在落点里（落点可以有一部分在画面外）。
+fn inside(placed: LinePlacement, x: u32, y: u32) -> bool {
+    let (px, py) = (x as i64, y as i64);
+    px >= placed.x as i64
+        && px < placed.x as i64 + placed.bitmap_width as i64
+        && py >= placed.y as i64
+        && py < placed.y as i64 + placed.bitmap_height as i64
+}
+
+/// 若干落点裁到画面内之后的并集（包围盒）。一个像素都不剩时给 `None`。
+fn union_bounds(placements: &[LinePlacement], target: (u32, u32)) -> Option<InkBounds> {
+    let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+    for placed in placements {
+        let left = (placed.x as i64).max(0);
+        let top = (placed.y as i64).max(0);
+        let right = (placed.x as i64 + placed.bitmap_width as i64).min(target.0 as i64);
+        let bottom = (placed.y as i64 + placed.bitmap_height as i64).min(target.1 as i64);
+        if right <= left || bottom <= top {
+            continue;
+        }
+        x0 = x0.min(left);
+        y0 = y0.min(top);
+        x1 = x1.max(right - 1);
+        y1 = y1.max(bottom - 1);
+    }
+    if x0 > x1 || y0 > y1 {
+        return None;
+    }
+    Some(InkBounds {
+        x: x0 as u32,
+        y: y0 as u32,
+        width: (x1 - x0 + 1) as u32,
+        height: (y1 - y0 + 1) as u32,
+    })
+}
+
+#[test]
+#[ignore = "需要真 GPU；跑：cargo test -p dhampir-worker --test compose -- --ignored"]
+fn 文字的落点与行盒逐个像素一致() {
+    let (ctx, _init) = open_leg(NATIVE_BACKENDS).expect("拿不到 GPU 上下文");
+    let (width, height) = TEXT_TARGET;
+    let out = target_rect(&ctx.device, width, height);
+    let compositor = Compositor::new(&ctx.device, FORMAT);
+    let target_view = out.create_view(&wgpu::TextureViewDescriptor::default());
+
+    // 落点走**共享布局**，测试不自己算：算错了这里就对不上像素。
+    let placements: Vec<LinePlacement> = TEXT_RECTS
+        .iter()
+        .map(|(x, y, box_width, box_height)| {
+            let rect = NormalizedRect { x: *x, y: *y, width: *box_width, height: *box_height };
+            place_line(rect, TEXT_TARGET).expect("行盒有高度，应当给得出落点")
+        })
+        .collect();
+    // 位图**照落点声明的尺寸造**、整张填满：这一条要证的是落点，不是字形。
+    let bitmaps: Vec<wgpu::Texture> = placements
+        .iter()
+        .zip(TEXT_COLORS)
+        .enumerate()
+        .map(|(index, (placed, color))| {
+            solid_rect(
+                &ctx.device,
+                &ctx.queue,
+                placed.bitmap_width,
+                placed.bitmap_height,
+                color,
+                &format!("dhampir text bitmap {index}"),
+            )
+        })
+        .collect();
+    let views: Vec<wgpu::TextureView> = bitmaps
+        .iter()
+        .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()))
+        .collect();
+    let items: Vec<OverlayItem<'_>> = views
+        .iter()
+        .zip(&placements)
+        .map(|(view, placed)| OverlayItem {
+            view,
+            bitmap_size: (placed.bitmap_width, placed.bitmap_height),
+            placement: *placed,
+        })
+        .collect();
+
+    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("dhampir text overlay encoder"),
+    });
+    // 先按常规路径建立底（清屏），再叠文字 —— 这正是宿主那两行的顺序。
+    compositor.compose(
+        &ctx.device,
+        &ctx.queue,
+        &mut encoder,
+        &target_view,
+        RenderSpace::square(TEXT_TARGET),
+        &[],
+        Some(wgpu::Color::TRANSPARENT),
+    );
+    let report = compose_overlay(
+        &compositor,
+        &ctx.device,
+        &ctx.queue,
+        &mut encoder,
+        &target_view,
+        TEXT_TARGET,
+        &items,
+    );
+    assert_eq!(report.drawn, items.len(), "三行都该画上去");
+    assert_eq!(report.size_mismatch, 0, "位图尺寸与落点必须一一对应");
+    ctx.queue.submit([encoder.finish()]);
+
+    let image = pollster::block_on(readback::read_texture_rgba8(&ctx.device, &ctx.queue, &out))
+        .expect("读回失败");
+
+    // 逐个像素对照：**后一行盖住前一行**（清单顺序即叠放顺序，与合成器一致）。
+    for y in 0..height {
+        for x in 0..width {
+            let mut expected = [0, 0, 0, 0];
+            for (placed, color) in placements.iter().zip(TEXT_COLORS) {
+                if inside(*placed, x, y) {
+                    expected = color;
+                }
+            }
+            let got = pixel(&image, width, x, y);
+            assert!(near(got, expected, 2), "({x},{y}) 应当是 {expected:?}，得到 {got:?}");
+        }
+    }
+
+    // 再数一遍墨迹：包围盒必须**恰好**是落点的并集 —— 宿主判的就是这个数。
+    let empty = dhampir_core::readback::Rgba8Image {
+        width,
+        height,
+        pixels: vec![0; (width * height * 4) as usize],
+    };
+    let ink = ink_report(&empty, &image).expect("两张同尺寸");
+    assert_eq!(ink.bounds, union_bounds(&placements, TEXT_TARGET), "墨迹包围盒与落点对不上");
+}
+
+#[test]
+#[ignore = "需要真 GPU；跑：cargo test -p dhampir-worker --test compose -- --ignored"]
+fn 没有可叠的行时目标一个字节都不改() {
+    // 「无文字工程逐字节不变」在渲染侧的写法：没有字要画时，叠加这一步
+    // **不进任何绘制命令**（也不清屏）。空目标上的「没变」没有意义，所以先铺一层底。
+    let (ctx, _init) = open_leg(NATIVE_BACKENDS).expect("拿不到 GPU 上下文");
+    let (width, height) = TEXT_TARGET;
+    let out = target_rect(&ctx.device, width, height);
+    let compositor = Compositor::new(&ctx.device, FORMAT);
+    let target_view = out.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let base = solid_rect(&ctx.device, &ctx.queue, width, height, [40, 80, 120, 255], "dhampir text base");
+    let base_view = base.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("dhampir text base encoder"),
+    });
+    compositor.compose(
+        &ctx.device,
+        &ctx.queue,
+        &mut encoder,
+        &target_view,
+        RenderSpace::square(TEXT_TARGET),
+        &[LayerDraw {
+            view: &base_view,
+            source_size: TEXT_TARGET,
+            transform: Transform::default(),
+            opacity: 1.0,
+            blend: dhampir_core::timeline::layer::BlendMode::Normal,
+        }],
+        Some(wgpu::Color::TRANSPARENT),
+    );
+    ctx.queue.submit([encoder.finish()]);
+    let before = pollster::block_on(readback::read_texture_rgba8(&ctx.device, &ctx.queue, &out))
+        .expect("读回失败");
+
+    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("dhampir text overlay empty encoder"),
+    });
+    let report = compose_overlay(
+        &compositor,
+        &ctx.device,
+        &ctx.queue,
+        &mut encoder,
+        &target_view,
+        TEXT_TARGET,
+        &[],
+    );
+    assert!(report.is_silent(), "空清单不该画、也不该拦：{report:?}");
+    ctx.queue.submit([encoder.finish()]);
+    let after = pollster::block_on(readback::read_texture_rgba8(&ctx.device, &ctx.queue, &out))
+        .expect("读回失败");
+
+    let changed = before
+        .pixels
+        .iter()
+        .zip(after.pixels.iter())
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(changed, 0, "空清单的叠加改动了目标纹理：{changed} 个字节");
+}
+
+#[test]
+#[ignore = "需要真 GPU；跑：cargo test -p dhampir-worker --test compose -- --ignored"]
+fn 位图尺寸与落点不符时一行都不画() {
+    // 宿主把位图与落点配错了对，硬画上去就是一次静默缩放（字糊一点、位置还差不多），
+    // 那种错只有把像素读回来比才发现。所以拦住、报数、不画。
+    let (ctx, _init) = open_leg(NATIVE_BACKENDS).expect("拿不到 GPU 上下文");
+    let (width, height) = TEXT_TARGET;
+    let out = target_rect(&ctx.device, width, height);
+    let compositor = Compositor::new(&ctx.device, FORMAT);
+    let target_view = out.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let placed = place_line(
+        NormalizedRect { x: 0.25, y: 0.6, width: 0.5, height: 0.15 },
+        TEXT_TARGET,
+    )
+    .expect("行盒有高度");
+    // 故意造一张比落点宽的位图，并**如实**报它的实际尺寸。
+    let actual = (placed.bitmap_width + 2, placed.bitmap_height);
+    let bitmap = solid_rect(
+        &ctx.device,
+        &ctx.queue,
+        actual.0,
+        actual.1,
+        [255, 255, 255, 255],
+        "dhampir text bitmap wrong size",
+    );
+    let bitmap_view = bitmap.create_view(&wgpu::TextureViewDescriptor::default());
+
+    // 底铺满整张（清屏色与文字色不同）：否则「没画」会被「底色一样」蒙过去。
+    let base = solid_rect(&ctx.device, &ctx.queue, width, height, [10, 20, 30, 255], "dhampir text base");
+    let base_view = base.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("dhampir text base encoder"),
+    });
+    compositor.compose(
+        &ctx.device,
+        &ctx.queue,
+        &mut encoder,
+        &target_view,
+        RenderSpace::square(TEXT_TARGET),
+        &[LayerDraw {
+            view: &base_view,
+            source_size: TEXT_TARGET,
+            transform: Transform::default(),
+            opacity: 1.0,
+            blend: dhampir_core::timeline::layer::BlendMode::Normal,
+        }],
+        Some(wgpu::Color::TRANSPARENT),
+    );
+    ctx.queue.submit([encoder.finish()]);
+    let before = pollster::block_on(readback::read_texture_rgba8(&ctx.device, &ctx.queue, &out))
+        .expect("读回失败");
+
+    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("dhampir text overlay mismatch encoder"),
+    });
+    let report = compose_overlay(
+        &compositor,
+        &ctx.device,
+        &ctx.queue,
+        &mut encoder,
+        &target_view,
+        TEXT_TARGET,
+        &[OverlayItem { view: &bitmap_view, bitmap_size: actual, placement: placed }],
+    );
+    assert_eq!(report.drawn, 0, "尺寸不符的位图不许画");
+    assert_eq!(report.size_mismatch, 1, "尺寸不符必须数出来");
+    ctx.queue.submit([encoder.finish()]);
+    let after = pollster::block_on(readback::read_texture_rgba8(&ctx.device, &ctx.queue, &out))
+        .expect("读回失败");
+
+    let changed = before
+        .pixels
+        .iter()
+        .zip(after.pixels.iter())
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(changed, 0, "尺寸不符时一个字节都不该改：{changed} 个字节");
 }

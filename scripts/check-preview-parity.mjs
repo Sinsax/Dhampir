@@ -36,6 +36,7 @@ export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 /** 允许用 RenderSpace::square 的文件：这些路径上**没有工程**，目标尺寸就是它自己的坐标系。 */
 export const SQUARE_ALLOWED = [
   { path: 'crates/dhampir-core/src/render/compose.rs', why: '它自己的单元测试（相同尺寸时比例是 1）' },
+  { path: 'crates/dhampir-core/src/render/overlay.rs', why: '文字叠加：行位图的落点已经是目标像素（place_line(rect, target) 的产物），这条路上没有文档坐标系可换算' },
   { path: 'crates/dhampir-worker/examples/decode_sequence.rs', why: '顺序解码的例子，输入是裸帧序列而不是工程' },
   { path: 'crates/dhampir-worker/examples/render_project.rs', why: '渲染例子直接渲契约，没有工程壳' },
   { path: 'crates/dhampir-worker/tests/compose.rs', why: '合成器测试，源是现造的颜色块' },
