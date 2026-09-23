@@ -19,7 +19,6 @@ use std::collections::HashMap;
 use dhampir_core::compose::{self, Composite};
 use dhampir_core::io::{FrameSink, FrameSource};
 use dhampir_core::render::SourceResolver;
-use dhampir_core::render::{Compositor, LayerDraw};
 use dhampir_core::wgpu;
 use dhampir_core::timeline::schema::{Project, validate_project_with_effects};
 use wasm_bindgen::prelude::*;
@@ -179,6 +178,25 @@ impl ProjectHost {
     }
 }
 
+/// 固定源解析器：所有 source、所有帧都返回**同一张纹理**。
+///
+/// 存在的理由是让 render_probe 走共用入口而不引入多源能力 ——
+/// 多源是 dhampir_project_draw 那条路的事（它用 BoundVideos 按 source 各自 seek）。
+struct FixedSource {
+    view: wgpu::TextureView,
+    size: (u32, u32),
+}
+
+impl SourceResolver for FixedSource {
+    fn texture_for(
+        &mut self,
+        _source: &str,
+        _source_frame: i64,
+    ) -> Option<(wgpu::TextureView, (u32, u32))> {
+        Some((self.view.clone(), self.size))
+    }
+}
+
 fn composite_json(composite: &Composite) -> serde_json::Value {
     let layers: Vec<serde_json::Value> = composite
         .layers
@@ -318,31 +336,34 @@ pub async fn dhampir_project_render_probe(
     });
     let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
 
-    // v1：所有图层采同一路源纹理（见模块注释里的能力说明）。
-    let draws: Vec<LayerDraw<'_>> = composite
-        .layers
-        .iter()
-        .map(|layer| LayerDraw {
-            view: &source_view,
-            source_size,
-            transform: layer.transform,
-            opacity: layer.opacity,
-        })
-        .collect();
-
-    let compositor = Compositor::new(&ctx.device, PREVIEW_FORMAT);
+    // **走共用的渲染入口**，而不是自己 new 一个 Compositor。
+    //
+    // 这里原先直接用 Compositor 叠图，于是它成了**旁路**：混合模式与调整图层会加进
+    // TimelineRenderer，而这条路不会自动获得 —— 两条路从那时起开始分叉。
+    // 现在传一个**固定 resolver**：所有 source 都返回同一张纹理。
+    // 这不是偷懒，而是本函数的**退化语义**本身（它只喂一路源，用来验「工程路径能出图」）。
+    //
+    // ⚠️ 一处**应当变化**的行为：旧旁路完全忽略 effects，新路径会应用特效。
+    // 所以对带特效的层，结果**本来就该不同**；对无特效的层必须逐字节相同
+    // （基线验收就是拿无特效的工程比）。
+    let mut resolver = FixedSource {
+        view: source_view.clone(),
+        size: source_size,
+    };
+    let renderer = dhampir_core::render::TimelineRenderer::new(&ctx.device, PREVIEW_FORMAT);
     let mut encoder = ctx
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("dhampir project probe encoder"),
         });
-    compositor.compose(
+    renderer.render_frame(
         &ctx.device,
         &ctx.queue,
         &mut encoder,
         &target_view,
         (width.max(1), height.max(1)),
-        &draws,
+        &composite,
+        &mut resolver,
         wgpu::Color::TRANSPARENT,
     );
     ctx.queue.submit([encoder.finish()]);
