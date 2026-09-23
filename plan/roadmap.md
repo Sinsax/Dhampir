@@ -106,11 +106,14 @@ scripts/check-preview-parity.mjs 与它的 12 条自检断言全绿。
   「谁负责栅格化」变含糊，而含糊的代价是两端各自决定。
   代价是宿主必须**两个都调**，所以接线要由结构守卫盯着（与 check-preview-parity 同一手法）——
   该守卫写在 next-steps.md 的 T2.6 里，两个宿主都接上之后才写（提前写就是恒真守卫）。
+  **已落地**：`scripts/check-overlay-plumbing.mjs` —— 一条通用律（渲染了帧、又读了时间线的文件
+  必须评估 overlay）加两个钉死的宿主，18 条自检与两个真实反向用例（见 t2-evidence.md）。
   已落地：TextItem（归一化矩形）/ TextOverlay / SubtitleTable / evaluate_overlay（13 条单测），
   以及它的第一个真实调用方 —— CLI 的 subtitle 子命令（`dhampir subtitle --project P --frame N`，
   只出结构、不需要 GPU，宿主的输出与它不一致就是宿主错）。
   **还没做的**（A4/D5 的余下部分）：HOST_API_VERSION 1 到 2（T2.7）、--subtitle-out 侧挂导出（T2.6）；
-  弹幕见 T3。
+  弹幕见 T3。**注**：这两项的编号是**本文件的**（守卫在 next-steps.md 里占的是 T2.6）——
+  对齐看 next-steps.md 的 T2 剩余表。
 - T2.2（A3）共享布局 —— **已完成**（见 [t2-evidence.md](./t2-evidence.md)）：
   crates/dhampir-timeline/src/text_layout.rs，零依赖，17 条单测含 2 条反向用例；
   参照输出 crates/dhampir-timeline/examples/layout_subtitles.rs（宿主与它不一致就是宿主错）。

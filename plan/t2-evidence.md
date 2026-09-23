@@ -2,6 +2,105 @@
 
 分段记录。T2 还没收口，所以这里先只有已完成的那几段。
 
+## T2.6 「两个宿主都接上了」的结构守卫（A4）—— 已完成
+
+### 它解决什么
+
+T2.4 与 T2.5 让**两端都画得出字**，但**接线本身**没有东西守着。只做一半是这条路最难看见的
+失效模式，而且两种都**不会让任何测试变红**：
+
+* **没评估**：这一帧的字根本不出现。画面看起来完全正常 —— 像「这个工程没有字幕」；
+* **评估了没画**：结构全对、画面空。看起来像「字体没渲染出来」。
+
+文案比对在这两种情况下都会通过：它比的是**结构**，而结构恰恰是评估层算出来的那一份。
+所以这里要的不是又一条像素判据，而是一条**结构判据** ——
+`scripts/check-overlay-plumbing.mjs`。
+
+### 判据：一条通用律，加两个钉死的宿主
+
+守卫不逐个文件打补丁，而是先立一条**通用律**，再把今天这两个宿主钉成「必须被命中」：
+
+> 渲染了帧（`render_frame(`）、又读了时间线（`.timeline`）的文件，必须评估 overlay
+> （`evaluate_overlay(`）。**命中数少于两个就判红** —— 这条防的是**规则自己失效**：
+> 改字段名之后谁都不再被命中，守卫照样是绿的，而漏掉的那个宿主静默地不画字。
+
+| # | 判据 | 它防的是什么 |
+|---|---|---|
+| 1 | `pub fn evaluate_overlay` 只在 `crates/dhampir-core/src/overlay.rs` 里 | 别处再长一份实现 —— 两份实现会各自自洽、只有把两张画面摆一起才看得出来 |
+| 2 | 通用律 + 两个宿主（`worker/pipeline.rs`、`wasm/timeline_host.rs`）必须被命中 | 新宿主忘了接；或规则被改到失效（这条比漏接更隐蔽：它是绿的） |
+| 3 | `pipeline.rs`：评估 ≥2、画 ≥2，且每处「评估」后 **8 行内**必须「画」 | 出片与逐帧 PNG 是两条渲染路径，漏一条就静默地不画字；以及评估了不画 |
+| 4 | `timeline_host.rs`：评估 1 次、`compose_overlay(` ≥2（预览 draw 与判定 text_probe）、必须用 `place_line(`、每次外部位图拷贝后 **20 行内**声明 `premultiplied_alpha: false` | 判定那条路忘了贴（判不了）、落点自己算、直排 alpha 写错（字边缘发暗，看着像「字体没渲染好」） |
+| 5 | 判定入口 `dhampir_project_text_probe` 起不许出现 `text_lines(` | 判定里重算清单会把刚提交的行位图全作废 —— 症状是「一行都画不出来」 |
+| 6 | CLI 的 subtitle 走 `evaluate_overlay` | 它是两个宿主对照的基准；基准自己再算一份，「对照」就变成两份实现互相确认 |
+| 7 | `web/engine.js`：每处 `createImageBitmap(rasterizeLine(` 后 **4 行内**必须写 `premultiplyAlpha: "none"`，任何其它值即红；`web/app.js` 必须读 `textManifest`、不许出现 `.textFrame(` | 同 4 与 5，落在外壳那一侧 |
+
+三条纪律与其它守卫一致：**能 `--self-test`**、**在空文件集上拒绝通过（exit 2）**、
+**参数先判死**（不认识的参数 = 2，不许当通过）。正跑输出：
+
+```text
+$ node scripts/check-overlay-plumbing.mjs  ->  exit 0
+✓ 文字叠加接上了：两个宿主都评估、都画（评估层只有一份，直排 alpha 与判定路径的清单来源都在判据里）；扫了 67 个 .rs + 2 个 JS
+```
+
+### 自检 18 条
+
+```text
+$ node scripts/check-overlay-plumbing.mjs --self-test  ->  exit 0
+✓ 文字叠加接线守卫自检通过（18 条断言）
+```
+
+覆盖：接线正确 → 通过；缺文件；core 非 pub；别处复制一份评估层；出片只评估一次；
+评估了不画；预览少一处贴图；没用 `place_line`；alpha 写成 `true`；
+**新宿主读时间线却不评估**（通用律）；**把 `plan.timeline` 改成 `plan.clock` 让宿主不再被命中**
+（规则失效）；JS 没写 `premultiplyAlpha`；写了一般值；判定入口重算清单；判定入口被改名；
+页面调 `textFrame`；页面没读 `textManifest`；空 `.rs` 集合。
+
+### 真实反向用例（注入真仓库，原样输出）
+
+`--self-test` 喂的是内存里的合成文件；真仓库上还各注了一次违例。
+`target/t2/t2-6-verdict/run-reverse.cjs` 带 `try/finally`，无论成败都还原备份，
+还原后比对 SHA256，并**再跑一次必须绿**：
+
+```text
+# 注入之前（干净仓库）
+$ node scripts/check-overlay-plumbing.mjs  ->  exit 0
+✓ 文字叠加接上了：两个宿主都评估、都画（评估层只有一份，直排 alpha 与判定路径的清单来源都在判据里）；扫了 67 个 .rs + 2 个 JS
+
+# 反向用例：negative-one-path-without-overlay
+注入到 crates/dhampir-worker/src/pipeline.rs（备份在 target/t2/t2-6-verdict/pipeline.rs.bak）
+$ node scripts/check-overlay-plumbing.mjs  ->  exit 1
+
+  - crates/dhampir-worker/src/pipeline.rs 只评估了 1 次 overlay —— 出片与逐帧 PNG 是两条渲染路径，漏掉的那条会静默地不画字
+  - crates/dhampir-worker/src/pipeline.rs 只画了 1 次 overlay —— 同上：两条路各要画一次
+宿主没有把文字叠加接下来
+
+还原后：SHA256 f8a4feb322418dc3（注入前 f8a4feb322418dc3）；再跑一次 exit 0
+
+# 反向用例：negative-premultiplied-alpha-true
+注入到 crates/dhampir-wasm/src/timeline_host.rs（备份在 target/t2/t2-6-verdict/timeline_host.rs.bak）
+$ node scripts/check-overlay-plumbing.mjs  ->  exit 1
+
+  - crates/dhampir-wasm/src/timeline_host.rs:380 拷外部位图时没有声明 premultiplied_alpha: false —— 说错不报错，只会让字的边缘发暗（看着像"字体没渲染好"）
+宿主没有把文字叠加接下来
+
+还原后：SHA256 f04e867c8e8579f7（注入前 f04e867c8e8579f7）；再跑一次 exit 0
+```
+
+两个用例各红一处，报出的**文件与行号**都对得上注入点 —— 不是「扫到了就算红」。
+
+### 覆盖边界（不假装）
+
+* 守卫**只判接线，不判语义与像素**。语义（矩形、落点）在 core 与 `text_layout` 的单测里，
+  像素在 T2.4 / T2.5 的判定通道里。这条分工写在守卫的头部注释里，免得下一个人指望它判墨迹。
+* **窗口是按行数的**（「评估后 8 行内画」「拷贝后 20 行内声明 alpha」「位图后 4 行内写 alpha」）。
+  把这两个调用拆得太远会让守卫**假红** —— 20 行这个数来自 wgpu 的 struct 字面量本身就十几行。
+* **命中只按文件**：同一个文件里有两个渲染路径、只在其中一个评估的情况，靠第 3 条的计数与
+  「评估后紧跟着画」来抓；更深的调用图（例如把评估塞进 helper 再调两次）不在判据里。
+* **JS 只扫 `web/engine.js` 与 `web/app.js`**：别的页面脚本不在判据里。
+* 证据原始输出在 `target/t2/t2-6-verdict/`（`reverse-cases.txt`、两个 `negative-*.txt`、
+  `guards.txt` 是 17 项守卫批的全量输出）—— `target/` 是 gitignore 的草稿区，
+  所以上面把输出原样抄了一份进本文档。
+
 ## T2.5 浏览器侧 canvas 栅格化（D5 / A4 的后一半）—— 已完成
 
 ### 它解决什么
