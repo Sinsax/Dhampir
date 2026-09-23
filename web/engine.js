@@ -337,6 +337,12 @@ export class Engine {
    * —— 比对与提交之间没有 await，所以这一次检查是原子的。
    *
    * （新清单算好的时候宿主已经把旧位图全丢了，所以过期的那一趟什么也不欠。）
+   *
+   * # 字幕与弹幕为什么要走两趟、两套编号
+   *
+   * 两份清单在宿主那边是**两个位图集合、两套下标**（各从 0 起）。合成一趟再按"字幕在前
+   * 弹幕在后"的偏移量拆开是不行的：一条字幕算不出落点就不会进清单，偏移量随之错位，
+   * 于是弹幕的位图会被贴成字幕 —— 而画面看起来只是"有一条字位置偏了"。
    */
   async prepareText(frame) {
     const manifest = this.textFrame(frame);
@@ -344,8 +350,34 @@ export class Engine {
     // 「宿主的清单 == 这一帧」时才肯判（见 Rust 侧的 text_probe）。
     this.textManifest = manifest;
     const token = (this.textToken += 1);
-    for (let index = 0; index < manifest.placements.length; index += 1) {
-      const line = manifest.placements[index];
+    const placed = await this.rasterizePlacements(
+      manifest.placements,
+      manifest.color,
+      manifest.outline,
+      token,
+      (index, bitmap) => this.mod.dhampir_project_set_text_bitmap(index, bitmap),
+    );
+    // 这一趟过期了就别接着交下一批：宿主手上的清单已经不是这一帧的了。
+    if (placed === false) return manifest;
+    await this.rasterizePlacements(
+      manifest.danmaku_placements,
+      manifest.color,
+      manifest.outline,
+      token,
+      (index, bitmap) => this.mod.dhampir_project_set_danmaku_bitmap(index, bitmap),
+    );
+    return manifest;
+  }
+
+  /**
+   * 把一份清单逐条栅格化并交给宿主。返回 `false` = 这一趟已经过期（别接着交）。
+   *
+   * `submit` 决定交到哪个位图集合 —— 两套编号各自从 0 起，所以这里只认下标，
+   * 不认"这份清单是字幕还是弹幕"。
+   */
+  async rasterizePlacements(placements, color, outline, token, submit) {
+    for (let index = 0; index < placements.length; index += 1) {
+      const line = placements[index];
       // 全是空白字符的行**不做位图**：宿主不判它（栅格化出来本来就是空的），
       // 硬塞一张空的进去只会让"这一行没有位图"那条判据失去意义。
       if (line.visible !== true) continue;
@@ -354,18 +386,18 @@ export class Engine {
         // **直排 alpha**：宿主用 copy_external_image_to_texture 上传，并且声明
         // premultiplied_alpha = false。两边必须一致 —— 说错不会报错，只会让字的边缘发暗，
         // 而那看起来像"字体没渲染好"，不像"叠加算错了"。
-        bitmap = await createImageBitmap(rasterizeLine(line, manifest.color, manifest.outline), {
+        bitmap = await createImageBitmap(rasterizeLine(line, color, outline), {
           premultiplyAlpha: "none",
         });
       } catch (error) {
         // 不静默：宿主那边这一行会被判成 subtitle_raster_failed（有字要画、却没有位图）。
-        console.warn("dhampir: 第 " + index + " 行字做不出位图：" + error);
+        console.warn("dhampir: 第 " + index + " 条字做不出位图：" + error);
         continue;
       }
-      if (token !== this.textToken) { bitmap.close(); return manifest; }
-      this.mod.dhampir_project_set_text_bitmap(index, bitmap);
+      if (token !== this.textToken) { bitmap.close(); return false; }
+      submit(index, bitmap);
     }
-    return manifest;
+    return true;
   }
 
   /** seek 并渲染到 canvas。 */

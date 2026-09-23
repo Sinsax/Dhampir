@@ -104,6 +104,21 @@ struct TextLineSpec {
     rect: NormalizedRect,
     /// 目标像素里的落点（`place_line` 的结果，JS 照着它去栅格化）。
     placement: LinePlacement,
+    /// 弹幕条目的身份（字幕是 `None`）。
+    ///
+    /// 为什么要有这个字段：弹幕的 `rect` 逐帧都在动，**单看一帧的矩形分不出
+    /// 「泳道被分配错了」与「这一帧就该滚到这里」**。泳道与在屏帧区间才是两端要对的
+    /// 那三样数字，所以它们跟着条目一路带到清单里，而不是在报告那一层从别处再查一遍
+    /// —— 再查一遍就是给「清单」与「报告」两次说法不一致的机会。
+    danmaku: Option<DanmakuIdentity>,
+}
+
+/// 一条弹幕的身份：泳道 + 在屏帧区间（**闭**区间）。
+#[derive(Debug, Clone, Copy)]
+struct DanmakuIdentity {
+    lane: u32,
+    enter: i64,
+    exit: i64,
 }
 
 /// 工程预览宿主。
@@ -145,6 +160,24 @@ pub struct ProjectHost {
     /// 行号是 [`dhampir_project_text_frame`] 给出的清单里的下标 ——
     /// 于是「JS 栅格化了哪一行」与「宿主画哪一行」是同一个编号，不会错位。
     text_bitmaps: HashMap<u32, web_sys::ImageBitmap>,
+    /// 这一帧要画的**弹幕**条目，由 [`dhampir_project_text_frame`] 算好。
+    ///
+    /// # 为什么与 `text_lines` 分开两个向量
+    ///
+    /// 不是分类癖：两者的**判定规矩不同**。字幕的墨迹顶到画面边就是「字被切了」；
+    /// 弹幕**每一趟进出画面都要经过画面边**，顶边是常态。所以判定入口
+    /// （[`dhampir_project_text_probe`]）只判 `text_lines`，弹幕单独计数
+    /// （`dropped_danmaku`）—— 把两者混进一个向量，判定就会拿字幕的规矩去判弹幕，
+    /// 而那一半会永远红着，最后只能把规矩放宽（放宽之后字幕的切线又没人判了）。
+    ///
+    /// 另外弹幕的矩形**逐帧都在动**（`rect_at` 是时间的函数），字幕的矩形是静态的；
+    /// 混在一起会让「这一份清单是哪一帧的」这句话对两种条目有不同的含义。
+    danmaku_lines: Vec<TextLineSpec>,
+    /// 弹幕条目号 -> JS 栅格化好的位图（当前帧）。
+    ///
+    /// 与 `text_bitmaps` 分开一份：下标各自从 0 起，两边的清单互不影响 ——
+    /// 共用一个命名空间的话，多出一条字幕就会把弹幕的编号整段推后。
+    danmaku_bitmaps: HashMap<u32, web_sys::ImageBitmap>,
 }
 
 /// 渲染期的解析器：不 seek，只取「当前停在哪一帧」的纹理。
@@ -301,11 +334,14 @@ impl SourceResolver for BoundVideos<'_> {
 // 所以证据里不比字形；第 1、2 条必须同源，所以它们不能有第二份实现。
 // ---------------------------------------------------------------------------
 
-/// 算这一帧的文字行：`evaluate_overlay` 给的归一化矩形 -> `place_line` 给的目标像素落点。
+/// 算这一帧的**字幕**行：`evaluate_overlay` 给的归一化矩形 -> `place_line` 给的目标像素落点。
 ///
 /// 返回的两份东西是同一批行的两种表示：归一化矩形（两端比对的就是它）与落点（宿主照着画）。
 /// 落点算不出来的行（目标尺寸为 0、行盒没有高度）**不进清单**，由调用方用
 /// `unplaced_lines` 把它数出来 —— 静默少一行，看起来与「这一行本来就没有」一模一样。
+///
+/// **弹幕不在这一份里**：那是 [`danmaku_placements`]。判定的规矩不同（见那里的说明），
+/// 所以两边各有自己的清单、位图与报告。
 fn text_lines(
     doc: &ProjectDoc,
     frame: i64,
@@ -325,9 +361,48 @@ fn text_lines(
             text: item.text.clone(),
             rect: item.rect,
             placement,
+            danmaku: None,
         });
     }
     (Some(overlay), specs)
+}
+
+/// 这一帧要画的**弹幕**条目：`evaluate_overlay` 给的归一化矩形 -> `place_line` 给的目标像素落点。
+///
+/// # 与 [`text_lines`] 同一个形状，为什么不合成一个函数
+///
+/// 两者的矩形来源是同一份（`evaluate_overlay` 的 `items` / `danmaku`），落点也是同一个
+/// `place_line` —— 但**判定规矩不同**（字幕的墨迹顶到画面边是「被切了」，弹幕顶边是常态），
+/// 所以清单、位图、判定入口三处都要分开两个命名空间。合成一个函数、返回一个向量，
+/// 调用方就得靠 `danmaku.is_some()` 再把它们拆开 —— 拆的那一步迟早会有人忘。
+///
+/// # 位图为什么与字幕同款（整条目标宽）
+///
+/// 落点规则是「位图中心对准行盒中心」（[`place_line`]），栅格化那一侧在位图里居中画字。
+/// 弹幕的矩形是**这一条自己的盒子**（左边缘随滚动走），于是居中画出来的字正好落在
+/// 那个盒子的中心 —— 与字幕同一条算术，不需要第二套「按自己的宽度左对齐」的栅格化。
+/// 代价是每帧每条约一张全宽位图，而这是预览通道的代价（出片那一侧走 ffmpeg drawtext）。
+fn danmaku_placements(
+    overlay: &dhampir_core::overlay::TextOverlay,
+    target: (u32, u32),
+) -> Vec<TextLineSpec> {
+    let mut specs = Vec::with_capacity(overlay.danmaku.len());
+    for item in &overlay.danmaku {
+        let Some(placement) = place_line(item.rect, target) else {
+            continue;
+        };
+        specs.push(TextLineSpec {
+            text: item.text.clone(),
+            rect: item.rect,
+            placement,
+            danmaku: Some(DanmakuIdentity {
+                lane: item.lane,
+                enter: item.enter,
+                exit: item.exit,
+            }),
+        });
+    }
+    specs
 }
 
 /// 把这一帧的行位图拷进纹理。
@@ -494,8 +569,12 @@ impl ProjectHost {
     /// 正是这个项目最不想要的那类错。
     fn invalidate_text(&mut self) {
         self.text_lines.clear();
+        self.danmaku_lines.clear();
         self.text_frame = None;
         for (_, bitmap) in self.text_bitmaps.drain() {
+            bitmap.close();
+        }
+        for (_, bitmap) in self.danmaku_bitmaps.drain() {
             bitmap.close();
         }
     }
@@ -529,6 +608,8 @@ impl ProjectHost {
             text_lines,
             text_frame,
             text_bitmaps,
+            danmaku_lines,
+            danmaku_bitmaps,
         } = self;
         let (width, height) = *size;
         let sink_format = sink.format();
@@ -563,15 +644,28 @@ impl ProjectHost {
         //
         // 落点清单对不上这一帧就**不画**：宁可这一帧没有字幕，也不能把上一帧的字
         // 按上一帧的落点画上去 —— 那种画面看起来完全正常，只是"慢了半拍"。
-        if *text_frame == Some(frame) && !text_lines.is_empty() {
-            let uploaded = upload_text_bitmaps(
+        if *text_frame == Some(frame) && !(text_lines.is_empty() && danmaku_lines.is_empty()) {
+            // 两部分各自的位图上传一次，然后**合成一份 items 一次贴上去**：
+            // 贴两趟的话第一趟会把底清成"只有字幕"，而 compose_overlay 是叠加不是覆盖，
+            // 两趟叠在一起才是对的 —— 但那样就得保证两趟用的是同一张底，不如合成一趟。
+            let uploaded_lines = upload_text_bitmaps(
                 &ctx.device,
                 &ctx.queue,
                 sink_format,
                 text_lines,
                 text_bitmaps,
             );
-            let items = overlay_items(text_lines, &uploaded, None);
+            let uploaded_danmaku = upload_text_bitmaps(
+                &ctx.device,
+                &ctx.queue,
+                sink_format,
+                danmaku_lines,
+                danmaku_bitmaps,
+            );
+            // **弹幕排在字幕之后**：同一帧里弹幕在画面上层（与传统弹幕播放器一致），
+            // 而重叠只可能发生在泳道多到压住字幕时 —— 那时的先后顺序是唯一能表态的地方。
+            let mut items = overlay_items(text_lines, &uploaded_lines, None);
+            items.extend(overlay_items(danmaku_lines, &uploaded_danmaku, None));
             compose_overlay(
                 renderer.compositor(),
                 &ctx.device,
@@ -1113,6 +1207,8 @@ pub async fn dhampir_project_attach(canvas_id: String) -> Result<String, JsValue
             text_lines: Vec::new(),
             text_frame: None,
             text_bitmaps: HashMap::new(),
+            danmaku_lines: Vec::new(),
+            danmaku_bitmaps: HashMap::new(),
         });
     });
     Ok(json)
@@ -1269,11 +1365,13 @@ fn text_frame_error(frame: i64, message: &str) -> String {
         "items": [],
         "danmaku": [],
         "placements": [],
+        "danmaku_placements": [],
         "color": serde_json::Value::Null,
         "outline": serde_json::Value::Null,
         "dropped_lines": 0,
         "dropped_danmaku": 0,
         "unplaced_lines": 0,
+        "unplaced_danmaku": 0,
         "issues": [],
     }))
 }
@@ -1316,8 +1414,16 @@ fn registered_subtitles(doc: &ProjectDoc, subtitles: &SubtitleTable) -> usize {
 /// `items[{text,rect}]`、`danmaku[{text,rect,lane,enter,exit}]`、`color`、`outline`、
 /// `dropped_lines`、`dropped_danmaku`、`subtitle_assets` 与
 /// `dhampir subtitle --frame` 的输出同名，于是两端比对不需要一张映射表（映射表自己会漂）。
-/// 多出来的是 `placements`（像素落点）、`target`（宿主尺寸）、`unplaced_lines`
-/// —— CLI 那一侧不画图，所以它没有这三个。
+/// 多出来的是 `placements` / `danmaku_placements`（像素落点）、`target`（宿主尺寸）、
+/// `unplaced_lines` / `unplaced_danmaku` —— CLI 那一侧不画图，所以它没有这几项。
+///
+/// # 字幕与弹幕为什么各有各的清单
+///
+/// 两边形状一样（`text` + `rect` + 同一套落点键），但**落点算不出来时不能混成一个数**：
+/// 字幕是行盒没高度/目标尺寸为 0，弹幕还多一种（泳道排到了画面外）。合成一个
+/// `unplaced` 就分不清该去查哪一边。清单同理：`placements` 与 `danmaku_placements`
+/// 各按各的下标交给 `dhampir_project_set_text_bitmap` /
+/// [`dhampir_project_set_danmaku_bitmap`]，一份清单越界时另一份的下标不会跟着错位。
 ///
 /// # 问题码
 ///
@@ -1340,6 +1446,11 @@ pub fn dhampir_project_text_frame(frame: i32) -> String {
         };
         let target = host.size;
         let (overlay, lines) = text_lines(&doc, frame, &subtitles, target);
+        // 弹幕单独一份清单（判定规矩不同，见 `ProjectHost::danmaku_lines` 的说明）。
+        let danmaku_lines = overlay
+            .as_ref()
+            .map(|overlay| danmaku_placements(overlay, target))
+            .unwrap_or_default();
         let mut issues: Vec<Issue> = Vec::new();
         for asset_id in unregistered_subtitles(&doc, &subtitles) {
             issues.push(Issue::new(
@@ -1348,7 +1459,7 @@ pub fn dhampir_project_text_frame(frame: i32) -> String {
                 format!("字幕素材 {asset_id} 没有交给宿主：先调 dhampir_project_set_subtitles"),
             ));
         }
-        let (items, danmaku, color, outline, dropped_lines, dropped_danmaku) = match &overlay {
+        let (items, danmaku_items, color, outline, dropped_lines, dropped_danmaku) = match &overlay {
             Some(overlay) => (
                 overlay
                     .items
@@ -1375,12 +1486,18 @@ pub fn dhampir_project_text_frame(frame: i32) -> String {
             ),
         };
         // 有行、却算不出落点的那些：**数出来**。静默少一行，看起来与「这一行本来就没有」一样。
-        let placed = lines.len();
+        // 字幕与弹幕各数各的：落点算不出来的原因不同（字幕是行盒没高度/目标尺寸为 0，
+        // 弹幕还多一种 —— 泳道排到画面外），混成一个数就分不清该去查哪一边。
         let unplaced = overlay
             .as_ref()
             .map(|o| o.items.len())
             .unwrap_or(0)
-            .saturating_sub(placed);
+            .saturating_sub(lines.len());
+        let unplaced_danmaku = overlay
+            .as_ref()
+            .map(|o| o.danmaku.len())
+            .unwrap_or(0)
+            .saturating_sub(danmaku_lines.len());
         let sequence = doc.sequence_size();
         let json = host_api::to_json(&serde_json::json!({
             "frame": frame,
@@ -1388,25 +1505,15 @@ pub fn dhampir_project_text_frame(frame: i32) -> String {
             "target": [target.0, target.1],
             "subtitle_assets": registered_subtitles(&doc, &subtitles),
             "items": items,
-            "danmaku": danmaku,
-            "placements": lines.iter().map(|line| {
-                let mut value = text_item_json(&line.text, line.rect);
-                value["x"] = serde_json::json!(line.placement.x);
-                value["y"] = serde_json::json!(line.placement.y);
-                value["bitmap_width"] = serde_json::json!(line.placement.bitmap_width);
-                value["bitmap_height"] = serde_json::json!(line.placement.bitmap_height);
-                value["font_px"] = serde_json::json!(line.placement.font_px);
-                // 描边宽度也来自共享几何 —— JS 侧照着画就行，不许自己推一遍。
-                value["border_px"] = serde_json::json!(border_px(line.placement.font_px));
-                // 全是空白字符的行：栅格化出来本来就是空的，判它等于判「空格没有墨迹」。
-                value["visible"] = serde_json::json!(is_visible(&line.text));
-                value
-            }).collect::<Vec<_>>(),
+            "danmaku": danmaku_items,
+            "placements": lines.iter().map(placement_json).collect::<Vec<_>>(),
+            "danmaku_placements": danmaku_lines.iter().map(placement_json).collect::<Vec<_>>(),
             "color": color,
             "outline": outline,
             "dropped_lines": dropped_lines,
             "dropped_danmaku": dropped_danmaku,
             "unplaced_lines": unplaced,
+            "unplaced_danmaku": unplaced_danmaku,
             "issues": issues,
         }));
         // **算好了才记账。** JS 是照着这份清单去栅格化的，`draw` 只认这一份。
@@ -1416,9 +1523,33 @@ pub fn dhampir_project_text_frame(frame: i32) -> String {
         // 贴上去，而画面看起来只是"这一帧的字没变"。
         host.invalidate_text();
         host.text_lines = lines;
+        host.danmaku_lines = danmaku_lines;
         host.text_frame = Some(frame);
         json
     })
+}
+
+/// 一条要栅格化的条目的清单项：内容 + 归一化矩形 + 目标像素落点。
+///
+/// **字幕行与弹幕条目共用这一份**（逐字段同名），弹幕多三个键 `lane` / `enter` / `exit`。
+/// 不用两份构造函数：两份就会各自演化，而「JS 侧按同一套键名读两处」正是这里要的。
+fn placement_json(line: &TextLineSpec) -> serde_json::Value {
+    let mut value = text_item_json(&line.text, line.rect);
+    value["x"] = serde_json::json!(line.placement.x);
+    value["y"] = serde_json::json!(line.placement.y);
+    value["bitmap_width"] = serde_json::json!(line.placement.bitmap_width);
+    value["bitmap_height"] = serde_json::json!(line.placement.bitmap_height);
+    value["font_px"] = serde_json::json!(line.placement.font_px);
+    // 描边宽度也来自共享几何 —— JS 侧照着画就行，不许自己推一遍。
+    value["border_px"] = serde_json::json!(border_px(line.placement.font_px));
+    // 全是空白字符的行：栅格化出来本来就是空的，判它等于判「空格没有墨迹」。
+    value["visible"] = serde_json::json!(is_visible(&line.text));
+    if let Some(danmaku) = line.danmaku {
+        value["lane"] = serde_json::json!(danmaku.lane);
+        value["enter"] = serde_json::json!(danmaku.enter);
+        value["exit"] = serde_json::json!(danmaku.exit);
+    }
+    value
 }
 
 /// `{text, rect}` —— 与 CLI 的 `cmd_subtitle` 同一形状（逐字段同名）。
@@ -1512,6 +1643,9 @@ pub fn dhampir_project_set_subtitles(asset_id: String, text: String, format: Str
 ///
 /// 与 `dhampir_project_clear_bitmaps` 同一个理由：不清的话，这一帧不再出现的行会拿着
 /// 上一帧的位图被画上去 —— 而画面看起来完全正常，只是"慢了半拍"。
+///
+/// **两份都清**（字幕与弹幕）：它们同属"这一帧的字"，JS 那侧也是一趟栅格化完
+/// 两张清单再一起交上来。只清一份的话，另一份的旧位图会在新清单短于旧清单时留下来。
 #[wasm_bindgen]
 pub fn dhampir_project_clear_text_bitmaps() {
     PROJECT_HOST.with(|h| {
@@ -1519,11 +1653,17 @@ pub fn dhampir_project_clear_text_bitmaps() {
             for (_, bitmap) in host.text_bitmaps.drain() {
                 bitmap.close();
             }
+            for (_, bitmap) in host.danmaku_bitmaps.drain() {
+                bitmap.close();
+            }
         }
     });
 }
 
 /// JS 把某一行的位图交给宿主。`index` 是 `dhampir_project_text_frame` 给的清单下标。
+///
+/// **指的是 `placements` 那一份**（字幕）；弹幕走 [`dhampir_project_set_danmaku_bitmap`]。
+/// 两份清单的下标各自从 0 起，互不影响。
 ///
 /// 换掉旧位图时 `close()` 掉：不关会一直占着显存/内存。
 ///
@@ -1543,6 +1683,36 @@ pub fn dhampir_project_set_text_bitmap(index: u32, bitmap: web_sys::ImageBitmap)
             )));
         }
         if let Some(previous) = host.text_bitmaps.insert(index, bitmap) {
+            previous.close();
+        }
+        Ok(())
+    })
+}
+
+/// JS 把某一条弹幕的位图交给宿主。`index` 是 `danmaku_placements` 的下标。
+///
+/// # 为什么与 [`dhampir_project_set_text_bitmap`] 分开一个函数
+///
+/// 分开的是**编号空间**，不是形状：两条清单各有各的下标，共用一个入口就得先约定
+/// "字幕在前弹幕在后"这类偏移量 —— 一旦有一条字幕算不出落点（不进清单），
+/// 那个偏移量就错位，而弹幕的位图会被当成字幕贴上去。分开两个入口，越界检查就各自
+/// 对着自己的清单，谁的清单短了都不会污染另一个。
+///
+/// 越界与替换旧位图的规矩与字幕那一个完全一致（报错而不是丢掉、换掉时 `close()`）。
+#[wasm_bindgen]
+pub fn dhampir_project_set_danmaku_bitmap(index: u32, bitmap: web_sys::ImageBitmap) -> Result<(), JsValue> {
+    PROJECT_HOST.with(|h| {
+        let mut borrowed = h.borrow_mut();
+        let host = borrowed
+            .as_mut()
+            .ok_or_else(|| js_err("工程预览宿主尚未初始化，先调 dhampir_project_attach"))?;
+        if index as usize >= host.danmaku_lines.len() {
+            return Err(js_err(format!(
+                "弹幕条号 {index} 超出这一帧的条数（{}）——先调 dhampir_project_text_frame 拿清单",
+                host.danmaku_lines.len()
+            )));
+        }
+        if let Some(previous) = host.danmaku_bitmaps.insert(index, bitmap) {
             previous.close();
         }
         Ok(())

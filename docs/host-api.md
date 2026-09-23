@@ -91,6 +91,7 @@ Version: 3
 - `dhampir_project_resize`
 - `dhampir_project_set_bitmap`
 - `dhampir_project_set_bitmap_mode`
+- `dhampir_project_set_danmaku_bitmap`
 - `dhampir_project_set_subtitles`
 - `dhampir_project_set_text_bitmap`
 - `dhampir_project_sources_for`
