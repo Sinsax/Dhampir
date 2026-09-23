@@ -4,15 +4,19 @@
 #
 #   check-native   双编译之一：native + 全量测试 + fmt/clippy      ← Win + Linux
 #   check-wasm     双编译之二：wasm32 + 跨运行时等值测试
-#   guard          守卫脚本（core 无 #[cfg] / 依赖方向 / 文本卫生）
+#   guard          守卫脚本（17 个里不依赖本机资产的那 3 个：core 无 #[cfg] / 依赖方向 / 文本卫生）
 #
-# 三点刻意的设计：
+# 四点刻意的设计：
 #
 #  1. **不忽略任何退出码**。没有 `|| true`，没有 `continue-on-error`。
 #     "守卫永远绿"是这套东西最危险的失效模式，而它通常就是这样开始的。
 #  2. **每个守卫先跑 `--self-test` 再跑正式扫描**。自检证明守卫自己没坏；
 #     正式扫描证明仓库没坏。两件事分开报，才知道是哪一边出了问题。
-#  3. **wasm-bindgen CLI 的版本从 Cargo.lock 读**，不在这里写死。
+#  3. **只跑不依赖本机资产的那 3 个守卫**。另外 14 个要 ffmpeg、GPU、真实浏览器或
+#     records/ 里的取证存档（名单见 README「守卫脚本」一节）—— 放在这里跑只会变成
+#     "装了才绿、没装就红"，那是把环境问题伪装成回归。它们仍在开发机上跑，
+#     判据一条不少，只是不在这台 runner 上。
+#  4. **wasm-bindgen CLI 的版本从 Cargo.lock 读**，不在这里写死。
 #     crate 与 CLI 版本不一致是"第一天就红"的头号来源，所以只能有一处真相。
 #
 # 首次推送前未在本机验证过（本机没有 GitHub runner）。最可能首跑就红的是
@@ -115,10 +119,15 @@ jobs:
           if-no-files-found: error
 
   guard:
-    name: guard（守卫脚本）
+    name: guard（守卫脚本 3 / 17）
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # 17 个守卫里只有这 3 个能在这台 runner 上跑：另外 14 个要 ffmpeg、真 GPU、
+      # 真实浏览器或 records/ 里的取证存档。**这不是"少验一点"** —— 那 14 条在
+      # 开发机上跑，判据一条不少；放进 CI 只会让"环境没装好"长得像"代码回归"。
+      # 名单与各自的口径见 README 的「守卫脚本」一节。
 
       - name: core 无 #[cfg] / cfg!
         run: |

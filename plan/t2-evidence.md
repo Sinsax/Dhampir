@@ -1,6 +1,6 @@
 # T2 证据：文字与字幕上屏
 
-分段记录。T2 还没收口，所以这里先只有已完成的那几段。
+分段记录。**T2 已收口（HEAD 51b7056）**：七步都带证据，按段倒序排列 —— T2.7 在最前，T2.1 在最后。
 
 ## T2.7 API 版本升 2 与侧挂导出（A4 / D5）—— 已完成
 
@@ -417,7 +417,7 @@ T2.3a 之前的二进制（`target/wt-head-target`，dc517fe 的独立 worktree�
   而且 `check-local-backend` 的 22 条判据要一起改写 —— 拿判定输入去迁就新功能，方向是反的；
 * 新开一份（选了这个）：由 `sample-project.doc.json` 派生，5 个 asset（4 个视频 + `sub.srt` →
   `sample-subtitle.srt`）、4 条轨（3 条视频 + 1 条字幕轨，字号 0.055 / 底边距 0.06 / 最多 2 行）。
-  **它是完整工程、不是中间产物**，加进去之后 16 个守卫仍全绿（`check-local-backend` 22 / 22）。
+  **它是完整工程、不是中间产物**，加进去之后 17 个守卫仍全绿（`check-local-backend` 22 / 22）。
 
 它同时是两条路的输入：页面（`project=sample-subtitle.doc`）与 CLI 对照
 （`--project fixtures/sample-subtitle.doc.json --asset-root fixtures`）。
@@ -442,7 +442,7 @@ T2.3a 之前的二进制（`target/wt-head-target`，dc517fe 的独立 worktree�
 * **弹幕没接**（T3）：这一段只到「字幕」；
 * **没有跨浏览器矩阵**：本机只有 Chrome 走了判定通道；
 * **判定耗时长**（单次约 1–3 分钟：真实浏览器 + 本机后端 + 每帧一次 CLI 对照），
-  所以它不在 16 个守卫里，是**手动**通道 —— 这份证据就是它的原始输出。
+  所以它不在 17 个守卫里，是**手动**通道 —— 这份证据就是它的原始输出。
 
 ## T2.3a 栅格化：一行文字 → RGBA8 位图 —— 已完成
 

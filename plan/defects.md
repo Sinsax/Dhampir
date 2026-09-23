@@ -141,11 +141,11 @@
   验收: 布局层已落在 dhampir-timeline::text_layout（零依赖、17 条单测含 2 条反向用例），并有参照输出 examples/layout_subtitles.rs；**宿主消费同一条路径**属 A4/D5 的验收，不在本条的范围内
   证据: plan/t2-evidence.md
 
-- [A4] status=todo phase=T2
+- [A4] status=done phase=T2
   症状: 没有 overlay 渲染阶段，HOST_API_VERSION 停在 1
   根因: crates/dhampir-timeline/src/host_api.rs:1
   验收: overlay 追加在单趟与分段两条路径上（各留用例）；FrameResult 加字段时 HOST_API_VERSION 升到 2
-  证据: -
+  证据: plan/t2-evidence.md crates/dhampir-worker/tests/overlay.rs docs/host-api.md
 
 - [A5] status=todo phase=T6
   症状: 没有音频通路：无 AudioPlan，也没有 A/V 同步口径（帧号与采样数之间没有换算基准）

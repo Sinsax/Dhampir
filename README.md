@@ -124,8 +124,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ### 守卫脚本
 
-每个守卫都能 `--self-test`，且都被**反向验证**过（临时植入违例，确认它真的会红）。
-守卫若不会红，就不是守卫。
+一共 **17 个**（`scripts/` 下，各带自己的 `--self-test`）。每个守卫都被**反向验证**过
+（临时植入违例，确认它真的会红）。守卫若不会红，就不是守卫。
+
+CI 里跑的是其中**不依赖本机资产**的三条：
 
 ```bash
 node scripts/check-core-purity.mjs    # core 里没有 #[cfg] / cfg!（只扫去注释后的代码）
@@ -135,6 +137,18 @@ node scripts/check-text-hygiene.mjs   # 全仓 LF + 无 BOM + 合法 UTF-8
 
 三者的共同纪律：**不在空文件集上通过**。没有文件可查时退出码是 2，不是 0——
 "没扫到"和"扫过了没问题"是两件事。
+
+另外 14 条要本机上的东西（ffmpeg、GPU、真实浏览器、`records/` 里的取证存档），
+所以只在开发机上跑，不进 CI —— 它们是：核对台账与路线图引用的 `check-defects`、
+顺序解码的 `check-sequential-decode`、wasm pkg 是否陈旧的 `check-web-invariants`、
+后端缝的 `check-backend-seam`、预览坐标系的 `check-preview-parity`、
+文字叠加接线的 `check-overlay-plumbing`、复核两份里程碑记录的 `check-m1-record` /
+`check-m2-record`、media 状态声明的 `check-media-status`、本机后端端到端的
+`check-local-backend`、调用面与宿主 API 清单的 `api-surface`、时间线契约派生物的
+`timeline-contract`、CLI 契约的 `check-cli`、双端比对的 `check-dual-end`。
+
+**绿不绿以守卫自己的输出为准**：`records/` 里存的是当时的原始输出，不随代码走；
+想知道今天绿不绿，跑一遍。
 
 ### 跑一遍里程碑验收并留记录
 
