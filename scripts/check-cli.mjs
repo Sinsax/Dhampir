@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 底座 CLI 的契约检查：**五个子命令的入参、出参、退出码**。
+// 底座 CLI 的契约检查：**每个子命令的入参、出参、退出码**（名单见 SUBCOMMANDS）。
 //
 // # 为什么它值得单独存在
 //
@@ -28,6 +28,11 @@ export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const TMP = join(REPO_ROOT, 'target', 'p6', 'cli-contract');
 const PROJECT = 'fixtures/sample-project.doc.json';
 const ASSET = 'target/s3/proxy1080p.mp4';
+
+/** CLI 的子命令名单。**必须与 crates/dhampir-worker/src/bin/dhampir.rs 的 COMMANDS 表一致** ——
+ * 这是一条真判据：「加了命令但没登记」和「登记了但 --help 没列出来」都要红。
+ * 名单长度写进结论文案，所以文案不会自己漂成假的。 */
+export const SUBCOMMANDS = ['probe', 'info', 'gop', 'frame', 'render', 'import', 'library', 'edit'];
 
 /** 每一条判据的名字。**改这里就必须改采集端**。 */
 export const EXPECTED = [
@@ -129,9 +134,9 @@ function collect(cli) {
 
   // ---- 帮助与用法错 ----
   const help = run(cli, ['--help']);
-  const subcommands = ['probe', 'info', 'gop', 'frame', 'render'];
-  record('help', help.code === 0 && subcommands.every((name) => help.stdout.includes(name)),
-    'exit=' + help.code + ' 五个子命令都在=' + subcommands.every((name) => help.stdout.includes(name)));
+  const allListed = SUBCOMMANDS.every((name) => help.stdout.includes(name));
+  record('help', help.code === 0 && allListed,
+    'exit=' + help.code + ' ' + SUBCOMMANDS.length + ' 个子命令都在=' + allListed);
   record('no-args', run(cli, []).code === 0, 'exit=' + run(cli, []).code);
   const unknownFlag = run(cli, ['render', '--wdith', '640']);
   record('unknown-flag', unknownFlag.code === 2, 'exit=' + unknownFlag.code);
@@ -269,7 +274,8 @@ function main() {
     process.exitCode = 1;
     return;
   }
-  console.log('✓ dhampir CLI 契约成立（五子命令 / stdout 是 NDJSON / 退出码 0-2-1）');
+  console.log('✓ dhampir CLI 契约成立（' + SUBCOMMANDS.length
+    + ' 个子命令 / stdout 是 NDJSON / 退出码 0-2-1）');
   rmSync(TMP, { recursive: true, force: true });
 }
 
