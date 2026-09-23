@@ -28,7 +28,7 @@
 - [D1] status=done phase=T1
   症状: 同一工程在 640x480 预览与 640x360 成片里，图层位移的相对位置不同（预览所见 != 成片所得）
   根因: crates/dhampir-core/src/render/compose.rs:107 web/app.js:592
-  验收: core 单元测试「位移的归一化落点与目标尺寸无关」（640x360/320x180/1280x720/960x540 四种目标，容差 1e-5）加一条反向用例；接线由 scripts/check-preview-parity.mjs 钉（自检 12 条断言，10 条是反向用例）
+  验收: core 单元测试「位移的归一化落点与目标尺寸无关」（640x360/320x180/1280x720/960x540 四种目标，容差 1e-5）加一条反向用例；接线由 scripts/check-preview-parity.mjs 钉（自检 12 条断言，10 条是反向用例）；真机端到端由 crates/dhampir-worker/tests/preview_parity.rs 钉（三种目标尺寸量包围盒落点，含一条反向用例）
   证据: plan/t1-evidence.md
 
 - [D2] status=todo phase=T4
