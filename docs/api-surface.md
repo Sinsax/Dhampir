@@ -29,6 +29,7 @@
 
 下游会依赖：工程载入/校验/求值/上屏/素材绑定。**这部分才承诺兼容。**
 
+- `dhampir_host_api_version`
 - `dhampir_project_attach`
 - `dhampir_project_bind_source`
 - `dhampir_project_clear_bitmaps`

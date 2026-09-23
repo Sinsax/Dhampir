@@ -111,9 +111,12 @@ scripts/check-preview-parity.mjs 与它的 12 条自检断言全绿。
   已落地：TextItem（归一化矩形）/ TextOverlay / SubtitleTable / evaluate_overlay（13 条单测），
   以及它的第一个真实调用方 —— CLI 的 subtitle 子命令（`dhampir subtitle --project P --frame N`，
   只出结构、不需要 GPU，宿主的输出与它不一致就是宿主错）。
-  **还没做的**（A4/D5 的余下部分）：HOST_API_VERSION 1 到 2（T2.7）、--subtitle-out 侧挂导出（T2.6）；
-  弹幕见 T3。**注**：这两项的编号是**本文件的**（守卫在 next-steps.md 里占的是 T2.6）——
-  对齐看 next-steps.md 的 T2 剩余表。
+  **已完成**（T2.7，见 [t2-evidence.md](./t2-evidence.md) 的 T2.7 段）：HOST_API_VERSION 升到 2
+  （版本号**不进返回体**，由 `dhampir_host_api_version` 问一次，`docs/host-api.md` 作人读的那一份、
+  由 `scripts/api-surface.mjs` 钉住）、--subtitle-out 侧挂导出（先写文件再出片；时间重定基到这一趟产物；
+  格式「明说的优先，没明说看扩展名」，打架与认不出都退 2）；弹幕见 T3。
+  **编号**：本文件早先把这两项拆成 T2.6 / T2.7 两条，next-steps.md 里它们合起来是 T2.7
+  （T2.6 在那边是结构守卫）—— 以 next-steps.md 的 T2 剩余表为准。
 - T2.2（A3）共享布局 —— **已完成**（见 [t2-evidence.md](./t2-evidence.md)）：
   crates/dhampir-timeline/src/text_layout.rs，零依赖，17 条单测含 2 条反向用例；
   参照输出 crates/dhampir-timeline/examples/layout_subtitles.rs（宿主与它不一致就是宿主错）。
@@ -123,10 +126,16 @@ scripts/check-preview-parity.mjs 与它的 12 条自检断言全绿。
   加 --font-file。
 - T2.5 浏览器：canvas 栅格化加 createImageBitmap(canvas, premultiplyAlpha none)，
   走 T0.4 的判定通道验证（不再依赖 --exec）。
-- T2.6（D5）侧挂导出 --subtitle-out：**burned-in 与 sidecar 两种都要**。
-- T2.7（A4）HOST_API_VERSION 从 1 升到 2（FrameResult 加字段）。
+- T2.6（D5）侧挂导出 --subtitle-out：**burned-in 与 sidecar 两种都要** —— **已完成**（T2.7 的一部分）：
+  burned-in 仍是 `--font-file` 那条路，sidecar 是 `--subtitle-out` 加可选 `--format srt|ass`，
+  四条 CLI 判据与五个真实变异见 t2-evidence.md。**弹幕不在这一段**（那是 T3，D5 因此还没收口）。
+- T2.7（A4）HOST_API_VERSION 从 1 升到 2（FrameResult 加字段）—— **已完成**：`FrameResult.overlay`
+  （形状在 `crates/dhampir-timeline/src/host_api.rs`，与 CLI / wasm 逐字段同名；None 时**不出现该键**），
+  `dhampir_host_api_version()` 加 `docs/host-api.md`，两条都由 `scripts/api-surface.mjs` 钉住。
 
-**验收**：无文字工程**逐字节不变**；带字工程两端结构（项数/文本/归一化矩形）一致且容差写死；G5 仍绿。
+**验收（已达成，T2 收口）**：无文字工程**逐字节不变**（`target/t2/byte-identical.cjs` 的对账：
+22552 字节、SHA256 42E6195C…D21A6 同参数出片一致）；带字工程两端结构（项数/文本/归一化矩形）一致，
+容差写死在 `scripts/web-check.mjs`（`SUBTITLE_TOLERANCE = 1e-6`）；G5 仍绿（`check-dual-end`：最差 SSIM 1.000000）。
 
 ---
 

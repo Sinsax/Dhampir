@@ -54,6 +54,10 @@ export const EXPECTED = [
   'import-duplicate',
   'subtitle',
   'subtitle-blank',
+  'render-subtitle-out',
+  'render-subtitle-out-format',
+  'render-subtitle-out-refused',
+  'render-subtitle-out-empty',
 ];
 
 /**
@@ -297,6 +301,80 @@ function collect(cli) {
       && Array.isArray(blankOverlay.items) && blankOverlay.items.length === 0
       && blankOverlay.subtitle_assets === 1,
     'exit=' + blank.code + ' subtitle_assets=' + (blankOverlay === null ? 'null' : blankOverlay.subtitle_assets));
+
+  // ---- 侧挂字幕（--subtitle-out）：文字上屏的第二种口径 ----
+  //
+  // 它与「烧进画面」是两条独立的路：**不给字体时画面上一个字都没有**（`--font-file` 那条路
+  // 会整趟判失败，而这一趟确实判失败），而侧挂文件照写 —— 侧挂回答的是"这段里说过什么"，
+  // 不是"像素里有几个字"。所以这里的退出码是 1 而不是 0，这正是那条边界本身。
+  //
+  // 时间**重定基到这一趟产物**、且裁到出片区间里：第 2 条被切成 3 秒结尾。
+  // 那是这份判据里最容易写成"整条照抄"的一处 —— 整条照抄在这里会过得很舒服。
+  const sidePath = join(TMP, 'side.srt');
+  const side = run(cli, ['render', '--project', subProject, '--asset-root', fixtureRoot,
+    '--from', '0', '--to', '89', '--width', '64', '--height', '36',
+    '--out', join(TMP, 'side.mp4'), '--subtitle-out', sidePath]);
+  const sideDone = events(side.stdout, 'done');
+  const sideText = existsSync(sidePath) ? readFileSync(sidePath, 'utf8') : '';
+  // 逐字节比对（含结尾的空行与换行）：BOM 与 CR 也在这一条里被判掉。
+  const sideExpected = '1\n00:00:00,000 --> 00:00:02,000\n第一行中文'
+    + '\n\n2\n00:00:02,000 --> 00:00:03,000\n'
+    + 'Mixed 混排 text with a rather long tail that ought to wrap somewhere\n\n';
+  record('render-subtitle-out',
+    side.code === 1 && sideDone.length === 1 && sideDone[0].failed === true
+      && sideDone[0].subtitle_out === sidePath && sideDone[0].subtitle_entries === 2
+      && sideText === sideExpected
+      && Array.isArray(sideDone[0].issues)
+      && sideDone[0].issues.some((issue) => issue.code === 'subtitle_font_missing'),
+    'exit=' + side.code + ' entries=' + (sideDone.length === 0 ? 'none' : sideDone[0].subtitle_entries)
+      + ' 文本对得上=' + (sideText === sideExpected));
+
+  // 格式：明说的优先（扩展名 `.txt` 认不出来，所以只有 `--format` 能定它），
+  // 而**两边打架**（文件名叫 .ass、内容说写 srt）与**都认不出来**都必须退 2 且不写文件 ——
+  // 前者是"播放器打开只会说解析失败"的典型，后者是"猜错的方向正好是前者"。
+  const assPath = join(TMP, 'side.txt');
+  const ass = run(cli, ['render', '--project', subProject, '--asset-root', fixtureRoot,
+    '--from', '0', '--to', '89', '--width', '64', '--height', '36',
+    '--out', join(TMP, 'ass.mp4'), '--subtitle-out', assPath, '--format', 'ass']);
+  const assText = existsSync(assPath) ? readFileSync(assPath, 'utf8') : '';
+  const dialogues = assText.split('\n').filter((line) => line.startsWith('Dialogue:'));
+  const clashPath = join(TMP, 'clash.ass');
+  const clash = run(cli, ['render', '--project', subProject, '--asset-root', fixtureRoot,
+    '--out', join(TMP, 'clash.mp4'), '--subtitle-out', clashPath, '--format', 'srt']);
+  const weirdPath = join(TMP, 'side.weird');
+  const weird = run(cli, ['render', '--project', subProject, '--asset-root', fixtureRoot,
+    '--out', join(TMP, 'weird.mp4'), '--subtitle-out', weirdPath]);
+  record('render-subtitle-out-format',
+    ass.code === 1 && assText.startsWith('[Script Info]\n') && dialogues.length === 2
+      && dialogues[1] === 'Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,'
+        + 'Mixed 混排 text with a rather long tail that ought to wrap somewhere'
+      && clash.code === 2 && !existsSync(clashPath)
+      && weird.code === 2 && !existsSync(weirdPath),
+    'ass exit=' + ass.code + ' Dialogue=' + dialogues.length
+      + ' 打架 exit=' + clash.code + ' 认不出 exit=' + weird.code);
+
+  // 侧挂**先于出片**落地：字体给错时这一趟在开始出片之前就退 2，所以**不该留下文件** ——
+  // 留下的那份会让调用方以为"产物与这份时间轴是一对"，而产物根本没出。
+  // 这条同时钉住了**顺序**：反过来说，先写文件再检查字体，这个判据就会红。
+  const refusedPath = join(TMP, 'refused.srt');
+  const refused = run(cli, ['render', '--project', subProject, '--asset-root', fixtureRoot,
+    '--from', '0', '--to', '89', '--width', '64', '--height', '36',
+    '--out', join(TMP, 'refused.mp4'), '--font-file', 'fixtures/definitely-not-a-font.ttf',
+    '--subtitle-out', refusedPath]);
+  record('render-subtitle-out-refused', refused.code === 2 && !existsSync(refusedPath),
+    'exit=' + refused.code + ' 留下了文件=' + existsSync(refusedPath));
+
+  // 工程里没有字幕：文件**照样写出来**（空的），计数是 0。
+  // 「没写文件」与「写了但没内容」在调用方那里是两件事，所以这条要分开判。
+  const emptyPath = join(TMP, 'empty.srt');
+  const empty = run(cli, ['render', '--project', PROJECT, '--from', '0', '--to', '9',
+    '--width', '64', '--height', '36', '--out', join(TMP, 'empty.mp4'), '--subtitle-out', emptyPath]);
+  const emptyDone = events(empty.stdout, 'done');
+  record('render-subtitle-out-empty',
+    empty.code === 0 && emptyDone.length === 1 && emptyDone[0].subtitle_entries === 0
+      && existsSync(emptyPath) && statSync(emptyPath).size === 0,
+    'exit=' + empty.code + ' entries=' + (emptyDone.length === 0 ? 'none' : emptyDone[0].subtitle_entries)
+      + ' 大小=' + (existsSync(emptyPath) ? statSync(emptyPath).size : 'none'));
 
   return observed;
 }

@@ -2,6 +2,176 @@
 
 分段记录。T2 还没收口，所以这里先只有已完成的那几段。
 
+## T2.7 API 版本升 2 与侧挂导出（A4 / D5）—— 已完成
+
+### 它解决什么，以及为什么放在最后
+
+T2.7 是这条路上唯一一处**对端看到的形状会变**的改动：
+
+* `FrameResult` 多一个 `overlay` 键 —— 这是跨 wasm 边界的返回体，按旧形状写的对端会多看到一个键；
+* CLI 除出片之外多一样产物：`--subtitle-out` 的侧挂字幕文件。
+
+**它排在 T2.4 / T2.5 / T2.6 之后是有原因的**：形状一改，"出问题"就有两种完全不同的解释
+（形状自己错了 / 哪个宿主忘了接）。先把两个宿主接上、再用结构守卫把接线钉住，
+最后才动形状 —— 那时前一种解释已经被排除掉了。这也正是它单独提交、不跟别的改动混的理由。
+
+### 决定一：版本号不进返回体
+
+给每个形状塞一个 `version` 字段是最直觉的做法，这里**没这么做**：形状是钉死的
+（每条都有键集断言），升一次版本要动所有形状，而版本号只需要问一次。
+
+落地方式是「一个导出 + 一份文档」：
+
+* `pub const HOST_API_VERSION: u32 = 2;`（`crates/dhampir-timeline/src/host_api.rs`）——
+  **版本号的真值就在这里**，别处不许再写一遍；
+* `dhampir_host_api_version()`（`crates/dhampir-wasm/src/timeline_host.rs`）—— 对端启动时问一次；
+* `docs/host-api.md` —— 人读的那一份（形状从哪查、哪些算承诺、v1 到 v2 变了什么、已知边界），
+  里面有一行 `Version: 2` 与文末的导出名单。
+
+那份文档**被守卫钉着**：`scripts/api-surface.mjs` 的正则从 Rust 源码里读出常量，
+再跟文档的 `Version:` 行、跟名单逐行比对。所以「升了常量忘了改文档」不会静默通过。
+
+### 决定二：`api-surface.mjs` 长成双契约生成器，而不是新开一个守卫
+
+原本 `api-surface.mjs` 只守调用面清单（`docs/api-surface.md`）。这次没有新建
+`check-host-api.mjs`，而是让它同时守两个契约 —— 两者共享同一套「扫源码、对文档、双向」
+的实现，分成两个脚本会把同一段逻辑抄第二份：
+
+| 契约 | 文档 | 判据 |
+|---|---|---|
+| 调用面清单 | `docs/api-surface.md` | 双向：文档里的每个名字在代码里存在，代码里的每个导出在文档里出现 |
+| 宿主 API | `docs/host-api.md` | 整行 `Version: N` 与源码常量相等；名单双向；**空名单拒绝通过** |
+
+`--write` **只改那两样**（清单表 + 版本行），文档其余部分是手写的，一个字都不碰 ——
+否则下一次 `--write` 会把「哪些算承诺」这类话抹掉。
+
+### 决定三：侧挂导出是独立产物，不是"另一种 burned-in"
+
+两者在同一条链路上，但产出与失败方式都不同，所以口径分开写：
+
+* **burned-in**：还是原来的 `--font-file` 那条路，字进像素；
+* **sidecar**：`--subtitle-out <路径>` 出一份字幕文件（`--format srt|ass`），
+  **载荷与 `tracks[].enabled` 无关**（诚实边界，不假装尊重轨的开关）。
+
+三处刻意的设计：
+
+1. **先写文件，再出片**。写不了（目录不存在、格式打架、认不出的扩展名）就在**开始出片之前**退 2。
+   反过来做的话，"出片失败了"与"侧挂没写出来"在调用方那里会变成同一个 exit 1。
+   `render-subtitle-out-refused` 这条判据钉的就是这个顺序：字体路径给错时出片会失败，
+   但侧挂文件必须**已经存在**。
+2. **时间重定基到这一趟的产物**（产物第 0 帧 = 00:00:00），终点是 `last + 1` 帧；
+   `end <= start` 抬到 `start + 1`（ASS 的厘秒精度会把极短的 cue 截成 0 长，那样播不出来）。
+3. **格式判定「明说的优先，没明说看扩展名」**；打架退 2；认不出且没明说**不猜**退 2 ——
+   猜错的方向正好是"文件名叫 `.ass`、里面是 SRT"这种最难查的错。
+
+帧区间由 core 出原语（`dhampir_core::overlay::overlay_spans`），不在 worker 里拼：
+谁在画、画到哪一帧是评估层的事，侧挂只是把同一份答案换个写法。
+
+### 判据：一条版本律，加四条 CLI 判据
+
+CLI 的四条判据是**分开登记**的，不合成一条 —— 「没写文件」与「写了但没内容」在调用方那里是两件事：
+
+| 判据 | 钉住什么 |
+|---|---|
+| `render-subtitle-out` | 侧挂**逐字节**等于期望的 SRT（含"第 2 条被裁到 3s"这个裁剪结果），`done` 事件里的 `subtitle_out` / `subtitle_entries` 对得上 |
+| `render-subtitle-out-format` | `--format ass` 出 ASS（首行 `[Script Info]`、`Dialogue:` 两条）；扩展名与 `--format` 打架退 2 且**不留下文件**；认不出的扩展名退 2 且不留下文件 |
+| `render-subtitle-out-refused` | **顺序**：字体给错时侧挂文件已经写出来了 |
+| `render-subtitle-out-empty` | 没有字幕的工程：`entries = 0`、文件存在且 **0 字节**（不是"没写文件"） |
+
+### 原始输出
+
+```text
+# 调用面 / 宿主 API（一个脚本，两个契约）
+$ node scripts/api-surface.mjs --self-test  ->  exit 0
+✓ 调用面清单与宿主 API 守卫自检通过（23 条断言）
+
+$ node scripts/api-surface.mjs  ->  exit 0
+✓ 调用面清单与宿主 API 都与代码一致（6 个模块 / 59 个导出；版本 2，docs/host-api.md 列了 23 个导出）
+
+# CLI 契约（22 条判据，其中 4 条是本段新增）
+$ node scripts/check-cli.mjs --self-test  ->  exit 0
+✓ CLI 契约检查自检通过（7 条断言）
+
+$ node scripts/check-cli.mjs  ->  exit 0
+CLI 契约：22 / 22 条判据通过
+✓ dhampir CLI 契约成立（9 个子命令 / stdout 是 NDJSON / 退出码 0-2-1）
+```
+
+`target/t2/t2-7-reverse/reverse.txt`：六条**真实反向用例**（注入真仓库，还原后比对 SHA256）。
+每条都只让该红的那一处红：
+
+```text
+=== 1-doc-version-line-missing -> exit 1
+  - docs/host-api.md 里没有整行的 `Version: N` —— 对端照着它查形状，没有它就只能猜
+
+=== 2-doc-version-differs-from-source -> exit 1
+  - docs/host-api.md 写的是 Version: 1，源码里的 HOST_API_VERSION 是 2（升了版本忘改文档）
+
+=== 3-doc-lists-a-name-the-code-does-not-have -> exit 1
+  - 文档里的 dhampir_project_gone 在 timeline_host.rs 里找不到（删了导出？重新生成名单）
+
+=== 4-code-export-missing-from-doc -> exit 1
+  - 导出 dhampir_host_api_version 没有出现在 docs/host-api.md 的名单里
+
+=== 5-doc-name-list-emptied -> exit 1
+  - docs/host-api.md 一条导出都没列 —— 拒绝在空名单上通过
+  - 导出 dhampir_host_api_version 没有出现在 docs/host-api.md 的名单里
+  （其余 22 个导出逐条列出，此处省略）
+
+=== 6-surface-doc-lists-a-name-the-code-does-not-have -> exit 1
+  - 清单里的 dhampir_gone 在代码里找不到（删了导出？重新生成）
+  - 清单与代码不同步（跑 --write 重新生成）
+
+=== 还原后 -> exit 0
+✓ 调用面清单与宿主 API 都与代码一致（6 个模块 / 59 个导出；版本 2，docs/host-api.md 列了 23 个导出）
+```
+
+第 5 条是那条**纪律**的实例：名单被清空时必须红，而不是"没有名字可查所以通过"。
+
+`target/t2/t2-7-sidecar/reverse.txt`：五个**变异**（每个都真的改坏一处实现、重建、跑守卫，
+再整份还原、对账 SHA256、重建、确认回绿）：
+
+```text
+基准 SHA256（16 位）：dhampir.rs 03ec26cec8eedd20 / overlay.rs 252ef874209c6c2b
+基准：node scripts/check-cli.mjs = CLI 契约：22 / 22 条判据通过
+
+--- M1 干脆不写侧挂文件          -> 19 / 22；红：-out、-format、-empty（3/3）
+--- M2 侧挂整条照抄（不裁到出片区间） -> 20 / 22；红：-out、-format（2/2）   entries 从 2 变 4
+--- M3 格式打架也照写（不报用法错）   -> 21 / 22；红：-format（1/1）
+--- M4 字体给错也照样写侧挂文件       -> 21 / 22；红：-refused（1/1）       顺序被钉住
+--- M5 没有字幕就不写文件             -> 21 / 22；红：-empty（1/1）
+
+还原后 SHA256（16 位）：03ec26cec8eedd20 / 252ef874209c6c2b
+与基准一致=true；还原后重建=成功；还原后守卫 = 22 / 22 条判据通过（exit=0）
+结论：5 个变异各自的预期判据全部为红
+```
+
+M4 第一次**没被抓住** —— 原因不是守卫漏判，是**变异打错了位置**：`resolve_font(args)` 在
+`cmd_frame` 与 `cmd_render` 里各有一份，四行锚点命中的是前一份，守卫盯的那条路根本没被改动。
+锚点加长到包含 `let subtitles = load_subtitles(&doc, &sources)?;` 之后命中 `cmd_render`，
+M4 立刻红了。教训写在脚本里：**变异没被抓住时要显式报出「没被抓住（或变异无效）」并失败退出**，
+否则"变异无效"会伪装成"守卫漏判"。
+
+全量守卫批（17 项，含各自 `--self-test`）在这一段之后仍全绿：
+
+```text
+$ node target/t2/run-guards.cjs  ->  exit 0
+17 / 17 个脚本全绿
+```
+
+### 覆盖边界（不假装）
+
+* **版本号只证明"对端能问、文档与代码一致"**，不证明任何对端真的按版本分支处理了 ——
+  本仓没有第二个独立实现来消费这个数字；
+* **侧挂不看 `tracks[].enabled`**（画面上不看，文件里也不看）：这是评估层的既有口径，
+  不是本段引入的，写在这里免得下一个人以为它是 bug；
+* **轨内元素重叠时会两条都列出**，按起点排序 —— 侧挂不做去重或优先级；
+* **丢行仍在侧挂文件里**：`max_lines` 是"画不下"的约束，侧挂是文本导出，两者口径本就不同；
+  但**全部行都超 `max_lines`** 时评估层的答案是"没有可画的东西"，于是这一帧什么也不出
+  （`dropped_lines` 在中途就丢了）—— 同一个边界也写在 `docs/host-api.md` 里；
+* **ASS 只验了形状**（首行、`Dialogue:` 条数与文本），没验样式落点，也没有一份 ASS 样片走判定通道；
+* **侧挂不做编码探测**：写出去的一律是 LF、UTF-8 无 BOM（`check-text-hygiene` 的口径）。
+
 ## T2.6 「两个宿主都接上了」的结构守卫（A4）—— 已完成
 
 ### 它解决什么

@@ -74,6 +74,27 @@ pub fn frame_at_ms(ms: u64, timebase: &TimebaseDto) -> Option<Frame> {
     Some(frame.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64)
 }
 
+/// 序列帧号换成**这一帧开始的毫秒**（向下取整）。
+///
+/// 与 [`frame_at_ms`] 互为反面：那边把时间对上画面，这边把画面上的帧写回时间。
+/// 侧挂字幕文件（`--subtitle-out`）走的是后一条路 —— 它写的是「画面里第几帧到第几帧有字」，
+/// 而文件格式只要毫秒。
+///
+/// 取**向下**取整（负数也向下）：这个值表示"这一帧从此刻开始"，
+/// 向上取整会让第 0 帧的起点变成 1ms 之后 —— 一份起点不是 0 的字幕文件在播放器里要往后挪。
+///
+/// 有余数就是有余数，这里不四舍五入也不假装精确：60fps 下第 1 帧是第 16ms（真实 16.67ms），
+/// 与 [`frame_at_ms`] 用的同一套整数除法，两边不会各漂一点。
+pub fn ms_at_frame(frame: Frame, timebase: &TimebaseDto) -> Option<i64> {
+    if timebase.num == 0 || timebase.den == 0 {
+        return None;
+    }
+    let numerator = i128::from(frame) * i128::from(timebase.den) * 1000;
+    let denominator = i128::from(timebase.num);
+    let ms = numerator.div_euclid(denominator);
+    Some(ms.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64)
+}
+
 /// 去掉 BOM 并把行尾统一。
 ///
 /// 这两件事必须一起做：BOM 会让**第一行**永远匹配不上（看错误代码像是在说
@@ -478,6 +499,47 @@ mod tests {
         // 坏时间基不猜
         assert_eq!(frame_at_ms(1000, &tb(0, 1)), None);
         assert_eq!(frame_at_ms(1000, &tb(30, 0)), None);
+    }
+
+    #[test]
+    fn 帧号换回毫秒用同一套整数除法() {
+        // 60fps：一帧 16.67ms，向下取整是 16ms。
+        assert_eq!(ms_at_frame(0, &tb(60, 1)), Some(0));
+        assert_eq!(ms_at_frame(1, &tb(60, 1)), Some(16));
+        assert_eq!(ms_at_frame(60, &tb(60, 1)), Some(1000));
+        assert_eq!(ms_at_frame(120, &tb(60, 1)), Some(2000));
+        // 整秒的帧率上必须是精确值，否则侧挂文件的起点会整段偏一点。
+        assert_eq!(ms_at_frame(30, &tb(30, 1)), Some(1000));
+        assert_eq!(ms_at_frame(1, &tb(1, 1)), Some(1000));
+        // 30000/1001：第 2 帧起点 66.73ms -> 66。
+        assert_eq!(ms_at_frame(2, &tb(30000, 1001)), Some(66));
+        // 负数也**向下**：第 -1 帧的起点是负时间，向上取整会把它写成 0。
+        assert_eq!(ms_at_frame(-1, &tb(60, 1)), Some(-17));
+        // 坏时间基不猜，与 frame_at_ms 同款。
+        assert_eq!(ms_at_frame(1, &tb(0, 1)), None);
+        assert_eq!(ms_at_frame(1, &tb(30, 0)), None);
+    }
+
+    #[test]
+    fn 帧与毫秒的换算在侧挂文件要用的那一段上对得起来() {
+        // 侧挂文件依赖的性质只有两条：
+        //   1. 起点**不晚于**该帧（不然那一帧会被写到区间外面去）；
+        //   2. 起点随帧号不减（不然文件里的时间会倒着走）。
+        // 有余数时的"顶多早那么零点几毫秒"是 floor 的代价，这里不假装它不存在，
+        // 只钉住"不会晚"这一边 —— 晚才是会把画面和文件拆开的方向。
+        for timebase in [tb(60, 1), tb(30, 1), tb(25, 1), tb(30000, 1001), tb(24000, 1001)] {
+            let mut previous = ms_at_frame(0, &timebase).expect("能换算");
+            for frame in 1..=2000i64 {
+                let start = ms_at_frame(frame, &timebase).expect("能换算");
+                assert!(start >= previous, "第 {frame} 帧的起点倒退回去了");
+                let as_ms = u64::try_from(start).expect("这一段里没有负数");
+                assert!(
+                    frame_at_ms(as_ms, &timebase).expect("能换算") <= frame,
+                    "第 {frame} 帧的起点换算回帧号跑到它后面去了"
+                );
+                previous = start;
+            }
+        }
     }
 
     #[test]

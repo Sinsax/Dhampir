@@ -158,6 +158,108 @@ pub fn cue_visible_at(cue: &Cue, frame: Frame, timebase: &TimebaseDto) -> bool {
     }
 }
 
+/// 这条字幕条活着的**帧区间**（闭区间）。
+///
+/// 与 [`cue_visible_at`] 是同一套规则（区间闭开、短于一帧仍算一帧）——
+/// 只是一个按帧问、一个按区间答。**两边各写一份是会漂的**，
+/// 所以有一条测试逐帧比对两者（`帧区间与逐帧判定一致`）。
+pub fn cue_frames(cue: &Cue, timebase: &TimebaseDto) -> Option<(Frame, Frame)> {
+    let start = frame_at_ms(cue.start_ms, timebase)?;
+    let end = frame_at_ms(cue.end_ms, timebase)?;
+    Some(if end > start { (start, end - 1) } else { (start, start) })
+}
+
+/// 一条要写进**侧挂字幕文件**的字幕条：文本 + 它在这段出片区间里出现的帧区间。
+///
+/// 帧号是**绝对**的（时间线坐标系，不是产物坐标系）：重定基是调用方的事，
+/// 因为「产物的第 0 帧是时间线的哪一帧」只有调用方知道。
+#[derive(Debug, Clone, PartialEq)]
+pub struct OverlaySpan {
+    /// 字幕素材 id。**一份侧挂文件只装得下一份素材** —— 哪条来自哪份素材要跟着条目走，
+    /// 否则调用方无从发现「这次出片用到了两份」。
+    pub asset_id: String,
+    pub text: String,
+    /// 第一次出现的帧（已经裁到出片区间里）。
+    pub first: Frame,
+    /// 最后一次出现的帧（含）。
+    pub last: Frame,
+}
+
+/// 出片区间 `[from, to]` 里，画面上出现过哪些字幕条、各占哪几帧。
+///
+/// # 与 [`evaluate_overlay`] 的关系
+///
+/// 同一件事的两种问法：那边问「这一帧画什么」，这边问「这段区间里哪些条目出现过」。
+/// 侧挂导出要的是后者 —— 逐帧问也能拼出来，但拼的人自己就得再实现一遍合并规则，
+/// 而「哪两帧属于同一条」正是会漂的那部分。
+///
+/// 两边的规则**必须一致**，所以这里的可见性判定走同一套 [`cue_visible_at`] 的口径
+/// （经由 [`cue_frames`]）、元素的覆盖走同一个 `Layer::covers`、
+/// 「没样式的字幕轨不参与」也是同一条。测试里逐帧比对两者的结论。
+///
+/// # 已知边界（不假装）
+///
+/// * **轨内元素重叠**时这里会把两个元素的条目都列出来，而 `evaluate_overlay`
+///   只画第一个覆盖该帧的元素 —— 重叠是校验禁止的（`layer_overlap`），
+///   走到这里说明工程已经在校验那关被拦下了。
+/// * 不看轨道/元素是不是**被静音**（`enabled` 在元素上，见上：它是参与的）。
+/// * 不看 `max_lines`：被丢掉的行在侧挂文件里**仍然在** —— 侧挂文件是「这份素材在这段
+///   区间里说了什么」，不是「这一帧的像素里有几个字」。
+pub fn overlay_spans(
+    timeline: &TimelineV2,
+    from: Frame,
+    to: Frame,
+    subtitles: &SubtitleTable,
+) -> Vec<OverlaySpan> {
+    let timebase = timeline.timebase;
+    let mut spans: Vec<OverlaySpan> = Vec::new();
+
+    for track in &timeline.tracks {
+        if track.kind != TrackKind::Subtitle {
+            continue;
+        }
+        if track.subtitle.is_none() {
+            // 与 evaluate_overlay 同一条：没有样式的字幕轨不参与（位置与字号都无从谈起）。
+            continue;
+        }
+        for element in &track.layers {
+            if !element.enabled {
+                continue;
+            }
+            let Some(source) = element.source.as_ref() else {
+                continue;
+            };
+            let Some(cues) = subtitles.get(&source.asset_id) else {
+                continue;
+            };
+            // 元素自己的覆盖区间（左闭右开）先裁到出片区间里 —— 元素不覆盖的帧，
+            // 那条字幕没被画过，就不该出现在侧挂文件里。
+            let low = element.start.max(from);
+            let high = element.end.saturating_sub(1).min(to);
+            if high < low {
+                continue;
+            }
+            for cue in cues {
+                let Some((first, last)) = cue_frames(cue, &timebase) else {
+                    continue;
+                };
+                let first = first.max(low);
+                let last = last.min(high);
+                if last < first {
+                    continue;
+                }
+                spans.push(OverlaySpan {
+                    asset_id: source.asset_id.clone(),
+                    text: cue.text.clone(),
+                    first,
+                    last,
+                });
+            }
+        }
+    }
+    spans
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,5 +463,164 @@ mod tests {
             tall.items[0].rect.width,
             wide.items[0].rect.width
         );
+    }
+
+    // ---- 侧挂导出（T2.7）：两种问法必须说的是同一件事 ----
+
+    fn cue(start_ms: u64, end_ms: u64, text: &str) -> Cue {
+        Cue { start_ms, end_ms, text: text.to_string(), style: Default::default() }
+    }
+
+    /// 一个带样式的字幕轨（两个紧邻、不重叠的元素）、一条**没样式**的轨、
+    /// 以及一个**关掉**的元素。后两者是反向用例：它们都不该出现在侧挂导出里。
+    fn spans_timeline() -> TimelineV2 {
+        timeline(
+            r#"{
+                "schema": 3,
+                "timebase": { "num": 30, "den": 1 },
+                "tracks": [
+                    { "id": "sub", "kind": "subtitle",
+                      "layers": [
+                        { "id": "e1", "start": 0, "end": 120, "source": { "asset_id": "sub.srt", "source_in": 0 } },
+                        { "id": "e2", "start": 120, "end": 240, "source": { "asset_id": "sub.srt", "source_in": 0 } }
+                      ],
+                      "subtitle": { "font_ratio": 0.055, "bottom_margin": 0.06, "max_lines": 2 } },
+                    { "id": "nos", "kind": "subtitle",
+                      "layers": [{ "id": "n1", "start": 0, "end": 240, "source": { "asset_id": "other.srt", "source_in": 0 } }] },
+                    { "id": "off", "kind": "subtitle",
+                      "layers": [{ "id": "o1", "start": 0, "end": 240, "enabled": false,
+                                   "source": { "asset_id": "other.srt", "source_in": 0 } }],
+                      "subtitle": { "font_ratio": 0.055, "bottom_margin": 0.06, "max_lines": 2 } }
+                ]
+            }"#,
+        )
+    }
+
+    /// 四条**单字**字幕（不会换行、不会被 max_lines 丢 —— 于是
+    /// `evaluate_overlay` 某一帧的 items 正好是「那一刻活着的条」，可以逐帧对账）
+    /// 加上另一份素材的字幕。
+    fn spans_table() -> SubtitleTable {
+        let mut table = SubtitleTable::new();
+        table.insert(
+            "sub.srt".to_string(),
+            vec![
+                cue(0, 2000, "甲"),
+                cue(2000, 4000, "乙"),
+                cue(4000, 6000, "丙"),
+                cue(6000, 8000, "丁"),
+            ],
+        );
+        table.insert("other.srt".to_string(), vec![cue(0, 8000, "别的")]);
+        table
+    }
+
+    /// **这一条才是把两种问法钉在一起的东西。** 逐帧问 `evaluate_overlay`
+    /// （画面里出现的字），与按区间问 `overlay_spans`（侧挂导出要写的字）对账。
+    ///
+    /// 「没样式的轨不参与」「关掉的元素不参与」都由这条顺手盯住 ——
+    /// 那两条规则只要有一边改了口径，对账立刻红。
+    #[test]
+    fn 侧挂导出的区间与画面里出现的字一致() {
+        let timeline = spans_timeline();
+        let table = spans_table();
+        let (from, to) = (0, 300);
+        let spans = overlay_spans(&timeline, from, to, &table);
+        assert!(!spans.is_empty(), "这份时间线上有字幕，不该一条都算不出来");
+
+        for frame in from..=to {
+            let mut want: Vec<&str> = spans
+                .iter()
+                .filter(|span| span.first <= frame && frame <= span.last)
+                .map(|span| span.text.as_str())
+                .collect();
+            want.sort_unstable();
+            let overlay = evaluate_overlay(&timeline, frame, SEQUENCE, Some(&table));
+            let mut got: Vec<&str> = overlay
+                .as_ref()
+                .map(|overlay| overlay.items.iter().map(|item| item.text.as_str()).collect())
+                .unwrap_or_default();
+            got.sort_unstable();
+            assert_eq!(want, got, "第 {frame} 帧：侧挂导出与画面必须说的是同一件事");
+        }
+        assert!(
+            spans.iter().all(|span| span.asset_id == "sub.srt"),
+            "没样式的轨与关掉的元素都不该进来：{spans:?}"
+        );
+    }
+
+    #[test]
+    fn 出片区间外的条不进侧挂导出() {
+        let timeline = spans_timeline();
+        let table = spans_table();
+        // 只出「乙」那一段：侧挂导出里就只该有它。
+        let spans = overlay_spans(&timeline, 60, 119, &table);
+        assert_eq!(spans.len(), 1, "{spans:?}");
+        assert_eq!((spans[0].text.as_str(), spans[0].first, spans[0].last), ("乙", 60, 119));
+        // 区间把一条从中间切开时，报的是它**在这段区间里**出现的帧，不是整条的帧。
+        let spans = overlay_spans(&timeline, 30, 89, &table);
+        assert_eq!(spans.len(), 2, "{spans:?}");
+        assert_eq!((spans[0].text.as_str(), spans[0].first, spans[0].last), ("甲", 30, 59));
+        assert_eq!((spans[1].text.as_str(), spans[1].first, spans[1].last), ("乙", 60, 89));
+    }
+
+    #[test]
+    fn 元素没覆盖的帧不算它出现过() {
+        let timeline = timeline(
+            r#"{
+                "schema": 3,
+                "timebase": { "num": 30, "den": 1 },
+                "tracks": [{
+                    "id": "sub", "kind": "subtitle",
+                    "layers": [{ "id": "e", "start": 0, "end": 30, "source": { "asset_id": "sub.srt", "source_in": 0 } }],
+                    "subtitle": { "font_ratio": 0.055, "bottom_margin": 0.06, "max_lines": 2 }
+                }]
+            }"#,
+        );
+        let table = spans_table();
+        let spans = overlay_spans(&timeline, 0, 239, &table);
+        // 「甲」到第 59 帧才结束，但元素只覆盖 [0,30) —— 第 30 帧起画面上没有它。
+        assert_eq!(spans.len(), 1, "{spans:?}");
+        assert_eq!((spans[0].text.as_str(), spans[0].first, spans[0].last), ("甲", 0, 29));
+        assert!(evaluate_overlay(&timeline, 30, SEQUENCE, Some(&table)).is_none());
+    }
+
+    #[test]
+    fn 短于一帧的条在侧挂导出里仍占一帧() {
+        let mut table = SubtitleTable::new();
+        table.insert("sub.srt".to_string(), vec![cue(1000, 1003, "闪一下")]);
+        let spans = overlay_spans(&spans_timeline(), 0, 239, &table);
+        // 1000..1003ms 在 30fps 下取整是同一帧 —— 不能一条都不出现。
+        assert_eq!(spans.len(), 1, "{spans:?}");
+        assert_eq!((spans[0].first, spans[0].last), (30, 30));
+    }
+
+    #[test]
+    fn 空表时侧挂导出也是空的() {
+        assert!(overlay_spans(&spans_timeline(), 0, 239, &SubtitleTable::new()).is_empty());
+    }
+
+    #[test]
+    fn 时间基坏掉时不算出现过() {
+        // num 为 0 的工程是坏的（校验会拦），但这里也不能装作算得出来。
+        let mut bad = spans_timeline();
+        bad.timebase = TimebaseDto { num: 0, den: 1 };
+        assert!(overlay_spans(&bad, 0, 239, &spans_table()).is_empty());
+    }
+
+    #[test]
+    fn 帧区间与逐帧判定一致() {
+        // 约 29.97fps：两种问法在非整数帧率下最容易分叉。
+        let timebase = TimebaseDto { num: 30000, den: 1001 };
+        for (start, end) in [(0_u64, 2000_u64), (1000, 1003), (500, 500), (33, 34)] {
+            let item = cue(start, end, "x");
+            let (first, last) = cue_frames(&item, &timebase).expect("时间基合法");
+            for frame in (first - 5)..=(last + 5) {
+                assert_eq!(
+                    cue_visible_at(&item, frame, &timebase),
+                    frame >= first && frame <= last,
+                    "cue {start}..{end} 在第 {frame} 帧：逐帧判定与帧区间必须同答"
+                );
+            }
+        }
     }
 }

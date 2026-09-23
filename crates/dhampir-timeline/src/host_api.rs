@@ -12,8 +12,18 @@
 //!
 //! # 版本
 //!
-//! 形状冻结在 [`HOST_API_VERSION`]。版本号**目前不在返回体里** ——
-//! 加它会改变形状，所以要单独作为一次破坏性改动来做，不能顺手加。
+//! 形状冻结在 [`HOST_API_VERSION`]。**字段增减都要 +1**，而版本号本身
+//! **不在每个返回体里**：往每个形状里塞一个 version 键，每加一次版本就要动所有形状，
+//! 而这里的形状是钉死的（每条都有键集断言）—— 问一次记住就够了。
+//!
+//! 那对端怎么知道对面是哪个版本？问：wasm 侧有 `dhampir_host_api_version`，
+//! 文档在 `docs/host-api.md`。**那两处与这个常量由守卫比对**（scripts/api-surface.mjs），
+//! 所以「升了常量忘了改文档」不会静默通过。
+//!
+//! ## v1 -> v2（T2.7）
+//!
+//! [`FrameResult`] 多了 `overlay`：这一帧的文字覆盖层（要画哪几行字、各占哪个归一化矩形）。
+//! 加键就是**破坏性改动** —— 按本仓口径（对端拿到的形状变了）版本要跟着升。
 
 use std::collections::BTreeMap;
 
@@ -183,7 +193,10 @@ pub fn to_json<T: Serialize>(value: &T) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| String::from("{\"error\":\"序列化失败\"}"))
 }
 /// 形状版本。**字段增减都要 +1。**
-pub const HOST_API_VERSION: u32 = 1;
+///
+/// 对端问版本用的是 wasm 侧的 `dhampir_host_api_version`，不是这个常量本身 ——
+/// 文档在 `docs/host-api.md`，那份与这个值由 `scripts/api-surface.mjs` 比对。
+pub const HOST_API_VERSION: u32 = 2;
 
 /// `dhampir_project_open` 的返回体。
 ///
@@ -264,13 +277,80 @@ pub struct LayerView {
     pub effects: Vec<EffectView>,
 }
 
+/// 归一化矩形（相对**文档坐标系**）：与 `text_layout::NormalizedRect` 逐字段同名。
+///
+/// 形状在这里**再定义一次**，而不是直接拿那个类型来序列化：宿主 API 的形状是本模块的事，
+/// 而 `NormalizedRect` 是共享几何的一部分 —— 让后者牵着前者走，等于把契约形状
+/// 交给一个可以随时改的内部结构。两边的对应关系由下面那个 `From` 实现与它的单测钉住。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RectView {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl From<crate::text_layout::NormalizedRect> for RectView {
+    fn from(rect: crate::text_layout::NormalizedRect) -> Self {
+        Self { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+    }
+}
+
+/// 要画的一行字：内容 + 它占的行盒（归一化，相对文档坐标系）。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TextItemView {
+    pub text: String,
+    pub rect: RectView,
+}
+
+impl From<crate::text_layout::TextLine> for TextItemView {
+    fn from(line: crate::text_layout::TextLine) -> Self {
+        Self { text: line.text, rect: RectView::from(line.rect) }
+    }
+}
+
+/// 某一帧的文字覆盖层：这一帧还要画哪几行字。
+///
+/// # 为什么与 `layers` 分开
+///
+/// 图层说的是「哪张纹理怎么叠」，文字**没有纹理** —— 它要先由宿主栅格化成位图。
+/// 塞进一个结构里会让「谁负责栅格化」变含糊，而含糊的代价是两端各自决定。
+/// 所以这里是两个字段，不是把字塞进某一张 `LayerView`。
+///
+/// # 键名与另外两处逐字段同名
+///
+/// `items[{text,rect}]`、`color`、`outline`、`dropped_lines` 与 CLI 的
+/// `subtitle` 子命令、预览宿主的 `dhampir_project_text_frame` 一致 ——
+/// 三处同名，比对时不需要一张映射表（映射表自己会漂）。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OverlayView {
+    /// 按轨道顺序（先画的在前），轨内按行。
+    pub items: Vec<TextItemView>,
+    /// 文字颜色，RGBA。来自轨道样式。
+    pub color: [u8; 4],
+    /// 是否描边。来自轨道样式。
+    pub outline: bool,
+    /// 因为超过 `max_lines` 被丢弃的**行数**（所有字幕轨加起来）。
+    pub dropped_lines: usize,
+}
+
 /// `dhampir_project_frame` 的返回体。
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FrameResult {
     pub frame: Frame,
     pub layers: Vec<LayerView>,
-#[serde(default, skip_serializing_if = "Option::is_none")]
+    /// 这一帧的文字覆盖层。
+    ///
+    /// **没有字幕时这个键根本不出现**，而不是给一个空数组：「没有字幕」与
+    /// 「有字幕但这一帧是空的」在评估层就是同一个答案（`None`），
+    /// 在这里为它们造出两种形状，等于把那个区分又搬回来一次。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay: Option<OverlayView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
@@ -386,6 +466,7 @@ mod tests {
                     params: BTreeMap::from([("radius".to_string(), 4.0_f32)]),
                 }],
             }],
+            overlay: None,
             error: None,
         };
         let value = serde_json::to_value(&result).unwrap();
@@ -438,10 +519,78 @@ mod tests {
         let result = FrameResult {
             frame: 0,
             layers: Vec::new(),
+            overlay: None,
             error: Some("还没有载入通过校验的工程".to_string()),
         };
         let value = serde_json::to_value(&result).unwrap();
         assert_eq!(keys(&value), sorted(&["frame", "layers", "error"]));
+    }
+
+    /// 有文字时：**多出来的是 overlay 这一个键**，且它的子键集是钉死的。
+    #[test]
+    fn 有文字时多出_overlay_这一个键() {
+        let result = FrameResult {
+            frame: 7,
+            layers: Vec::new(),
+            overlay: Some(OverlayView {
+                items: vec![TextItemView {
+                    text: "第一行中文".to_string(),
+                    rect: RectView { x: 0.25, y: 0.8, width: 0.5, height: 0.066 },
+                }],
+                color: [255, 240, 200, 255],
+                outline: false,
+                dropped_lines: 3,
+            }),
+            error: None,
+        };
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(keys(&value), sorted(&["frame", "layers", "overlay"]));
+        let overlay = &value["overlay"];
+        assert_eq!(keys(overlay), sorted(&["items", "color", "outline", "dropped_lines"]));
+        assert_eq!(keys(&overlay["items"][0]), sorted(&["text", "rect"]));
+        assert_eq!(keys(&overlay["items"][0]["rect"]), sorted(&["x", "y", "width", "height"]));
+    }
+
+    /// **反向**：没有文字时不许出现 `overlay` 键。
+    ///
+    /// `Option` 直接序列化会多出一个 `null`，那是形状变化 —— 对端拿到的
+    /// 「这一帧什么都没有」与「这个宿主不懂文字」会长得一模一样。
+    #[test]
+    fn 没有文字时不许出现_overlay_键() {
+        let result = FrameResult { frame: 0, layers: Vec::new(), overlay: None, error: None };
+        let value = serde_json::to_value(&result).unwrap();
+        assert!(value.get("overlay").is_none(), "没有文字时不该有 overlay 键");
+        // 反过来说：有文字时**必须**有，否则这条反向用例本身是恒真的。
+        let with_text = FrameResult {
+            frame: 0,
+            layers: Vec::new(),
+            overlay: Some(OverlayView {
+                items: vec![TextItemView {
+                    text: "x".to_string(),
+                    rect: RectView { x: 0.0, y: 0.0, width: 1.0, height: 0.1 },
+                }],
+                color: [255, 255, 255, 255],
+                outline: true,
+                dropped_lines: 0,
+            }),
+            error: None,
+        };
+        let value = serde_json::to_value(&with_text).unwrap();
+        assert!(value.get("overlay").is_some(), "有文字时必须有 overlay 键");
+    }
+
+    /// 矩形与文本行的字段是**逐字段对应**的：换名或漏字段都在这条上红。
+    #[test]
+    fn 矩形与文本行逐字段对应() {
+        use crate::text_layout::{NormalizedRect, TextLine};
+        let rect = NormalizedRect { x: 0.125, y: 0.75, width: 0.5, height: 0.0625 };
+        let view = RectView::from(rect);
+        assert_eq!(view, RectView { x: 0.125, y: 0.75, width: 0.5, height: 0.0625 });
+        let item = TextItemView::from(TextLine { text: "两行\n两行".to_string(), rect });
+        let value = serde_json::to_value(&item).unwrap();
+        assert_eq!(value["text"], serde_json::json!("两行\n两行"));
+        assert_eq!(value["rect"]["x"], serde_json::json!(0.125));
+        assert_eq!(value["rect"]["height"], serde_json::json!(0.0625));
     }
 
     #[test]

@@ -607,7 +607,14 @@ impl SourceResolver for FixedSource {
     }
 }
 
-fn composite_result(composite: &Composite) -> dhampir_core::timeline::host_api::FrameResult {
+/// 把求值结果转成宿主 API 的形状。
+///
+/// `overlay` 由调用方算好交进来 —— **不在这里读 `SUBTITLES`**：这个函数只做形状转换，
+/// 加一次隐式的全局读，它就不再是「一个可以被单独看懂的转换」了。
+fn composite_result(
+    composite: &Composite,
+    overlay: Option<dhampir_core::timeline::host_api::OverlayView>,
+) -> dhampir_core::timeline::host_api::FrameResult {
     dhampir_core::timeline::host_api::FrameResult {
         frame: composite.frame,
         layers: composite
@@ -635,8 +642,52 @@ fn composite_result(composite: &Composite) -> dhampir_core::timeline::host_api::
                     .collect(),
             })
             .collect(),
+        overlay,
         error: None,
     }
+}
+
+/// 这一帧的文字覆盖层，转成宿主 API 的形状。
+///
+/// # 与 `dhampir_project_text_frame` 的关系
+///
+/// 两处读的是**同一张表、同一份评估**（`evaluate_overlay`）：这里只做形状转换。
+/// 各算一遍就会有两套说法，而「这一帧该画哪几行」正是两端要比对的那件事。
+///
+/// # 为什么这里不给像素落点
+///
+/// `place_line` 要目标尺寸，而返回体里给的是**归一化矩形** —— 宿主自己多大就乘多大。
+/// 落点是宿主内部的事（栅格化与贴图那一段），不是跨边界的形状。
+fn frame_overlay(doc: &ProjectDoc, frame: i64) -> Option<host_api::OverlayView> {
+    SUBTITLES.with(|slot| {
+        // **借出来用，不 clone** —— 这个函数会被逐帧调（图层面板就靠它）。
+        let subtitles = slot.borrow();
+        let overlay =
+            evaluate_overlay(&doc.timeline, frame, doc.sequence_size(), Some(&subtitles))?;
+        Some(host_api::OverlayView {
+            items: overlay
+                .items
+                .iter()
+                .map(|item| host_api::TextItemView {
+                    text: item.text.clone(),
+                    rect: item.rect.into(),
+                })
+                .collect(),
+            color: overlay.color,
+            outline: overlay.outline,
+            dropped_lines: overlay.dropped_lines,
+        })
+    })
+}
+
+/// 这个宿主实现的**宿主 API 版本**。
+///
+/// 版本号不进每个返回体（理由见 `dhampir_core::timeline::host_api` 的模块注释）：
+/// 对端问一次，记住就够了。查版本时用这个函数，形状对不上时对照 `docs/host-api.md`
+/// —— 那份文档与这里的常量由守卫比对，所以「升了常量忘了改文档」不会静默通过。
+#[wasm_bindgen]
+pub fn dhampir_host_api_version() -> u32 {
+    host_api::HOST_API_VERSION
 }
 
 /// 载入一份工程：解析 + 校验，返回结构化结果。
@@ -720,6 +771,9 @@ pub fn dhampir_project_doc() -> String {
 }
 
 /// 这一帧要画什么。工程没载入（或没通过校验）时返回带 error 的空清单。
+///
+/// 返回体里 `overlay` 是**这一帧的文字覆盖层**（要画哪几行字、各占哪个归一化矩形）；
+/// 工程里没有字幕、或者这一帧没有活着的字幕时那个键**根本不出现**。
 #[wasm_bindgen]
 pub fn dhampir_project_frame(frame: i32) -> String {
     PROJECT.with(|slot| {
@@ -728,15 +782,19 @@ pub fn dhampir_project_frame(frame: i32) -> String {
             None => dhampir_core::timeline::host_api::to_json(&dhampir_core::timeline::host_api::FrameResult {
                 frame: i64::from(frame),
                 layers: Vec::new(),
+                overlay: None,
                 error: Some("还没有载入通过校验的工程".to_string()),
             }),
             Some(doc) => {
                 let assets = doc.asset_timebases();
-                host_api::to_json(&composite_result(&compose::evaluate_v2_with_assets(
-                    &doc.timeline,
-                    i64::from(frame),
-                    Some(&assets),
-                )))
+                host_api::to_json(&composite_result(
+                    &compose::evaluate_v2_with_assets(
+                        &doc.timeline,
+                        i64::from(frame),
+                        Some(&assets),
+                    ),
+                    frame_overlay(doc, i64::from(frame)),
+                ))
             }
         }
     })

@@ -32,14 +32,16 @@ use std::process::{Command, ExitCode};
 
 use dhampir_core::compose;
 use dhampir_core::effects::REGISTRY;
-use dhampir_core::overlay::{SubtitleTable, evaluate_overlay};
+use dhampir_core::overlay::{OverlaySpan, SubtitleTable, evaluate_overlay, overlay_spans};
 use dhampir_core::timeline::edit::{EditOp, apply as apply_edit};
 use dhampir_core::timeline::host_api::{AssetInfoView, SampleView, gop_slices};
 use dhampir_core::timeline::project::{
     Asset, AssetKind, ProjectDoc, asset_reference_counts, load_doc, validate_project_doc,
 };
-use dhampir_core::timeline::schema::{TimebaseDto, TrackKind};
-use dhampir_core::timeline::subtitle::{parse_ass, parse_srt};
+use dhampir_core::timeline::schema::{Frame, TimebaseDto, TrackKind};
+use dhampir_core::timeline::subtitle::{
+    AssStyle, Cue, CueStyle, ms_at_frame, parse_ass, parse_srt, to_ass, to_srt,
+};
 use dhampir_worker::pipeline::{RenderPlan, SourceTable, render_frames_png, render_plan};
 
 const USAGE: &str = "\
@@ -53,6 +55,10 @@ const USAGE: &str = "\
                                                   出第 N 帧的 PNG（文件名 frame-<N>.png）
   render  --project <文件> --from <N> --to <N> --out <文件.mp4>
                                                   出片（stdout 是 NDJSON 进度）
+          [--subtitle-out <文件>] [--format srt|ass]
+                                                  把这一段里的字幕另存一份**侧挂文件**。
+                                                  --format 不给就看扩展名（.ass/.ssa -> ASS，
+                                                  其余 -> SRT）；看不出来**不猜**，直接报错
 
 公共选项：
   import  --project <文件> --file <素材> [--id <id>] [--replace] [--write]
@@ -79,6 +85,14 @@ const USAGE: &str = "\
                         而不是静默出一份没有字幕的片子
   -h, --help            显示本帮助
 
+  字幕有**两种口径**，可以只要一种，也可以都要 —— 它们是两条独立的路：
+    * 烧进画面：--font-file（工程里有字幕轨时少给就判失败，见上）。
+      它要 GPU 栅格化，所以只有 frame / render 走得到；
+    * 侧挂文件：--subtitle-out（**只有 render 认**）。它不要字体也不要 GPU，
+      搬的是「这一段里说过什么」：条目的时间是**相对这一趟的产物**从 0 起算的毫秒，
+      内容只有文本与时间（源里的加粗/斜体/颜色不进侧挂）。
+      没给 --font-file 时画面上的字一个都不会有，侧挂文件照写。
+
   subtitle 子命令不需要 GPU，也不需要 ffmpeg —— 它只出结构，不画图。
 
 退出码：0 成功 / 2 用法或校验错 / 1 运行期失败";
@@ -104,7 +118,49 @@ struct Args {
     width: Option<u32>,
     height: Option<u32>,
     font_file: Option<String>,
+    subtitle_out: Option<String>,
+    format: Option<SidecarFormat>,
     help: bool,
+}
+
+/// 侧挂字幕文件的格式。**只有两种，且在解析阶段就定死** ——
+/// 非法值（`vtt`、`SRT` 之流）要在参数这一关退 2，而不是等出片跑完才发现写了一份没人认的文件。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidecarFormat {
+    Srt,
+    Ass,
+}
+
+impl SidecarFormat {
+    /// 参数里认的拼法。**小写两个**，与 `--format` 的帮助文案同源。
+    fn from_flag(value: &str) -> Option<Self> {
+        match value {
+            "srt" => Some(Self::Srt),
+            "ass" => Some(Self::Ass),
+            _ => None,
+        }
+    }
+
+    /// 扩展名认出来的格式。认不出返回 None —— **认不出就不猜**，
+    /// 猜错的表现是"文件名叫 .ass、里面其实是 SRT"，播放器只会说解析失败。
+    fn from_extension(path: &Path) -> Option<Self> {
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_ascii_lowercase());
+        match extension.as_deref() {
+            Some("srt") => Some(Self::Srt),
+            Some("ass") | Some("ssa") => Some(Self::Ass),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Srt => "srt",
+            Self::Ass => "ass",
+        }
+    }
 }
 
 /// 认得的**带值**选项。不在表里的一律报错。
@@ -125,6 +181,12 @@ const KNOWN_VALUE_FLAGS: [&str; 13] = [
 ];
 /// 认得的**不带值**选项。
 const KNOWN_FLAGS: [&str; 5] = ["--frame", "--write", "--replace", "-h", "--help"];
+/// 侧挂导出的两个带值选项。
+///
+/// **它们不跟 `KNOWN_VALUE_FLAGS` 混在一起**，因为它们比别的选项多两条规矩：
+/// 只有 render 认（sidecar 是"一段区间"的导出，frame 只有一帧，谈区间没有意义），
+/// 而且 `--format` 的值只认 srt / ass。那两条都在解析阶段判 —— 打错字要立刻看到。
+const KNOWN_SIDECAR_FLAGS: [&str; 2] = ["--subtitle-out", "--format"];
 /// 认得的子命令。
 const COMMANDS: [&str; 9] = [
     "probe", "info", "gop", "frame", "render", "import", "library", "edit", "subtitle",
@@ -161,7 +223,10 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             }
             return Err(format!("多余的位置参数：{token}"));
         }
-        if !KNOWN_VALUE_FLAGS.contains(&token) && !KNOWN_FLAGS.contains(&token) {
+        if !KNOWN_VALUE_FLAGS.contains(&token)
+            && !KNOWN_FLAGS.contains(&token)
+            && !KNOWN_SIDECAR_FLAGS.contains(&token)
+        {
             return Err(format!("不认识的选项：{token}"));
         }
         let value = argv
@@ -183,9 +248,30 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--width" => args.width = Some(parse_uint(&token, &value)?),
             "--height" => args.height = Some(parse_uint(&token, &value)?),
             "--font-file" => args.font_file = Some(value),
+            "--subtitle-out" => args.subtitle_out = Some(value),
+            "--format" => {
+                let parsed = SidecarFormat::from_flag(&value).ok_or_else(|| {
+                    format!("--format 只认 srt / ass，得到 {value}")
+                })?;
+                args.format = Some(parsed);
+            }
             other => return Err(format!("不认识的选项：{other}")),
         }
         index += 2;
+    }
+    // 侧挂导出只有 render 认。**别的子命令静默收下就是"参数被丢掉"** ——
+    // 用户以为写了侧挂文件，结果什么都没有，而退出码还是 0。
+    let wants_sidecar = args.subtitle_out.is_some() || args.format.is_some();
+    if wants_sidecar && !args.command.is_empty() && args.command != "render" {
+        return Err(format!(
+            "--subtitle-out / --format 只有 render 认（现在给的是 {}）：\
+             侧挂文件是「一段区间」的导出，frame 只出一帧，谈区间没有意义",
+            args.command
+        ));
+    }
+    // 同理：`--format` 说的是"那份侧挂文件"的格式，没有文件就没有它说明的对象。
+    if args.format.is_some() && args.subtitle_out.is_none() {
+        return Err("--format 要跟着 --subtitle-out：它说明的是那份侧挂文件的格式".to_string());
     }
     Ok(args)
 }
@@ -704,6 +790,54 @@ fn cmd_render(args: &Args) -> Result<ExitCode, String> {
     }
     let output = PathBuf::from(out);
 
+    // ---- 侧挂字幕（`--subtitle-out`）----
+    //
+    // 它**先于出片**落地，理由是它跟出片没有依赖关系：算它要的是时间线、素材表和字幕解析，
+    // 既不要 GPU 也不要 ffmpeg。写失败就在开始出片之前退出去，不用等一趟分钟级的活白跑。
+    //
+    // 它与**烧进画面**是两条独立的路：没给 `--font-file` 时画面上一个字都不会有
+    // （那一趟判失败），而侧挂文件照写 —— 侧挂是"这段里说过什么"，不是"像素里有几个字"。
+    let sidecar = match sidecar_target(args) {
+        Ok(target) => target,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(ExitCode::from(2));
+        }
+    };
+    let mut sidecar_written: Option<(PathBuf, usize)> = None;
+    if let Some((path, format)) = sidecar {
+        let spans = overlay_spans(&doc.timeline, from, to, &subtitles);
+        let text = sidecar_text(&spans, from, &doc.timeline.timebase, format)?;
+        std::fs::write(&path, &text)
+            .map_err(|error| format!("写不了侧挂字幕 {}：{error}", path.display()))?;
+        // 事实走 stderr（stdout 只给机器读）：写了几条、来自哪几份素材。
+        // 一份侧挂文件只装得下一份素材，所以**用到了几份要明说** ——
+        // 两份素材混在一个文件里这件事，只能在写出去的时候讲。
+        let mut per_asset: Vec<(String, usize)> = Vec::new();
+        for span in &spans {
+            match per_asset.iter_mut().find(|(id, _)| *id == span.asset_id) {
+                Some((_, count)) => *count += 1,
+                None => per_asset.push((span.asset_id.clone(), 1)),
+            }
+        }
+        let summary = per_asset
+            .iter()
+            .map(|(id, count)| format!("{id} {count} 条"))
+            .collect::<Vec<_>>()
+            .join("、");
+        if spans.is_empty() {
+            eprintln!("侧挂字幕：这一段里没有字幕，{} 是空的", path.display());
+        } else {
+            eprintln!(
+                "侧挂字幕：{} 条 -> {}（{}）",
+                spans.len(),
+                path.display(),
+                summary
+            );
+        }
+        sidecar_written = Some((path, spans.len()));
+    }
+
     let total = (to - from + 1) as usize;
     println!(
         "{}",
@@ -756,6 +890,8 @@ fn cmd_render(args: &Args) -> Result<ExitCode, String> {
             "opened_streams": report.opened_streams,
             "empty_frames": report.empty_frames,
             "overlay": report.overlay,
+            "subtitle_out": sidecar_written.as_ref().map(|(path, _)| path.display().to_string()),
+            "subtitle_entries": sidecar_written.as_ref().map(|(_, count)| *count),
             "issues": report.issues,
             "failed": failed,
         })
@@ -1010,6 +1146,80 @@ fn resolve_font(args: &Args) -> Result<Option<&Path>, ExitCode> {
     Ok(Some(file))
 }
 
+/// 侧挂字幕文件的**落点与格式**：`--subtitle-out` 与 `--format` 一起决定。
+///
+/// **纯函数**（只读 args，不碰盘），所以能脱离命令行单测。
+///
+/// 格式的判定顺序是「明说的优先，没明说就看扩展名」：
+///   * 两边都给、而且**打架**（`--format srt` 却写 `x.ass`）-> 报用法错。
+///     那是"文件名叫 ASS、里面是 SRT"的典型，而它在播放器里看起来像"ASS 解析失败"；
+///   * 扩展名认不出来又没给 `--format` -> 报用法错。**不猜**：猜错的方向正好是上面那一种。
+fn sidecar_target(args: &Args) -> Result<Option<(PathBuf, SidecarFormat)>, String> {
+    let Some(text) = args.subtitle_out.as_deref() else {
+        // 没要侧挂文件。`--format` 单独出现已经在解析阶段被拦下了。
+        return Ok(None);
+    };
+    let path = PathBuf::from(text);
+    match (SidecarFormat::from_extension(&path), args.format) {
+        (Some(from_name), None) => Ok(Some((path, from_name))),
+        (None, Some(asked)) => Ok(Some((path, asked))),
+        (Some(from_name), Some(asked)) if from_name == asked => Ok(Some((path, asked))),
+        (Some(from_name), Some(asked)) => Err(format!(
+            "{text} 的扩展名说这是 {}，--format 却说要写 {} —— 两个里得改一个：\
+             扩展名与内容对不上，播放器打开时只会说解析失败",
+            from_name.name(),
+            asked.name()
+        )),
+        (None, None) => Err(format!(
+            "从 {text} 看不出要写哪种字幕：--subtitle-out 的扩展名不是 .srt / .ass / .ssa，\
+             请用 --format 明说"
+        )),
+    }
+}
+
+/// 把侧挂条目排成一份文件内容。**纯函数**：不碰盘、不读时钟，所以能单测。
+///
+/// 时间**换算回毫秒并重定基到这一趟出的片子**（`base` 是产物的第 0 帧）：
+/// 侧挂文件是给这段产物用的，从 0 起算才是播放器会看到的东西。
+///
+/// 条目按起点排序：顺序乱的 SRT 有的播放器直接当坏文件。
+fn sidecar_text(
+    spans: &[OverlaySpan],
+    base: Frame,
+    timebase: &TimebaseDto,
+    format: SidecarFormat,
+) -> Result<String, String> {
+    let broken = || format!("时间基坏掉（{}/{}），算不出侧挂字幕的时间", timebase.num, timebase.den);
+    let base_ms = ms_at_frame(base, timebase).ok_or_else(broken)?;
+    let mut cues: Vec<Cue> = Vec::with_capacity(spans.len());
+    for span in spans {
+        let start = ms_at_frame(span.first, timebase).ok_or_else(broken)?;
+        // 终点是**最后一帧的下一个起点**：SRT 的结束时间是"什么时候消失"。
+        let end = ms_at_frame(span.last.saturating_add(1), timebase).ok_or_else(broken)?;
+        let start = u64::try_from(start - base_ms)
+            .map_err(|_| format!("侧挂字幕的时间算出来是负的（第 {} 帧）", span.first))?;
+        let mut end = u64::try_from(end - base_ms)
+            .map_err(|_| format!("侧挂字幕的时间算出来是负的（第 {} 帧）", span.last))?;
+        // SRT / ASS 的时间精度是 1ms。比 1ms 还短的一帧在这里没法精确表示 ——
+        // 至少不能让终点落在起点之前：那样的条目有的播放器直接丢掉。
+        if end <= start {
+            end = start + 1;
+        }
+        cues.push(Cue {
+            start_ms: start,
+            end_ms: end,
+            text: span.text.clone(),
+            // 侧挂文件只带文本与时间：源里的加粗/斜体/颜色不进这里（`to_srt` 也没有地方放）。
+            style: CueStyle::default(),
+        });
+    }
+    cues.sort_by_key(|cue| (cue.start_ms, cue.end_ms));
+    Ok(match format {
+        SidecarFormat::Srt => to_srt(&cues),
+        SidecarFormat::Ass => to_ass(&cues, &AssStyle::default()),
+    })
+}
+
 /// 打印某一帧的**文字覆盖层**：要画哪几行字、每行占哪个归一化矩形。
 ///
 /// 两个作用：
@@ -1219,6 +1429,166 @@ mod tests {
     fn 宽度为零要被拒() {
         let error = parse(&argv(&["render", "--width", "0"])).expect_err("应当报错");
         assert!(error.contains("不能是 0"), "{error}");
+    }
+
+    #[test]
+    fn 侧挂标志表里每一条都真的被处理() {
+        // 与上面那张表同一条规矩：表里列了却没写分支的选项会落到 other 报错。
+        // 这一张的值受约束，所以占位值**各自给合法的**：`--format 1` 本来就该被拒。
+        for flag in KNOWN_SIDECAR_FLAGS {
+            let value = if flag == "--format" { "ass" } else { "side.srt" };
+            let mut line = vec!["render", flag, value];
+            if flag != "--subtitle-out" {
+                // `--format` 要跟着 `--subtitle-out`（单独出现是用法错，见下一条）。
+                line.extend(["--subtitle-out", "side.srt"]);
+            }
+            let parsed = parse(&argv(&line))
+                .unwrap_or_else(|error| panic!("表里的选项 {flag} 解析不过：{error}"));
+            assert_eq!(parsed.command, "render");
+            assert_eq!(parsed.subtitle_out.as_deref(), Some("side.srt"));
+        }
+        // 顺序反过来也要认：`--format` 先出现不该改变结论。
+        let swapped = parse(&argv(&["render", "--format", "ass", "--subtitle-out", "side.ass"]))
+            .expect("合法");
+        assert_eq!(swapped.format, Some(SidecarFormat::Ass));
+    }
+
+    #[test]
+    fn 侧挂格式只认两种拼法() {
+        assert_eq!(SidecarFormat::from_flag("srt"), Some(SidecarFormat::Srt));
+        assert_eq!(SidecarFormat::from_flag("ass"), Some(SidecarFormat::Ass));
+        // 大小写与别的格式都不认：认了就等于"悄悄换一种文件格式"。
+        assert_eq!(SidecarFormat::from_flag("SRT"), None);
+        assert_eq!(SidecarFormat::from_flag("ssa"), None);
+        assert_eq!(SidecarFormat::from_flag("vtt"), None);
+        let error = parse(&argv(&["render", "--subtitle-out", "s.srt", "--format", "vtt"]))
+            .expect_err("应当报错");
+        assert!(error.contains("srt / ass"), "{error}");
+    }
+
+    #[test]
+    fn 侧挂标志只在_render_上认() {
+        // **静默收下就是"参数被丢掉"**：用户以为写了侧挂文件，而退出码还是 0。
+        for line in [
+            vec!["frame", "--subtitle-out", "s.srt"],
+            vec!["frame", "--format", "srt"],
+            vec!["probe", "--subtitle-out", "s.srt"],
+            vec!["subtitle", "--subtitle-out", "s.srt"],
+        ] {
+            let error = parse(&argv(&line)).expect_err("应当报错");
+            assert!(error.contains("render"), "{line:?} -> {error}");
+        }
+        // `--format` 说的是"那份侧挂文件"，没有文件就没有它说明的对象。
+        let error = parse(&argv(&["render", "--format", "srt"])).expect_err("应当报错");
+        assert!(error.contains("--subtitle-out"), "{error}");
+        // 没给子命令时照旧是"问怎么用"，不该因为这两个选项变成错误。
+        assert!(parse(&argv(&["--subtitle-out", "s.srt"])).is_ok());
+    }
+
+    fn sidecar_args(path: &str, format: Option<SidecarFormat>) -> Args {
+        Args {
+            command: "render".to_string(),
+            subtitle_out: Some(path.to_string()),
+            format,
+            ..Args::default()
+        }
+    }
+
+    #[test]
+    fn 侧挂格式明说的优先没明说看扩展名() {
+        // 扩展名认得出：明说一致就照明说的，不一致**报错**（文件名叫 ASS 里面是 SRT，
+        // 播放器只会说"ASS 解析失败"）。
+        assert_eq!(
+            sidecar_target(&sidecar_args("s.srt", None)).expect("合法"),
+            Some((PathBuf::from("s.srt"), SidecarFormat::Srt))
+        );
+        assert_eq!(
+            sidecar_target(&sidecar_args("s.ASS", None)).expect("合法"),
+            Some((PathBuf::from("s.ASS"), SidecarFormat::Ass))
+        );
+        assert_eq!(
+            sidecar_target(&sidecar_args("s.ssa", None)).expect("合法"),
+            Some((PathBuf::from("s.ssa"), SidecarFormat::Ass))
+        );
+        assert_eq!(
+            sidecar_target(&sidecar_args("s.ass", Some(SidecarFormat::Ass))).expect("合法"),
+            Some((PathBuf::from("s.ass"), SidecarFormat::Ass))
+        );
+        let clash = sidecar_target(&sidecar_args("s.ass", Some(SidecarFormat::Srt)))
+            .expect_err("应当报错");
+        assert!(clash.contains("--format"), "{clash}");
+        // 扩展名认不出来：明说了就照明说的，没明说**不猜**。
+        assert_eq!(
+            sidecar_target(&sidecar_args("subs.txt", Some(SidecarFormat::Srt))).expect("合法"),
+            Some((PathBuf::from("subs.txt"), SidecarFormat::Srt))
+        );
+        let guess = sidecar_target(&sidecar_args("subs.txt", None)).expect_err("应当报错");
+        assert!(guess.contains("--format"), "{guess}");
+        // 没要侧挂文件时这一步什么都不做。
+        assert_eq!(
+            sidecar_target(&Args { command: "render".to_string(), ..Args::default() })
+                .expect("合法"),
+            None
+        );
+    }
+
+    #[test]
+    fn 侧挂文本的时间重定基到产物并按时排序() {
+        let timebase = TimebaseDto { num: 60, den: 1 };
+        // 第 60 帧是产物的第 0 帧：写出去的时间要从 0 起算，而不是从 1000ms。
+        let spans = vec![
+            OverlaySpan {
+                asset_id: "b.srt".to_string(),
+                text: "后说的".to_string(),
+                first: 120,
+                last: 179,
+            },
+            OverlaySpan {
+                asset_id: "a.srt".to_string(),
+                text: "先说的\n第二行".to_string(),
+                first: 60,
+                last: 119,
+            },
+        ];
+        let srt = sidecar_text(&spans, 60, &timebase, SidecarFormat::Srt).expect("算得出");
+        assert_eq!(
+            srt,
+            "1\n00:00:00,000 --> 00:00:01,000\n先说的\n第二行\n\n\
+             2\n00:00:01,000 --> 00:00:02,000\n后说的\n\n",
+            "起点要重定基、条目要按起点排序"
+        );
+        // ASS 是同一条内容的另一种装法：头部是 [Script Info]，条目在 Dialogue 行上。
+        let ass = sidecar_text(&spans, 60, &timebase, SidecarFormat::Ass).expect("算得出");
+        assert!(ass.starts_with("[Script Info]\n"), "{ass}");
+        assert!(ass.contains("Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,先说的\\N第二行"), "{ass}");
+    }
+
+    #[test]
+    fn 侧挂文本不留零长度的条目() {
+        // 比 1ms 还短的一帧在 SRT 里没法精确表示（这里时间基 1000fps：一帧不到 1ms）。
+        // 能表示的最低限度是"至少 1ms"：终点落在起点之前或等于起点的条目会被播放器丢掉。
+        let timebase = TimebaseDto { num: 4000, den: 1 };
+        let spans = vec![OverlaySpan {
+            asset_id: "s.srt".to_string(),
+            text: "一闪而过".to_string(),
+            first: 8000,
+            last: 8000,
+        }];
+        let srt = sidecar_text(&spans, 8000, &timebase, SidecarFormat::Srt).expect("算得出");
+        assert!(srt.contains("00:00:00,000 --> 00:00:00,001"), "{srt}");
+        // 时间基坏掉时**不猜**：这是工程文件坏了，报出去让人查。
+        let broken = sidecar_text(&spans, 0, &TimebaseDto { num: 0, den: 1 }, SidecarFormat::Srt)
+            .expect_err("应当报错");
+        assert!(broken.contains("时间基"), "{broken}");
+    }
+
+    #[test]
+    fn 帮助文案提到侧挂的两个选项() {
+        // 帮助是契约的一部分：能用的选项必须在里面，不然"能不能用"只能靠猜。
+        for name in KNOWN_SIDECAR_FLAGS {
+            assert!(USAGE.contains(name), "帮助里没写 {name}");
+        }
+        assert!(USAGE.contains("只有 render 认"), "帮助里没说清谁能用");
     }
 
     #[test]
