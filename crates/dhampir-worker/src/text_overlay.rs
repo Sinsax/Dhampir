@@ -51,12 +51,31 @@
 //! 是它自己的规则在起作用。判失败会把「按样式办事」变成失败，而失败一旦变得常见，
 //! 人就开始忽略它。
 //!
+//! # 弹幕：同一条画法，**不同的判据**
+//!
+//! 弹幕复用上面那张表的前两行 —— 没有字体、画不出来都是问题，**问题代码也共用**
+//! （`subtitle_font_missing` / `subtitle_raster_failed`）：原因与修法是同一件事，
+//! 与那串字属于字幕还是弹幕无关。共用而不是另起一组，是为了不让调用方去比对两张表。
+//!
+//! 但弹幕**不做「墨迹被切就判失败」**：它从右滚到左，出来与离开的路上本来就有大半条
+//! 在画面外，那不是「结构说这行放得下、像素说被切了」，而是滚动本身的样子。
+//! 照搬字幕那条判据，每一条弹幕都会红 —— 而失败一旦变得常见，人就开始忽略它。
+//!
+//! 所以弹幕的账**单独分一列**（[`OverlayStats`] 的 `danmaku_*`：画了几条、
+//! 因为泳道排不下丢了几条、画不出几条）。分列的理由不是好看：两边的**上限来源不同** ——
+//! 字幕丢行来自 `max_lines`（样式里写的），弹幕丢条来自泳道耗尽（素材密度 × `lanes`），
+//! 该改的地方一个是样式、一个是泳道参数。合成一个数就查不出是哪一个在丢。
+//!
 //! # 已知缺口（写下来，不藏着）
 //!
 //! 一条字幕**全部**超过 max_lines 时（例如 max_lines = 0），`evaluate_overlay` 按契约
 //! 返回 `None`（它约定「没有可画的东西」与「没有字幕」同形），于是那份丢弃计数在中途
 //! 就没了 —— 这里收不到，也就计不出来。改它要动 core 的返回口径（T2.1 的契约），
 //! 不在这一段的范围里，记在 plan/t2-evidence.md 的覆盖边界里。
+//!
+//! 同一个洞对弹幕有两处入口：一条弹幕轨被泳道**全部**丢掉（`lanes = 0`，或素材密到
+//! 一条都排不下），以及弹幕素材解析出来就是空的。这时弹幕那半边是空的，字幕半边也空的话
+//! 同样落到 `None`。**同一处契约口径，同一条边界** —— 那边改了这里跟着受益，不另修。
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -159,33 +178,50 @@ pub fn blit(
 // 一帧一帧地画：缓存与计数在这里
 // ---------------------------------------------------------------------------
 
-/// 这一趟里字幕都发生了什么。**是事实，不是判据** —— 判据在 [`IssueLog`] 里。
+/// 这一趟里文字覆盖层都发生了什么。**是事实，不是判据** —— 判据在 [`IssueLog`] 里。
 ///
 /// 分开写是有意的：「画了几行、切了几行、丢了几行」与「哪些情况算失败」
 /// 是两件事。前者进报告，后者进问题清单，而 [`crate::pipeline::RenderReport::failed`]
 /// 只读后者 —— 于是「丢弃计数」不会把一次合法的出片判成失败。
+///
+/// 字幕与弹幕**各一列**（理由见模块文档）：两边都会丢东西，但丢的原因与要改的地方不同。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct OverlayStats {
-    /// 真的叠上画面的行数。
+    /// 真的叠上画面的**字幕行数**。
     pub lines_drawn: usize,
-    /// 被切的（顶到位图边界，或有墨像素落在画面外）。
+    /// 被切的字幕行数（顶到位图边界，或有墨像素落在画面外）。
     pub lines_clipped: usize,
-    /// 因为超过 max_lines 被共享布局丢掉的行数。
+    /// 因为超过 max_lines 被共享布局丢掉的字幕行数。
     pub lines_dropped: usize,
-    /// 没能画出来的行数（没有字体、ffmpeg 画不出、几何对不上）。
+    /// 没能画出来的字幕行数（没有字体、ffmpeg 画不出、几何对不上）。
     pub lines_failed: usize,
+    /// 真的叠上画面的**弹幕条数**。
+    ///
+    /// 「一条弹幕画了几十帧」在这里算几十条 —— 与 `lines_drawn` 同款：
+    /// 它是**逐帧的账累加起来**的数，不是素材里有多少条。
+    pub danmaku_drawn: usize,
+    /// 因为泳道排不下被共享布局丢掉的弹幕条数（整条素材算一次，与帧无关）。
+    pub danmaku_dropped: usize,
+    /// 没能画出来的弹幕条数（没有字体、ffmpeg 画不出、几何对不上）。
+    pub danmaku_failed: usize,
     /// 栅格化缓存命中次数 —— 「省了多少次进程」是量出来的。
+    ///
+    /// **字幕与弹幕共用这一个缓存**（键里带文本与尺寸，弹幕的字与字幕的字不会撞），
+    /// 所以它不分成两列：分列只会让「省了多少次」这个数变成两个都只对一半的数。
     pub cache_hits: usize,
     pub cache_misses: usize,
 }
 
 impl OverlayStats {
-    /// 这一趟有没有字幕的事。CLI 用它决定要不要出声。
+    /// 这一趟有没有文字的事。CLI 用它决定要不要出声。
     pub fn is_silent(&self) -> bool {
         self.lines_drawn == 0
             && self.lines_clipped == 0
             && self.lines_dropped == 0
             && self.lines_failed == 0
+            && self.danmaku_drawn == 0
+            && self.danmaku_dropped == 0
+            && self.danmaku_failed == 0
     }
 }
 
@@ -241,6 +277,98 @@ impl OverlayPainter {
     }
 }
 
+/// 一条文字叠上去的结果。**只回答发生了什么** —— 怎么记账由调用方决定
+/// （字幕与弹幕各有各的计数器）。
+///
+/// 分成三个变体而不是一个 bool：`Nothing`（没有可画的东西）与 `Failed`（画不出来）
+/// 在下游是两件事 —— 前者不该计数、也不该记问题，后者要记。合成一个 bool 就会把
+/// 「目标尺寸为 0」当成一次渲染失败。
+enum Painted {
+    /// 叠上去了。`clipped` = 「墨迹被切」那个问题报出来了没有。
+    Drawn { clipped: bool },
+    /// 画不出来（没字体 / 栅格化失败 / 叠图尺寸对不上）。问题已经记进 `log`。
+    Failed,
+    /// 没有可画的东西（目标尺寸为 0、行盒没有高度）。**不是失败**。
+    Nothing,
+}
+
+/// 画一条：落点 → 栅格化 → 叠上去 →（可选）切线判定。
+///
+/// **字幕与弹幕共用这一份**。共用的前提是两者对得上同一个规则：位图恒取**整条目标宽**、
+/// 文字在位图里居中，所以「位图中心对准矩形中心」对字幕（矩形 = 整条可用宽）与弹幕
+/// （矩形 = 这条自己的宽度）都给出正确落点。各写一份就会漂 —— 而漂了以后两边各自
+/// 都自洽，只有把两张画面摆在一起才看得出来。
+///
+/// `judge_clip`：要不要把「墨迹被切」判成问题与计数。字幕给 `true`；弹幕给 `false` ——
+/// 滚动中越界是常态（见模块文档）。**这个开关在这里而不是在调用方事后过滤**：
+/// 事后过滤意味着问题已经记进 `IssueLog` 了，而它没有撤回 —— 弹幕一出画面
+/// 整次出片就会被判失败。
+#[allow(clippy::too_many_arguments)]
+fn paint_one(
+    rasterize: &mut impl FnMut(&TextRasterKey) -> Result<Rc<TextBitmap>, String>,
+    font_file: Option<&Path>,
+    image: &mut Rgba8Image,
+    target: (u32, u32),
+    text: &str,
+    rect: dhampir_core::timeline::text_layout::NormalizedRect,
+    color: [u8; 4],
+    outline: bool,
+    judge_clip: bool,
+    log: &mut IssueLog,
+) -> Painted {
+    let Some(placement) = place_line(rect, target) else {
+        return Painted::Nothing;
+    };
+    let path = issue_path(text);
+    let Some(font_file) = font_file else {
+        log.record(
+            "subtitle_font_missing",
+            &path,
+            format!(
+                "这一帧要画「{text}」，而宿主没有给字体（--font-file）。\
+                 本仓不内嵌字体、也不猜系统字体，所以这里画不出来 —— \
+                 不给字体就不出一份「看起来成功、其实没有字幕」的片子"
+            ),
+        );
+        return Painted::Failed;
+    };
+    let key = TextRasterKey {
+        text: text.to_string(),
+        font_px: placement.font_px,
+        color,
+        outline,
+        font_file: font_file.to_path_buf(),
+        width: placement.bitmap_width,
+        height: placement.bitmap_height,
+    };
+    let bitmap = match rasterize(&key) {
+        Ok(bitmap) => bitmap,
+        Err(error) => {
+            log.record("subtitle_raster_failed", &path, error);
+            return Painted::Failed;
+        }
+    };
+    let report = match blit(image, &bitmap, placement.x, placement.y) {
+        Ok(report) => report,
+        Err(error) => {
+            log.record("subtitle_blit_failed", &path, error);
+            return Painted::Failed;
+        }
+    };
+    let clipped = if judge_clip {
+        match clip_message(text, &bitmap, placement, target, report.skipped) {
+            Some(message) => {
+                log.record("subtitle_ink_clipped", &path, message);
+                true
+            }
+            None => false,
+        }
+    } else {
+        false
+    };
+    Painted::Drawn { clipped }
+}
+
 /// 真正干活的那一段。**栅格化器是参数**：于是「落点、叠加、问题、计数」这四件事
 /// 能在不起 ffmpeg 的前提下被单测（与 text_raster 里那个缓存缝同一个理由）。
 fn paint_lines(
@@ -253,56 +381,50 @@ fn paint_lines(
     stats: &mut OverlayStats,
 ) {
     stats.lines_dropped += overlay.dropped_lines;
+    stats.danmaku_dropped += overlay.dropped_danmaku;
 
     for item in &overlay.items {
-        let Some(placement) = place_line(item.rect, target) else {
-            continue;
-        };
-        let path = issue_path(&item.text);
-        let Some(font_file) = font_file else {
-            stats.lines_failed += 1;
-            log.record(
-                "subtitle_font_missing",
-                &path,
-                format!(
-                    "这一帧要画「{}」，而宿主没有给字体（--font-file）。\
-                     本仓不内嵌字体、也不猜系统字体，所以这里画不出来 —— \
-                     不给字体就不出一份「看起来成功、其实没有字幕」的片子",
-                    item.text
-                ),
-            );
-            continue;
-        };
-        let key = TextRasterKey {
-            text: item.text.clone(),
-            font_px: placement.font_px,
-            color: overlay.color,
-            outline: overlay.outline,
-            font_file: font_file.to_path_buf(),
-            width: placement.bitmap_width,
-            height: placement.bitmap_height,
-        };
-        let bitmap = match rasterize(&key) {
-            Ok(bitmap) => bitmap,
-            Err(error) => {
-                stats.lines_failed += 1;
-                log.record("subtitle_raster_failed", &path, error);
-                continue;
+        match paint_one(
+            &mut *rasterize,
+            font_file,
+            image,
+            target,
+            &item.text,
+            item.rect,
+            overlay.color,
+            overlay.outline,
+            true,
+            log,
+        ) {
+            Painted::Drawn { clipped } => {
+                stats.lines_drawn += 1;
+                if clipped {
+                    stats.lines_clipped += 1;
+                }
             }
-        };
-        let report = match blit(image, &bitmap, placement.x, placement.y) {
-            Ok(report) => report,
-            Err(error) => {
-                stats.lines_failed += 1;
-                log.record("subtitle_blit_failed", &path, error);
-                continue;
-            }
-        };
-        stats.lines_drawn += 1;
-        if let Some(message) = clip_message(&item.text, &bitmap, placement, target, report.skipped)
-        {
-            stats.lines_clipped += 1;
-            log.record("subtitle_ink_clipped", &path, message);
+            Painted::Failed => stats.lines_failed += 1,
+            Painted::Nothing => {}
+        }
+    }
+
+    for item in &overlay.danmaku {
+        match paint_one(
+            &mut *rasterize,
+            font_file,
+            image,
+            target,
+            &item.text,
+            item.rect,
+            overlay.color,
+            overlay.outline,
+            // **不判切线**：滚动中越界是常态（见模块文档）。画面外的墨像素由 `blit`
+            // 丢掉，但那既不进问题清单、也不计数 —— 计数只数"画了几条"。
+            false,
+            log,
+        ) {
+            Painted::Drawn { .. } => stats.danmaku_drawn += 1,
+            Painted::Failed => stats.danmaku_failed += 1,
+            Painted::Nothing => {}
         }
     }
 }
@@ -365,7 +487,7 @@ fn clip_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dhampir_core::overlay::TextItem;
+    use dhampir_core::overlay::{DanmakuTextItem, TextItem};
     use dhampir_core::timeline::schema::Issue;
     // 落点几何搬去契约层之后，矩形类型只在这个测试模块里还用到。
     use dhampir_core::timeline::text_layout::NormalizedRect;
@@ -393,6 +515,28 @@ mod tests {
             outline: true,
             dropped_lines: dropped,
             dropped_danmaku: 0,
+        }
+    }
+
+    /// 只有弹幕、没有字幕的一帧。`dropped_danmaku` 是泳道排不下丢掉的那几条。
+    fn danmaku_overlay(items: &[(&str, NormalizedRect, u32)], dropped_danmaku: usize) -> TextOverlay {
+        TextOverlay {
+            items: Vec::new(),
+            danmaku: items
+                .iter()
+                .map(|(text, rect, lane)| DanmakuTextItem {
+                    text: (*text).to_string(),
+                    rect: *rect,
+                    lane: *lane,
+                    // 在屏区间在这一点上无关紧要（画法只看这一帧的矩形），给一对确定值。
+                    enter: 0,
+                    exit: 100,
+                })
+                .collect(),
+            color: [255, 255, 255, 255],
+            outline: true,
+            dropped_lines: 0,
+            dropped_danmaku,
         }
     }
 
@@ -714,5 +858,105 @@ mod tests {
         assert!(log.is_empty(), "丢行不该判失败：那是样式自己写的上限");
         assert_eq!(painter.stats().lines_dropped, 3);
         assert_eq!(painter.stats().lines_drawn, 1);
+    }
+
+    // ---- 弹幕：同一条画法，不同的判据 ----
+
+    #[test]
+    fn 弹幕按自己的那一列记账_且只动弹幕那几格() {
+        let mut painter = OverlayPainter::new(Some(Path::new("C:/fake/font.ttf")));
+        let mut image = frame(640, 360, [0, 0, 0, 255]);
+        let before = image.clone();
+        let mut log = IssueLog::new();
+        let mut calls = 0;
+        // 第一条在画面里（左边缘 0.6），第二条整个滚到画面左边之外 —— 两条都要算"画了"：
+        // 滚动中越界是常态，与字幕那条「墨迹被切」不是一回事。
+        let items = danmaku_overlay(
+            &[
+                ("第一条", rect(0.6, 0.1, 0.25, 0.066), 0),
+                ("第二条", rect(-0.5, 0.2, 0.25, 0.066), 1),
+            ],
+            2,
+        );
+        paint_lines(
+            &mut |key| fake_rasterizer(&mut calls)(key),
+            Some(Path::new("C:/fake/font.ttf")),
+            &mut image,
+            &items,
+            (640, 360),
+            &mut log,
+            &mut painter.stats,
+        );
+        assert!(log.is_empty(), "弹幕滚出画面是常态，不该记问题：{:?}", log.into_vec());
+        let stats = painter.stats();
+        assert_eq!(stats.danmaku_drawn, 2);
+        assert_eq!(stats.danmaku_dropped, 2);
+        assert_eq!(stats.danmaku_failed, 0);
+        // **字幕那几格必须不动**：混在一起就查不出是哪一个在丢/画不出。
+        assert_eq!(stats.lines_drawn, 0);
+        assert_eq!(stats.lines_clipped, 0);
+        assert_eq!(stats.lines_dropped, 0);
+        assert_eq!(stats.lines_failed, 0);
+        assert!(!stats.is_silent(), "只有弹幕的一帧不是静默");
+        assert_ne!(image, before, "在画面里的那条确实要落笔");
+        assert_eq!(calls, 2, "两条各栅格化一次");
+    }
+
+    #[test]
+    fn 弹幕画不出来记在弹幕那一列而不是字幕那一列() {
+        // 反向：把弹幕计数写进 `lines_failed` 的话，这两条断言会红。
+        let mut painter = OverlayPainter::new(None);
+        let mut image = frame(640, 360, [0, 0, 0, 255]);
+        let before = image.clone();
+        let mut log = IssueLog::new();
+        let items = danmaku_overlay(&[("第一条", rect(0.6, 0.1, 0.25, 0.066), 0)], 0);
+        paint_lines(
+            &mut |_key| unreachable!("没有字体时不该走到栅格化"),
+            None,
+            &mut image,
+            &items,
+            (640, 360),
+            &mut log,
+            &mut painter.stats,
+        );
+        let issues = log.into_vec();
+        // 问题代码与字幕共用一对：原因与修法是同一件事（不给字体就画不出字）。
+        assert_eq!(codes(&issues), vec!["subtitle_font_missing"]);
+        assert_eq!(image, before, "画不出来就不该动像素");
+        let stats = painter.stats();
+        assert_eq!(stats.danmaku_failed, 1);
+        assert_eq!(stats.lines_failed, 0);
+        assert_eq!(stats.danmaku_drawn, 0);
+    }
+
+    #[test]
+    fn 字幕与弹幕同在时两套计数器各归各() {
+        let mut painter = OverlayPainter::new(Some(Path::new("C:/fake/font.ttf")));
+        let mut image = frame(640, 360, [0, 0, 0, 255]);
+        let mut log = IssueLog::new();
+        let mut calls = 0;
+        let mut items = overlay(&[("字幕一", rect(0.25, 0.8, 0.5, 0.066))], 1);
+        items.danmaku.push(DanmakuTextItem {
+            text: "弹幕一".to_string(),
+            rect: rect(0.6, 0.1, 0.25, 0.066),
+            lane: 0,
+            enter: 0,
+            exit: 100,
+        });
+        items.dropped_danmaku = 3;
+        paint_lines(
+            &mut |key| fake_rasterizer(&mut calls)(key),
+            Some(Path::new("C:/fake/font.ttf")),
+            &mut image,
+            &items,
+            (640, 360),
+            &mut log,
+            &mut painter.stats,
+        );
+        assert!(log.is_empty());
+        let stats = painter.stats();
+        assert_eq!((stats.lines_drawn, stats.lines_dropped), (1, 1));
+        assert_eq!((stats.danmaku_drawn, stats.danmaku_dropped), (1, 3));
+        assert_eq!(calls, 2, "字幕一行 + 弹幕一条");
     }
 }

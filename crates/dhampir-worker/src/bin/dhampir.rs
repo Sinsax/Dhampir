@@ -896,16 +896,23 @@ fn cmd_render(args: &Args) -> Result<ExitCode, String> {
             "failed": failed,
         })
     );
-    // 事实与判据分开说：字幕画了几行/丢了几行是**事实**（走 stderr，stdout 只给机器读），
+    // 事实与判据分开说：字画了几行/几条、丢了几行/几条是**事实**（走 stderr，stdout 只给机器读），
     // 而"画不出来"与"被切"进的是问题清单 —— 判失败的是后者。
+    //
+    // 字幕与弹幕**分开报**：两边都会丢东西，但丢的原因与要改的地方不同（改 max_lines 还是加泳道）。
+    // 弹幕没有"被切"这一项 —— 滚动中越界是常态，不进判据（见 text_overlay 的模块文档）。
     if !report.overlay.is_silent() {
         eprintln!(
-            "字幕：画了 {} 行、被切 {} 行、丢弃 {} 行（超过 max_lines）、画不出 {} 行；\
-             栅格化缓存命中 {} / 未命中 {}",
+            "文字覆盖层：字幕画了 {} 行、被切 {} 行、丢弃 {} 行（超过 max_lines）、画不出 {} 行；\
+             弹幕画了 {} 条、丢弃 {} 条（泳道排不下）、画不出 {} 条；\
+             栅格化缓存命中 {} / 未命中 {}（字幕与弹幕共用）",
             report.overlay.lines_drawn,
             report.overlay.lines_clipped,
             report.overlay.lines_dropped,
             report.overlay.lines_failed,
+            report.overlay.danmaku_drawn,
+            report.overlay.danmaku_dropped,
+            report.overlay.danmaku_failed,
             report.overlay.cache_hits,
             report.overlay.cache_misses,
         );
