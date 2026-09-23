@@ -809,3 +809,111 @@ mod gop_slice_tests {
         }
     }
 }
+
+/// 检查后端**声明的**关键帧间隔与样本表里的**实际**间隔是否一致。
+///
+/// # 为什么需要它
+///
+/// gop_length 是**声明**，样本表是**事实**。前端会拿 gop_length 去算
+/// gop_frame_range，而 gop_slices 读的是事实 —— 两者一旦不一致，
+/// 「第 k 段覆盖哪些帧」就有了**两个答案**，而那种分歧不会崩，
+/// 只会让画面少一帧或多一帧，非常难查。
+///
+/// 返回 None 表示没问题（含"间隔无从谈起"的几种正常情形）。
+pub fn gop_length_mismatch(samples: &[SampleView], declared: u32) -> Option<Issue> {
+    if declared == 0 {
+        return Some(Issue::new(
+            "gop_length_unknown",
+            "gop_length",
+            "后端没有声明关键帧间隔 —— 前端无法把帧号换算成段号".to_string(),
+        ));
+    }
+
+    let sync_indices: Vec<usize> = samples
+        .iter()
+        .enumerate()
+        .filter(|(_, sample)| sample.is_sync)
+        .map(|(index, _)| index)
+        .collect();
+
+    // 关键帧少于两个时"间隔"无从谈起 —— 那不是不一致。
+    // 完全没有关键帧的情形由 gop_slices 返回空来表达，不在这里重复报。
+    if sync_indices.len() < 2 {
+        return None;
+    }
+
+    let declared = declared as usize;
+    let spacings: Vec<usize> = sync_indices.windows(2).map(|pair| pair[1] - pair[0]).collect();
+    let first_bad = spacings.iter().position(|spacing| *spacing != declared)?;
+
+    Some(Issue::new(
+        "gop_length_mismatch",
+        &format!("samples[{}]", sync_indices[first_bad]),
+        format!(
+            "后端声明关键帧间隔 {declared}，而样本表里第 {first_bad} 个关键帧到下一个隔了 {}",
+            spacings[first_bad]
+        ),
+    ))
+}
+
+#[cfg(test)]
+mod gop_length_tests {
+    use super::*;
+
+    fn table(spacing: usize, count: usize) -> Vec<SampleView> {
+        (0..count)
+            .map(|index| SampleView {
+                offset: index * 10,
+                size: 10,
+                dts: index as u64,
+                duration: 1,
+                is_sync: index % spacing == 0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn 声明与实际一致时没问题() {
+        assert!(gop_length_mismatch(&table(60, 240), 60).is_none());
+    }
+
+    #[test]
+    fn 不一致时指出第一处并带上两个数字() {
+        // 关键帧落在 0 / 60 / 90 / 150：间隔依次是 60 / 30 / 60，
+        // 第一处不一致就在 60 与 90 之间。
+        let mut samples = table(60, 240);
+        for (index, sample) in samples.iter_mut().enumerate() {
+            sample.is_sync = [0usize, 60, 90, 150].contains(&index);
+        }
+        let issue = gop_length_mismatch(&samples, 60).expect("应当报不一致");
+        assert_eq!(issue.code, "gop_length_mismatch");
+        assert!(issue.path.starts_with("samples["), "path 要指到具体位置：{}", issue.path);
+        // 提示要同时带上「声明的」与「实际的」，否则用户不知道该改哪一边。
+        assert!(issue.message.contains("60"), "{}", issue.message);
+        assert!(issue.message.contains("30"), "{}", issue.message);
+    }
+
+    #[test]
+    fn 没声明间隔要明确报出来() {
+        // 0 表示未知。此时前端**不能**按 GOP 换算 —— 那比报错更糟。
+        let issue = gop_length_mismatch(&table(60, 120), 0).expect("应当报未声明");
+        assert_eq!(issue.code, "gop_length_unknown");
+    }
+
+    #[test]
+    fn 关键帧少于两个时不算不一致() {
+        // 间隔无从谈起。完全没有关键帧的情形由 gop_slices 返回空来表达。
+        let mut none_sync = table(60, 10);
+        for sample in &mut none_sync {
+            sample.is_sync = false;
+        }
+        assert!(gop_length_mismatch(&none_sync, 60).is_none());
+        assert!(gop_length_mismatch(&[], 60).is_none());
+
+        let mut one_sync = table(60, 10);
+        for (index, sample) in one_sync.iter_mut().enumerate() {
+            sample.is_sync = index == 0;
+        }
+        assert!(gop_length_mismatch(&one_sync, 60).is_none());
+    }
+}
