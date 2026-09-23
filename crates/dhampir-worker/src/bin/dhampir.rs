@@ -1220,7 +1220,7 @@ fn sidecar_text(
     })
 }
 
-/// 打印某一帧的**文字覆盖层**：要画哪几行字、每行占哪个归一化矩形。
+/// 打印某一帧的**文字覆盖层**：要画哪几行字幕、几条弹幕，各占哪个归一化矩形。
 ///
 /// 两个作用：
 ///   * 给「两端要画的那份结构」一个可以逐字段核对的参照 ——
@@ -1228,6 +1228,27 @@ fn sidecar_text(
 ///   * 让 core 的文字评估**一出生就有调用方**。只写不用的公共 API 比没有更容易误导。
 ///
 /// 它**不画图**：栅格化是宿主的事，所以这里不需要 GPU，也不需要 ffmpeg。
+///
+/// # 弹幕与字幕分两个键，为什么
+///
+/// 两者的**落点规则不同**：字幕的每一行居中于整条目标宽，弹幕按自己的宽度
+/// 左对齐、位置是帧的函数（见 `dhampir-timeline::danmaku::rect_at`）。混进一个数组
+/// 就得在每个元素上带一个种类标签，而那与"这里是纯结构"的定位冲突。
+///
+/// 键名与预览宿主的 `dhampir_project_text_frame`、
+/// `dhampir-timeline::host_api::OverlayView` **逐字段同名**：
+/// `items[{text,rect}]`、`danmaku[{text,rect,lane,enter,exit}]`、`color`、`outline`、
+/// `dropped_lines`、`dropped_danmaku`、`subtitle_assets` —— 三处同名，
+/// 比对时不需要一张映射表（映射表自己会漂）。
+///
+/// # 弹幕的 ASS 导出不在这里（明写的边界）
+///
+/// `danmaku::to_ass_danmaku`（带 `\move`）已经备好并有单测，但**没有接进
+/// `--subtitle-out`**：一份 ASS 只有一个 `Style`，字幕字号来自 `AssStyle::font_size`、
+/// 弹幕字号来自 `font_ratio × 序列高`，合进同一个文件要么改共享的 `ass_header`
+/// （牵动 `to_ass` 与两端），要么再添一个旗标。而 T3 的验收只要求**结构一致**
+/// （同一输入两端给出相同的 text / 泳道 / 进出帧、丢弃数一致），
+/// 所以这里先记为边界，不顺手扩契约。
 fn cmd_subtitle(args: &Args) -> Result<ExitCode, String> {
     let project = args
         .project
@@ -1249,31 +1270,21 @@ fn cmd_subtitle(args: &Args) -> Result<ExitCode, String> {
 
     let sequence = doc.sequence_size();
     let overlay = evaluate_overlay(&doc.timeline, frame, sequence, Some(&table));
-    let (items, color, outline, dropped_lines) = match overlay {
+    let (items, danmaku, color, outline, dropped_lines, dropped_danmaku) = match overlay {
         Some(overlay) => (
-            overlay
-                .items
-                .iter()
-                .map(|item| {
-                    serde_json::json!({
-                        "text": item.text,
-                        "rect": {
-                            "x": item.rect.x,
-                            "y": item.rect.y,
-                            "width": item.rect.width,
-                            "height": item.rect.height,
-                        },
-                    })
-                })
-                .collect::<Vec<_>>(),
+            overlay.items.iter().map(text_item_json).collect::<Vec<_>>(),
+            overlay.danmaku.iter().map(danmaku_item_json).collect::<Vec<_>>(),
             serde_json::json!(overlay.color),
             serde_json::json!(overlay.outline),
             overlay.dropped_lines,
+            overlay.dropped_danmaku,
         ),
         None => (
             Vec::new(),
+            Vec::new(),
             serde_json::Value::Null,
             serde_json::Value::Null,
+            0,
             0,
         ),
     };
@@ -1283,11 +1294,48 @@ fn cmd_subtitle(args: &Args) -> Result<ExitCode, String> {
         "sequence": [sequence.0, sequence.1],
         "subtitle_assets": table.len(),
         "items": items,
+        "danmaku": danmaku,
         "color": color,
         "outline": outline,
         "dropped_lines": dropped_lines,
+        "dropped_danmaku": dropped_danmaku,
     }))?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// `{text, rect}` —— 与预览宿主的 `text_item_json`、`host_api::TextItemView` 同一形状。
+///
+/// **三处逐字段同名**（见 `dhampir-timeline::host_api::OverlayView` 的说明），
+/// 所以这里不写"另一个字段名"：比对两端靠的就是这一份同名，映射表自己会漂。
+fn text_item_json(item: &dhampir_core::overlay::TextItem) -> serde_json::Value {
+    serde_json::json!({
+        "text": item.text,
+        "rect": {
+            "x": item.rect.x,
+            "y": item.rect.y,
+            "width": item.rect.width,
+            "height": item.rect.height,
+        },
+    })
+}
+
+/// `{text, rect, lane, enter, exit}` —— 与预览宿主、`host_api::DanmakuItemView` 同一形状。
+///
+/// `lane` / `enter` / `exit` **必须给**：只比矩形的话，「泳道被分配错了」（两条换了位置）
+/// 在单帧里可能完全看不出来 —— 而那正是两端最容易漂的地方。
+///
+/// 这里的 `rect` 是**这一帧**的滚动位置（`danmaku::rect_at` 是时间的函数），
+/// 不是像字幕那样的固定居中矩形。要"这条弹幕最终停在哪个泳道、活在哪几帧"，
+/// 看 `lane` / `enter` / `exit` 三个字段。
+fn danmaku_item_json(item: &dhampir_core::overlay::DanmakuTextItem) -> serde_json::Value {
+    let mut value = text_item_json(&dhampir_core::overlay::TextItem {
+        text: item.text.clone(),
+        rect: item.rect,
+    });
+    value["lane"] = serde_json::json!(item.lane);
+    value["enter"] = serde_json::json!(item.enter);
+    value["exit"] = serde_json::json!(item.exit);
+    value
 }
 
 fn cmd_edit(args: &Args) -> Result<ExitCode, String> {
