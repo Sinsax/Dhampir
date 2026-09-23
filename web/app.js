@@ -61,6 +61,77 @@ function notice(text) {
   renderIssues();
 }
 
+// --- 判定回传（程序化验收唯一可靠的出口） -----------------------------------------
+
+/**
+ * 把一条判定**主动回传**给后端。
+ *
+ * 为什么不让驱动钻进页面里取：CDP 的 Runtime.evaluate（awaitPromise 与
+ * returnByValue 同用）在本机 Chrome 上给回空对象，而「返回空对象」和
+ * 「什么都没发生」长得一样 —— 那种诊断工具比没有更坏。改成页面主动 POST，
+ * 驱动只读后端：**拿不到就是没拿到，不会伪装成通过。**
+ *
+ * 传不出去时**要看得见**（状态栏里出），不许静默 —— 这一条比功能本身重要。
+ */
+async function reportVerdict(name, value) {
+  const base = typeof backend.baseUrl === "string" ? backend.baseUrl : "";
+  if (base.length === 0) {
+    log("判定没回传（" + name + "）：这个后端没有 baseUrl，回传通道只在单机/分离模式可用");
+    return null;
+  }
+  try {
+    const response = await fetch(base + "/verdict", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: name, value: value === undefined ? null : value }),
+    });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    return await response.json();
+  } catch (error) {
+    const message = String(error && error.message ? error.message : error);
+    log("判定没回传（" + name + "）：" + message);
+    return null;
+  }
+}
+
+/**
+ * 验收判据：**同一次编辑，预览与 CLI 必须给出同一个工程。**
+ *
+ * op 由页面自己挑（第一条带元素的视频轨的第一个元素，出点收到中间），
+ * 再把 op 与前后两份 doc 一起回传 —— 这样 driver 不必另抄一份「怎么挑元素」，
+ * 两边也就不可能挑到不同的元素。
+ */
+async function runTrimParity(name) {
+  const doc = state.doc;
+  if (doc === null || doc === undefined) {
+    await reportVerdict(name, { ok: false, reason: "页面里还没有工程" });
+    return;
+  }
+  const track = doc.timeline.tracks.find((item) => item.kind === "video" && item.layers.length > 0);
+  if (track === undefined) {
+    await reportVerdict(name, { ok: false, reason: "没有带元素的视频轨" });
+    return;
+  }
+  const layer = track.layers[0];
+  const span = layer.end - layer.start;
+  if (!(span > 1)) {
+    await reportVerdict(name, { ok: false, reason: "元素太短，出点收不动" });
+    return;
+  }
+  const op = { op: "trim", layer: layer.id, edge: "out", to: layer.start + Math.floor(span / 2) };
+  const before = JSON.parse(JSON.stringify(doc));
+  await runEdit(op, "验收：剃刀");
+  const after = state.doc;
+  const changed = JSON.stringify(before) !== JSON.stringify(after);
+  await reportVerdict(name, {
+    ok: changed,
+    reason: changed ? "" : "编辑之后 doc 一个字都没变 —— 那这次验收什么也没验到",
+    op: op,
+    before: before,
+    after: after,
+  });
+}
+
 /** 状态栏：写一条最新的进展/结果。 */
 function log(message) {
   state.hint = String(message);
@@ -743,6 +814,16 @@ async function main() {
   window.dhampirReady = true;
   mark("启动完成");
 
+  // 判定回传：?verdict=<name> 让页面自己跑一次验收并**主动回传**结果。
+  // 与 export 一样只在显式带参数时生效 —— 这是给验收用的入口，不是产品功能。
+  const verdictName = new URLSearchParams(location.search).get("verdict");
+  if (verdictName !== null && verdictName !== "") {
+    await runTrimParity(verdictName);
+    // **告诉驱动这一轮结束了。** 不然它只能靠超时收场，而"等超时"看起来和"卡住"一样。
+    try { navigator.sendBeacon("/result", JSON.stringify({ verdict: verdictName })); }
+    catch (error) { /* 观测手段不该影响结论 */ }
+  }
+
   // 程序化验收用的自动导出钩子：driver 无法点按钮，用查询参数触发。
   // 这是"给测试用的入口"，不是产品功能 —— 所以只在显式带上参数时才生效。
   if (new URLSearchParams(location.search).get("export") === "1") {
@@ -766,6 +847,9 @@ window.dhampir = {
   runExport: runExport,
   // 编辑操作也挂出来：验收驱动靠它把"点一次剃刀"变成可复算的一步。
   runEdit: runEdit,
+  // 判定回传：页面自己把结果送出去，而不是让驱动钻进来取。
+  reportVerdict: reportVerdict,
+  runTrimParity: runTrimParity,
   loadLibrary: loadLibrary,
   select: (trackIndex, layerIndex) => {
     state.selected = { trackIndex: trackIndex, layerIndex: layerIndex };

@@ -37,6 +37,7 @@ import { createReadStream, existsSync, mkdirSync, readFileSync, rmSync, statSync
 import { spawn, spawnSync } from 'node:child_process';
 import { dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { firstDifference, firstSubsetDifference } from './verdict-compare.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, '..');
@@ -220,8 +221,16 @@ if (backendMode !== null && mode !== 'probe') {
 const projectId = 'sample-project.doc';
 // 查询串拼一次、三种模式共用。**手工看的时候也要带上后端参数** ——
 // 只起页面不起后端（或反过来）会让人自己拼 URL，而拼错的表现是"页面能用但没连上后端"。
+// --verdict <name>：让页面跑一次验收判定并**主动回传**，驱动只读后端拿结果。
+// 这是 --exec 坏掉之后的替代通道（见文件头「观测」一节）。
+// 它是一条**独立的流程**：与自动导出互斥 —— 两者都要抢那个「这一轮结束了」的信号。
+const verdictName = valueOf('--verdict', null);
+if (verdictName !== null && backendMode === null) {
+  console.error('--verdict 需要后端（--local 或 --remote）：判定是页面 POST 到后端、驱动再读回来的');
+  process.exit(2);
+}
 const params = [];
-if (mode === 'app' && !argv.includes('--no-export')) params.push('export=1');
+if (mode === 'app' && !argv.includes('--no-export') && verdictName === null) params.push('export=1');
 if (backendMode === 'local') {
   params.push('backend=local');
   params.push('port=' + backendPort);
@@ -237,6 +246,7 @@ if (canvasValue !== null) params.push('canvas=' + canvasValue);
 // 两条路都该给出同一张画面，不同就说明其中一条错了。
 const srcValue = valueOf('--src', null);
 if (srcValue !== null) params.push('src=' + srcValue);
+if (verdictName !== null) params.push('verdict=' + encodeURIComponent(verdictName));
 const query = params.length > 0 ? '?' + params.join('&') : '';
 
 let suffix;
@@ -371,6 +381,8 @@ if (mode === 'serve') {
     else if (mode === 'probe') reportProbe();
     else if (mode === 'app') {
       if (backendMode === null) reportApp(stderr);
+      // 判定回传要**在后端还活着的时候读** —— 收尾那一段会把后端杀掉。
+      else if (verdictName !== null) await reportVerdict(verdictName);
       else await reportBackendExport(stderr);
     }
   } finally {
@@ -744,3 +756,103 @@ function frameRate() {
   const project = JSON.parse(readFileSync(join(REPO_ROOT, 'fixtures', 'sample-project.doc.json'), 'utf8'));
   return project.timeline.timebase.num / project.timeline.timebase.den;
 }
+
+// ---------------------------------------------------------------------------
+// 判定回传（页面主动送出来，驱动只读后端）
+// ---------------------------------------------------------------------------
+//
+// **为什么不用 --exec**：CDP 的 Runtime.evaluate（awaitPromise 与 returnByValue
+// 同用）在本机 Chrome 上给回空对象，而「返回空对象」和「什么都没发生」长得一样。
+// 改成页面把判定 POST 到本机后端、驱动读后端：**拿不到就是没拿到，不算通过。**
+
+/** 找 dhampir 可执行文件。找不到返回 null —— 调用方要如实报「没法对照」，不许静默跳过。 */
+function findCli() {
+  const explicit = valueOf('--cli', null);
+  // **显式给了就用那个，不许偷偷换一个。** 静默回退会让人以为验的是 A，其实跑的是 B。
+  if (explicit !== null) {
+    return existsSync(explicit)
+      ? { cli: explicit, error: null }
+      : { cli: null, error: '显式指定的 --cli 不存在：' + explicit };
+  }
+  const fileName = process.platform === 'win32' ? 'dhampir.exe' : 'dhampir';
+  for (const dir of ['debug', 'release']) {
+    const candidate = join(REPO_ROOT, 'target', dir, fileName);
+    if (existsSync(candidate)) return { cli: candidate, error: null };
+  }
+  return { cli: null, error: '找不到 dhampir 可执行文件（先 cargo build -p dhampir-worker --bin dhampir）' };
+}
+
+/**
+ * 判据：**同一次编辑，预览与 CLI 给出的工程必须逐字段相同。**
+ *
+ * 从 fixture 拷一份工程给 CLI 改（同一个 op），改完与页面回传的 after 比。
+ * 起点也要对一次：页面那份必须**覆盖** fixture 写下的每个字段，否则两边改的
+ * 根本不是同一份工程，比出来的结论没有意义。
+ */
+function runCliParity(value) {
+  const found = findCli();
+  if (found.cli === null) {
+    return { ok: false, detail: found.error + ' —— 没法对照' };
+  }
+  const cli = found.cli;
+  const dir = join(REPO_ROOT, 'target', 'verdict');
+  mkdirSync(dir, { recursive: true });
+  const projectFile = join(dir, 'trim-parity.json');
+  const original = readFileSync(join(REPO_ROOT, 'fixtures', 'sample-project.doc.json'), 'utf8');
+  writeFileSync(projectFile, original);
+
+  let started = null;
+  try { started = JSON.parse(original); } catch (error) {
+    return { ok: false, detail: 'fixture 不是 JSON：' + String(error && error.message ? error.message : error) };
+  }
+  const baseDifference = firstSubsetDifference(started, value.before, '$');
+  if (baseDifference !== null) return { ok: false, detail: '页面那份工程与 fixture 对不上：' + baseDifference };
+
+  const result = spawnSync(cli, ['edit', '--project', projectFile, '--write', '--op', JSON.stringify(value.op)], {
+    cwd: REPO_ROOT, encoding: 'utf8',
+  });
+  const stderrText = String(result.stderr || '').trim();
+  if (result.status !== 0) {
+    return { ok: false, detail: 'CLI 编辑退出 ' + result.status + '：' + (stderrText || String(result.stdout || '').trim()) };
+  }
+  let after = null;
+  try { after = JSON.parse(readFileSync(projectFile, 'utf8')); } catch (error) {
+    return { ok: false, detail: 'CLI 写出来的工程不是 JSON：' + String(error && error.message ? error.message : error) };
+  }
+  const difference = firstDifference(after, value.after, '$');
+  if (difference !== null) return { ok: false, detail: '同一次编辑，预览与 CLI 的工程不同：' + difference };
+  return { ok: true, detail: '预览与 CLI 对同一个 op 给出逐字段相同的工程' };
+}
+
+/** 读后端上的判定并下结论。**拿不到就是没拿到，不算通过。** */
+async function reportVerdict(name) {
+  console.log('判定回传：' + name);
+  let payload = null;
+  let readError = null;
+  try {
+    const response = await fetch(backendUrl + '/verdict?name=' + encodeURIComponent(name));
+    if (!response.ok) readError = '后端 /verdict 返回 ' + response.status;
+    else payload = await response.json();
+  } catch (error) {
+    readError = '读 /verdict 失败：' + String(error && error.message ? error.message : error);
+  }
+  const items = payload !== null && Array.isArray(payload.items) ? payload.items : [];
+  if (items.length === 0) {
+    if (readError !== null) console.log('  - ' + readError);
+    console.log('  - 没拿到页面回传的判定 —— 这不是通过（通道只在单机/分离模式下通）');
+    process.exitCode = 1;
+    return;
+  }
+  const value = items[items.length - 1].value;
+  if (value === null || typeof value !== 'object' || value.ok !== true) {
+    const reason = value !== null && typeof value === 'object' ? value.reason : '回传的值不是对象';
+    console.log('  - 页面自己说这次编辑没成立：' + String(reason));
+    process.exitCode = 1;
+    return;
+  }
+  console.log('  op：' + JSON.stringify(value.op));
+  const parity = runCliParity(value);
+  console.log((parity.ok ? '  ✓ ' : '  - ') + parity.detail);
+  if (!parity.ok) process.exitCode = 1;
+}
+

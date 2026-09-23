@@ -262,6 +262,35 @@ export function loadAssetIndex(assetRoot) {
   return parseAssetIndex(texts, fallback, assetRoot);
 }
 
+/**
+ * 判定回传的记账。
+ *
+ * **页面主动回传，而不是驱动钻进页面里取。** CDP 的 Runtime.evaluate（awaitPromise
+ * 与 returnByValue 同用时）在本机 Chrome 上会给回空对象 —— 于是一个返回空对象的诊断
+ * 工具，看起来和什么都没发生一模一样。让页面把判定 POST 到这里，驱动只读这里：
+ * 拿不到就是**没拿到**，不会伪装成通过。
+ */
+export const MAX_VERDICTS = 64;
+
+export function createVerdictStore() {
+  return { seq: 0, items: [] };
+}
+
+/** 记一条判定。返回它带上的序号（驱动靠序号判断这是新的还是上一轮的）。 */
+export function recordVerdict(store, name, value, at) {
+  if (typeof name !== 'string' || name === '') return null;
+  store.seq += 1;
+  store.items.push({ seq: store.seq, name: name, value: value, at: at });
+  while (store.items.length > MAX_VERDICTS) store.items.shift();
+  return store.seq;
+}
+
+/** 取判定：name 为 null 表示全部；只取序号大于 after 的那些。 */
+export function readVerdicts(store, name, after) {
+  const floor = Number.isInteger(after) ? after : 0;
+  return store.items.filter((item) => item.seq > floor && (name === null || item.name === name));
+}
+
 // ---------------------------------------------------------------------------
 // HTTP
 // ---------------------------------------------------------------------------
@@ -390,7 +419,7 @@ function projectFromBody(parsed) {
 
 function handle(req, res, context, url) {
   const path = url.pathname;
-  const { backend, cli, assetRoot, assets } = context;
+  const { backend, cli, assetRoot, assets, verdict } = context;
 
   // 预检**排在所有路由之前**：它是浏览器问"这个跨源请求能不能发"，
   // 与该请求要落到哪个路由无关。
@@ -688,6 +717,30 @@ function handle(req, res, context, url) {
     }
   }
 
+  // ---- 判定回传 ----
+  if (path === '/verdict') {
+    if (req.method === 'GET') {
+      const name = url.searchParams.get('name');
+      const after = Number(url.searchParams.get('after'));
+      const items = readVerdicts(verdict, name, Number.isInteger(after) ? after : 0);
+      return sendJson(res, 200, { seq: verdict.seq, items: items });
+    }
+    if (req.method === 'POST') {
+      return readBody(req, (body) => {
+        let request = null;
+        try { request = JSON.parse(body.toString('utf8')); } catch (error) {
+          return sendJson(res, 400, { error: issue('bad_request', path, '请求体不是 JSON：' + error.message) });
+        }
+        const name = typeof request.name === 'string' ? request.name : null;
+        if (name === null || name === '') {
+          return sendJson(res, 400, { error: issue('bad_request', path, '需要 {name, value}') });
+        }
+        const seq = recordVerdict(verdict, name, request.value === undefined ? null : request.value, Date.now());
+        return sendJson(res, 200, { seq: seq });
+      });
+    }
+  }
+
   sendJson(res, 404, { error: issue('no_such_route', path, '没有这个路由：' + req.method + ' ' + path) });
 }
 
@@ -780,6 +833,20 @@ function runSelfTest() {
   expect('真索引能从工程文件里读出 a.mp4', real.has('a.mp4'));
   expect('真索引里没有不存在的 id', !real.has('nope.mp4'));
 
+  // ---- 判定回传 ----
+  const store = createVerdictStore();
+  expect('新账本是空的', store.seq === 0 && readVerdicts(store, null, 0).length === 0);
+  expect('记账返回递增序号', recordVerdict(store, 'trim-parity', { ok: true }, 1) === 1
+    && recordVerdict(store, 'other', 0, 2) === 2);
+  expect('按名字取只拿这一条', readVerdicts(store, 'trim-parity', 0).length === 1);
+  expect('after 之后的才算新的', readVerdicts(store, null, 1).length === 1
+    && readVerdicts(store, null, 2).length === 0);
+  expect('名字为空不记账', recordVerdict(store, '', 1, 3) === null && store.seq === 2);
+  expect('账本有上限（老条目会被挤掉，但序号只增不减）', (() => {
+    for (let i = 0; i < MAX_VERDICTS + 5; i += 1) recordVerdict(store, 'flood', i, 4);
+    return store.items.length === MAX_VERDICTS && store.seq === MAX_VERDICTS + 7;
+  })());
+
   console.log('OK 本机后端自检通过（' + passed + ' 条断言）');
 }
 
@@ -801,7 +868,13 @@ async function main() {
   const cli = findCli(explicitCli, process.env);
   const assets = loadAssetIndex(assetRoot);
   const backend = createBackend();
-  const context = { backend: backend, cli: cli, assetRoot: assetRoot, assets: assets };
+  const context = {
+    backend: backend,
+    cli: cli,
+    assetRoot: assetRoot,
+    assets: assets,
+    verdict: createVerdictStore(),
+  };
 
   const server = createServer((req, res) => {
     try {
