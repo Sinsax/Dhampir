@@ -86,6 +86,19 @@
       "content_hash": null,
       "tags": {},
       "note": "字幕也是一种素材：轨道引用它，与引用一段视频没有区别。"
+    },
+    {
+      "id": "dm.ass",
+      "kind": "subtitle",
+      "name": "样本弹幕",
+      "uri": "sample-subtitle.ass",
+      "frame_count": null,
+      "timebase": null,
+      "width": null,
+      "height": null,
+      "content_hash": null,
+      "tags": {},
+      "note": "弹幕也是 subtitle 素材（内容是 ASS）。名字不另起一个 kind：解析、登记、贴图三条路与字幕完全同一条，多一个 kind 只会多一处分支。"
     }
   ],
   "timeline": {
@@ -250,6 +263,28 @@
             255
           ],
           "outline": true
+        }
+      },
+      {
+        "id": "dm",
+        "kind": "danmaku",
+        "layers": [
+          {
+            "id": "shots",
+            "start": 0,
+            "end": 240,
+            "source": {
+              "asset_id": "dm.ass",
+              "source_in": 0
+            },
+            "note": "与字幕轨覆盖同一段区间：于是「这一帧两半都空 -> 整个覆盖层为 None」也在这份工程里被走到（第 240 帧）。"
+          }
+        ],
+        "danmaku": {
+          "asset_id": "dm.ass",
+          "lanes": 2,
+          "duration_ms": 2000,
+          "font_ratio": 0.04
         }
       }
     ]

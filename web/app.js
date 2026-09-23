@@ -133,11 +133,12 @@ async function runTrimParity(name) {
 }
 
 /**
- * 验收判据（T2.5）：**画面上的字，两端必须落在同一个地方、看着同一份清单。**
+ * 验收判据（T2.5 字幕 / T3.4 弹幕）：**画面上的字，两端必须落在同一个地方、看着同一份清单。**
  *
  * 页面只做两件事：
- *   1. seek 那一帧 —— 宿主算出清单（哪几行、各占哪个归一化矩形、各落在哪几个
- *      目标像素），这里把每一行栅格化（canvas -> createImageBitmap -> 交回宿主）；
+ *   1. seek 那一帧 —— 宿主算出两份清单（哪几行/哪几条、各占哪个归一化矩形、各落在哪几个
+ *      目标像素），这里把每一条栅格化（canvas -> createImageBitmap -> 交回宿主）。
+ *      字幕与弹幕是**两套清单、两套编号**（弹幕还多 泳道/进入帧/离开帧 三样结构）；
  *   2. 把宿主的两份结果**原样回传**：清单（dhampir_project_text_frame）与墨迹报告
  *      （dhampir_project_text_probe：每次"减去一行"差出来的像素落在哪、有没有被切）。
  *
@@ -148,6 +149,9 @@ async function runTrimParity(name) {
  * 帧是按样本字幕的节奏挑的（fixtures/sample-subtitle.doc.json：4 条 cue 各 2 秒 @30fps）：
  * 0 = 第一条（单行）、60 = 第二条（按估宽换成两行）、120 = 第三条（单字）、
  * 180 = 第四条（5 行，max_lines=2，丢 3 行）、240 = 全部结束之后（空）。
+ * 同一条时间线上的弹幕轨（lanes=2 / duration_ms=2000）在这些帧上依次是
+ * 2 / 2 / 1 / 2 / 0 条，其中 180 那一帧两条分属不同泳道 —— 弹幕那一半刻意让
+ * 「泳道复用」与「闭区间边界换泳道」都被走到（见 fixtures/sample-subtitle.ass）。
  * 挑错帧不影响判据（两边**同帧**对照），只影响覆盖面。
  */
 async function runSubtitleVerdict(name) {
@@ -162,16 +166,24 @@ async function runSubtitleVerdict(name) {
   const manifests = [];
   const probes = [];
   let unplaced = 0;
+  let unplacedDanmaku = 0;
   for (const frame of frames) {
     await state.engine.seek(frame);
     manifests.push(state.engine.textManifest);
     probes.push(await state.engine.textProbe(frame));
   }
-  for (const manifest of manifests) unplaced += Number(manifest.unplaced_lines) || 0;
-  const ok = subtitles.failed.length === 0 && probes.length === frames.length && unplaced === 0;
-  // 理由里把三个数都写出来：只说"没成立"的话，看的人还得回去数一遍。
+  for (const manifest of manifests) {
+    unplaced += Number(manifest.unplaced_lines) || 0;
+    // 弹幕的「算不出落点」单独数：原因与字幕不同（字幕是行盒没高度/目标为 0，
+    // 弹幕还多一种 —— 泳道排到画面外），混成一个数就分不清该去查哪一边。
+    unplacedDanmaku += Number(manifest.unplaced_danmaku) || 0;
+  }
+  const ok = subtitles.failed.length === 0 && probes.length === frames.length
+    && unplaced === 0 && unplacedDanmaku === 0;
+  // 理由里把四个数都写出来：只说"没成立"的话，看的人还得回去数一遍。
   const reason = ok ? "" : ("字幕判定没成立：" + subtitles.failed.length + " 路没登记上、"
-    + unplaced + " 行算不出落点、拿到 " + probes.length + "/" + frames.length + " 份墨迹报告");
+    + unplaced + " 行算不出落点、弹幕 " + unplacedDanmaku + " 条算不出落点、拿到 "
+    + probes.length + "/" + frames.length + " 份墨迹报告");
   return report(ok, reason, { subtitles: subtitles, frames: manifests, probes: probes });
 }
 

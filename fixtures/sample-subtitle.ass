@@ -1,0 +1,33 @@
+; 样本弹幕素材：与 sample-subtitle.srt 同一条时间线上的第二个文字源。
+;
+; 两处口径与字幕**不同**，写在文件里免得被当成笔误：
+;
+;   * 在屏时长来自工程的 `danmaku.duration_ms`，**不是**这里的 `End`。`End` 是 ASS
+;     语法的必填位（多数工具随手填），所以下面一律写 5 秒 —— 谁改这里都不会影响画面。
+;   * `\move(...)` 的坐标**不参与布局**。落点由 `danmaku::rect_at` 按 `duration_ms`
+;     与目标尺寸统一算（两端同源），这里写一个像样的数值只是让它看起来像份真素材。
+;
+; 五条 Dialogue 是按工程里 `lanes: 2` / `duration_ms: 2000`、时间线 30fps 选的，
+; 覆盖泳道分配的三条规则：
+;
+;   * 三条同时进入 -> 只有前两条排得进，第三条被**丢弃并计数**（dropped_danmaku）；
+;   * 0.0s 进的两条占满两条泳道；4.0s 那条要等到它们离开之后才复用 0 号泳道；
+;   * 6.0s 那条的进入帧正好是 0 号泳道占用区间的**终点**（闭区间边界）—— 边界不许
+;     共用，否则那一帧两条会叠在一起，所以它只能落 1 号泳道。
+
+[Script Info]
+ScriptType: v4.00+
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Microsoft YaHei,19,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,7,0,0,22,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,{\an7\move(640,22,-260,22)}第一条弹幕
+Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,第二条弹幕
+Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,第三条排不下
+Dialogue: 0,0:00:04.00,0:00:09.00,Default,,0,0,0,,第四条复用泳道
+Dialogue: 0,0:00:06.00,0:00:11.00,Default,,0,0,0,,第五条换泳道

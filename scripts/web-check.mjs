@@ -214,15 +214,19 @@ if (backendMode !== null && mode !== 'probe') {
   backendUrl = valueOf('--remote-url', null);
   if (backendUrl === null) {
     backendPort = Number(valueOf('--backend-port', '8802'));
-    // **把 fixture 里的字幕摆到后端的 asset root 下。** 后端按「asset root + uri」
+    // **把 fixture 里的字幕与弹幕摆到后端的 asset root 下。** 后端按「asset root + uri」
     // 解析素材位置（工程文件的 assets 表优先），而这份仓库里素材本来就分两处：
-    // 视频在 target/s3（本机素材，默认跑法早已依赖它），字幕在 fixtures/（跟踪目录，
-    // 判定的对照半边也要读它）。一个 asset root 装不下两边，所以把字幕这一份拷过去。
+    // 视频在 target/s3（本机素材，默认跑法早已依赖它），字幕/弹幕在 fixtures/（跟踪目录，
+    // 判定的对照半边也要读它）。一个 asset root 装不下两边，所以把这两份拷过去。
     // 不做这一步的失败形状是 `/assets/sub.srt/media` 回 404 asset_file_missing，
     // 而页面上的表现只是"字幕登记不上"—— 看起来像判定逻辑写错了。
-    const subtitleFixture = join(REPO_ROOT, 'fixtures', 'sample-subtitle.srt');
-    const subtitleStaged = join(REPO_ROOT, 'target', 's3', 'sample-subtitle.srt');
-    if (existsSync(subtitleFixture)) copyFileSync(subtitleFixture, subtitleStaged);
+    //
+    // **弹幕也要摆**：弹幕素材在资产表里同样是 `kind: subtitle` 的一份，
+    // 少摆它这一路就登记不上，而症状与"工程里没有弹幕轨"一模一样。
+    for (const name of ['sample-subtitle.srt', 'sample-subtitle.ass']) {
+      const fixturePath = join(REPO_ROOT, 'fixtures', name);
+      if (existsSync(fixturePath)) copyFileSync(fixturePath, join(REPO_ROOT, 'target', 's3', name));
+    }
     backendProcess = spawn(process.execPath, ['scripts/dhampir-local.mjs', '--port', String(backendPort)], {
       cwd: REPO_ROOT, stdio: ['ignore', 'ignore', 'inherit'],
     });
@@ -934,6 +938,78 @@ function compareSubtitleManifest(frame, cli, manifest) {
 }
 
 /**
+ * 弹幕对弹幕：**结构逐字段比**（T3 的验收口径）。
+ *
+ * 比的是 `(text, lane, enter, exit)` 四样。**`lane` 一定要比**：只比这一帧的矩形的话，
+ * 「泳道被分配错了」（两条换了位置）在单帧里可能完全看不出来 —— 而那正是两端最容易
+ * 漂的地方（分配算法一分为二就会漂，且两边各自的表都自洽）。
+ *
+ * 矩形也一并比：它是 `danmaku::rect_at` 这个**时间的函数**算出来的，是同一条判据的
+ * 另一半。它随帧变化，所以按容差比；而 `lane`/`enter`/`exit` 是整数，严格比。
+ *
+ * **丢弃数（`dropped_danmaku`）不是日志，是结论的一部分**：少的那几条看起来和
+ * 「素材里就那几条」一模一样。
+ */
+function compareSubtitleDanmaku(frame, cli, manifest) {
+  const where = '帧 ' + frame;
+  const problems = [];
+  if (cli.dropped_danmaku !== manifest.dropped_danmaku) {
+    problems.push(where + '：丢弃的弹幕条数不同（CLI ' + cli.dropped_danmaku
+      + '、页面 ' + manifest.dropped_danmaku + '）');
+  }
+  const left = Array.isArray(cli.danmaku) ? cli.danmaku : [];
+  const right = Array.isArray(manifest.danmaku) ? manifest.danmaku : [];
+  if (left.length !== right.length) {
+    problems.push(where + '：弹幕条数不同（CLI ' + left.length + '、页面 ' + right.length + '）');
+    return problems;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    const label = where + ' 第 ' + index + ' 条弹幕';
+    for (const key of ['lane', 'enter', 'exit']) {
+      if (left[index][key] !== right[index][key]) {
+        problems.push(label + '：' + key + ' 不同（CLI ' + left[index][key]
+          + '、页面 ' + right[index][key] + '）');
+      }
+    }
+    if (left[index].text !== right[index].text) {
+      problems.push(label + '：文本不同（CLI ' + JSON.stringify(left[index].text)
+        + '、页面 ' + JSON.stringify(right[index].text) + '）');
+    }
+    const a = left[index].rect;
+    const b = right[index].rect;
+    if (a === undefined || b === undefined) {
+      problems.push(label + '：一端没有 rect');
+      continue;
+    }
+    for (const key of ['x', 'y', 'width', 'height']) {
+      if (typeof a[key] !== 'number' || typeof b[key] !== 'number') {
+        problems.push(label + '：rect.' + key + ' 不是数（CLI ' + a[key] + '、页面 ' + b[key] + '）');
+      } else if (Math.abs(a[key] - b[key]) > SUBTITLE_TOLERANCE) {
+        problems.push(label + '：rect.' + key + ' 差 ' + Math.abs(a[key] - b[key])
+          + '（CLI ' + a[key] + '、页面 ' + b[key] + '）');
+      }
+    }
+  }
+  return problems;
+}
+
+/**
+ * 这份工程里有弹幕轨吗。读不了就当没有 —— **读不了本身会被别的判据抓住**
+ * （CLI 那一半跑不起来、工程不存在），这里不重复报一遍。
+ */
+function projectHasDanmakuTrack(file) {
+  try {
+    const doc = JSON.parse(readFileSync(file, 'utf8'));
+    const tracks = doc !== null && doc.timeline !== undefined && Array.isArray(doc.timeline.tracks)
+      ? doc.timeline.tracks
+      : [];
+    return tracks.some((track) => track !== null && track.kind === 'danmaku');
+  } catch (error) {
+    return false;
+  }
+}
+
+/**
  * 墨迹报告（只有宿主这一侧有）：**不是和 CLI 比，而是页内自洽**。
  *
  * 三件事：有字就得有墨迹（否则这一行贴了个空）、没有字的帧不能有墨迹
@@ -1010,7 +1086,7 @@ function compareSubtitleProbe(frame, manifest, probe) {
   return problems;
 }
 
-/** 一帧的实测事实（判定成立时才打出来）：几行、墨迹多少像素、位图多大落在哪。 */
+/** 一帧的实测事实（判定成立时才打出来）：几行、墨迹多少像素、位图多大落在哪；弹幕几条、丢了几条。 */
 function subtitleFrameNote(frame, manifest, probe) {
   const placements = Array.isArray(manifest.placements) ? manifest.placements : [];
   const lines = probe !== null && probe !== undefined && Array.isArray(probe.lines) ? probe.lines : [];
@@ -1024,19 +1100,37 @@ function subtitleFrameNote(frame, manifest, probe) {
     : '；头一行位图 ' + first.bitmap_width + 'x' + first.bitmap_height
       + ' @(' + first.x + ',' + first.y + ') 字号 ' + first.font_px;
   const ink = probe === null || probe === undefined || probe.ink === undefined ? '（没有报告）' : probe.ink.pixels;
+  // 弹幕那一半的事实：这一帧几条、各在哪个泳道/哪几帧活着、整条素材被丢了几条。
+  // **不看墨迹**：弹幕不进 probe（判定路径只判字幕行，见 compareSubtitleProbe 的说明）。
+  const danmaku = Array.isArray(manifest.danmaku) ? manifest.danmaku : [];
+  const lanes = danmaku.map((item) => item.text + '(泳道 ' + item.lane + ' ' + item.enter + '..' + item.exit + ')');
+  const shots = danmaku.length === 0
+    ? ''
+    : '；弹幕 ' + danmaku.length + ' 条：' + lanes.join('、')
+      + '（整条素材丢 ' + manifest.dropped_danmaku + ' 条）';
   return '帧 ' + frame + '：' + placements.length + ' 行' + target + '，墨迹 ' + ink
-    + ' px（逐行 ' + per.join('/') + '）' + at;
+    + ' px（逐行 ' + per.join('/') + '）' + at + shots;
 }
 
 /**
- * 判据：**同一帧，浏览器宿主与 CLI 给出的清单必须一致**（T2.5 的验收口径）。
+ * 判据：**同一帧，浏览器宿主与 CLI 给出的清单必须一致**（T2.5 的验收口径；弹幕那一半是 T3.4）。
  *
- * 两端跑的是同一份 `text_layout`，所以这里比的是结构：项数、文本、归一化矩形、字色/描边。
+ * 两端跑的是同一份 `text_layout` 与同一份 `danmaku`（泳道分配 + `rect_at`），
+ * 所以这里比的是结构：项数、文本、归一化矩形、字色/描边；弹幕再多比
+ * `lane`/`enter`/`exit` 与 `dropped_danmaku`。
  * **字形不在判据里** —— 浏览器那边用系统字体（sans-serif）、CLI 用 --font-file，
  * 像素本来就允许不同（plan/roadmap.md 的 T2 验收：结构一致、字形允许不同）。
  *
  * CLI 那一半读的是 fixtures/ 下这份工程（跟踪目录）—— 与页面读到的是同一个文件：
- * web-check 起本机后端之前把 fixture 里的 .srt 摆到了 target/s3 下（后端只有一个 asset root）。
+ * web-check 起本机后端之前把 fixture 里的 .srt/.ass 摆到了 target/s3 下（后端只有一个
+ * asset root）。
+ *
+ * # 为什么还要一条「非空白」检查
+ *
+ * 两端都一条弹幕也没算出来时，上面每一条逐字段判据都成立 —— 而那样的结论是**白说的**。
+ * 所以工程里**有**弹幕轨时，这一趟必须真的见到条目、也真的见到被丢的条目：
+ * 前者证明结构那条路被走通，后者证明「丢弃数一致」这条判据不是空过。
+ * 工程里没有弹幕轨时这两条不判（那种工程本来就没有这一半可验）。
  */
 function runSubtitleParity(value) {
   const found = findCli();
@@ -1049,10 +1143,13 @@ function runSubtitleParity(value) {
   }
   const projectFile = join(REPO_ROOT, 'fixtures', projectId + '.json');
   if (!existsSync(projectFile)) return { ok: false, detail: '对照用的工程不在：' + projectFile };
+  const hasDanmaku = projectHasDanmakuTrack(projectFile);
 
   const problems = [];
   const frames = [];
   const notes = [];
+  let danmakuSeen = 0;
+  let danmakuDropped = 0;
   for (let index = 0; index < manifests.length; index += 1) {
     const manifest = manifests[index];
     const frame = Number(manifest.frame);
@@ -1071,18 +1168,36 @@ function runSubtitleParity(value) {
       continue;
     }
     problems.push(...compareSubtitleManifest(frame, cli, manifest));
+    problems.push(...compareSubtitleDanmaku(frame, cli, manifest));
     problems.push(...compareSubtitleProbe(frame, manifest, probes[index]));
     notes.push(subtitleFrameNote(frame, manifest, probes[index]));
+    const shots = Array.isArray(manifest.danmaku) ? manifest.danmaku.length : 0;
+    danmakuSeen += shots;
+    // 丢弃数按帧累加会重复计数（整条素材算一次、每帧都报同一个数），所以取最大值 ——
+    // 这里要的是「有没有丢过」，不是「丢了几次」。
+    danmakuDropped = Math.max(danmakuDropped, Number(manifest.dropped_danmaku) || 0);
+  }
+  if (hasDanmaku && danmakuSeen === 0) {
+    problems.push('这份工程有弹幕轨，但这些帧里一条都没见到 —— 弹幕那一半等于什么也没验');
+  }
+  if (hasDanmaku && danmakuDropped === 0) {
+    problems.push('这份工程有弹幕轨，但一帧都没丢过条 —— 「丢弃数一致」这条判据没被走到');
   }
   if (problems.length > 0) {
     const shown = problems.slice(0, 6);
     const more = problems.length > shown.length ? '；…还有 ' + (problems.length - shown.length) + ' 条' : '';
     return { ok: false, detail: shown.join('；') + more };
   }
+  // 弹幕那一半的实测事实**写进结论**：只说"一致"的话，看不出这一趟到底验到了什么
+  // （「一条都没见到」与「见到了 9 条」是同一句话）。
+  const danmakuFact = hasDanmaku
+    ? '；弹幕结构一致（' + danmakuSeen + ' 条·泳道/进入/离开帧 + 丢弃 ' + danmakuDropped + ' 条）'
+    : '；这份工程没有弹幕轨，弹幕那一半没内容可验';
   return {
     ok: true,
     detail: '帧 ' + frames.join('/') + '：两端清单一致（文本逐字节、矩形容差 ' + SUBTITLE_TOLERANCE
-      + '）；墨迹逐行自洽（可见的行都有像素、没有字的帧为 0、行间不重叠）',
+      + '）' + danmakuFact
+      + '；墨迹逐行自洽（可见的行都有像素、没有字的帧为 0、行间不重叠）',
     notes: notes,
   };
 }
