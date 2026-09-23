@@ -95,6 +95,16 @@ export class Engine {
     return sources;
   }
 
+  /**
+   * 出片前的预检：这份工程里有没有**超出对端能力**的东西。
+   *
+   * 规则**不在这里** —— 它在 Rust 的 host_api::precheck 里，
+   * 这个方法只是通道。在 JS 里重写一遍过滤逻辑，两端就会各自演化。
+   */
+  precheck(capabilities) {
+    return JSON.parse(this.mod.dhampir_project_precheck(JSON.stringify(capabilities)));
+  }
+
   resize(width, height) {
     this.mod.dhampir_project_resize(width, height);
   }

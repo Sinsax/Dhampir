@@ -182,10 +182,47 @@ async function seekTo(frame) {
 // 两条路，**如实区分**：
 //   png-sequence：逐帧渲染成 PNG，帧精确，交给 FFmpeg 编码（默认）；
 //   http        ：把工程交给服务端出片（A 模式；本仓库只有 echo 假后端）。
+// 提交前预检。返回 true 表示**已被拦住**，不该继续提交。
+//
+// 没有这一步，用户要等**分钟级任务跑完**才被告知"某一条对端不支持"。
+// 而能力声明从哪来、规则是什么，都不在这个文件里：
+// 前者问 backend，后者由 Rust 给出 —— 这里只负责把它们接上并显示。
+async function precheckBeforeExport() {
+  let capabilities = null;
+  try {
+    capabilities = await backend.capabilities();
+  } catch (error) {
+    // 拿不到能力声明**不是**拦截理由：降级模式本来就没有后端。
+    // 但要让人看得见这件事，而不是静默跳过 —— 静默跳过会让"没预检"
+    // 和"预检通过"看起来一模一样。
+    $("issues").innerHTML =
+      "<div>拿不到对端能力声明，本次跳过预检：" + String(error) + "</div>";
+    return false;
+  }
+  if (capabilities === null) {
+    // 降级模式：对端不渲染也不出片，无从预检。
+    return false;
+  }
+  const issues = state.engine.precheck(capabilities);
+  if (issues.length === 0) {
+    $("issues").innerHTML = "<div class=\"ok\">提交前预检通过</div>";
+    return false;
+  }
+  const lines = issues.map(function (issue) {
+    return "<div class=\"bad\">[" + issue.code + "] " + issue.path + " — " + issue.message + "</div>";
+  }).join("");
+  $("issues").innerHTML =
+    "<div class=\"bad\">提交前预检拦下了这次导出（对端做不了这些）：</div>" + lines;
+  return true;
+}
+
 async function runExport() {
   const only = document.getElementById("frameOnly");
   const from = Number(only.dataset.from);
   const to = Number(only.dataset.to);
+
+  // **提交前**预检：把对端做不了的东西现在就指出来，而不是等任务跑完。
+  if (await precheckBeforeExport()) return;
   try {
     log("逐帧渲染 " + from + ".." + to + " …");
     await exportPngSequence(state.engine, state.project, { from, to }, async (frame, bytes, total) => {
