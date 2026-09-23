@@ -181,7 +181,9 @@ const pagePort = server.address().port;
 let backendProcess = null;
 let backendPort = 0;
 let backendUrl = null;
-if (backendMode !== null && mode === 'app') {
+// --probe 不需要后端（它只验工程帧能不能上 canvas）。其余模式都要 ——
+// 包括 --serve：**手工看的时候也该自动起后端**，否则要人手拼 URL 才能用上本机模式。
+if (backendMode !== null && mode !== 'probe') {
   backendUrl = valueOf('--remote-url', null);
   if (backendUrl === null) {
     backendPort = Number(valueOf('--backend-port', '8802'));
@@ -208,24 +210,31 @@ if (backendMode !== null && mode === 'app') {
   }
 }
 
-const canvasArg = argv.indexOf('--canvas') >= 0 ? '&canvas=' + argv[argv.indexOf('--canvas') + 1] : '';
 const projectId = 'sample-project.doc';
+// 查询串拼一次、三种模式共用。**手工看的时候也要带上后端参数** ——
+// 只起页面不起后端（或反过来）会让人自己拼 URL，而拼错的表现是"页面能用但没连上后端"。
+const params = [];
+if (mode === 'app' && !argv.includes('--no-export')) params.push('export=1');
+if (backendMode === 'local') {
+  params.push('backend=local');
+  params.push('port=' + backendPort);
+  params.push('project=' + projectId);
+} else if (backendMode === 'remote') {
+  params.push('backend=remote');
+  params.push('url=' + encodeURIComponent(backendUrl));
+  params.push('project=' + projectId);
+}
+const canvasValue = argv.indexOf('--canvas') >= 0 ? argv[argv.indexOf('--canvas') + 1] : null;
+if (canvasValue !== null) params.push('canvas=' + canvasValue);
+const query = params.length > 0 ? '?' + params.join('&') : '';
+
 let suffix;
 if (argv.includes('--synthetic')) {
   suffix = '/synthetic.html?frames=' + (valueOf('--synthetic', '0')) + '&width=320&height=180';
 } else if (mode === 'probe') {
   suffix = '/probe.html';
-} else if (mode === 'app') {
-  if (backendMode === 'local') {
-    suffix = '/?export=1&backend=local&port=' + backendPort + '&project=' + projectId + canvasArg;
-  } else if (backendMode === 'remote') {
-    suffix = '/?export=1&backend=remote&url=' + encodeURIComponent(backendUrl)
-      + '&project=' + projectId + canvasArg;
-  } else {
-    suffix = '/?export=1' + canvasArg;
-  }
 } else {
-  suffix = '/';
+  suffix = '/' + query;
 }
 process.on('exit', () => { if (backendProcess) backendProcess.kill(); });
 const url = 'http://127.0.0.1:' + pagePort + suffix;
@@ -235,7 +244,7 @@ if (backendUrl !== null) console.log('  后端：' + backendUrl + '（页面用 
 let pageMarks = null;
 
 if (mode === 'serve') {
-  console.log('（只起服务；Ctrl+C 结束）');
+  console.log('（手工看：打开上面那个 URL。Ctrl+C 结束；带了 --local/--remote 时后端也已起来）');
 } else {
   // 超时可调：诊断时用短超时让它**自己超时并打印现场**，而不是干等五分钟什么也看不到。
   const timeoutMs = Number(valueOf('--timeout-ms', mode === 'app' ? '300000' : '90000'));
