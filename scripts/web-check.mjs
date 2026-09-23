@@ -170,7 +170,13 @@ const server = createServer((req, res) => {
     res.writeHead(404).end('not found: ' + path);
     return;
   }
-  res.writeHead(200, { 'content-type': MIME[extname(file)] || 'application/octet-stream' });
+  res.writeHead(200, {
+    'content-type': MIME[extname(file)] || 'application/octet-stream',
+    // **不许缓存。** 这是个验收入口：改了 app.js / engine.js 之后，
+    // 浏览器拿缓存里的旧版本会让"改了没生效"，而那种表现和"改错了"一模一样。
+    // 手工看的时候（--serve）这一条尤其重要 —— 少一次 Ctrl+Shift+R 的猜谜。
+    'cache-control': 'no-store',
+  });
   createReadStream(file).pipe(res);
 });
 
