@@ -20,6 +20,7 @@
 
 - `dhampir_demux_description`
 - `dhampir_demux_frame_index`
+- `dhampir_demux_gop_slices`
 - `dhampir_demux_open`
 - `dhampir_demux_samples`
 - `dhampir_demux_sync_start`

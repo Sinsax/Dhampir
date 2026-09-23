@@ -74,6 +74,24 @@ pub fn dhampir_demux_description() -> Vec<u8> {
     })
 }
 
+/// 把分离器里的样本表转成跨边界形状。
+///
+/// 抽成一个函数：dhampir_demux_samples 与 dhampir_demux_gop_slices 都要它，
+/// 各写一份迟早会漂。
+fn sample_views(track: &crate::demux::VideoTrack) -> Vec<host_api::SampleView> {
+    track
+        .samples
+        .iter()
+        .map(|s| host_api::SampleView {
+            offset: s.offset,
+            size: s.size,
+            dts: s.dts,
+            duration: s.duration,
+            is_sync: s.is_sync,
+        })
+        .collect()
+}
+
 /// 逐样本表，按解码顺序。每项 o/s/d/u/k：文件偏移、字节数、解码时间戳、时长、是否同步样本。
 #[wasm_bindgen]
 pub fn dhampir_demux_samples() -> String {
@@ -82,19 +100,26 @@ pub fn dhampir_demux_samples() -> String {
         let Some(track) = borrowed.as_ref() else {
             return String::from("[]");
         };
-        // 形状**一字不改**（键仍是 o/s/d/u/k），但现在它有个名字。
-        let samples: Vec<host_api::SampleView> = track
-            .samples
-            .iter()
-            .map(|s| host_api::SampleView {
-                offset: s.offset,
-                size: s.size,
-                dts: s.dts,
-                duration: s.duration,
-                is_sync: s.is_sync,
-            })
-            .collect();
-        host_api::to_json(&samples)
+        host_api::to_json(&sample_views(track))
+    })
+}
+
+/// 把样本表切成 **GOP 段**，供远端模式按段取。
+///
+/// 形状见 host_api::GopSliceView：字节范围 + 样本表下标 ——
+/// **服务器零计算**，不解码、不转码、不重新封装。
+/// 前端拿这个加原始字节就能喂解码器。
+///
+/// 返回空数组表示**这份素材没有可起解的关键帧**（没法按帧定位）——
+/// 那是明确失败，不是「没有段」。
+#[wasm_bindgen]
+pub fn dhampir_demux_gop_slices() -> String {
+    TRACK.with(|t| {
+        let borrowed = t.borrow();
+        let Some(track) = borrowed.as_ref() else {
+            return String::from("[]");
+        };
+        host_api::to_json(&host_api::gop_slices(&sample_views(track)))
     })
 }
 
