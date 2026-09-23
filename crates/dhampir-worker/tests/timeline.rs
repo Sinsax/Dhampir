@@ -258,3 +258,62 @@ fn 遇到调整图层时整帧不画而不是悄悄画错() {
     assert_eq!(drawn, 0, "分段合成还没实现，就该一帧都不画，而不是画出一张看不出错的图");
     ctx.queue.submit([encoder.finish()]);
 }
+
+
+#[test]
+#[ignore = "需要真 GPU；跑：cargo test -p dhampir-worker --test timeline -- --ignored"]
+fn 调整图层模糊下方而不影响上方() {
+    // **这就是调整图层的定义**：它影响「已经画上去的全部内容」，不影响画在它**之后**的。
+    //
+    // 判据分两半，缺一不可：
+    //   * 下方**真的被改了** —— 否则调整图层根本没生效；
+    //   * 上方**一个字都没变** —— 否则它影响的是全图，不是「下方」。
+    //
+    // 为什么必须两半都有：只测「结果变了」的话，一个把整幅图都模糊掉的错误实现也能通过。
+    let (ctx, _init) = open_leg(NATIVE_BACKENDS).expect("拿不到 GPU 上下文");
+    let source = make_source(&ctx);
+
+    // 调整图层：没有素材、只有特效。
+    let mut adjustment = layer("adj", 1.0, 1.0, vec![blur_effect(6.0)]);
+    adjustment.is_adjustment = true;
+    adjustment.source = String::new();
+
+    let bottom_only = Composite {
+        frame: 0,
+        layers: vec![layer("bottom", 1.0, 1.0, Vec::new())],
+    };
+    let adjusted = Composite {
+        frame: 0,
+        layers: vec![layer("bottom", 1.0, 1.0, Vec::new()), adjustment.clone()],
+    };
+    // 调整层之上再压一层**完全不透明、铺满**的层：它必须不受调整影响。
+    let top = layer("top", 1.0, 1.0, Vec::new());
+    let covered = Composite {
+        frame: 0,
+        layers: vec![
+            layer("bottom", 1.0, 1.0, Vec::new()),
+            adjustment,
+            top.clone(),
+        ],
+    };
+    let only_top = Composite { frame: 0, layers: vec![top] };
+
+    let plain = render(&ctx, &source, &bottom_only);
+    let blurred = render(&ctx, &source, &adjusted);
+    let with_top = render(&ctx, &source, &covered);
+    let without_adjustment_above = render(&ctx, &source, &only_top);
+
+    // 1. **下方真的被改了。**
+    assert_ne!(
+        plain, blurred,
+        "挂上调整图层后下方没变 —— 分段合成没生效"
+    );
+
+    // 2. **上方一个字都没变。**
+    //    第二层完全不透明且铺满，所以「底层经调整后 + 上层」应当与「只有上层」逐字节相同。
+    //    如果实现把最终结果也模糊了，这两个就会不同 —— 这条断言正是为此而设。
+    assert_eq!(
+        with_top, without_adjustment_above,
+        "调整图层影响了画在它上面的层 —— 那它就不是「影响下方」了"
+    );
+}
