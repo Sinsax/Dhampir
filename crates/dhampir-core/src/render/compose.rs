@@ -40,6 +40,8 @@ pub struct LayerDraw<'a> {
     pub transform: Transform,
     /// 已经乘过转场权重与关键帧的**最终**不透明度。
     pub opacity: f32,
+    /// 这一层怎么与下面合。**必须是已实现的模式** —— 调用方负责预筛，见 `compose`。
+    pub blend: dhampir_timeline::layer::BlendMode,
 }
 
 /// 把混合模式映射成**固定的混合方程**。
@@ -144,7 +146,9 @@ pub fn inverse_affine(
 
 /// 合成管线。构造一次、每帧复用。
 pub struct Compositor {
-    pipeline: wgpu::RenderPipeline,
+    /// **每种已实现的混合模式一条 pipeline** —— 固定混合方程是在 pipeline 里写死的，
+    /// 所以没法在 draw 之间改，只能按模式各建一条、画的时候切。
+    pipelines: Vec<(dhampir_timeline::layer::BlendMode, wgpu::RenderPipeline)>,
     bind_group_layout: wgpu::BindGroupLayout,
 }
 
@@ -187,6 +191,13 @@ impl Compositor {
             immediate_size: 0,
         });
 
+        // 按模式各建一条。只遍历**已实现**的模式 —— blend_state 返回 None 的
+        // 那些根本进不来（这是「做不到」在渲染侧的显式落点）。
+        let mut pipelines = Vec::new();
+        for mode in dhampir_timeline::layer::BlendMode::ALL
+            .into_iter()
+            .filter(|mode| mode.is_implemented())
+        {
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("dhampir compose pipeline"),
             layout: Some(&pipeline_layout),
@@ -202,21 +213,10 @@ impl Compositor {
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target_format,
-                    // 直通 alpha：(src.rgb * src.a) + dst.rgb * (1 - src.a)。
-                    // 用**直通**而不是预乘：求值层给的不透明度是「这一层多透」，
-                    // 预乘会把它算两遍。
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::SrcAlpha,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                    }),
+                    // 方程**只在 blend_state 里写一份**，这里不重复。
+                    // （用直通 alpha 而不是预乘：求值层给的不透明度是「这一层多透」，
+                    //   预乘会把它算两遍 —— 这条在选择 SrcAlpha/OneMinusSrcAlpha 时定下。）
+                    blend: blend_state(mode),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -232,7 +232,10 @@ impl Compositor {
         });
 
         // 这里刻意**不建共用 uniform**：见 compose() 里的说明。
-        Self { pipeline, bind_group_layout }
+        pipelines.push((mode, pipeline));
+        }
+
+        Self { pipelines, bind_group_layout }
     }
 
     /// 把 layers **按给定顺序**（从下往上）叠进 target。
@@ -240,6 +243,17 @@ impl Compositor {
     /// 整个列表只用一次 render pass：清屏一次、之后每层叠加。
     /// 每层一个 pass 会让 load 语义有机会出错，也慢。
     #[allow(clippy::too_many_arguments)]
+    /// 这个模式的 pipeline。`None` = 未实现 —— 不该走到渲染。
+    fn pipeline_for(
+        &self,
+        mode: dhampir_timeline::layer::BlendMode,
+    ) -> Option<&wgpu::RenderPipeline> {
+        self.pipelines
+            .iter()
+            .find(|(candidate, _)| *candidate == mode)
+            .map(|(_, pipeline)| pipeline)
+    }
+
     pub fn compose(
         &self,
         device: &wgpu::Device,
@@ -250,6 +264,20 @@ impl Compositor {
         layers: &[LayerDraw<'_>],
         clear: wgpu::Color,
     ) {
+        // **先整帧查一遍**：有任何一个未实现的模式就一帧都不画。
+        //
+        // 这不是「不许静默降级」的反面，而是**最后一道防线** ——
+        // 契约层（unimplemented_blends / precheck）与能力声明本该在提交前就拦住它。
+        // 走到这里说明上游漏了；此时「少画几层的图」比「悄悄换了混合方程的图」安全：
+        // 前者一眼看得见，后者要拿两端的字节比才能发现。
+        if let Some(missing) = layers
+            .iter()
+            .find(|layer| self.pipeline_for(layer.blend).is_none())
+        {
+            debug_assert!(false, "未实现的混合模式漏到渲染层：{:?}", missing.blend);
+            return;
+        }
+
         // **每层一块 uniform**，而不是共用一块、边画边写。
         //
         // 共用一块是错的，而且错得很安静：queue.write_buffer 写的是「提交时那一块内存」，
@@ -308,8 +336,12 @@ impl Compositor {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&self.pipeline);
-        for bind_group in &bind_groups {
+        // **按层切 pipeline**：固定混合方程写在 pipeline 里，没法在 draw 之间改。
+        for (layer, bind_group) in layers.iter().zip(&bind_groups) {
+            let pipeline = self
+                .pipeline_for(layer.blend)
+                .expect("上面已经整帧查过：未实现的模式走不到这里");
+            pass.set_pipeline(pipeline);
             pass.set_bind_group(0, bind_group, &[]);
             pass.draw(0..3, 0..1);
         }

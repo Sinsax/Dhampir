@@ -97,8 +97,8 @@ fn 两层按不透明度叠加() {
         &out.create_view(&wgpu::TextureViewDescriptor::default()),
         (SIZE, SIZE),
         &[
-            LayerDraw { view: &red_view, source_size: (SIZE, SIZE), transform: Transform::default(), opacity: 1.0 },
-            LayerDraw { view: &blue_view, source_size: (SIZE, SIZE), transform: Transform::default(), opacity: 0.5 },
+            LayerDraw { view: &red_view, source_size: (SIZE, SIZE), transform: Transform::default(), opacity: 1.0, blend: dhampir_core::timeline::layer::BlendMode::Normal },
+            LayerDraw { view: &blue_view, source_size: (SIZE, SIZE), transform: Transform::default(), opacity: 0.5, blend: dhampir_core::timeline::layer::BlendMode::Normal },
         ],
         wgpu::Color::TRANSPARENT,
     );
@@ -152,6 +152,7 @@ fn 缩放把层缩到中心而四周保持背景() {
             // 缩到一半：只盖住中心，四周应当留着背景（清屏色）
             transform: Transform { x: 0.0, y: 0.0, scale: 0.5, rotation_deg: 0.0 },
             opacity: 1.0,
+            blend: dhampir_core::timeline::layer::BlendMode::Normal,
         }],
         wgpu::Color::TRANSPARENT,
     );

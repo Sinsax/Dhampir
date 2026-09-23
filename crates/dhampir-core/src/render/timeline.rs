@@ -162,6 +162,7 @@ impl TimelineRenderer {
                 source_size: *size,
                 transform: layer.transform,
                 opacity: layer.opacity,
+                blend: layer.blend,
             })
             .collect();
 
