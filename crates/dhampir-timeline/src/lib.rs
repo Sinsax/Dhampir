@@ -30,9 +30,17 @@ pub mod golden;
 // 元素模型 v2。与 v1（schema 模块）**并存**：v1 保持可用，切换是下一步。
 // 这样每个提交都是绿的，而不是把仓库停在「改了一半」的状态。
 // 同样建立在 serde 上，所以跟 schema 一起按 feature 门控。
+// 关键帧求值曲线。**逻辑只有这一份**（住在数据侧是因为 `Keyframe` / `Easing` 都在这边，
+// 而剃刀要「切点那一刻的值」）；core 的 `compose.rs` 转发同一份，不另抄一遍。
+#[cfg(feature = "serde")]
+pub mod curve;
 // PR 式编辑操作。**业务规则只在这一份**：CLI 与预览都调它。
 #[cfg(feature = "serde")]
 pub mod edit;
+// 文档历史层（撤销/重做）。**两份调用方共用这一份** —— CLI 落盘一份、预览持有一份，
+// 规则是同一个类型给的，不允许谁在自己那边再写一套「差不多的撤销」。
+#[cfg(feature = "serde")]
+pub mod history;
 #[cfg(feature = "serde")]
 pub mod host_api;
 #[cfg(feature = "serde")]

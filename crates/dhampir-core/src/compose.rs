@@ -25,7 +25,7 @@
 
 use dhampir_timeline::layer::{AssetTimebases, BlendMode, Layer as LayerV2, TimelineV2, source_frame_at};
 use dhampir_timeline::schema::{
-    Clip, Effect, Frame, Keyframe, Project, TimebaseDto, TrackKind, Transform, TransitionSpec,
+    Clip, Effect, Frame, Project, TimebaseDto, TrackKind, Transform, TransitionSpec,
 };
 
 /// 一个要画的图层。
@@ -81,37 +81,12 @@ fn previous_clip<'a>(track: &'a dhampir_timeline::schema::Track, clip: &Clip) ->
         .find(|other| other.id != clip.id && other.track_at.saturating_add(other.duration) == clip.track_at)
 }
 
-/// 关键帧求值。没有关键帧就用片段的静态不透明度。
+/// 关键帧求值。**逻辑只有一份，在 `dhampir_timeline::curve` 里** —— 这里只是转发。
 ///
-/// 关键帧**不要求有序**——契约里没这么要求，所以这里先排一次。
-/// 依赖"用户会按顺序写"是那种只在别人手写的工程上才会炸的假设。
-pub fn opacity_from(opacity: f32, keyframes: &[Keyframe], local_frame: Frame) -> f32 {
-    if keyframes.is_empty() {
-        return opacity;
-    }
-    let mut keys: Vec<&Keyframe> = keyframes.iter().collect();
-    keys.sort_by_key(|key| key.frame);
-
-    let first = keys[0];
-    if local_frame <= first.frame {
-        return first.value;
-    }
-    let last = keys[keys.len() - 1];
-    if local_frame >= last.frame {
-        return last.value;
-    }
-    for pair in keys.windows(2) {
-        let (a, b) = (pair[0], pair[1]);
-        if local_frame >= a.frame && local_frame <= b.frame {
-            let span = (b.frame - a.frame) as f32;
-            // span 为 0 时两个关键帧在同一帧上——取后一个的值，别除零。
-            let t = if span <= 0.0 { 1.0 } else { (local_frame - a.frame) as f32 / span };
-            let eased = b.easing.apply(t);
-            return a.value + (b.value - a.value) * eased;
-        }
-    }
-    opacity
-}
+/// 为什么住那边：`Keyframe` / `Easing` 都是 timeline 的形状，而依赖方向只能是
+/// core → timeline；timeline 自己（剃刀）也要这份求值。留一个同样的路径在这里，
+/// 是让下游一行都不用改（`dhampir_core::compose::opacity_from` 继续存在）。
+pub use crate::timeline::curve::opacity_from;
 
 /// 关键帧求值（v1 的入口）。**逻辑只有一份**，在 `opacity_from` 里。
 pub fn opacity_at(clip: &Clip, local_frame: Frame) -> f32 {

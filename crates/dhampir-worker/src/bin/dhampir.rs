@@ -34,6 +34,7 @@ use dhampir_core::compose;
 use dhampir_core::effects::REGISTRY;
 use dhampir_core::overlay::{OverlaySpan, SubtitleTable, evaluate_overlay, overlay_spans};
 use dhampir_core::timeline::edit::{EditOp, apply as apply_edit};
+use dhampir_core::timeline::history::History;
 use dhampir_core::timeline::host_api::{AssetInfoView, SampleView, gop_slices};
 use dhampir_core::timeline::project::{
     Asset, AssetKind, ProjectDoc, asset_reference_counts, load_doc, validate_project_doc,
@@ -66,12 +67,19 @@ const USAGE: &str = "\
                          不给 --write 就是**干跑**：只打印将要写入的那一条
   library --project <文件>
                          列出素材库：每个资产被引用了多少次
-  edit    --project <文件> --op <JSON> [--write]
+  edit    --project <文件> --op <JSON> [--history <文件>] [--write]
                          执行一次编辑操作（与浏览器走的是同一份实现）。
                          形状是一个带 op 字段的 JSON 对象，六个操作：
                          insert / trim / split / move / remove / set_sequence
                          （split 的形状：op=split, layer=c, at=75）
                          **不给 --write 就只在内存里做一遍并打印结果**
+  edit    --project <文件> --undo [--write]   （--redo 同理）
+                        按 --history 指定的历史退一步 / 进一步。
+                        历史存哪**必须由你说**（不替你往工程旁边写文件）；
+                        历史文件不在 = 从空历史开始，不是错误。
+                        没有可撤销 / 可重做的步骤时退出码 2 并明说
+                        （静默什么都不做更难查）。
+                        --history 只在 --write 时才落盘：干跑不碰磁盘
 
 公共选项：
   --asset-root <目录>   工程文件里 asset.uri 的相对根（默认 target/s3）
@@ -110,6 +118,9 @@ struct Args {
     file: Option<String>,
     id: Option<String>,
     op: Option<String>,
+    history: Option<String>,
+    undo: bool,
+    redo: bool,
     write: bool,
     replace: bool,
     from: Option<i64>,
@@ -164,7 +175,7 @@ impl SidecarFormat {
 }
 
 /// 认得的**带值**选项。不在表里的一律报错。
-const KNOWN_VALUE_FLAGS: [&str; 13] = [
+const KNOWN_VALUE_FLAGS: [&str; 14] = [
     "--project",
     "--asset",
     "--out",
@@ -173,6 +184,7 @@ const KNOWN_VALUE_FLAGS: [&str; 13] = [
     "--file",
     "--id",
     "--op",
+    "--history",
     "--from",
     "--to",
     "--width",
@@ -180,7 +192,7 @@ const KNOWN_VALUE_FLAGS: [&str; 13] = [
     "--font-file",
 ];
 /// 认得的**不带值**选项。
-const KNOWN_FLAGS: [&str; 5] = ["--frame", "--write", "--replace", "-h", "--help"];
+const KNOWN_FLAGS: [&str; 7] = ["--frame", "--write", "--replace", "--undo", "--redo", "-h", "--help"];
 /// 侧挂导出的两个带值选项。
 ///
 /// **它们不跟 `KNOWN_VALUE_FLAGS` 混在一起**，因为它们比别的选项多两条规矩：
@@ -203,11 +215,12 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             index += 1;
             continue;
         }
-        if token == "--write" || token == "--replace" {
-            if token == "--write" {
-                args.write = true;
-            } else {
-                args.replace = true;
+        if token == "--write" || token == "--replace" || token == "--undo" || token == "--redo" {
+            match token {
+                "--write" => args.write = true,
+                "--replace" => args.replace = true,
+                "--undo" => args.undo = true,
+                _ => args.redo = true,
             }
             index += 1;
             continue;
@@ -242,6 +255,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--file" => args.file = Some(value),
             "--id" => args.id = Some(value),
             "--op" => args.op = Some(value),
+            "--history" => args.history = Some(value),
             "--from" => args.from = Some(parse_int(&token, &value)?),
             "--to" => args.to = Some(parse_int(&token, &value)?),
             "--frame" => args.frame = Some(parse_int(&token, &value)?),
@@ -272,6 +286,30 @@ fn parse(argv: &[String]) -> Result<Args, String> {
     // 同理：`--format` 说的是"那份侧挂文件"的格式，没有文件就没有它说明的对象。
     if args.format.is_some() && args.subtitle_out.is_none() {
         return Err("--format 要跟着 --subtitle-out：它说明的是那份侧挂文件的格式".to_string());
+    }
+    // 撤销/重做那一组只归 edit。口径与上面侧挂那两条**完全一样**：
+    // 别的子命令静默收下就是「参数被丢掉」——用户以为退了，结果什么都没发生，而退出码还是 0。
+    if (args.undo || args.redo || args.history.is_some())
+        && !args.command.is_empty()
+        && args.command != "edit"
+    {
+        return Err(format!(
+            "--undo / --redo / --history 只有 edit 认（现在给的是 {}）",
+            args.command
+        ));
+    }
+    if args.undo && args.redo {
+        return Err("--undo 与 --redo 只能给一个".to_string());
+    }
+    if (args.undo || args.redo) && args.op.is_some() {
+        return Err("--op 与 --undo / --redo 只能给一个：一次只做一件事".to_string());
+    }
+    // **历史存哪由调用方说**：随手往工程旁边写一个隐藏文件，会在用户没要求的地方留下东西
+    // （本仓自己的 fixtures/ 第一个就中），而「看不出来不猜」是本仓一贯口径。
+    if (args.undo || args.redo) && args.history.is_none() {
+        return Err(
+            "--undo / --redo 要跟 --history <文件>：历史存哪得由你说，本工具不替你猜".to_string(),
+        );
     }
     Ok(args)
 }
@@ -1345,12 +1383,39 @@ fn danmaku_item_json(item: &dhampir_core::overlay::DanmakuTextItem) -> serde_jso
     value
 }
 
+/// 历史层的默认上限（**条**）。一条是一份整份快照，所以这个数别往上开。
+const HISTORY_CAP: usize = 64;
+
+/// 历史文件不在 = **空历史**，不是错误：第一次编辑时它本来就不存在。
+fn load_history(path: &str) -> Result<History, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text)
+            .map_err(|error| format!("历史文件 {path} 不是合法的历史：{error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(History::new(HISTORY_CAP))
+        }
+        Err(error) => Err(format!("读不了历史文件 {path}：{error}")),
+    }
+}
+
+fn save_history(path: &str, history: &History) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(history).map_err(|error| error.to_string())?;
+    std::fs::write(path, format!("{text}\n"))
+        .map_err(|error| format!("写不回历史文件 {path}：{error}"))
+}
+
 fn cmd_edit(args: &Args) -> Result<ExitCode, String> {
     let project = args.project.as_ref().ok_or("edit 要 --project <文件>")?;
-    let op_text = args.op.as_ref().ok_or("edit 要 --op <JSON>")?;
     let doc = match load_project_or_usage(project) {
         Ok(doc) => doc,
         Err(code) => return Ok(code),
+    };
+    if args.undo || args.redo {
+        return cmd_edit_history(args, project, doc);
+    }
+    let Some(op_text) = args.op.as_ref() else {
+        eprintln!("edit 要 --op <JSON>，或者 --undo / --redo（配 --history <文件>）");
+        return Ok(ExitCode::from(2));
     };
     let op: EditOp = match serde_json::from_str(op_text) {
         Ok(op) => op,
@@ -1361,6 +1426,18 @@ fn cmd_edit(args: &Args) -> Result<ExitCode, String> {
     };
     let outcome = apply_edit(&doc, REGISTRY, &op);
     if args.write && outcome.is_ok() {
+        // 顺序是**先历史、后工程**：反过来的话，历史写失败会留下
+        // 「编辑已经落盘、却退不回去」——而用户看到的是一条错误，会以为没改。
+        if let Some(history_path) = args.history.as_ref() {
+            let mut history = load_history(history_path)?;
+            let label = if outcome.summary.is_empty() {
+                "编辑".to_string()
+            } else {
+                outcome.summary.clone()
+            };
+            history.push(label, doc.clone());
+            save_history(history_path, &history)?;
+        }
         let text = serde_json::to_string_pretty(&outcome.doc).map_err(|error| error.to_string())?;
         std::fs::write(project, format!("{text}\n"))
             .map_err(|error| format!("写不回工程 {project}：{error}"))?;
@@ -1376,6 +1453,50 @@ fn cmd_edit(args: &Args) -> Result<ExitCode, String> {
     } else {
         ExitCode::from(2)
     })
+}
+
+/// 撤销 / 重做：从历史文件里退一步或进一步。
+///
+/// **不给 `--write` 就是干跑** —— 连历史文件都不碰（干跑不许在磁盘上留下任何痕迹）。
+fn cmd_edit_history(args: &Args, project: &str, doc: ProjectDoc) -> Result<ExitCode, String> {
+    let history_path = args
+        .history
+        .as_ref()
+        .expect("--undo / --redo 一定带 --history（解析阶段就拦了）");
+    let mut history = load_history(history_path)?;
+    let restored = if args.undo {
+        history.undo(doc)
+    } else {
+        history.redo(doc)
+    };
+    let Some(snapshot) = restored else {
+        let (code, message) = if args.undo {
+            ("nothing_to_undo", "没有可撤销的步骤")
+        } else {
+            ("nothing_to_redo", "没有可重做的步骤")
+        };
+        // **静默什么都不做比报错难查得多**：退 2 并说清是哪一边空了。
+        print_json(&serde_json::json!({
+            "ok": false,
+            "summary": "",
+            "written": false,
+            "issues": [{ "code": code, "path": "history", "message": message }],
+        }))?;
+        return Ok(ExitCode::from(2));
+    };
+    if args.write {
+        save_history(history_path, &history)?;
+        let text = serde_json::to_string_pretty(&snapshot.doc).map_err(|error| error.to_string())?;
+        std::fs::write(project, format!("{text}\n"))
+            .map_err(|error| format!("写不回工程 {project}：{error}"))?;
+    }
+    print_json(&serde_json::json!({
+        "ok": true,
+        "summary": format!("{}：{}", if args.undo { "撤销" } else { "重做" }, snapshot.label),
+        "written": args.write,
+        "issues": [],
+    }))?;
+    Ok(ExitCode::SUCCESS)
 }
 
 fn main() -> ExitCode {
@@ -1473,11 +1594,52 @@ mod tests {
     fn 带值选项表里每一条都真的被处理() {
         // 表里列了却不处理的选项会落到 other 分支报错 —— 而它已经在表里，
         // 说明有人加了选项却没写分支。这条把它变成红。
+        //
+        // 用 `edit` 探是因为有几个选项**只有某个子命令认**（--history 归 edit、
+        // --subtitle-out 归 render），拿 `probe` 探会把「限制」误报成「没处理」。
         for flag in KNOWN_VALUE_FLAGS {
-            let parsed = parse(&argv(&["probe", flag, "1"]))
+            let parsed = parse(&argv(&["edit", flag, "1"]))
                 .unwrap_or_else(|error| panic!("表里的选项 {flag} 解析不过：{error}"));
-            assert_eq!(parsed.command, "probe");
+            assert_eq!(parsed.command, "edit");
         }
+    }
+
+    #[test]
+    fn 撤销重做那一组只有_edit_认() {
+        // 口径与侧挂那两条一样：别的子命令**静默收下就是参数被丢掉**。
+        for argv_line in [
+            vec!["render", "--undo", "--history", "h.json"],
+            vec!["frame", "--redo", "--history", "h.json"],
+            vec!["edit", "--undo", "--history", "h.json"],
+        ] {
+            let result = parse(&argv(&argv_line));
+            if argv_line[0] == "edit" {
+                assert!(result.is_ok(), "{argv_line:?} 应当合法");
+            } else {
+                let error = result.expect_err("非 edit 子命令要给错");
+                assert!(error.contains("只有 edit 认"), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn 撤销重做要带历史_且不许和_op_一起给() {
+        let error = parse(&argv(&["edit", "--undo"])).expect_err("没给 --history 要给错");
+        assert!(error.contains("--history"), "{error}");
+
+        let error = parse(&argv(&["edit", "--undo", "--history", "h.json", "--op", "{}"]))
+            .expect_err("--op 与 --undo 互斥");
+        assert!(error.contains("一次只做一件事"), "{error}");
+
+        let error = parse(&argv(&[
+            "edit",
+            "--undo",
+            "--redo",
+            "--history",
+            "h.json",
+        ]))
+        .expect_err("--undo 与 --redo 互斥");
+        assert!(error.contains("只能给一个"), "{error}");
     }
 
     #[test]

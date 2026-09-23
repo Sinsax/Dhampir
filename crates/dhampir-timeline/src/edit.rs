@@ -28,7 +28,7 @@
 use crate::layer::{Layer, source_frame_at};
 use crate::project::ProjectDoc;
 use crate::project::validate_project_doc;
-use crate::schema::{EffectSpec, Frame, Issue, TimebaseDto};
+use crate::schema::{Easing, EffectSpec, Frame, Issue, Keyframe, TimebaseDto};
 
 /// 一次编辑的结果。
 #[derive(Debug, Clone, PartialEq)]
@@ -276,10 +276,29 @@ pub fn trim(
     outcome
 }
 
+/// 剃刀插进切缝的那个键要继承的缓动。
+///
+/// 本仓的求值语义是**用相邻对里后一个键的缓动**插值（`curve::opacity_from`），
+/// 所以插进去的键继承的必须是**排序后第一个落在切点右侧的键**的缓动 ——
+/// 它顶替的正是它原本所在那一段的右端角色。切点之后没有键时，顶替的是末尾那一段，
+/// 缓动取最后一个键的。这一条不照抄的话左半段会漂（`plan/t4-design.md` 3.3 那行「49 落键」）。
+fn seam_easing(keys: &[Keyframe], cut: Frame) -> Easing {
+    keys.iter()
+        .filter(|key| key.frame >= cut)
+        .min_by_key(|key| key.frame)
+        .or_else(|| keys.iter().max_by_key(|key| key.frame))
+        .map(|key| key.easing)
+        .unwrap_or_default()
+}
+
 /// 剃刀：在某一帧把一个元素切成两个。
 ///
 /// **切点两侧的源帧必须连续** —— 右侧的 source_in 是"切点那一刻的素材帧号"，
 /// 直接抄左边的会让右半段跳回开头（画面上一眼看得出来，但只有真去看才发现）。
+///
+/// **关键帧**：两半各自补一个切缝上的键，好让拼接处的画面接得上。
+/// 承诺的边界见下面的注释与 `plan/t4-design.md` 3.3 —— 切缝两帧与两端点恒精确，
+/// 但不承诺逐帧精确。
 pub fn split(
     doc: &ProjectDoc,
     effects: &[EffectSpec],
@@ -304,20 +323,6 @@ pub fn split(
             summary: String::new(),
         };
     }
-    if !original.keyframes.is_empty() {
-        // 带关键帧时，切点两侧要各插一个"当时的值"才不跳变，而那需要插值曲线 ——
-        // 它现在只有一份实现，在 core 的求值里。**宁可明说做不到，也不悄悄切歪。**
-        return EditOutcome {
-            doc: doc.clone(),
-            issues: vec![Issue::new(
-                "split_across_keyframes",
-                "keyframes",
-                format!("元素 {layer_id} 带关键帧，剃刀会改变关键帧曲线；请先在关键帧处切开"),
-            )],
-            summary: String::new(),
-        };
-    }
-
     let mut candidate = doc.clone();
     let timebase = candidate.timeline.timebase.clone();
     let asset = original
@@ -366,6 +371,53 @@ pub fn split(
         .filter(|marker| marker.frame < local)
         .cloned()
         .collect();
+    // 关键帧：切缝两侧各补一个"当时的值"，好让拼接处的画面接得上。
+    //
+    // **承诺的边界**（见 `plan/t4-design.md` 3.3，数字是量出来的，写在用例里）：
+    // 左半段的 `local-1` 与右半段的 `local` 这两帧、以及元素两端，值**恒精确**；
+    // `linear` / `ease_in` 这类**幂律**缓动逐帧精确；`ease_out` / `ease_in_out`
+    // 不是幂律，半段内部有**有界**偏差。所以**不做**"逐帧精确"的承诺，
+    // 也**不做**"多插几个键把缓动拟合回来"——那会引入另一种误差，两头都比现在差。
+    //
+    // 没有关键帧时这段空转（`left` / `right` 已经从原来那份额外克隆过来，
+    // 关键帧本来就是空的），老路径的行为逐字节不变。
+    let keys = &original.keyframes;
+    if !keys.is_empty() {
+        let mut left_keys: Vec<Keyframe> = keys
+            .iter()
+            .filter(|key| key.frame < local)
+            .cloned()
+            .collect();
+        if !left_keys.iter().any(|key| key.frame == local - 1) {
+            left_keys.push(Keyframe {
+                frame: local - 1,
+                value: crate::curve::opacity_from(original.opacity, keys, local - 1),
+                easing: seam_easing(keys, local),
+            });
+        }
+        left_keys.sort_by_key(|key| key.frame);
+        left.keyframes = left_keys;
+
+        let mut right_keys: Vec<Keyframe> = keys
+            .iter()
+            .filter(|key| key.frame >= local)
+            .map(|key| {
+                // 整体左移 `local`：这样它们相对新起点仍是原来的相对位置。
+                let mut moved = *key;
+                moved.frame -= local;
+                moved
+            })
+            .collect();
+        if !right_keys.iter().any(|key| key.frame == 0) {
+            right_keys.push(Keyframe {
+                frame: 0,
+                value: crate::curve::opacity_from(original.opacity, keys, local),
+                easing: seam_easing(keys, local),
+            });
+        }
+        right_keys.sort_by_key(|key| key.frame);
+        right.keyframes = right_keys;
+    }
 
     let layers = &mut candidate.timeline.tracks[track_index].layers;
     layers[layer_index] = left;
@@ -719,16 +771,62 @@ mod tests {
     }
 
     #[test]
-    fn 剃刀不碰带关键帧的元素_并且明说为什么() {
-        let mut original = doc(tb(30, 1), vec![layer("c", 0, 30, Some(0))]);
-        original.timeline.tracks[0].layers[0].keyframes =
-            vec![Keyframe { frame: 0, value: 0.0, easing: Easing::Linear }];
+    fn 剃刀切带关键帧的元素_切缝两帧与端点精确() {
+        // 关键帧 0 处 0.25、100 处 1.0，缓动取 `ease_in_out` —— **非幂律**，最坏的那一种。
+        // 承诺三条：切缝两帧（左 49、右 0 也就是原 50）与两端点（原 0、原 100）的值
+        // == 原曲线在那几帧的值。半段内部的偏差是有界的，这里**不作断言**。
+        let mut original = doc(tb(30, 1), vec![layer("c", 0, 101, Some(0))]);
+        let keys = vec![
+            Keyframe { frame: 0, value: 0.25, easing: Easing::EaseInOut },
+            Keyframe { frame: 100, value: 1.0, easing: Easing::EaseInOut },
+        ];
+        original.timeline.tracks[0].layers[0].keyframes = keys.clone();
+        let opacity = original.timeline.tracks[0].layers[0].opacity;
+
+        let at = 50;
+        let outcome = split(&original, &[], "c", at);
+        assert!(outcome.is_ok(), "{:?}", outcome.issues);
+        let left = &outcome.doc.timeline.tracks[0].layers[0];
+        let right = &outcome.doc.timeline.tracks[0].layers[1];
+        assert_eq!((left.start, left.end), (0, at));
+        assert_eq!((right.start, right.end), (at, 101));
+        // 两半的关键帧落在自己的合法范围内这件事由 `commit` 的校验兜着 ——
+        // 越界会报 `keyframe_out_of_clip`、`is_ok()` 就不会成立。
+
+        // 比的是"每一半自己的曲线"与"原曲线在同一绝对帧上"。
+        // 只钉切缝与端点：这几帧的相等是**逐位**的（两边走的是同一个 `opacity_from`）。
+        for (half, offset, local_frames) in [
+            (left, 0, vec![0, at - 1]),
+            (right, at, vec![0, 100 - at]),
+        ] {
+            for local in local_frames {
+                let got = crate::curve::opacity_from(half.opacity, &half.keyframes, local);
+                let want = crate::curve::opacity_from(opacity, &keys, offset + local);
+                assert_eq!(got, want, "第 {local} 帧（原坐标 {}）", offset + local);
+            }
+        }
+    }
+
+    #[test]
+    fn 切点正好落在键上时右半段不再插一个重复的() {
+        let mut original = doc(tb(30, 1), vec![layer("c", 0, 21, Some(0))]);
+        original.timeline.tracks[0].layers[0].keyframes = vec![
+            Keyframe { frame: 0, value: 0.0, easing: Easing::Linear },
+            Keyframe { frame: 10, value: 1.0, easing: Easing::Linear },
+            Keyframe { frame: 20, value: 0.5, easing: Easing::Linear },
+        ];
         let outcome = split(&original, &[], "c", 10);
-        assert!(!outcome.is_ok());
-        assert!(outcome
-            .issues
-            .iter()
-            .any(|issue| issue.code == "split_across_keyframes"));
+        assert!(outcome.is_ok(), "{:?}", outcome.issues);
+        // 右半段：原来的 frame 10 左移成 frame 0 —— 它本身就是切缝上的键，别插重复的。
+        let right = &outcome.doc.timeline.tracks[0].layers[1];
+        assert_eq!(right.keyframes.len(), 2);
+        assert_eq!((right.keyframes[0].frame, right.keyframes[0].value), (0, 1.0));
+        assert_eq!(right.keyframes[1].frame, 10);
+        // 左半段：保留 frame 0，再补一个 frame 9（切缝）。
+        let left = &outcome.doc.timeline.tracks[0].layers[0];
+        assert_eq!(left.keyframes.len(), 2);
+        assert_eq!(left.keyframes[0].frame, 0);
+        assert_eq!(left.keyframes[1].frame, 9);
     }
 
     #[test]
