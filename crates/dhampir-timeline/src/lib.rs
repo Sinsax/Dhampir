@@ -30,6 +30,9 @@ pub mod golden;
 // 元素模型 v2。与 v1（schema 模块）**并存**：v1 保持可用，切换是下一步。
 // 这样每个提交都是绿的，而不是把仓库停在「改了一半」的状态。
 // 同样建立在 serde 上，所以跟 schema 一起按 feature 门控。
+// PR 式编辑操作。**业务规则只在这一份**：CLI 与预览都调它。
+#[cfg(feature = "serde")]
+pub mod edit;
 #[cfg(feature = "serde")]
 pub mod host_api;
 #[cfg(feature = "serde")]

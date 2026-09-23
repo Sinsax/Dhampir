@@ -362,6 +362,48 @@ pub fn dhampir_project_open(json: &str) -> String {
     host_api::to_json(&host_api::OpenResult::from_doc_issues(&issues))
 }
 
+/// 执行一次编辑操作。**与 CLI 走同一份实现**（dhampir_core::timeline::edit）。
+///
+/// 返回 {ok, summary, issues}；成功时新工程会写回宿主，
+/// 前端随后调 dhampir_project_doc 拿规范化的那一份。
+///
+/// 规则不在这里：这一层只是通道。把剪辑规则写进 wasm 导出或前端，
+/// 就会出现"CLI 与浏览器对同一次操作结果不同"，而那是这个项目最贵的那条不变量。
+#[wasm_bindgen]
+pub fn dhampir_project_edit(op_json: &str) -> String {
+    use dhampir_core::timeline::schema::Issue;
+    let op: dhampir_core::timeline::edit::EditOp = match serde_json::from_str(op_json) {
+        Ok(op) => op,
+        Err(error) => {
+            return host_api::to_json(&serde_json::json!({
+                "ok": false,
+                "summary": "",
+                "issues": [Issue::new("bad_op", "op", format!("不认识的编辑操作：{error}"))],
+            }))
+        }
+    };
+    // **先把当前工程克隆出来再改。** PROJECT 是 RefCell：一边 borrow 一边 borrow_mut
+    // 会直接 panic，而那句话在 wasm 里就是一个 unreachable（整页死）。
+    let current = PROJECT.with(|slot| slot.borrow().clone());
+    let Some(doc) = current else {
+        return host_api::to_json(&serde_json::json!({
+            "ok": false,
+            "summary": "",
+            "issues": [Issue::new("no_project", "project", "还没有载入通过校验的工程".to_string())],
+        }));
+    };
+    let outcome = dhampir_core::timeline::edit::apply(&doc, dhampir_core::effects::REGISTRY, &op);
+    if outcome.is_ok() {
+        // **成了才写回。** 没成就让宿主里那份保持原样 —— 半改状态比失败更难查。
+        PROJECT.with(|slot| *slot.borrow_mut() = Some(outcome.doc.clone()));
+    }
+    host_api::to_json(&serde_json::json!({
+        "ok": outcome.is_ok(),
+        "summary": outcome.summary,
+        "issues": outcome.issues,
+    }))
+}
+
 /// 当前工程的**工程文件本体**（壳 + 契约）。
 ///
 /// 前端要它有三件事：按资产表解析素材地址、读 render_hints 作为出片尺寸、

@@ -253,6 +253,8 @@ console.log('→ ' + url);
 if (backendUrl !== null) console.log('  后端：' + backendUrl + '（页面用 backend=' + backendMode + '）');
 
 let pageMarks = null;
+/** --exec 在页面里的执行结果（**要在杀掉浏览器之前拿到**）。 */
+let execResult = null;
 
 if (mode === 'serve') {
   console.log('（手工看：打开上面那个 URL。Ctrl+C 结束；带了 --local/--remote 时后端也已起来）');
@@ -311,6 +313,29 @@ if (mode === 'serve') {
       if (state.pageErrors.some((text) => text.includes('启动失败'))) break;
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
+    // --exec **必须在杀掉浏览器之前跑** —— 它要连页面的调试端口。
+    // （第一次写的时候放在报告那一段，那时 Chrome 已经没了，拿到的是 fetch failed。）
+    const script = valueOf('--exec', null);
+    if (script !== null && pageMarks !== null && pageMarks.ready === true) {
+      try {
+        const targets = await (await fetch('http://127.0.0.1:' + debugPort + '/json/list')).json();
+        const page = targets.find((target) => target.type === 'page');
+        if (page === undefined) {
+          execResult = null;
+        } else {
+          // **两步走**：先让页面把结果存到 window 上，再读回来。
+          // 一步到位（awaitPromise + returnByValue）在本机 Chrome 上给回的是 {}，
+          // 而那看起来像"表达式没返回"—— 诊断工具不该有这种歧义。
+          await cdpEvaluate(
+            page.webSocketDebuggerUrl,
+            '(async () => { window.__dshExec = await (' + script + '); return 1; })()'
+          );
+          execResult = await cdpEvaluate(page.webSocketDebuggerUrl, 'window.__dshExec');
+        }
+      } catch (error) {
+        execResult = '执行失败：' + String(error && error.message ? error.message : error);
+      }
+    }
   } else {
     await finished;
   }
@@ -323,7 +348,26 @@ if (mode === 'serve') {
   // **报告要在杀掉后端之前跑完。** 产品路径的最后一步是下载产物，
   // 而后端一停就下载不了 —— 上一次就是这样拿到了 ECONNRESET。
   try {
-    if (readyOnly) reportReady(stderr);
+    if (readyOnly) {
+      // --exec：页面起来之后在页面里跑一段 JS 并把结果打出来。
+      // **这是"能验到界面"的唯一入口** —— 没有它，前端的编辑路径就只能靠肉眼看，
+      // 而"看起来点了有反应"证明不了 doc 真的变了。
+      if (execResult !== null) {
+        // **拿不到就直说。** 这个入口在本机 Chrome 上不稳定（awaitPromise 与
+        // returnByValue 一起用时给回的是 {}），而一个"返回空对象"的诊断工具
+        // 比没有更坏 —— 下一个人会以为"表达式没返回"，然后去查页面。
+        const empty = execResult === undefined
+          || (typeof execResult === 'object' && execResult !== null
+              && Object.keys(execResult).length === 0);
+        if (empty) {
+          console.log('页面执行结果: （拿不到 —— 这个入口在本机 Chrome 上不可靠，别拿它下结论）');
+        } else {
+          const text = typeof execResult === 'string' ? execResult : JSON.stringify(execResult);
+          console.log('页面执行结果: ' + text);
+        }
+      }
+      reportReady(stderr);
+    }
     else if (mode === 'probe') reportProbe();
     else if (mode === 'app') {
       if (backendMode === null) reportApp(stderr);
@@ -403,7 +447,9 @@ function cdpEvaluate(webSocketDebuggerUrl, expression, timeoutMs) {
       socket.send(JSON.stringify({
         id: 1,
         method: 'Runtime.evaluate',
-        params: { expression: expression, returnByValue: true },
+        // awaitPromise：页面里常要 await 一次 fetch / 一次编辑操作，
+        // 不开这个的话拿到的是一个 Promise 对象（序列化成 {}），看起来像"没返回"。
+        params: { expression: expression, returnByValue: true, awaitPromise: true },
       }));
     });
     socket.addEventListener('message', (event) => {

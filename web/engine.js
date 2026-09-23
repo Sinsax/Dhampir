@@ -90,6 +90,20 @@ export class Engine {
     return this.projectFile;
   }
 
+  /**
+   * 执行一次编辑操作。**规则在 Rust**（dhampir-timeline::edit）——
+   * 剃刀、修剪、波纹删除、序列设置都只有那一份实现，CLI 与这里调的是同一个函数。
+   *
+   * 失败时宿主里那份**一个字都没变**，所以这里也不刷新本地副本。
+   */
+  edit(op) {
+    const result = JSON.parse(this.mod.dhampir_project_edit(JSON.stringify(op)));
+    if (result.ok === true) {
+      this.projectFile = JSON.parse(this.mod.dhampir_project_doc());
+    }
+    return result;
+  }
+
   /** 重新校验当前工程但不改变它——编辑过程中用来显示问题。 */
   validate(project) {
     const json = typeof project === "string" ? project : JSON.stringify(project);

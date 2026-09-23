@@ -33,6 +33,7 @@ use std::process::{Command, ExitCode};
 use dhampir_core::compose;
 use dhampir_core::effects::REGISTRY;
 use dhampir_core::timeline::host_api::{AssetInfoView, SampleView, gop_slices};
+use dhampir_core::timeline::edit::{EditOp, apply as apply_edit};
 use dhampir_core::timeline::project::{
     Asset, AssetKind, ProjectDoc, asset_reference_counts, load_doc, validate_project_doc,
 };
@@ -57,6 +58,12 @@ const USAGE: &str = "\
                          不给 --write 就是**干跑**：只打印将要写入的那一条
   library --project <文件>
                          列出素材库：每个资产被引用了多少次
+  edit    --project <文件> --op <JSON> [--write]
+                         执行一次编辑操作（与浏览器走的是同一份实现）。
+                         形状是一个带 op 字段的 JSON 对象，六个操作：
+                         insert / trim / split / move / remove / set_sequence
+                         （split 的形状：op=split, layer=c, at=75）
+                         **不给 --write 就只在内存里做一遍并打印结果**
 
 公共选项：
   --asset-root <目录>   工程文件里 asset.uri 的相对根（默认 target/s3）
@@ -80,6 +87,7 @@ struct Args {
     asset_map: Option<String>,
     file: Option<String>,
     id: Option<String>,
+    op: Option<String>,
     write: bool,
     replace: bool,
     from: Option<i64>,
@@ -91,14 +99,15 @@ struct Args {
 }
 
 /// 认得的**带值**选项。不在表里的一律报错。
-const KNOWN_VALUE_FLAGS: [&str; 11] = [
-    "--project", "--asset", "--out", "--asset-root", "--asset-map", "--file", "--id",
+const KNOWN_VALUE_FLAGS: [&str; 12] = [
+    "--project", "--asset", "--out", "--asset-root", "--asset-map", "--file", "--id", "--op",
     "--from", "--to", "--width", "--height",
 ];
 /// 认得的**不带值**选项。
 const KNOWN_FLAGS: [&str; 5] = ["--frame", "--write", "--replace", "-h", "--help"];
 /// 认得的子命令。
-const COMMANDS: [&str; 7] = ["probe", "info", "gop", "frame", "render", "import", "library"];
+const COMMANDS: [&str; 8] =
+    ["probe", "info", "gop", "frame", "render", "import", "library", "edit"];
 
 /// 解析。**纯函数**，所以能脱离命令行单测。
 fn parse(argv: &[String]) -> Result<Args, String> {
@@ -146,6 +155,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--asset-map" => args.asset_map = Some(value),
             "--file" => args.file = Some(value),
             "--id" => args.id = Some(value),
+            "--op" => args.op = Some(value),
             "--from" => args.from = Some(parse_int(&token, &value)?),
             "--to" => args.to = Some(parse_int(&token, &value)?),
             "--frame" => args.frame = Some(parse_int(&token, &value)?),
@@ -809,6 +819,35 @@ fn cmd_library(args: &Args) -> Result<ExitCode, String> {
     }))
 }
 
+fn cmd_edit(args: &Args) -> Result<ExitCode, String> {
+    let project = args.project.as_ref().ok_or("edit 要 --project <文件>")?;
+    let op_text = args.op.as_ref().ok_or("edit 要 --op <JSON>")?;
+    let doc = match load_project_or_usage(project) {
+        Ok(doc) => doc,
+        Err(code) => return Ok(code),
+    };
+    let op: EditOp = match serde_json::from_str(op_text) {
+        Ok(op) => op,
+        Err(error) => {
+            eprintln!("--op 不是合法的编辑操作：{error}");
+            return Ok(ExitCode::from(2));
+        }
+    };
+    let outcome = apply_edit(&doc, REGISTRY, &op);
+    if args.write && outcome.is_ok() {
+        let text = serde_json::to_string_pretty(&outcome.doc).map_err(|error| error.to_string())?;
+        std::fs::write(project, format!("{text}\n"))
+            .map_err(|error| format!("写不回工程 {project}：{error}"))?;
+    }
+    print_json(&serde_json::json!({
+        "ok": outcome.is_ok(),
+        "summary": outcome.summary,
+        "written": args.write && outcome.is_ok(),
+        "issues": outcome.issues,
+    }))?;
+    Ok(if outcome.is_ok() { ExitCode::SUCCESS } else { ExitCode::from(2) })
+}
+
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let args = match parse(&argv) {
@@ -833,6 +872,7 @@ fn main() -> ExitCode {
         "render" => cmd_render(&args),
         "import" => cmd_import(&args),
         "library" => cmd_library(&args),
+        "edit" => cmd_edit(&args),
         other => Err(format!("不认识的子命令：{other}")),
     };
     match result {

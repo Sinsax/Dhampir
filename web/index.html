@@ -36,6 +36,13 @@
   button { background: #2f4a75; color: #e6e6e6; border: 1px solid #4f6da3; border-radius: 4px; padding: 5px 10px; cursor: pointer; }
   a#download { background: #2f6b3a; border: 1px solid #4a9a5a; border-radius: 4px; padding: 5px 10px; color: #e6e6e6; text-decoration: none; }
   .identity { font-size: 11px; color: #9aa0b0; margin-bottom: 8px; word-break: break-all; }
+  .lib { font-size: 11px; max-height: 120px; overflow: auto; }
+  .lib .row { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 2px 0; border-bottom: 1px solid #24262d; }
+  .lib .row button { padding: 1px 6px; font-size: 11px; }
+  .lib .unused { color: #e8c46a; }
+  #editBar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+  #editBar button { padding: 3px 7px; font-size: 11px; }
+  #editBar label { font-size: 11px; gap: 4px; margin: 0; }
   .hint { color: #c9c9c9; }
   .bad { color: #ff8f8f; }
   .warn { color: #e8c46a; }
@@ -65,7 +72,22 @@
     <span id="progressText"></span>
     <a id="download" hidden>下载成片</a>
   </div>
-  <aside id="inspector"><h3>元素属性</h3><div id="props">（未选中元素）</div></aside>
+  <aside id="inspector">
+    <h3>素材库</h3>
+    <!-- 引用次数由 Rust 算（dhampir library），这里只负责画出来 ——
+         在前端重数一遍就是第二份实现，而两份实现一定会漂。 -->
+    <div id="library" class="lib">（未连接后端）</div>
+    <h3>编辑</h3>
+    <div id="editBar">
+      <button id="splitBtn">剃刀（播放头）</button>
+      <button id="removeBtn">删除</button>
+      <button id="rippleBtn">波纹删除</button>
+      <label>序列帧率<input id="seqFps" type="number" min="1" value="30"></label>
+      <button id="applyFps">应用帧率</button>
+    </div>
+    <h3>元素属性</h3>
+    <div id="props">（未选中元素）</div>
+  </aside>
   <div id="issues"></div>
   <!-- 导出范围。app.js 把 first..end-1 写进 data-*；hidden 是因为 v1 不做范围选择 UI。 -->
   <div id="frameOnly" hidden data-from="0" data-to="0"></div>

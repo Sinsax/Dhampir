@@ -44,6 +44,8 @@ const state = {
   // 最近一条状态/结果（"已提交给后端出片…"这类）。**只留最新一条** ——
   // 它是状态栏，不是日志；越积越多只会把真正的问题挤下去。
   hint: "",
+  // 素材库（来自后端的 dhampir library）。null = 没连后端 / 还没取。
+  library: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -180,6 +182,97 @@ async function bindAllSources() {
     }
   }
   return loaded;
+}
+
+// --- 素材库 -----------------------------------------------------------------------
+
+/**
+ * 取素材库。**引用次数问后端**（它转调 Rust 的 library），不在前端重数 ——
+ * 「这个素材有没有被引用」只有一份实现，而两份实现一定会漂。
+ */
+async function loadLibrary() {
+  if (typeof backend.baseUrl !== "string" || backend.baseUrl.length === 0) return;
+  try {
+    const response = await fetch(backend.baseUrl + "/projects/" + encodeURIComponent(backend.projectId) + "/library");
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    state.library = await response.json();
+  } catch (error) {
+    state.library = null;
+    notice("取素材库失败：" + String(error && error.message ? error.message : error));
+  }
+}
+
+function renderLibrary() {
+  const host = $("library");
+  host.textContent = "";
+  if (state.library === null) {
+    host.textContent = "（未连接后端 —— 加素材请用 dhampir import 或后端的 POST /assets）";
+    return;
+  }
+  const unused = new Set(Array.isArray(state.library.unused) ? state.library.unused : []);
+  for (const asset of state.library.assets) {
+    const row = document.createElement("div");
+    row.className = "row";
+    const label = document.createElement("span");
+    if (unused.has(asset.id)) label.className = "unused";
+    label.textContent = asset.id + " · " + asset.kind + " · " + asset.references + " 次";
+    label.title = asset.uri;
+    const insert = document.createElement("button");
+    insert.textContent = "插入";
+    insert.addEventListener("click", () => insertFromLibrary(asset.id));
+    row.appendChild(label);
+    row.appendChild(insert);
+    host.appendChild(row);
+  }
+  if (state.library.assets.length === 0) host.textContent = "（库里什么都没有）";
+}
+
+/** 往选中的元素所在轨道（没有就第一条视频轨）的当前帧放一个引用。 */
+function targetTrackId() {
+  const selected = state.selected;
+  if (selected !== null && state.doc !== null) {
+    const track = state.doc.timeline.tracks[selected.trackIndex];
+    if (track !== undefined) return track.id;
+  }
+  const first = state.doc.timeline.tracks.find((track) => track.kind === "video");
+  return first === undefined ? null : first.id;
+}
+
+function insertFromLibrary(assetId) {
+  const track = targetTrackId();
+  if (track === null) {
+    notice("没有可用的视频轨道");
+    return;
+  }
+  runEdit({ op: "insert", track: track, asset: assetId, at: state.frame, source_in: 0, length: 60 },
+    "插入 " + assetId);
+}
+
+// --- 编辑操作 ---------------------------------------------------------------------
+//
+// **规则一个都不在这里。** 剃刀怎么切、修剪推多少源帧、序列改帧率要重算哪些数，
+// 全在 Rust 的 dhampir-timeline::edit 里 —— CLI 与这里调的是同一个函数。
+// 这一层只负责把点击翻成一次调用，然后把结果画出来。
+
+async function runEdit(op, label) {
+  const result = state.engine.edit(op);
+  if (result.ok !== true) {
+    // 宿主里那份**一个字都没变**，所以这里也不动本地副本。
+    state.issues = result.issues || [];
+    renderIssues();
+    log((label || "编辑") + " 没生效：" + state.issues.map((issue) => issue.code).join(", "));
+    return;
+  }
+  state.doc = state.engine.doc();
+  state.issues = [];
+  state.warnings = [];
+  renderTimeline();
+  renderInspector();
+  renderIssues();
+  await seekTo(state.frame);
+  log((label || "编辑") + "：" + result.summary);
+  await loadLibrary();
+  renderLibrary();
 }
 
 // --- 时间线视图 -------------------------------------------------------------------
@@ -621,6 +714,30 @@ async function main() {
   $("last").addEventListener("click", () => seekTo(end - 1));
   $("frame").addEventListener("input", (event) => seekTo(Number(event.target.value)));
   $("export").addEventListener("click", runExport);
+  $("splitBtn").addEventListener("click", () => {
+    const layer = selectedLayer();
+    if (layer === null) { log("先选中一个元素再剃刀"); return; }
+    runEdit({ op: "split", layer: layer.id, at: state.frame }, "剃刀").catch((error) => log(String(error)));
+  });
+  $("removeBtn").addEventListener("click", () => {
+    const layer = selectedLayer();
+    if (layer === null) { log("先选中一个元素再删除"); return; }
+    runEdit({ op: "remove", layer: layer.id, ripple: false }, "删除").catch((error) => log(String(error)));
+  });
+  $("rippleBtn").addEventListener("click", () => {
+    const layer = selectedLayer();
+    if (layer === null) { log("先选中一个元素再波纹删除"); return; }
+    runEdit({ op: "remove", layer: layer.id, ripple: true }, "波纹删除").catch((error) => log(String(error)));
+  });
+  $("applyFps").addEventListener("click", () => {
+    const fps = Number($("seqFps").value);
+    if (!(fps > 0)) { log("序列帧率要是一个正数"); return; }
+    runEdit({ op: "set_sequence", timebase: { num: fps, den: 1 }, width: 0, height: 0 }, "序列帧率")
+      .catch((error) => log(String(error)));
+  });
+  $("seqFps").value = String(state.doc.timeline.timebase.num / state.doc.timeline.timebase.den);
+  await loadLibrary();
+  renderLibrary();
   only.dataset.ready = "1";
   canvas.dataset.ready = "1";
   window.dhampirReady = true;
@@ -647,6 +764,9 @@ window.dhampir = {
   renderInspector: renderInspector,
   renderIssues: renderIssues,
   runExport: runExport,
+  // 编辑操作也挂出来：验收驱动靠它把"点一次剃刀"变成可复算的一步。
+  runEdit: runEdit,
+  loadLibrary: loadLibrary,
   select: (trackIndex, layerIndex) => {
     state.selected = { trackIndex: trackIndex, layerIndex: layerIndex };
     renderInspector();

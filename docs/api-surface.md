@@ -34,6 +34,7 @@
 - `dhampir_project_clear_bitmaps`
 - `dhampir_project_doc`
 - `dhampir_project_draw`
+- `dhampir_project_edit`
 - `dhampir_project_end_frame`
 - `dhampir_project_first_frame`
 - `dhampir_project_frame`
