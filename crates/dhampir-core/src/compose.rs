@@ -23,6 +23,7 @@
 //! 这是个取舍，不是疏漏——要做真正的重叠溶解，得让契约知道素材长度或允许重叠，
 //! 那是 v2 的事。冻帧至少是**两端都能一模一样算出来**的。
 
+use dhampir_timeline::layer::BlendMode;
 use dhampir_timeline::schema::{Clip, Effect, Frame, Keyframe, Project, TrackKind, Transform};
 
 /// 一个要画的图层。
@@ -39,6 +40,13 @@ pub struct Layer {
     /// 这一层是不是「为了转场把前一片段冻在末帧」造出来的。
     /// 渲染器不需要区别对待，但调试时要看得出来。
     pub frozen_for_transition: bool,
+    /// 混合模式。v1 只有 normal；v2 的元素自带它。
+    pub blend: BlendMode,
+    /// **这一层是不是调整图层**：没有素材、只有特效，要影响「已经画上去的全部内容」。
+    ///
+    /// 求值层**不做切段**（那是渲染器的事），但必须把位置信息给出去 ——
+    /// 渲染器按清单顺序扫，遇到 true 就切：先合成到中间纹理，跑这一层的特效，再往下继续。
+    pub is_adjustment: bool,
 }
 
 /// 某一帧上要画的东西。
@@ -141,6 +149,9 @@ pub fn evaluate(project: &Project, frame: Frame) -> Composite {
                     transform: previous.transform,
                     effects: previous.effects.clone(),
                     frozen_for_transition: true,
+                    // v1 的契约里没有这两个概念，所以是恒定的默认值。
+                    blend: BlendMode::Normal,
+                    is_adjustment: false,
                 });
             }
         }
@@ -153,6 +164,9 @@ pub fn evaluate(project: &Project, frame: Frame) -> Composite {
             transform: clip.transform,
             effects: clip.effects.clone(),
             frozen_for_transition: false,
+            // v1 的契约里没有这两个概念，所以是恒定的默认值。
+            blend: BlendMode::Normal,
+            is_adjustment: false,
         });
     }
 
@@ -353,5 +367,36 @@ mod tests {
     fn 求值只依赖帧号不看墙钟() {
         let p = project(vec![video(vec![clip("a", 0, 10)])]);
         assert_eq!(evaluate(&p, 3), evaluate(&p, 3));
+    }
+
+    #[test]
+    fn v1_求值出的层带恒定的默认混合与调整标记() {
+        use dhampir_timeline::schema::{Clip, Project, TimebaseDto, Track, TrackKind, Transform};
+        let project = Project {
+            schema: 1,
+            timebase: TimebaseDto { num: 30, den: 1 },
+            tracks: vec![Track {
+                id: "v1".to_string(),
+                kind: TrackKind::Video,
+                clips: vec![Clip {
+                    id: "c1".to_string(),
+                    source: "a.mp4".to_string(),
+                    source_in: 0,
+                    track_at: 0,
+                    duration: 10,
+                    transform: Transform { x: 0.0, y: 0.0, scale: 1.0, rotation_deg: 0.0 },
+                    opacity: 1.0,
+                    effects: Vec::new(),
+                    keyframes: Vec::new(),
+                    transition_in: None,
+                }],
+            }],
+        };
+        let composite = evaluate(&project, 0);
+        assert_eq!(composite.layers.len(), 1);
+        // v1 的契约里**没有**这两个概念。求值结果必须是恒定的默认值 ——
+        // 否则就是「从不存在的信息里编出了东西」，那种编造在两端会各自演化。
+        assert_eq!(composite.layers[0].blend, BlendMode::Normal);
+        assert!(!composite.layers[0].is_adjustment);
     }
 }

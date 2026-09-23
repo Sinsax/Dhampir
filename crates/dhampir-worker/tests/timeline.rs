@@ -49,6 +49,9 @@ fn layer(clip_id: &str, opacity: f32, scale: f32, effects: Vec<Effect>) -> Layer
         transform: Transform { x: 0.0, y: 0.0, scale, rotation_deg: 0.0 },
         effects,
         frozen_for_transition: false,
+        // 这个 fixture 测的是渲染，不是混合与调整图层 —— 用恒定默认值。
+        blend: dhampir_core::timeline::layer::BlendMode::Normal,
+        is_adjustment: false,
     }
 }
 
