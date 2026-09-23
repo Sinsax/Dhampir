@@ -66,6 +66,40 @@ pub struct TimelineRenderer {
     format: wgpu::TextureFormat,
 }
 
+/// 固定源解析器：永远返回同一张纹理。
+///
+/// 分段合成末尾要把结果从中间纹理搬到 target，而 compose_layers 的纹理来自解析器 ——
+/// 给它一个「永远是这张」的解析器，就得到一次搬运。
+struct FixedSource<'a> {
+    view: &'a wgpu::TextureView,
+    size: (u32, u32),
+}
+
+impl SourceResolver for FixedSource<'_> {
+    fn texture_for(
+        &mut self,
+        _source: &str,
+        _source_frame: i64,
+    ) -> Option<(wgpu::TextureView, (u32, u32))> {
+        Some((self.view.clone(), self.size))
+    }
+}
+
+/// 一次「原样搬运」用的图层：没有变换、完全不透明。
+fn identity_layer() -> crate::compose::Layer {
+    crate::compose::Layer {
+        clip_id: String::new(),
+        source: String::new(),
+        source_frame: 0,
+        opacity: 1.0,
+        transform: dhampir_timeline::schema::Transform { x: 0.0, y: 0.0, scale: 1.0, rotation_deg: 0.0 },
+        effects: Vec::new(),
+        frozen_for_transition: false,
+        blend: dhampir_timeline::layer::BlendMode::Normal,
+        is_adjustment: false,
+    }
+}
+
 impl TimelineRenderer {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         Self {
@@ -99,16 +133,147 @@ impl TimelineRenderer {
         resolver: &mut dyn SourceResolver,
         clear: wgpu::Color,
     ) -> usize {
-        self.compose_layers(
-            device,
-            queue,
-            encoder,
-            target,
-            target_size,
-            &composite.layers,
-            resolver,
-            Some(clear),
+        // **先看分段计划。** 没有调整图层就走原来那条单 pass 路（行为逐字节不变）；
+        // 有的话要「先合成一段 -> 对结果跑特效 -> 再继续」，那需要中间纹理。
+        let plan = plan_steps(&composite.layers);
+        if !plan.iter().any(|step| matches!(step, Step::Adjust { .. })) {
+            return self.compose_layers(
+                device,
+                queue,
+                encoder,
+                target,
+                target_size,
+                &composite.layers,
+                resolver,
+                Some(clear),
+            );
+        }
+        self.render_segmented(
+            device, queue, encoder, target, target_size, composite, resolver, clear, &plan,
         )
+    }
+
+    /// 分段合成：调整图层要求「先合成一段 -> 对结果跑特效 -> 再继续」。
+    ///
+    /// **纹理全部存进 Vec，用下标指代「当前底」** —— 不用引用。
+    /// 用引用的话，循环里新建的视图会与「当前底」的借用冲突，而绕开它需要
+    /// 泄漏或索引体操；存进 Vec 之后借用关系是自然的，代价只是多几张纹理。
+    /// **先要正确性，纹理池化留到后面。**
+    #[allow(clippy::too_many_arguments)]
+    fn render_segmented(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        target_size: (u32, u32),
+        composite: &Composite,
+        resolver: &mut dyn SourceResolver,
+        clear: wgpu::Color,
+        plan: &[Step],
+    ) -> usize {
+        let extent = wgpu::Extent3d {
+            width: target_size.0.max(1),
+            height: target_size.1.max(1),
+            depth_or_array_layers: 1,
+        };
+        let mut textures: Vec<wgpu::Texture> = Vec::new();
+        let mut views: Vec<wgpu::TextureView> = Vec::new();
+        // **写成显式传参的函数，不用闭包。**
+        // 闭包会在整个作用域内独占 views/textures 的可变借用，
+        // 而循环里还要读 views（拿当前底）—— 那样根本编译不过。
+        fn allocate(
+            device: &wgpu::Device,
+            format: wgpu::TextureFormat,
+            extent: wgpu::Extent3d,
+            label: &'static str,
+            textures: &mut Vec<wgpu::Texture>,
+            views: &mut Vec<wgpu::TextureView>,
+        ) -> usize {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: extent,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            views.push(texture.create_view(&wgpu::TextureViewDescriptor::default()));
+            textures.push(texture);
+            views.len() - 1
+        }
+
+        let mut current: Option<usize> = None;
+        let mut drawn = 0usize;
+
+        for step in plan {
+            match step {
+                Step::Draw(indices) => {
+                    let layers: Vec<crate::compose::Layer> = indices
+                        .iter()
+                        .map(|index| composite.layers[*index].clone())
+                        .collect();
+                    let dest = match current {
+                        Some(index) => index,
+                        None => allocate(device, self.format, extent, "dhampir segment first", &mut textures, &mut views),
+                    };
+                    let base = views[dest].clone();
+                    let fresh = current.is_none();
+                    drawn += self.compose_layers(
+                        device,
+                        queue,
+                        encoder,
+                        &base,
+                        target_size,
+                        &layers,
+                        resolver,
+                        if fresh { Some(clear) } else { None },
+                    );
+                    current = Some(dest);
+                }
+                Step::Adjust { effects, .. } => {
+                    let radius = blur_radius(effects);
+                    let Some(from) = current else { continue };
+                    if radius == 0 {
+                        continue;
+                    }
+                    // blur_separable 需要一张中间纹理与一张输出纹理（它自己是一横一纵两趟）。
+                    let middle = allocate(
+                        device, self.format, extent, "dhampir adjust middle", &mut textures, &mut views,
+                    );
+                    let out = allocate(
+                        device, self.format, extent, "dhampir adjust out", &mut textures, &mut views,
+                    );
+                    let source = views[from].clone();
+                    let mid = views[middle].clone();
+                    let to = views[out].clone();
+                    self.blur.blur_separable(
+                        device, queue, encoder, &source, &mid, &to, target_size, radius,
+                    );
+                    current = Some(out);
+                }
+            }
+        }
+
+        // **把结果落回 target。** 用现成的 compose_layers 加一个固定源解析器即可 ——
+        // 为一次搬运引入 blit 渲染器不值得。
+        let Some(result) = current else {
+            return 0;
+        };
+        let result_view = views[result].clone();
+        let mut fixed = FixedSource {
+            view: &result_view,
+            size: target_size,
+        };
+        let blit = [identity_layer()];
+        drawn += self.compose_layers(
+            device, queue, encoder, target, target_size, &blit, &mut fixed, Some(clear),
+        );
+        drop(textures);
+        drawn
     }
 
     /// 把这几层合成到 dest，返回**实际画了几层**。
