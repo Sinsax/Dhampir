@@ -9,12 +9,15 @@ license.workspace = true
 [dependencies]
 serde = { workspace = true, optional = true }
 schemars = { version = "1", optional = true }
+# 壳的 extensions 要装任意 JSON。core 本来就**直接**依赖 serde_json，
+# 所以这里不新增任何依赖暴露面。
+serde_json = { workspace = true, optional = true }
 
 [features]
 default = ["serde"]
 # `Timebase` 要能直接进出时间线 JSON（指导文档 §5.2 的 `"timebase": {"num":…,"den":…}`），
 # 所以 serde 是默认开的；但关掉它这个 crate 依然完整可用（零依赖）。
-serde = ["dep:serde"]
+serde = ["dep:serde", "dep:serde_json"]
 # JSON Schema 只给代码生成用，所以是可选的：
 # 依赖 timeline 的 crate（core / wasm / worker）不需要为一份 .d.ts 把 schemars 也编进去。
 json-schema = ["dep:schemars", "serde"]

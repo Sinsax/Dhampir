@@ -32,6 +32,9 @@ pub mod golden;
 // 同样建立在 serde 上，所以跟 schema 一起按 feature 门控。
 #[cfg(feature = "serde")]
 pub mod layer;
+// 工程文件（壳）：渲染契约的超集（契约 + 资产表 + 元信息 + 应用状态）。
+#[cfg(feature = "serde")]
+pub mod project;
 // schema 整个模块都建立在 serde 上（类型要能进 JSON），所以关掉 serde 就没它。
 #[cfg(feature = "serde")]
 pub mod schema;
