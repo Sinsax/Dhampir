@@ -101,10 +101,10 @@ impl TimelineRenderer {
         // 这正是本项目一以贯之的取舍：**明确失败优于静默降级。**
         let plan = plan_steps(&composite.layers);
         if plan.iter().any(|step| matches!(step, Step::Adjust { .. })) {
-            debug_assert!(
-                false,
-                "调整图层的分段合成还没实现；这条路径不该在测试里被走到"
-            );
+            // **不要用 debug_assert**：那会让这条路径在 debug 下 panic、在 release 下返回 0，
+            // 同一条路径两种行为。而 wasm-pack --dev 就是 debug 构建 ——
+            // 于是浏览器里会直接崩掉一整个模块，而不是「这一帧没画」。
+            // 统一返回 0：调用方看得见（画面空），且两种构建下一致。
             return 0;
         }
 

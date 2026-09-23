@@ -204,3 +204,57 @@ fn 源解析不出来时跳过该层而不是整帧失败() {
     ctx.queue.submit([encoder.finish()]);
     // 不 panic、能提交，就算过：这条钉的是"少一层素材不该让整帧失败"。
 }
+
+
+#[test]
+#[ignore = "需要真 GPU；跑：cargo test -p dhampir-worker --test timeline -- --ignored"]
+fn 遇到调整图层时整帧不画而不是悄悄画错() {
+    // **这条钉的是「明确失败优于静默降级」。**
+    //
+    // 调整图层要求「先合成一部分 -> 对结果跑特效 -> 再继续」，
+    // 那需要中间纹理与多次 pass，而渲染器现在只有一次 pass。
+    // 所以它必须**整帧不画并返回 0**，而不是把调整图层当普通层画上去 ——
+    // 后者会得到一张「特效没生效、但看不出哪里不对」的图。
+    //
+    // 为什么现在才加：上一轮加了这条拒绝路径，**却没有任何用例覆盖它**
+    // （既有 GPU 用例的图层清单里都没有调整图层），
+    // 所以那条路径从未被真正执行过。写了不等于跑过。
+    struct Nothing;
+    impl SourceResolver for Nothing {
+        fn texture_for(
+            &mut self,
+            _source: &str,
+            _source_frame: i64,
+        ) -> Option<(wgpu::TextureView, (u32, u32))> {
+            None
+        }
+    }
+
+    let (ctx, _init) = open_leg(NATIVE_BACKENDS).expect("拿不到 GPU 上下文");
+    let target = ctx.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("dhampir timeline test adjustment"),
+        size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+
+    // 调整图层：没有素材、只有特效。这里用 is_adjustment 直接标出来。
+    let mut adjustment = layer("adj", 1.0, 1.0, Vec::new());
+    adjustment.is_adjustment = true;
+    adjustment.source = String::new();
+
+    let composite = Composite { frame: 0, layers: vec![adjustment] };
+    let renderer = TimelineRenderer::new(&ctx.device, FORMAT);
+    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    let drawn = renderer.render_frame(
+        &ctx.device, &ctx.queue, &mut encoder,
+        &target.create_view(&wgpu::TextureViewDescriptor::default()),
+        (SIZE, SIZE), &composite, &mut Nothing, wgpu::Color::TRANSPARENT,
+    );
+    assert_eq!(drawn, 0, "分段合成还没实现，就该一帧都不画，而不是画出一张看不出错的图");
+    ctx.queue.submit([encoder.finish()]);
+}
