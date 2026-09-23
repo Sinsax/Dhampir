@@ -26,9 +26,15 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 // 只看**应当**是文本的文件。二进制产物（PNG/wasm/视频）不在管辖范围内——
 // 对它们说"不许有 0x0D"是无意义的。
+//
+// `.srt` / `.ass` 是**判定输入**（fixtures/ 里的字幕与弹幕素材）：两端都直接解析它们，
+// 一行 CRLF 就能让「同一份素材两端给出同一张表」这件事在别的平台上换个结论 ——
+// 与 golden 文件同理。T3.4 加 `fixtures/sample-subtitle.ass` 时才发现这两个扩展名
+// 漏在名单外（文件本身是干净的，但守卫**没在看**）。
 const TEXT_EXTENSIONS = new Set([
   '.rs', '.toml', '.md', '.json', '.mjs', '.js', '.cjs', '.ps1', '.sh',
   '.txt', '.yml', '.yaml', '.html', '.css', '.ts', '.tsx', '.svg', '.gitignore',
+  '.srt', '.ass', '.ssa', '.vtt',
 ]);
 
 // 没有扩展名但仍然是文本的约定文件。
@@ -213,6 +219,22 @@ function runSelfTest() {
     if (dirtyFiles.length !== 1 || dirtyOffenders.length !== 1 || dirtyVerdict.exitCode !== 1) {
       failures.push(
         `自检「磁盘上真放一个 CRLF 文件」期望 1 个文件 / 1 个违规 / 退出码 1，实际 ${dirtyFiles.length} 个 / ${dirtyOffenders.length} 个 / 退出码 ${dirtyVerdict.exitCode}`,
+      );
+    }
+
+    // `.srt` / `.ass` 是判定输入（T3.4 加弹幕素材时才发现它们漏在名单外）。上面那条
+    // 用的是 `.txt`，对扩展名单本身什么都没说——名单再被删掉一次，仍然一路全绿，直到
+    // 哪天真去写一个带 CRLF 的素材。这条把「这几个扩展名真的在名单里」钉在自检上。
+    const subtitleRoot = join(dir, 'subtitle-root');
+    mkdirSync(subtitleRoot);
+    writeFileSync(join(subtitleRoot, 'probe.ass'), 'a\r\n');
+    writeFileSync(join(subtitleRoot, 'probe.srt'), 'a\r\n');
+    const subtitleFiles = collectFiles(subtitleRoot, []);
+    const subtitleOffenders = subtitleFiles.filter((file) => inspectBytes(readFileSync(file)).length > 0);
+    diskCases += 1;
+    if (subtitleFiles.length !== 2 || subtitleOffenders.length !== 2) {
+      failures.push(
+        `自检「.ass / .srt 素材在名单里」期望收集到 2 个文件 / 2 个违规，实际 ${subtitleFiles.length} 个 / ${subtitleOffenders.length} 个`,
       );
     }
   } finally {

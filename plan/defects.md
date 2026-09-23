@@ -49,11 +49,11 @@
   验收: 同素材画中画的工程能出片；纹理池按 (source, frame) 键复用
   证据: -
 
-- [D5] status=todo phase=T2
+- [D5] status=done phase=T3
   症状: 字幕与弹幕存得下、查得出、画不出（解析器与契约校验都在，渲染阶段不存在）
-  根因: crates/dhampir-timeline/src/subtitle.rs:1
+  根因: crates/dhampir-timeline/src/subtitle.rs:1 crates/dhampir-timeline/src/danmaku.rs:1
   验收: 带字工程两端结构（项数/文本/归一化矩形）一致且容差写死；无文字工程逐字节不变
-  证据: -
+  证据: plan/t2-evidence.md plan/t3-evidence.md
 
 - [D6] status=todo phase=T4
   症状: 不能撤销/重做，编辑不可逆

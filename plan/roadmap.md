@@ -128,7 +128,8 @@ scripts/check-preview-parity.mjs 与它的 12 条自检断言全绿。
   走 T0.4 的判定通道验证（不再依赖 --exec）。
 - T2.6（D5）侧挂导出 --subtitle-out：**burned-in 与 sidecar 两种都要** —— **已完成**（T2.7 的一部分）：
   burned-in 仍是 `--font-file` 那条路，sidecar 是 `--subtitle-out` 加可选 `--format srt|ass`，
-  四条 CLI 判据与五个真实变异见 t2-evidence.md。**弹幕不在这一段**（那是 T3，D5 因此还没收口）。
+  四条 CLI 判据与五个真实变异见 t2-evidence.md。**弹幕不在这一段**（那是 T3 —— 弹幕接上后
+  D5 在 T3 收口，见下面的 T3 段；T2 当时只到「字幕」这一半）。
 - T2.7（A4）HOST_API_VERSION 从 1 升到 2（FrameResult 加字段）—— **已完成**：`FrameResult.overlay`
   （形状在 `crates/dhampir-timeline/src/host_api.rs`，与 CLI / wasm 逐字段同名；None 时**不出现该键**），
   `dhampir_host_api_version()` 加 `docs/host-api.md`，两条都由 `scripts/api-surface.mjs` 钉住。
@@ -141,12 +142,31 @@ scripts/check-preview-parity.mjs 与它的 12 条自检断言全绿。
 
 ## T3 弹幕（P7.5） → 依赖 T2
 
-- T3.1（D5）dhampir-timeline::danmaku：parse_ass_danmaku 加**共享的 layout() 泳道分配**。
-  分配必须是确定性的；泳道耗尽时**丢弃并计数**，不许叠。
-- T3.2（A4）求值进共享 overlay；to_ass 带 \move。
-- T3.3 与 T2.2 同一条规矩：结构与归一化矩形一致，字形像素允许不同。
+**状态：已完成（T3 收口）**。证据在 [t3-evidence.md](./t3-evidence.md)；**D5 已转 done**
+（它的两条验收这一轮都核过了：带字工程两端结构一致且容差写死 —— T2.5 的字幕那半加 T3.4 的
+弹幕那半；无文字工程逐字节不变 —— 22552 字节 / SHA256 42E6195C…D21A6 重跑仍一致）。
 
-**验收**：同一输入在两端给出**相同**的 (text, 泳道, 进入/离开帧)；丢弃数一致。
+- T3.1（D5）dhampir-timeline::danmaku：parse_ass_danmaku 加**共享的 layout() 泳道分配**。
+  分配必须是确定性的；泳道耗尽时**丢弃并计数**，不许叠。 —— **已完成**：
+  `DanmakuItem{text,lane,enter,exit}`（**矩形不进结构**，一帧一个答案），
+  `layout()` 顺序即优先级、`上一条 exit < 这一条 enter` 才复用泳道（闭区间边界不许共用）、
+  排不下与 `lanes == 0` 都丢弃并计数、坏时间基丢弃并计数；`rect_at` 进入帧 x=1、
+  离开帧 x=-width、中间线性（线性是**可复算**的选择）；在屏时长取自 `duration_ms`，
+  素材 ASS 的 `End` 不参与。
+- T3.2（A4）求值进共享 overlay；to_ass 带 \move。 —— **已完成**：`evaluate_overlay` 加
+  Danmaku 轨循环，`TextOverlay.danmaku` + `dropped_danmaku`，None 判据改为**两半都空**；
+  `to_ass_danmaku` 落点复用 `rect_at`（同一份数学）。宿主 API 因此升到 **3**
+  （`OverlayView.danmaku` / `dropped_danmaku`，T3.2c）。
+- T3.3 与 T2.2 同一条规矩：结构与归一化矩形一致，字形像素允许不同。 —— **已完成**：
+  CLI `subtitle` 加 `danmaku`/`dropped_danmaku` 两键（T3.3b）；wasm 宿主清单/位图两份、
+  弹幕**不做切线判失败**（`judge_clip` 是显式入参，T3.3c）。
+
+**验收（已达成，T3 收口）**：同一输入在两端给出**相同**的 (text, 泳道, 进入/离开帧)；
+丢弃数一致。落点是 `--verdict subtitle` 那条既有通道（不新开）：五个帧
+0/60/120/180/240 逐条比 `(text, lane, enter, exit)` 与 `dropped_danmaku`，
+矩形按 `SUBTITLE_TOLERANCE = 1e-6` 比 —— 实测 `弹幕结构一致（7 条·泳道/进入/离开帧 +
+丢弃 1 条）`。另加两条**非空白**判据（工程有弹幕轨时，一条都没见到 / 一帧都没丢过 → 红），
+三个真实反例都真的红了（泳道改一格、`lanes: 5`、`lanes: 0`），还原后逐字节相同。
 
 ---
 
