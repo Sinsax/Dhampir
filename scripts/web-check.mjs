@@ -160,7 +160,9 @@ if (mode === 'app' && argv.includes('--local')) {
   }
 
 }
-const suffix = mode === 'probe' ? '/probe.html' : mode === 'app' ? (argv.includes('--local') ? '/?export=1&backend=local&port=' + localPort + '&project=sample-project' : '/?export=1') : '/';
+const canvasIndex = argv.indexOf('--canvas');
+const canvasArg = canvasIndex >= 0 ? '&canvas=' + argv[canvasIndex + 1] : '';
+const suffix = mode === 'probe' ? '/probe.html' : mode === 'app' ? (argv.includes('--local') ? '/?export=1&backend=local&port=' + localPort + '&project=sample-project' + canvasArg : '/?export=1' + canvasArg) : '/';
 process.on('exit', () => { if (localBackend) localBackend.kill(); });
 const url = 'http://127.0.0.1:' + port + suffix;
 console.log('→ ' + url);

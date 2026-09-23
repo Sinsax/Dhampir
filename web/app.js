@@ -283,6 +283,19 @@ async function main() {
   state.project = JSON.parse(JSON.stringify(engine.project));
 
   const canvas = $("preview");
+  // 画布尺寸是**宿主参数**，不是契约字段 —— 契约里故意没有分辨率，
+  // 因为「预览尺寸归宿主」。双端比对要求两边尺寸一致，
+  // 所以宿主必须能通过参数把它们对齐（此前 worker 硬编码 320x180、
+  // 画布 640x360，两边从来就不可比）。
+  const requestedSize = new URLSearchParams(location.search).get("canvas");
+  if (requestedSize) {
+    const parts = requestedSize.split("x").map(Number);
+    if (parts.length === 2 && parts[0] > 0 && parts[1] > 0) {
+      canvas.width = parts[0];
+      canvas.height = parts[1];
+      mark("画布已设为 " + parts[0] + "x" + parts[1]);
+    }
+  }
   await engine.attach("preview");
   mark("已上屏到 canvas");
   await bindAllSources(engine, state.project, await backend.mediaUrlFor("a.mp4"));
