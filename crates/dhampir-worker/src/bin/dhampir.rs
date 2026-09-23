@@ -51,6 +51,8 @@ const USAGE: &str = "\
 
 公共选项：
   --asset-root <目录>   工程文件里 asset.uri 的相对根（默认 target/s3）
+  --asset-map <文件>     兜底资产登记表（形状：assets.<id>.file）。
+                         **只补工程文件没登记的 id**：工程文件里的位置永远优先
   --width <像素>        输出宽度（默认取工程文件里的 render_hints.width）
   --height <像素>       输出高度（默认取工程文件里的 render_hints.height）
   -h, --help            显示本帮助
@@ -66,6 +68,7 @@ struct Args {
     asset: Option<String>,
     out: Option<String>,
     asset_root: Option<String>,
+    asset_map: Option<String>,
     from: Option<i64>,
     to: Option<i64>,
     frame: Option<i64>,
@@ -75,8 +78,9 @@ struct Args {
 }
 
 /// 认得的**带值**选项。不在表里的一律报错。
-const KNOWN_VALUE_FLAGS: [&str; 8] = [
-    "--project", "--asset", "--out", "--asset-root", "--from", "--to", "--width", "--height",
+const KNOWN_VALUE_FLAGS: [&str; 9] = [
+    "--project", "--asset", "--out", "--asset-root", "--asset-map", "--from", "--to", "--width",
+    "--height",
 ];
 /// 认得的**不带值**选项。
 const KNOWN_FLAGS: [&str; 3] = ["--frame", "-h", "--help"];
@@ -117,6 +121,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--asset" => args.asset = Some(value),
             "--out" => args.out = Some(value),
             "--asset-root" => args.asset_root = Some(value),
+            "--asset-map" => args.asset_map = Some(value),
             "--from" => args.from = Some(parse_int(&token, &value)?),
             "--to" => args.to = Some(parse_int(&token, &value)?),
             "--frame" => args.frame = Some(parse_int(&token, &value)?),
@@ -348,8 +353,39 @@ fn load_project_or_usage(path: &str) -> Result<ProjectDoc, ExitCode> {
     }
 }
 
+/// 读兜底资产登记表。形状与 fixtures/local-assets.json 一致：
+/// {"assets":{"<id>":{"file":"...","kind":"..."}}}，file 相对 asset_root 解析。
+pub fn load_asset_map(path: &str, asset_root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("读不了兜底登记表 {path}：{error}"))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|error| format!("兜底登记表不是 JSON：{error}"))?;
+    let table = value
+        .get("assets")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| format!("兜底登记表 {path} 里没有 assets 对象"))?;
+    let mut rows = Vec::new();
+    for (id, entry) in table {
+        let Some(file) = entry.get("file").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if file.is_empty() {
+            continue;
+        }
+        let raw = Path::new(file);
+        rows.push((
+            id.clone(),
+            if raw.is_absolute() { raw.to_path_buf() } else { asset_root.join(raw) },
+        ));
+    }
+    Ok(rows)
+}
+
 /// 素材表：id -> 文件。**位置由宿主解释**，所以相对 uri 要挂到 --asset-root 上。
-fn build_sources(doc: &ProjectDoc, asset_root: &Path) -> SourceTable {
+///
+/// 优先级：**工程文件的 assets 先来，兜底表只补缺**。
+/// 反过来的话，兜底表会悄悄盖掉工程文件里写的真实位置，而用户看不到。
+fn build_sources(doc: &ProjectDoc, asset_root: &Path, fallback: &[(String, PathBuf)]) -> SourceTable {
     let mut table = SourceTable::new();
     for asset in &doc.assets {
         if asset.uri.is_empty() {
@@ -363,7 +399,21 @@ fn build_sources(doc: &ProjectDoc, asset_root: &Path) -> SourceTable {
         };
         table.insert(asset.id.clone(), file);
     }
+    for (id, file) in fallback {
+        if table.file_for(id).is_none() {
+            table.insert(id.clone(), file.clone());
+        }
+    }
     table
+}
+
+/// 解析兜底表；给了路径但读不了就**报错而不是忽略** ——
+/// 静默忽略会让"兜底没生效"和"兜底不需要"看起来一样。
+fn resolve_fallback(args: &Args, asset_root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
+    match args.asset_map.as_ref() {
+        None => Ok(Vec::new()),
+        Some(path) => load_asset_map(path, asset_root),
+    }
 }
 
 /// 输出尺寸：命令行 > 工程文件里的 render_hints。
@@ -481,7 +531,7 @@ fn cmd_frame(args: &Args) -> Result<ExitCode, String> {
     }
     let (width, height) = resolve_size(args, &doc);
     let root = PathBuf::from(args.asset_root.clone().unwrap_or_else(|| "target/s3".to_string()));
-    let sources = build_sources(&doc, &root);
+    let sources = build_sources(&doc, &root, &resolve_fallback(args, &root)?);
 
     // 文件名固定按帧号，调用方给的是**目录** —— 这样同一帧重跑一定落在同一个路径上。
     let output = PathBuf::from(out).join("frame.png");
@@ -528,7 +578,7 @@ fn cmd_render(args: &Args) -> Result<ExitCode, String> {
     let (from, to) = resolve_range(args, &doc)?;
     let (width, height) = resolve_size(args, &doc);
     let root = PathBuf::from(args.asset_root.clone().unwrap_or_else(|| "target/s3".to_string()));
-    let sources = build_sources(&doc, &root);
+    let sources = build_sources(&doc, &root, &resolve_fallback(args, &root)?);
     let output = PathBuf::from(out);
 
     let total = (to - from + 1) as usize;
@@ -755,7 +805,7 @@ mod tests {
                           {"id":"c.mp4","kind":"video","uri":""}]}"#,
         )
         .expect("能载入");
-        let table = build_sources(&doc, Path::new("target/s3"));
+        let table = build_sources(&doc, Path::new("target/s3"), &[]);
         // 相对 uri 挂到根上。
         assert_eq!(
             table.file_for("a.mp4").map(|path| path.to_string_lossy().replace('\\', "/")),
@@ -768,6 +818,29 @@ mod tests {
         );
         // uri 为空的不进表 —— 位置未知就不假装知道。
         assert!(table.file_for("c.mp4").is_none());
+    }
+
+    #[test]
+    fn 兜底登记表只补工程文件没登记的_id() {
+        let doc = load_doc(
+            r#"{"project_schema":1,"timeline":{"schema":2,"timebase":{"num":30,"den":1},"tracks":[]},
+                "assets":[{"id":"a.mp4","kind":"video","uri":"real.mp4"}]}"#,
+        )
+        .expect("能载入");
+        let fallback = vec![
+            // 同一个 id：工程文件里的位置必须赢。
+            ("a.mp4".to_string(), PathBuf::from("target/s3/wrong.mp4")),
+            ("b.mp4".to_string(), PathBuf::from("target/s3/fallback.mp4")),
+        ];
+        let table = build_sources(&doc, Path::new("target/s3"), &fallback);
+        assert_eq!(
+            table.file_for("a.mp4").map(|p| p.to_string_lossy().replace('\\', "/")),
+            Some("target/s3/real.mp4".to_string())
+        );
+        assert_eq!(
+            table.file_for("b.mp4").map(|p| p.to_string_lossy().replace('\\', "/")),
+            Some("target/s3/fallback.mp4".to_string())
+        );
     }
 
     #[test]
