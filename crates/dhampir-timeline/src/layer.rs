@@ -28,7 +28,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{Effect, Frame, Keyframe, Project, TimebaseDto, TrackKind, TransitionSpec};
+use crate::schema::{
+    Effect, EffectSpec, Frame, Issue, Keyframe, Project, TimebaseDto, TrackKind, TransitionSpec,
+};
 
 /// v2 契约版本。
 pub const LAYER_SCHEMA_VERSION: u32 = 2;
@@ -429,5 +431,263 @@ mod tests {
         layer.start = 200;
         layer.end = 260;
         assert_eq!(layer.start + layer.recorded.markers[0].frame, 212, "元素挪了，标记跟着挪");
+    }
+}
+
+/// v2 契约的校验。
+///
+/// 与 v1 那套的关系：**错误格式完全复用**（Issue 的 code/path/message），
+/// 但检查的东西不同——v2 多了「全局 id 唯一」「end 必须大于 start」「blend 是否可实现」。
+///
+/// 刻意**不**在这里检查资产引用：那要工程文件壳才知道（assets 表在壳里），
+/// 属于另一层的职责。这里只认时间线自己的事。
+pub fn validate_timeline_v2(timeline: &TimelineV2, effects: &[EffectSpec]) -> Vec<Issue> {
+    let mut issues = Vec::new();
+
+    if timeline.schema != LAYER_SCHEMA_VERSION {
+        issues.push(Issue::new(
+            "unsupported_schema",
+            "timeline.schema",
+            format!(
+                "时间线是 schema v{}，本实现只认 v{}",
+                timeline.schema, LAYER_SCHEMA_VERSION
+            ),
+        ));
+        // 版本都不认，后面字段的含义无从谈起——直接返回，别给一堆二次错误。
+        return issues;
+    }
+    if let Err(message) = timeline.timebase.to_timebase() {
+        issues.push(Issue::new("invalid_timebase", "timeline.timebase", message.to_string()));
+    }
+
+    // id 必须**全局**唯一（v1 只保证轨内唯一）。
+    let mut seen: BTreeMap<&str, String> = BTreeMap::new();
+
+    for (track_index, track) in timeline.tracks.iter().enumerate() {
+        let track_path = format!("tracks[{track_index}]");
+        if track.id.is_empty() {
+            issues.push(Issue::new("empty_track_id", &track_path, "轨道的 id 不能为空".to_string()));
+        }
+        // 同轨重叠。排序后只看相邻——不相邻的区间若重叠，一定存在相邻的一对也重叠。
+        let mut spans: Vec<(Frame, Frame, usize)> = track
+            .layers
+            .iter()
+            .enumerate()
+            .map(|(index, layer)| (layer.start, layer.end, index))
+            .collect();
+        spans.sort_by_key(|(start, _, _)| *start);
+        for pair in spans.windows(2) {
+            let (_, previous_end, _) = pair[0];
+            let (start, _, index) = pair[1];
+            if start < previous_end {
+                issues.push(Issue::new(
+                    "layer_overlap",
+                    &format!("{track_path}.layers[{index}]"),
+                    format!("与同轨的另一层重叠：本层从第 {start} 帧开始，而前一层到第 {previous_end} 帧才结束"),
+                ));
+            }
+        }
+
+        for (index, layer) in track.layers.iter().enumerate() {
+            let path = format!("{track_path}.layers[{index}]");
+            if layer.id.is_empty() {
+                issues.push(Issue::new("empty_layer_id", &path, "图层的 id 不能为空".to_string()));
+            } else if let Some(first) = seen.insert(layer.id.as_str(), path.clone()) {
+                issues.push(Issue::new(
+                    "duplicate_element_id",
+                    &path,
+                    format!("图层 id {} 与 {first} 重复（v2 要求全局唯一）", layer.id),
+                ));
+            }
+            if layer.end <= layer.start {
+                issues.push(Issue::new(
+                    "end_not_after_start",
+                    &format!("{path}.end"),
+                    format!("区间必须左闭右开且非空：start={} end={}", layer.start, layer.end),
+                ));
+            }
+            if layer.start < 0 {
+                issues.push(Issue::new(
+                    "negative_frame",
+                    &format!("{path}.start"),
+                    format!("起始帧不能为负：{}", layer.start),
+                ));
+            }
+            if !layer.opacity.is_finite() || !(0.0..=1.0).contains(&layer.opacity) {
+                issues.push(Issue::new(
+                    "opacity_out_of_range",
+                    &format!("{path}.opacity"),
+                    format!("不透明度必须在 0..=1：{}", layer.opacity),
+                ));
+            }
+            if !layer.transform.scale.is_finite() || layer.transform.scale <= 0.0 {
+                issues.push(Issue::new(
+                    "scale_not_positive",
+                    &format!("{path}.transform.scale"),
+                    format!("缩放必须是正的有限数：{}", layer.transform.scale),
+                ));
+            }
+            if !layer.enabled {
+                // 关掉的层不参与渲染，但范围内的字段问题仍该报——所以这里什么都不跳过，
+                // 只是把它记在心里：将来若要"只校验启用的层"，这里就是分叉点。
+            }
+            // 元素级标记是**相对 start 的偏移**，所以范围是 [0, end-start)。
+            for (marker_index, marker) in layer.recorded.markers.iter().enumerate() {
+                if marker.frame < 0 || marker.frame >= layer.duration() {
+                    issues.push(Issue::new(
+                        "marker_out_of_layer",
+                        &format!("{path}.markers[{marker_index}].frame"),
+                        format!("标记在第 {} 帧（相对元素起点），而元素只有 {} 帧", marker.frame, layer.duration()),
+                    ));
+                }
+            }
+            if !effects.is_empty() {
+                for (effect_index, effect) in layer.effects.iter().enumerate() {
+                    let effect_path = format!("{path}.effects[{effect_index}]");
+                    match effects.iter().find(|spec| spec.kind == effect.kind) {
+                        None => issues.push(Issue::new(
+                            "unknown_effect",
+                            &effect_path,
+                            format!("没有登记叫 {} 的特效", effect.kind),
+                        )),
+                        Some(spec) => {
+                            for (name, value) in &effect.params {
+                                if let Some((_, min, max)) = spec.params.iter().find(|(param, _, _)| param == name) {
+                                    if !value.is_finite() || value < min || value > max {
+                                        issues.push(Issue::new(
+                                            "effect_param_out_of_range",
+                                            &format!("{effect_path}.params.{name}"),
+                                            format!("参数 {name} 必须在 {min}..={max}，得到 {value}"),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    issues
+}
+
+/// blend 是否可用固定混合方程表达。**渲染器必须先问这个再往下走。**
+///
+/// 单独成一条函数而不是塞进 validate：因为「契约接受」与「本实现能做」是两件事——
+/// 枚举留全是为了将来支持时不必再改版本号，但渲染时遇到未实现的必须明确报错，
+/// 不许静默按 normal 画。
+pub fn unimplemented_blends(timeline: &TimelineV2) -> Vec<(String, BlendMode)> {
+    let mut out = Vec::new();
+    for (track_index, track) in timeline.tracks.iter().enumerate() {
+        for (layer_index, layer) in track.layers.iter().enumerate() {
+            if !layer.blend.is_implemented() {
+                out.push((
+                    format!("tracks[{track_index}].layers[{layer_index}].blend"),
+                    layer.blend,
+                ));
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod v2_tests {
+    use super::*;
+    use crate::schema::TimebaseDto;
+
+    fn layer(id: &str, start: Frame, end: Frame) -> Layer {
+        Layer {
+            id: id.to_string(),
+            start,
+            end,
+            transform: TransformV2::default(),
+            opacity: 1.0,
+            blend: BlendMode::Normal,
+            enabled: true,
+            recorded: Recorded::default(),
+            source: None,
+            effects: Vec::new(),
+            transition_in: None,
+            keyframes: Vec::new(),
+        }
+    }
+
+    fn track(id: &str, layers: Vec<Layer>) -> TrackV2 {
+        TrackV2 { id: id.to_string(), kind: crate::schema::TrackKind::Video, layers }
+    }
+
+    fn timeline(tracks: Vec<TrackV2>) -> TimelineV2 {
+        TimelineV2 {
+            schema: LAYER_SCHEMA_VERSION,
+            timebase: TimebaseDto { num: 60, den: 1 },
+            markers: Vec::new(),
+            tracks,
+        }
+    }
+
+    fn codes(issues: &[Issue]) -> Vec<&str> {
+        issues.iter().map(|i| i.code.as_str()).collect()
+    }
+
+    #[test]
+    fn 空区间与非负检查() {
+        let issues = validate_timeline_v2(&timeline(vec![track("v", vec![layer("a", 10, 10)])]), &[]);
+        assert_eq!(codes(&issues), vec!["end_not_after_start"]);
+
+        let issues = validate_timeline_v2(&timeline(vec![track("v", vec![layer("a", -5, 10)])]), &[]);
+        assert!(codes(&issues).contains(&"negative_frame"));
+    }
+
+    #[test]
+    fn id_必须全局唯一_跨轨也要抓() {
+        // v1 只保证轨内唯一；v2 提到全局。这条是迁移时最容易被忽略的约束。
+        let issues = validate_timeline_v2(
+            &timeline(vec![
+                track("v1", vec![layer("same", 0, 10)]),
+                track("v2", vec![layer("same", 0, 10)]),
+            ]),
+            &[],
+        );
+        assert_eq!(codes(&issues), vec!["duplicate_element_id"]);
+        assert!(issues[0].message.contains("same"), "要指出撞了哪一个");
+    }
+
+    #[test]
+    fn 同轨重叠被抓而紧邻不抓() {
+        let ok = validate_timeline_v2(
+            &timeline(vec![track("v", vec![layer("a", 0, 10), layer("b", 10, 20)])]),
+            &[],
+        );
+        assert!(ok.is_empty(), "紧邻（左闭右开）不该算重叠：{ok:?}");
+
+        let bad = validate_timeline_v2(
+            &timeline(vec![track("v", vec![layer("a", 0, 10), layer("b", 9, 20)])]),
+            &[],
+        );
+        assert_eq!(codes(&bad), vec!["layer_overlap"]);
+    }
+
+    #[test]
+    fn 未实现的混合模式_契约接受但渲染前必须被发现() {
+        let mut l = layer("a", 0, 10);
+        l.blend = BlendMode::Overlay;
+        let timeline = timeline(vec![track("v", vec![l])]);
+        // 契约层**不报错**：枚举留全就是为了将来支持时不必改版本号。
+        assert!(validate_timeline_v2(&timeline, &[]).is_empty(), "契约应当接受它");
+        // 但渲染前必须能知道「这个我做不了」——不许静默按 normal 画。
+        let pending = unimplemented_blends(&timeline);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].1, BlendMode::Overlay);
+        assert!(pending[0].0.contains("blend"), "path 要指到字段：{}", pending[0].0);
+    }
+
+    #[test]
+    fn 版本不认就只报一条() {
+        let mut tl = timeline(vec![]);
+        tl.schema = 99;
+        tl.tracks.push(track("v", vec![layer("a", 10, 10)]));
+        let issues = validate_timeline_v2(&tl, &[]);
+        assert_eq!(codes(&issues), vec!["unsupported_schema"], "不该产生二次错误");
     }
 }

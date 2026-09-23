@@ -222,7 +222,9 @@ pub struct Issue {
 }
 
 impl Issue {
-    fn new(code: &str, path: &str, message: String) -> Self {
+    /// 构造一条问题。**pub** 是因为别的模块（layer / project）也要造 Issue ——
+    /// 复用同一套错误格式，而不是各造一份。
+    pub fn new(code: &str, path: &str, message: String) -> Self {
         Self {
             code: code.to_string(),
             path: path.to_string(),
