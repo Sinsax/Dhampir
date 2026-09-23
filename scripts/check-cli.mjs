@@ -52,6 +52,8 @@ export const EXPECTED = [
   'import-write',
   'library',
   'import-duplicate',
+  'subtitle',
+  'subtitle-blank',
 ];
 
 /**
@@ -250,6 +252,51 @@ function collect(cli) {
 
   const duplicate = run(cli, ['import', '--project', workPath, '--file', ASSET, '--id', 'extra']);
   record('import-duplicate', duplicate.code === 2, 'exit=' + duplicate.code);
+
+  // ---- subtitle：文字覆盖层（评估层的直接出口）----
+  //
+  // 它不需要 GPU 也不需要 ffmpeg，所以**进默认关卡**。
+  // 判的不是一串魔数，而是三条**结构不变量** —— 居中、底边、行高。
+  // 那三个关系正是两端必须一致的东西；写死坐标只会让测试跟着实现一起漂。
+  const subProject = join(TMP, 'sub-project.json');
+  const subDoc = JSON.parse(readFileSync(join(REPO_ROOT, 'fixtures', 'sample-project.doc.json'), 'utf8'));
+  subDoc.assets.push({ id: 'sub.srt', kind: 'subtitle', uri: 'sample-subtitle.srt' });
+  subDoc.timeline.tracks.push({
+    id: 'sub',
+    kind: 'subtitle',
+    layers: [{ id: 'cue', start: 0, end: 100000, source: { asset_id: 'sub.srt', source_in: 0 } }],
+    subtitle: {
+      font_ratio: 0.055, bottom_margin: 0.06, max_lines: 2,
+      color: [255, 255, 255, 255], outline: true,
+    },
+  });
+  writeFileSync(subProject, JSON.stringify(subDoc), 'utf8');
+  const fixtureRoot = join(REPO_ROOT, 'fixtures');
+
+  const parseOverlay = (result) => {
+    try { return JSON.parse(result.stdout); } catch (error) { return null; }
+  };
+
+  const shown = run(cli, ['subtitle', '--project', subProject, '--asset-root', fixtureRoot, '--frame', '15']);
+  const overlay = parseOverlay(shown);
+  const item = overlay !== null && Array.isArray(overlay.items) ? overlay.items[0] : null;
+  record('subtitle',
+    shown.code === 0 && item !== null
+      && item.text === '第一行中文'
+      && Math.abs(item.rect.x + item.rect.width / 2 - 0.5) < 1e-4
+      && Math.abs(item.rect.y + item.rect.height - (1 - 0.06)) < 1e-4
+      && Math.abs(item.rect.height - 0.055 * 1.2) < 1e-4,
+    'exit=' + shown.code + ' item=' + JSON.stringify(item));
+
+  // **这一帧没有字幕**：空数组 + 素材确实被解析过（subtitle_assets=1）。
+  // 少了后半句，这条就会在「字幕素材根本没读进来」时也通过 —— 那正是它要抓的东西。
+  const blank = run(cli, ['subtitle', '--project', subProject, '--asset-root', fixtureRoot, '--frame', '6000']);
+  const blankOverlay = parseOverlay(blank);
+  record('subtitle-blank',
+    blank.code === 0 && blankOverlay !== null
+      && Array.isArray(blankOverlay.items) && blankOverlay.items.length === 0
+      && blankOverlay.subtitle_assets === 1,
+    'exit=' + blank.code + ' subtitle_assets=' + (blankOverlay === null ? 'null' : blankOverlay.subtitle_assets));
 
   return observed;
 }
