@@ -114,6 +114,7 @@ function renderInspector() {
     const result = state.engine.validate(state.project);
     state.issues = result.issues || [];
     renderIssues();
+  mark("三个面板已渲染");
     renderTimeline();
   };
   host.appendChild(numberField("起始帧 track_at", clip.track_at, (v) => apply((c) => { c.track_at = v; })));
@@ -288,6 +289,7 @@ async function main() {
   mark("视频源已绑定");
 
   const end = engine.endFrame();
+  mark("endFrame 已返回: " + end);
   $("frame").max = String(Math.max(0, end - 1));
   const only = document.getElementById("frameOnly");
   only.dataset.from = "0";
@@ -296,6 +298,7 @@ async function main() {
   renderInspector();
   renderIssues();
   await seekTo(0);
+  mark("准备 seekTo(0)");
   mark("首帧已上屏");
 
   $("first").addEventListener("click", () => seekTo(0));
