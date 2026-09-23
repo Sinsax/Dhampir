@@ -181,7 +181,10 @@ function main() {
   // compare_project 即使每一帧都是 inf，也会打印「最差 SSIM = 1.000000」——
   // 我原来的正则只认 inf，于是「全部完全一致」被判成了「没达到」。
   // **这类错只有看到真实输出才会发现**：光看代码会觉得它是对的。
-  const worstMatch = /最差 SSIM = ([0-9.]+|inf)/.exec(compare.stdout);
+    // **两个流都要看**：compare_project 把结论写进 stderr，不是 stdout。
+  // 这一点我猜错过两次（以为是正则只认 inf、以为是替换没落地）——
+  // 真正的做法是**先看那行到底从哪个流出来**。
+  const worstMatch = /最差 SSIM = ([0-9.]+|inf)/.exec(compare.stdout + compare.stderr);
   const worstSsim = worstMatch === null ? null : (worstMatch[1] === 'inf' ? 1 : Number(worstMatch[1]));
   if (worstSsim === null || worstSsim < 1) {
     problems.push("SSIM 没有达到 1.000000（通过线出处：M4 记录）");
