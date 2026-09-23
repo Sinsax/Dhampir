@@ -190,7 +190,7 @@ impl TimelineRenderer {
             target,
             target_size,
             &draws,
-            clear,
+            Some(clear),
         );
 
         // 让编译器和读者都看得见这些纹理活到了这里。

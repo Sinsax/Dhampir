@@ -262,7 +262,12 @@ impl Compositor {
         target: &wgpu::TextureView,
         target_size: (u32, u32),
         layers: &[LayerDraw<'_>],
-        clear: wgpu::Color,
+        // **None = 不清屏，叠到已有内容上。**
+        //
+        // 分段合成要求「把第 2 段画到第 1 段已经画好的底上」，
+        // 而这个函数原先**每次都会清屏** —— 直接套用会把前一段擦掉，
+        // 而症状是「调整图层之前的内容不见了」，很容易被误判成纹理绑定错。
+        clear: Option<wgpu::Color>,
     ) {
         // **先整帧查一遍**：有任何一个未实现的模式就一帧都不画。
         //
@@ -327,7 +332,10 @@ impl Compositor {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(clear),
+                    load: match clear {
+                        Some(color) => wgpu::LoadOp::Clear(color),
+                        None => wgpu::LoadOp::Load,
+                    },
                     store: wgpu::StoreOp::Store,
                 },
             })],
