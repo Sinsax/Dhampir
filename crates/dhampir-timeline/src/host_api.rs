@@ -24,6 +24,15 @@
 //!
 //! [`FrameResult`] 多了 `overlay`：这一帧的文字覆盖层（要画哪几行字、各占哪个归一化矩形）。
 //! 加键就是**破坏性改动** —— 按本仓口径（对端拿到的形状变了）版本要跟着升。
+//!
+//! ## v2 -> v3（T3.2c）
+//!
+//! [`OverlayView`] 多了 `danmaku` 与 `dropped_danmaku`：弹幕与字幕共用这一帧的文字覆盖层，
+//! 但**分成两个键**（落点规则不同：字幕居中于整条目标宽，弹幕按自己的宽度左对齐）。
+//! 又是加键，所以再升一次版本。
+//!
+//! 弹幕那一条带上 `lane` / `enter` / `exit`：只比矩形的话，**泳道被分配错了**
+//! （两条换了位置）在单帧里可能完全看不出来 —— 而那正是两端最容易漂的地方。
 
 use std::collections::BTreeMap;
 
@@ -196,7 +205,7 @@ pub fn to_json<T: Serialize>(value: &T) -> String {
 ///
 /// 对端问版本用的是 wasm 侧的 `dhampir_host_api_version`，不是这个常量本身 ——
 /// 文档在 `docs/host-api.md`，那份与这个值由 `scripts/api-surface.mjs` 比对。
-pub const HOST_API_VERSION: u32 = 2;
+pub const HOST_API_VERSION: u32 = 3;
 
 /// `dhampir_project_open` 的返回体。
 ///
@@ -311,7 +320,27 @@ impl From<crate::text_layout::TextLine> for TextItemView {
     }
 }
 
-/// 某一帧的文字覆盖层：这一帧还要画哪几行字。
+/// 要画的一条弹幕：内容 + **这一帧**的矩形 + 泳道与在屏区间。
+///
+/// 四个字段一起给，是为了让「两端给出同一张表」**能逐字段对账**：只比矩形的话，
+/// 泳道被分配错了（两条换了位置）在单帧里可能看不出来。
+///
+/// `rect` 是**这一帧**的滚动位置（帧的函数），不像字幕那样是静态行盒 ——
+/// 别把它当成「这条弹幕的框」存起来复用。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DanmakuItemView {
+    pub text: String,
+    pub rect: RectView,
+    /// 第几泳道。0 是**最上面**那条。
+    pub lane: u32,
+    /// 第一次出现的帧（闭区间起点）。
+    pub enter: Frame,
+    /// 最后一次出现的帧（**闭**区间终点）。
+    pub exit: Frame,
+}
+
+/// 某一帧的文字覆盖层：这一帧还要画哪几行字、哪几条弹幕。
 ///
 /// # 为什么与 `layers` 分开
 ///
@@ -319,22 +348,32 @@ impl From<crate::text_layout::TextLine> for TextItemView {
 /// 塞进一个结构里会让「谁负责栅格化」变含糊，而含糊的代价是两端各自决定。
 /// 所以这里是两个字段，不是把字塞进某一张 `LayerView`。
 ///
+/// # 为什么字幕与弹幕也分开
+///
+/// 两者的**落点规则不同**：字幕的每一行居中于整条目标宽，弹幕按自己的宽度左对齐、
+/// 位置是帧的函数。混在一个数组里就得在每个元素上带一个种类标签 ——
+/// 而那与「这里是纯结构」的定位冲突。
+///
 /// # 键名与另外两处逐字段同名
 ///
-/// `items[{text,rect}]`、`color`、`outline`、`dropped_lines` 与 CLI 的
-/// `subtitle` 子命令、预览宿主的 `dhampir_project_text_frame` 一致 ——
-/// 三处同名，比对时不需要一张映射表（映射表自己会漂）。
+/// `items[{text,rect}]`、`danmaku[{text,rect,lane,enter,exit}]`、`color`、`outline`、
+/// `dropped_lines`、`dropped_danmaku` 与 CLI 的 `subtitle` 子命令、预览宿主的
+/// `dhampir_project_text_frame` 一致 —— 三处同名，比对时不需要一张映射表（映射表自己会漂）。
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OverlayView {
     /// 按轨道顺序（先画的在前），轨内按行。
     pub items: Vec<TextItemView>,
-    /// 文字颜色，RGBA。来自轨道样式。
+    /// 同一帧里活着的弹幕条，按轨道顺序、轨内按分配顺序。
+    pub danmaku: Vec<DanmakuItemView>,
+    /// 文字颜色，RGBA。来自轨道样式。**弹幕也用它**。
     pub color: [u8; 4],
-    /// 是否描边。来自轨道样式。
+    /// 是否描边。来自轨道样式。**弹幕也用它**。
     pub outline: bool,
     /// 因为超过 `max_lines` 被丢弃的**行数**（所有字幕轨加起来）。
     pub dropped_lines: usize,
+    /// 因为泳道排不下被丢弃的**弹幕条数**（所有弹幕轨加起来）。
+    pub dropped_danmaku: usize,
 }
 
 /// `dhampir_project_frame` 的返回体。
@@ -537,18 +576,37 @@ mod tests {
                     text: "第一行中文".to_string(),
                     rect: RectView { x: 0.25, y: 0.8, width: 0.5, height: 0.066 },
                 }],
+                danmaku: vec![DanmakuItemView {
+                    text: "飘过".to_string(),
+                    rect: RectView { x: 0.9, y: 0.0, width: 0.08, height: 0.048 },
+                    lane: 0,
+                    enter: 10,
+                    exit: 250,
+                }],
                 color: [255, 240, 200, 255],
                 outline: false,
                 dropped_lines: 3,
+                dropped_danmaku: 2,
             }),
             error: None,
         };
         let value = serde_json::to_value(&result).unwrap();
         assert_eq!(keys(&value), sorted(&["frame", "layers", "overlay"]));
         let overlay = &value["overlay"];
-        assert_eq!(keys(overlay), sorted(&["items", "color", "outline", "dropped_lines"]));
+        assert_eq!(
+            keys(overlay),
+            sorted(&["items", "danmaku", "color", "outline", "dropped_lines", "dropped_danmaku"])
+        );
         assert_eq!(keys(&overlay["items"][0]), sorted(&["text", "rect"]));
         assert_eq!(keys(&overlay["items"][0]["rect"]), sorted(&["x", "y", "width", "height"]));
+        // 弹幕那一条：泳道与在屏区间必须在，否则「泳道分配错了」在单帧里查不出来。
+        assert_eq!(
+            keys(&overlay["danmaku"][0]),
+            sorted(&["text", "rect", "lane", "enter", "exit"])
+        );
+        assert_eq!(keys(&overlay["danmaku"][0]["rect"]), sorted(&["x", "y", "width", "height"]));
+        assert_eq!(overlay["danmaku"][0]["lane"], serde_json::json!(0));
+        assert_eq!(overlay["danmaku"][0]["exit"], serde_json::json!(250));
     }
 
     /// **反向**：没有文字时不许出现 `overlay` 键。
@@ -569,14 +627,46 @@ mod tests {
                     text: "x".to_string(),
                     rect: RectView { x: 0.0, y: 0.0, width: 1.0, height: 0.1 },
                 }],
+                danmaku: Vec::new(),
                 color: [255, 255, 255, 255],
                 outline: true,
                 dropped_lines: 0,
+                dropped_danmaku: 0,
             }),
             error: None,
         };
         let value = serde_json::to_value(&with_text).unwrap();
         assert!(value.get("overlay").is_some(), "有文字时必须有 overlay 键");
+    }
+
+    /// **只有弹幕**的一帧：`items` 空但 `danmaku` 不空，形状照样成立。
+    ///
+    /// 这条钉的是「字幕与弹幕两个键各自独立」—— 把两者合成一个数组的话，
+    /// 这条就写不出来（而症状是"弹幕工程看起来像没有文字"）。
+    #[test]
+    fn 只有弹幕时_danmaku_可以非空而_items_为空() {
+        let result = FrameResult {
+            frame: 1,
+            layers: Vec::new(),
+            overlay: Some(OverlayView {
+                items: Vec::new(),
+                danmaku: vec![DanmakuItemView {
+                    text: "只此一条".to_string(),
+                    rect: RectView { x: 0.5, y: 0.048, width: 0.2, height: 0.048 },
+                    lane: 1,
+                    enter: 0,
+                    exit: 30,
+                }],
+                color: [255, 255, 255, 255],
+                outline: true,
+                dropped_lines: 0,
+                dropped_danmaku: 0,
+            }),
+            error: None,
+        };
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(value["overlay"]["items"].as_array().map(Vec::len), Some(0));
+        assert_eq!(value["overlay"]["danmaku"].as_array().map(Vec::len), Some(1));
     }
 
     /// 矩形与文本行的字段是**逐字段对应**的：换名或漏字段都在这条上红。

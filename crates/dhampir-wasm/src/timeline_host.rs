@@ -25,7 +25,7 @@ use std::collections::HashMap;
 
 use dhampir_core::compose::{self, Composite};
 use dhampir_core::io::{FrameSink, FrameSource};
-use dhampir_core::overlay::{SubtitleTable, evaluate_overlay};
+use dhampir_core::overlay::{DanmakuTextItem, SubtitleTable, evaluate_overlay};
 use dhampir_core::readback::Rgba8Image;
 use dhampir_core::render::{
     OverlayItem, RenderSpace, SourceResolver, compose_overlay, ink_report,
@@ -673,9 +673,23 @@ fn frame_overlay(doc: &ProjectDoc, frame: i64) -> Option<host_api::OverlayView> 
                     rect: item.rect.into(),
                 })
                 .collect(),
+            // 弹幕的矩形是**这一帧**的滚动位置（core 已经按帧算好）——
+            // 这里只是形状转换，不重算任何几何。
+            danmaku: overlay
+                .danmaku
+                .iter()
+                .map(|item| host_api::DanmakuItemView {
+                    text: item.text.clone(),
+                    rect: item.rect.into(),
+                    lane: item.lane,
+                    enter: item.enter,
+                    exit: item.exit,
+                })
+                .collect(),
             color: overlay.color,
             outline: overlay.outline,
             dropped_lines: overlay.dropped_lines,
+            dropped_danmaku: overlay.dropped_danmaku,
         })
     })
 }
@@ -1253,10 +1267,12 @@ fn text_frame_error(frame: i64, message: &str) -> String {
         "error": message,
         "subtitle_assets": 0,
         "items": [],
+        "danmaku": [],
         "placements": [],
         "color": serde_json::Value::Null,
         "outline": serde_json::Value::Null,
         "dropped_lines": 0,
+        "dropped_danmaku": 0,
         "unplaced_lines": 0,
         "issues": [],
     }))
@@ -1297,7 +1313,8 @@ fn registered_subtitles(doc: &ProjectDoc, subtitles: &SubtitleTable) -> usize {
 ///
 /// # 判据字段与 CLI 的 `subtitle` 子命令**逐字段同名**
 ///
-/// `items[{text,rect}]`、`color`、`outline`、`dropped_lines`、`subtitle_assets` 与
+/// `items[{text,rect}]`、`danmaku[{text,rect,lane,enter,exit}]`、`color`、`outline`、
+/// `dropped_lines`、`dropped_danmaku`、`subtitle_assets` 与
 /// `dhampir subtitle --frame` 的输出同名，于是两端比对不需要一张映射表（映射表自己会漂）。
 /// 多出来的是 `placements`（像素落点）、`target`（宿主尺寸）、`unplaced_lines`
 /// —— CLI 那一侧不画图，所以它没有这三个。
@@ -1331,21 +1348,29 @@ pub fn dhampir_project_text_frame(frame: i32) -> String {
                 format!("字幕素材 {asset_id} 没有交给宿主：先调 dhampir_project_set_subtitles"),
             ));
         }
-        let (items, color, outline, dropped_lines) = match &overlay {
+        let (items, danmaku, color, outline, dropped_lines, dropped_danmaku) = match &overlay {
             Some(overlay) => (
                 overlay
                     .items
                     .iter()
                     .map(|item| text_item_json(&item.text, item.rect))
                     .collect::<Vec<_>>(),
+                overlay
+                    .danmaku
+                    .iter()
+                    .map(|item| danmaku_item_json(item))
+                    .collect::<Vec<_>>(),
                 serde_json::json!(overlay.color),
                 serde_json::json!(overlay.outline),
                 overlay.dropped_lines,
+                overlay.dropped_danmaku,
             ),
             None => (
                 Vec::new(),
+                Vec::new(),
                 serde_json::Value::Null,
                 serde_json::Value::Null,
+                0,
                 0,
             ),
         };
@@ -1363,6 +1388,7 @@ pub fn dhampir_project_text_frame(frame: i32) -> String {
             "target": [target.0, target.1],
             "subtitle_assets": registered_subtitles(&doc, &subtitles),
             "items": items,
+            "danmaku": danmaku,
             "placements": lines.iter().map(|line| {
                 let mut value = text_item_json(&line.text, line.rect);
                 value["x"] = serde_json::json!(line.placement.x);
@@ -1379,6 +1405,7 @@ pub fn dhampir_project_text_frame(frame: i32) -> String {
             "color": color,
             "outline": outline,
             "dropped_lines": dropped_lines,
+            "dropped_danmaku": dropped_danmaku,
             "unplaced_lines": unplaced,
             "issues": issues,
         }));
@@ -1405,6 +1432,19 @@ fn text_item_json(text: &str, rect: NormalizedRect) -> serde_json::Value {
             "height": rect.height,
         },
     })
+}
+
+/// `{text, rect, lane, enter, exit}` —— 与 CLI 的 `cmd_subtitle`、`host_api::DanmakuItemView`
+/// 三处同一形状（逐字段同名）。
+///
+/// `lane`/`enter`/`exit` 一定要给：只比矩形的话，**泳道被分配错了**（两条换了位置）
+/// 在单帧里可能完全看不出来 —— 而那正是两端最容易漂的地方。
+fn danmaku_item_json(item: &DanmakuTextItem) -> serde_json::Value {
+    let mut value = text_item_json(&item.text, item.rect);
+    value["lane"] = serde_json::json!(item.lane);
+    value["enter"] = serde_json::json!(item.enter);
+    value["exit"] = serde_json::json!(item.exit);
+    value
 }
 
 /// 这一行画出来看得见吗（有非空白字符）。
