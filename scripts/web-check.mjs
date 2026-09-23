@@ -136,6 +136,25 @@ const localPort = 8796;
 let localBackend = null;
 if (mode === 'app' && argv.includes('--local')) {
   localBackend = spawn(process.execPath, ['scripts/dhampir-local.mjs', '--port', String(localPort)], { stdio: ['ignore', 'ignore', 'inherit'] });
+  // unref 让这个子进程**不阻止**父进程退出。
+  localBackend.unref();
+  // **等后端真的开始监听再开页面** —— spawn 返回不代表端口已经能连。
+  // 不等就会出现竞态：页面在 loadProject 阶段失败，而表现是「什么都没发生」。
+  {
+    let ready = false;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      try {
+        const probe = await fetch('http://127.0.0.1:' + localPort + '/health');
+        if (probe.ok) { ready = true; break; }
+      } catch (error) { /* 还没起来，继续等 */ }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (!ready) {
+      console.error('本机后端在 5 秒内没起来，--local 无法继续');
+      process.exit(1);
+    }
+  }
+
 }
 const suffix = mode === 'probe' ? '/probe.html' : mode === 'app' ? (argv.includes('--local') ? '/?export=1&backend=local&port=' + localPort + '&project=sample-project' : '/?export=1') : '/';
 process.on('exit', () => { if (localBackend) localBackend.kill(); });
@@ -145,7 +164,10 @@ console.log('→ ' + url);
 if (mode === 'serve') {
   console.log('（只起服务；Ctrl+C 结束）');
 } else {
-  const timeoutMs = mode === 'app' ? 300000 : 90000;
+  // 超时可调：诊断时用短超时让它**自己超时并打印现场**，
+  // 而不是干等五分钟什么也看不到。
+  const timeoutIndex = argv.indexOf('--timeout-ms');
+  const timeoutMs = timeoutIndex >= 0 ? Number(argv[timeoutIndex + 1]) : (mode === 'app' ? 300000 : 90000);
   const profile = join(REPO_ROOT, 'target', 'web-check-profile');
   const child = spawn(findChrome(), [
     '--headless=new', '--disable-gpu-sandbox', '--no-first-run', '--no-default-browser-check',
@@ -159,6 +181,9 @@ if (mode === 'serve') {
   clearTimeout(timer);
   try { child.kill(); } catch {}
   server.close();
+  // **跑完就杀，不能只靠 process.on('exit')** —— 子进程自己会让事件循环活着，
+  // 于是 Node 永不退出、管道永不刷出，看起来像浏览器卡住。
+  if (localBackend) { localBackend.kill(); localBackend = null; }
 
   if (mode === 'probe') {
     reportProbe();
