@@ -92,6 +92,48 @@ fn render(ctx: &dhampir_core::gpu::GpuContext, source: &wgpu::Texture, composite
     image.pixels
 }
 
+/// 与 make_source 同构，但**把 alpha 全部设成 255**。
+///
+/// 为什么需要它：synthetic_source_rgba8 造的源**故意是半透明的**
+/// （alpha 在 200 与 255 之间变化，core 里还有一条测试断言「不透明度应当有变化」）。
+/// 而「调整图层不影响上方」这条判据要求上方**真的铺满** ——
+/// 混合用的是**源 alpha**，不是图层 opacity，所以半透明上层会让被模糊的下层透出来，
+/// 判据必然失败。
+///
+/// **第 61 轮查了源的 alpha（timeline.rs:446）才确认这是判据的前提问题，不是实现问题。**
+fn make_opaque_source(ctx: &dhampir_core::gpu::GpuContext) -> wgpu::Texture {
+    let mut pixels = synthetic_source_rgba8(SIZE, SIZE, 7);
+    for pixel in pixels.chunks_mut(4) {
+        pixel[3] = 255;
+    }
+    let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("dhampir timeline test opaque source"),
+        size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    ctx.queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &pixels,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(SIZE * 4),
+            rows_per_image: Some(SIZE),
+        },
+        wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+    );
+    texture
+}
+
 fn make_source(ctx: &dhampir_core::gpu::GpuContext) -> wgpu::Texture {
     let pixels = synthetic_source_rgba8(SIZE, SIZE, 7);
     let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
@@ -271,7 +313,9 @@ fn 调整图层模糊下方而不影响上方() {
     //
     // 为什么必须两半都有：只测「结果变了」的话，一个把整幅图都模糊掉的错误实现也能通过。
     let (ctx, _init) = open_leg(NATIVE_BACKENDS).expect("拿不到 GPU 上下文");
-    let source = make_source(&ctx);
+    // **用不透明的源**：synthetic_source_rgba8 是故意半透明的（alpha 200/255），
+    // 而「不影响上方」要求上方真的铺满 —— 混合用的是源 alpha，不是图层 opacity。
+    let source = make_opaque_source(&ctx);
 
     // 调整图层：没有素材、只有特效。
     let mut adjustment = layer("adj", 1.0, 1.0, vec![blur_effect(6.0)]);
