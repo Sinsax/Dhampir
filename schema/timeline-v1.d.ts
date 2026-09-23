@@ -47,7 +47,7 @@ export interface Track {
   kind: TrackKind;
 }
 
-export type TrackKind = "video" | "audio";
+export type TrackKind = "video" | "audio" | "subtitle" | "danmaku";
 
 export interface Transform {
   /** 角度制。整数帧号之外的东西可以是浮点——**只有时间必须是整数**。 */

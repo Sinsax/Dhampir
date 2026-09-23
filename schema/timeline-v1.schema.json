@@ -198,10 +198,24 @@
       ]
     },
     "TrackKind": {
-      "type": "string",
-      "enum": [
-        "video",
-        "audio"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "video",
+            "audio"
+          ]
+        },
+        {
+          "description": "字幕轨：轨上的元素引用 .srt / .ass 素材，样式在**轨道级**。",
+          "type": "string",
+          "const": "subtitle"
+        },
+        {
+          "description": "弹幕轨：轨上带一个 DanmakuSpec，指向 .ass 弹幕素材。",
+          "type": "string",
+          "const": "danmaku"
+        }
       ]
     },
     "Transform": {

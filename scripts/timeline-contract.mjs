@@ -49,6 +49,12 @@ export function tsType(node, defs) {
   if (Array.isArray(node.enum)) {
     return node.enum.map((value) => JSON.stringify(value)).join(' | ');
   }
+  if (node.const !== undefined) {
+    // schemars 把带文档注释的枚举变体单独出成 const 分支（enum 数组里放不下描述）。
+    // 少了这一支，`const: "subtitle"` 会掉进下面的 type 分支退化成 `string`，
+    // 联合类型被 `| string` 吞掉——约束在 TS 侧就没了（TrackKind 上真实发生过）。
+    return JSON.stringify(node.const);
+  }
   if (typeof node.$ref === 'string') {
     const name = node.$ref.split('/').pop();
     return name;
@@ -157,6 +163,22 @@ function runSelfTest() {
   cases.push([
     '字符串枚举',
     tsType({ enum: ['a', 'b'] }, {}) === '"a" | "b"',
+  ]);
+  cases.push([
+    'const 出字面量',
+    tsType({ type: 'string', const: 'subtitle' }, {}) === '"subtitle"',
+  ]);
+  cases.push([
+    'enum 与 const 混在 oneOf 里',
+    tsType(
+      {
+        oneOf: [
+          { type: 'string', enum: ['video', 'audio'] },
+          { type: 'string', const: 'subtitle' },
+        ],
+      },
+      {},
+    ) === '"video" | "audio" | "subtitle"',
   ]);
   cases.push([
     '附加属性 -> Record',
