@@ -202,7 +202,10 @@ export function findCli(explicit, env) {
 /** 能力声明。**从"本实现实际能做到什么"出发**，不抄一份好看的清单。 */
 export function capabilities() {
   return {
-    timeline_versions: [2],
+    // **这个数字必须跟着契约版本走。** 它写死成 2 的时候，浏览器在真出片之前
+    // 就被自己的预检拦住了（schema_unsupported_by_peer）—— 而那正是预检该干的事，
+    // 所以表现是"预检拦下了一次本来能成功的导出"。
+    timeline_versions: [3],
     // 混合模式只列实现的那四种 —— 与 BlendMode::is_implemented() 同一事实。
     blend_modes: ['normal', 'add', 'multiply', 'screen'],
     effects: ['gaussian_blur'],

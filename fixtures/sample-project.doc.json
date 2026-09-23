@@ -76,7 +76,7 @@
     }
   ],
   "timeline": {
-    "schema": 2,
+    "schema": 3,
     "timebase": {
       "num": 30,
       "den": 1

@@ -23,9 +23,9 @@
 //! 这是个取舍，不是疏漏——要做真正的重叠溶解，得让契约知道素材长度或允许重叠，
 //! 那是 v2 的事。冻帧至少是**两端都能一模一样算出来**的。
 
-use dhampir_timeline::layer::{BlendMode, Layer as LayerV2, TimelineV2};
+use dhampir_timeline::layer::{AssetTimebases, BlendMode, Layer as LayerV2, TimelineV2, source_frame_at};
 use dhampir_timeline::schema::{
-    Clip, Effect, Frame, Keyframe, Project, TrackKind, Transform, TransitionSpec,
+    Clip, Effect, Frame, Keyframe, Project, TimebaseDto, TrackKind, Transform, TransitionSpec,
 };
 
 /// 一个要画的图层。
@@ -195,7 +195,54 @@ pub fn evaluate(project: &Project, frame: Frame) -> Composite {
 /// **共用同一份实现** —— 复制一遍就会漂，而「两端一致」正是这个项目最贵的东西。
 ///
 /// 调整图层在这里**只被标记、不被处理**：渲染器按清单顺序扫，遇到它才切段。
+/// 求值时要用的"外部事实"：时间线的时间基 + 资产时间基表。
+///
+/// **为什么不让 evaluate_v2 自己去读资产表**：契约层不依赖工程文件壳
+/// （方向是 core → timeline，壳在 timeline 里但语义上更靠上）。
+/// 传进来的是**事实**，不是壳本身。
+struct EvalContext<'a> {
+    timeline: &'a TimebaseDto,
+    assets: Option<&'a AssetTimebases>,
+}
+
+impl EvalContext<'_> {
+    /// 把"这一层的第几帧"换算成**素材自己的帧号**。
+    ///
+    /// 没有资产时间基时**退回恒等**（素材帧率按时间线算）—— 那正是升级前的行为，
+    /// 也是"资产表里没登记这个素材"时的唯一合理默认：**不猜帧率**。
+    fn source_frame(&self, element: &LayerV2, local_frame: Frame) -> Frame {
+        let Some(source) = element.source.as_ref() else {
+            return 0;
+        };
+        let identity = source.source_in.saturating_add(local_frame);
+        match self.assets.and_then(|table| table.get(&source.asset_id)) {
+            // 时间基不合法时退回恒等而不是 panic：那是**契约层**该报的错
+            // （invalid_timebase），渲染器没必要在这里死给你看。
+            Some(asset) => source_frame_at(source.source_in, local_frame, self.timeline, asset)
+                .unwrap_or(identity),
+            None => identity,
+        }
+    }
+}
+
+/// 在**元素模型 v2** 上求值（恒等换算）。
+///
+/// 等价于"假设素材帧率与时间线一致"。**既有工程与既有测试走的就是这条**，
+/// 所以它的行为在 P7 里逐字节未变。
 pub fn evaluate_v2(timeline: &TimelineV2, frame: Frame) -> Composite {
+    evaluate_v2_with_assets(timeline, frame, None)
+}
+
+/// 在元素模型 v2 上求值，并按**资产自己的时间基**换算源帧号。
+///
+/// 这是 P7 的核心：60fps 的素材放进 30fps 的时间线时，时间线每前进一步
+/// 素材要走两步 —— 也就是**舍去一半的画面**，而不是"半速播放"。
+pub fn evaluate_v2_with_assets(
+    timeline: &TimelineV2,
+    frame: Frame,
+    assets: Option<&AssetTimebases>,
+) -> Composite {
+    let ctx = EvalContext { timeline: &timeline.timebase, assets };
     let mut layers = Vec::new();
 
     for track in &timeline.tracks {
@@ -220,20 +267,26 @@ pub fn evaluate_v2(timeline: &TimelineV2, frame: Frame) -> Composite {
                     let last_local = previous.duration() - 1;
                     let opacity = opacity_from(previous.opacity, &previous.keyframes, last_local)
                         * (1.0 - weight);
-                    layers.push(element_to_draw(previous, last_local, opacity, true));
+                    layers.push(element_to_draw(previous, last_local, opacity, true, &ctx));
                 }
             }
         }
 
         let opacity = opacity_from(layer.opacity, &layer.keyframes, local) * weight;
-        layers.push(element_to_draw(layer, local, opacity, false));
+        layers.push(element_to_draw(layer, local, opacity, false, &ctx));
     }
 
     Composite { frame, layers }
 }
 
 /// 把一个 v2 元素摊成「要画的一层」。
-fn element_to_draw(element: &LayerV2, local_frame: Frame, opacity: f32, frozen: bool) -> Layer {
+fn element_to_draw(
+    element: &LayerV2,
+    local_frame: Frame,
+    opacity: f32,
+    frozen: bool,
+    ctx: &EvalContext<'_>,
+) -> Layer {
     Layer {
         clip_id: element.id.clone(),
         // 调整图层**没有素材** —— 空串是如实的表达，不是占位符。
@@ -243,11 +296,8 @@ fn element_to_draw(element: &LayerV2, local_frame: Frame, opacity: f32, frozen: 
             .as_ref()
             .map(|source| source.asset_id.clone())
             .unwrap_or_default(),
-        source_frame: element
-            .source
-            .as_ref()
-            .map(|source| source.source_in + local_frame)
-            .unwrap_or(0),
+        // **按时间换算**，不是直接加 local_frame。见 EvalContext::source_frame。
+        source_frame: ctx.source_frame(element, local_frame),
         opacity,
         // v2 的 rotation 是角度制，渲染器要的字段叫 rotation_deg。语义相同，只是名字。
         transform: Transform {

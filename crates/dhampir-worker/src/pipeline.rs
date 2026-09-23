@@ -47,7 +47,7 @@ use dhampir_core::compose;
 use dhampir_core::gpu::NATIVE_BACKENDS;
 use dhampir_core::readback;
 use dhampir_core::render::{SourceResolver, TimelineRenderer};
-use dhampir_core::timeline::layer::TimelineV2;
+use dhampir_core::timeline::layer::{AssetTimebases, TimelineV2};
 use dhampir_core::timeline::schema::{Frame, Issue, TimebaseDto};
 use dhampir_core::wgpu;
 
@@ -605,6 +605,10 @@ impl SourceResolver for DecodingSources<'_> {
 pub struct RenderPlan<'a> {
     pub timeline: &'a TimelineV2,
     pub sources: &'a SourceTable,
+    /// 素材 id → 时间基。**源帧号靠它换算**（见 compose::evaluate_v2_with_assets）。
+    /// 传空的不是错 —— 那是"假设素材帧率与时间线一致"的旧语义，
+    /// 但素材帧率真的不同时画面会变速，所以调用方应当把工程文件的资产表带上。
+    pub asset_timebases: &'a AssetTimebases,
     /// 闭区间 [from, to]，单位整数帧。
     pub from: Frame,
     pub to: Frame,
@@ -744,7 +748,11 @@ pub fn render_plan(
     let mut result: Result<(), String> = Ok(());
     for frame in plan.from..=plan.to {
         sources.begin_frame(frame);
-        let composite = compose::evaluate_v2(plan.timeline, frame);
+        let composite = compose::evaluate_v2_with_assets(
+            plan.timeline,
+            frame,
+            Some(plan.asset_timebases),
+        );
         // 调整图层没有素材，所以「本该有内容」只数有素材的那些层。
         let source_layers = composite.layers.iter().filter(|layer| !layer.is_adjustment).count();
 
@@ -862,7 +870,11 @@ pub fn render_frames_png(
     for frame in frames {
         let frame = *frame;
         sources.begin_frame(frame);
-        let composite = compose::evaluate_v2(plan.timeline, frame);
+        let composite = compose::evaluate_v2_with_assets(
+            plan.timeline,
+            frame,
+            Some(plan.asset_timebases),
+        );
         let mut command = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("dhampir frame encoder"),
         });

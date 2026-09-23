@@ -535,9 +535,13 @@ fn cmd_frame(args: &Args) -> Result<ExitCode, String> {
 
     // 文件名固定按帧号，调用方给的是**目录** —— 这样同一帧重跑一定落在同一个路径上。
     let output = PathBuf::from(out).join("frame.png");
+    // **把资产时间基带上。** 少了它就会退回恒等换算（素材帧率按时间线算），
+    // 而 60fps 素材放进 30fps 工程的表现是**半速播放**。
+    let asset_timebases = doc.asset_timebases();
     let plan = RenderPlan {
         timeline: &doc.timeline,
         sources: &sources,
+        asset_timebases: &asset_timebases,
         from: frame,
         to: frame,
         width,
@@ -595,9 +599,11 @@ fn cmd_render(args: &Args) -> Result<ExitCode, String> {
         })
     );
 
+    let asset_timebases = doc.asset_timebases();
     let plan = RenderPlan {
         timeline: &doc.timeline,
         sources: &sources,
+        asset_timebases: &asset_timebases,
         from,
         to,
         width,

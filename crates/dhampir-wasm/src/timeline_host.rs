@@ -242,7 +242,10 @@ impl ProjectHost {
         let composite = PROJECT.with(|slot| {
             slot.borrow()
                 .as_ref()
-                .map(|doc| compose::evaluate_v2(&doc.timeline, frame))
+                .map(|doc| {
+                let assets = doc.asset_timebases();
+                compose::evaluate_v2_with_assets(&doc.timeline, frame, Some(&assets))
+            })
         });
         let Some(composite) = composite else {
             return Err("还没有载入通过校验的工程".to_string());
@@ -383,10 +386,14 @@ pub fn dhampir_project_frame(frame: i32) -> String {
                 layers: Vec::new(),
                 error: Some("还没有载入通过校验的工程".to_string()),
             }),
-            Some(doc) => host_api::to_json(&composite_result(&compose::evaluate_v2(
-                &doc.timeline,
-                i64::from(frame),
-            ))),
+            Some(doc) => {
+                let assets = doc.asset_timebases();
+                host_api::to_json(&composite_result(&compose::evaluate_v2_with_assets(
+                    &doc.timeline,
+                    i64::from(frame),
+                    Some(&assets),
+                )))
+            }
         }
     })
 }
@@ -429,7 +436,10 @@ pub async fn dhampir_project_render_probe(
     let composite = PROJECT.with(|slot| {
         slot.borrow()
             .as_ref()
-            .map(|doc| compose::evaluate_v2(&doc.timeline, i64::from(frame)))
+            .map(|doc| {
+                let assets = doc.asset_timebases();
+                compose::evaluate_v2_with_assets(&doc.timeline, i64::from(frame), Some(&assets))
+            })
     })
     .ok_or_else(|| js_err("还没有载入通过校验的工程"))?;
 
@@ -535,7 +545,9 @@ pub async fn dhampir_sample_project_render_png(
         )));
     }
 
-    let composite = compose::evaluate_v2(&doc.timeline, i64::from(frame));
+    let assets = doc.asset_timebases();
+    let composite =
+        compose::evaluate_v2_with_assets(&doc.timeline, i64::from(frame), Some(&assets));
     let instance = new_instance();
     let ctx = dhampir_core::gpu::request_context(&instance, None)
         .await
@@ -762,17 +774,17 @@ pub fn dhampir_project_sources_for(frame: i32) -> String {
                 error: Some("还没有载入通过校验的工程".to_string()),
             });
         };
-        let (num, den) = match doc.timeline.timebase.to_timebase() {
-            Ok(timebase) => (f64::from(timebase.num), f64::from(timebase.den)),
-            Err(error) => {
-                return host_api::to_json(&host_api::SourcesResult {
-                    frame: i64::from(frame),
-                    sources: Vec::new(),
-                    error: Some(error.to_string()),
-                });
-            }
-        };
-        let composite = compose::evaluate_v2(&doc.timeline, i64::from(frame));
+        // 时间线的时间基不合法就直接报错 —— 这一步是**校验**，不是换算。
+        if let Err(error) = doc.timeline.timebase.to_timebase() {
+            return host_api::to_json(&host_api::SourcesResult {
+                frame: i64::from(frame),
+                sources: Vec::new(),
+                error: Some(error.to_string()),
+            });
+        }
+        let assets = doc.asset_timebases();
+        let composite =
+            compose::evaluate_v2_with_assets(&doc.timeline, i64::from(frame), Some(&assets));
         // 去重：同一个 (source, 帧) 只该 seek 一次。
         let mut seen = std::collections::BTreeSet::new();
         let mut sources = Vec::new();
@@ -783,7 +795,17 @@ pub fn dhampir_project_sources_for(frame: i32) -> String {
             sources.push(host_api::SourceView {
                 source: layer.source.clone(),
                 source_frame: layer.source_frame,
-                seconds: (layer.source_frame as f64) * den / num,
+                // **用素材自己的时间基**。以前用的是时间线的 —— 素材帧率不同时
+                // 那个秒数就是错的，而表现是"画面看起来正常但慢了/快了一截"。
+                seconds: assets
+                    .get(&layer.source)
+                    .and_then(|timebase| {
+                        dhampir_core::timeline::layer::seconds_at_asset_frame(
+                            layer.source_frame,
+                            timebase,
+                        )
+                    })
+                    .unwrap_or(0.0),
             });
         }
         host_api::to_json(&host_api::SourcesResult {

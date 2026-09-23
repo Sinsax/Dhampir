@@ -22,7 +22,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::layer::{TimelineV2, migrate_v1_to_v2, validate_timeline_v2};
+use crate::layer::{
+    AssetTimebases, LAYER_SCHEMA_VERSION, LAYER_SCHEMA_VERSION_V2, TimelineV2, migrate_v1_to_v2,
+    migrate_v2_to_v3, source_frame_at, validate_timeline_v2,
+};
 use crate::schema::{EffectSpec, Frame, Issue, Project, TimebaseDto};
 
 /// 壳的版本。与契约版本**互相独立**：壳可以到 v3 而契约还在 v2。
@@ -155,6 +158,14 @@ pub struct ProjectDoc {
     /// 下游放自己的东西，不污染契约。
 #[serde(default)]
     pub extensions: BTreeMap<String, serde_json::Value>,
+
+    /// **载入时从哪个契约版本升上来的**（没有升级过就是 None）。
+    ///
+    /// 刻意 skip 掉：它描述的是"这份文件是怎么被读进来的"，不是文件的内容 ——
+    /// 写回磁盘时出现它就等于把运行时状态污染进契约。
+    /// 它存在的唯一目的是让校验能说一句"你是从 v2 升上来的，而 v2 的时间语义不同"。
+#[serde(skip)]
+    pub migrated_from: Option<u32>,
 }
 /// 载入结果里的问题清单。
 ///
@@ -215,6 +226,27 @@ pub fn shell_from_timeline(timeline: TimelineV2) -> ProjectDoc {
         view: View::default(),
         render_hints: RenderHints::default(),
         extensions: BTreeMap::new(),
+        migrated_from: None,
+    }
+}
+
+impl ProjectDoc {
+    /// 资产 id → 时间基。求值层用它把时间线帧号换算成素材帧号。
+    ///
+    /// **没登记时间基的资产不进表**：不进表 = 走恒等换算（素材帧率按时间线算），
+    /// 这正是升级前的行为。**不要给它猜一个帧率** —— 猜错的表现是画面变速，
+    /// 而那是"看起来完全正常"的那一类错。
+    pub fn asset_timebases(&self) -> AssetTimebases {
+        let mut table = AssetTimebases::new();
+        for asset in &self.assets {
+            if asset.id.is_empty() {
+                continue;
+            }
+            if let Some(timebase) = asset.timebase.clone() {
+                table.insert(asset.id.clone(), timebase);
+            }
+        }
+        table
     }
 }
 
@@ -230,21 +262,46 @@ pub fn load_doc(text: &str) -> Result<ProjectDoc, String> {
     let value: serde_json::Value =
         serde_json::from_str(text).map_err(|e| format!("不是合法 JSON：{e}"))?;
 
+    // ---- 工程文件。内嵌的时间线可能还是旧版本，一级一级升上来。 ----
     if value.get("project_schema").is_some() {
-        return serde_json::from_value(value).map_err(|e| format!("工程文件字段不符：{e}"));
+        let mut doc: ProjectDoc =
+            serde_json::from_value(value).map_err(|e| format!("工程文件字段不符：{e}"))?;
+        let from = doc.timeline.schema;
+        if from == LAYER_SCHEMA_VERSION_V2 {
+            doc.timeline = migrate_v2_to_v3(&doc.timeline);
+            doc.migrated_from = Some(from);
+        } else if from != LAYER_SCHEMA_VERSION {
+            return Err(format!(
+                "工程文件里的时间线是 v{from}，本实现只认 v{LAYER_SCHEMA_VERSION_V2} 与 v{LAYER_SCHEMA_VERSION}"
+            ));
+        }
+        return Ok(doc);
     }
 
+    // ---- 裸契约 v1：v1 → v2 → v3，两级都走完 ----
     let version = value.get("schema").and_then(serde_json::Value::as_u64);
     if version == Some(1) {
         let project: Project =
             serde_json::from_value(value).map_err(|e| format!("v1 契约字段不符：{e}"))?;
-        let timeline = migrate_v1_to_v2(&project).map_err(|e| e.to_string())?;
-        return Ok(shell_from_timeline(timeline));
+        let v2 = migrate_v1_to_v2(&project).map_err(|e| e.to_string())?;
+        let mut doc = shell_from_timeline(migrate_v2_to_v3(&v2));
+        doc.migrated_from = Some(1);
+        return Ok(doc);
     }
 
+    // ---- 裸契约 v2 或 v3 ----
     let timeline: TimelineV2 =
-        serde_json::from_value(value).map_err(|e| format!("v2 契约字段不符：{e}"))?;
-    Ok(shell_from_timeline(timeline))
+        serde_json::from_value(value).map_err(|e| format!("v2/v3 契约字段不符：{e}"))?;
+    let from = timeline.schema;
+    let mut doc = if from == LAYER_SCHEMA_VERSION_V2 {
+        shell_from_timeline(migrate_v2_to_v3(&timeline))
+    } else {
+        shell_from_timeline(timeline)
+    };
+    if from == LAYER_SCHEMA_VERSION_V2 {
+        doc.migrated_from = Some(from);
+    }
+    Ok(doc)
 }
 
 /// 校验一份工程：壳 + 引用完整性 + 契约。
@@ -305,15 +362,33 @@ pub fn validate_project_doc(doc: &ProjectDoc, effects: &[EffectSpec]) -> DocIssu
                     format!("引用了登记表里没有的资产：{}", source.asset_id),
                 )),
                 Some(&asset_index) => {
+                    let asset = &doc.assets[asset_index];
                     // 只有**知道素材有多长**时才谈得上越界。
-                    if let Some(frame_count) = doc.assets[asset_index].frame_count {
-                        let wanted = source.source_in.saturating_add(layer.duration());
-                        if source.source_in < 0 || wanted > frame_count {
+                    if let Some(frame_count) = asset.frame_count {
+                        // **先换算再比。** 以前是拿"时间线帧数"直接比"素材帧数" ——
+                        // 素材帧率与时间线不一致时两边单位根本不同，这个检查是错的
+                        // （60fps 素材放进 30fps 时间线时它会放行两倍的长度）。
+                        let asset_timebase = asset
+                            .timebase
+                            .clone()
+                            .unwrap_or_else(|| doc.timeline.timebase.clone());
+                        let last = source_frame_at(
+                            source.source_in,
+                            layer.duration().saturating_sub(1),
+                            &doc.timeline.timebase,
+                            &asset_timebase,
+                        );
+                        // 时间基不合法是**契约层**的错误（invalid_timebase），这里不重复报。
+                        let exceeded = match last {
+                            Ok(last) => source.source_in < 0 || last >= frame_count,
+                            Err(_) => false,
+                        };
+                        if exceeded {
                             errors.push(Issue::new(
                                 "source_range_exceeded",
                                 &format!("{base}.source.source_in"),
                                 format!(
-                                    "素材 {} 只有 {frame_count} 帧，而这一层要从第 {} 帧取 {} 帧",
+                                    "素材 {} 只有 {frame_count} 帧，而这一层要从第 {} 帧起取 {} 个时间线帧（换算后越界）",
                                     source.asset_id, source.source_in, layer.duration()
                                 ),
                             ));
@@ -321,6 +396,32 @@ pub fn validate_project_doc(doc: &ProjectDoc, effects: &[EffectSpec]) -> DocIssu
                     }
                 }
             }
+        }
+    }
+
+    // ---- 从旧版本升上来的工程：**节奏可能变了**，警告 ----
+    //
+    // v3 改的是 source_in 的**单位**（见 layer::migrate_v2_to_v3）。
+    // 素材帧率与时间线一致时行为完全相同；不一致时 local_frame 从"按帧数累加"
+    // 变成"按时间换算"，画面节奏会变 —— 那不是 bug，但它**必须是可见的**。
+    if matches!(doc.migrated_from, Some(LAYER_SCHEMA_VERSION_V2) | Some(1)) {
+        for (index, asset) in doc.assets.iter().enumerate() {
+            let Some(timebase) = asset.timebase.clone() else { continue };
+            if timebase == doc.timeline.timebase {
+                continue;
+            }
+            warnings.push(Issue::new(
+                "timebase_changed_by_migration",
+                &format!("assets[{index}].timebase"),
+                format!(
+                    "工程是从旧版本升上来的：素材 {} 的帧率（{}/{}）与时间线（{}/{}）不同。                     旧版本下 source_in 之后按帧数累加，现在按时间换算 —— **画面节奏会变**，请复核。",
+                    asset.id,
+                    timebase.num,
+                    timebase.den,
+                    doc.timeline.timebase.num,
+                    doc.timeline.timebase.den
+                ),
+            ));
         }
     }
 
@@ -402,6 +503,7 @@ mod tests {
             view: View::default(),
             render_hints: RenderHints::default(),
             extensions: BTreeMap::new(),
+            migrated_from: None,
         }
     }
 

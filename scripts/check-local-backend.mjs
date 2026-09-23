@@ -146,8 +146,10 @@ async function collect(port) {
     record('capabilities', caps.has_encoder === true && caps.has_decoder === true, JSON.stringify(caps));
 
     const project = await (await fetch(base + '/projects/sample-project.doc')).json();
-    record('project-is-doc', project.project_schema === 1 && project.timeline && project.timeline.schema === 2,
-      'project_schema=' + project.project_schema);
+    // **钉住当前契约版本。** 版本升了这里就要跟着改 —— 那正是"升级牵动多少处"
+    // 的可数证据，而不是让断言跟着代码自动漂（自动漂的断言什么都证明不了）。
+    record('project-is-doc', project.project_schema === 1 && project.timeline && project.timeline.schema === 3,
+      'project_schema=' + project.project_schema + ' timeline.schema=' + (project.timeline && project.timeline.schema));
     record('project-assets', Array.isArray(project.assets) && project.assets.length === 4,
       'assets=' + (project.assets ? project.assets.length : 'none'));
 

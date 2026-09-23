@@ -44,6 +44,10 @@ export class Engine {
    *
    * 判据：联合类型不接受时错误消息里有 "could not be converted"；
    * 接受但内容不可用报的是另一种错（源没有数据），那说明类型这一关已经过了。
+   *
+   * ⚠️ 这个探测会在浏览器控制台留一条 "Browser fails extracting valid resource
+   * from external image" 的警告 —— **那是它故意的**：拿一个空 <video> 去试类型，
+   * 内容当然不可用。看到那条警告不代表出错。
    */
   static async probeVideoCopy() {
     if (typeof navigator === "undefined" || !navigator.gpu) return false;

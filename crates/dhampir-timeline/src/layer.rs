@@ -32,8 +32,12 @@ use crate::schema::{
     Effect, EffectSpec, Frame, Issue, Keyframe, Project, TimebaseDto, TrackKind, TransitionSpec,
 };
 
-/// v2 契约版本。
-pub const LAYER_SCHEMA_VERSION: u32 = 2;
+/// 当前契约版本。
+pub const LAYER_SCHEMA_VERSION: u32 = 3;
+
+/// v2 的版本号。**留着是因为迁移梯子要它**：v1 → v2 → v3 是一级一级走的，
+/// 每一步都必须产出一个"当时那个版本"的中间物，否则中间那一级没有名字。
+pub const LAYER_SCHEMA_VERSION_V2: u32 = 2;
 
 /// 混合模式。
 ///
@@ -291,11 +295,113 @@ pub fn migrate_v1_to_v2(project: &Project) -> Result<TimelineV2, MigrateError> {
         });
     }
     Ok(TimelineV2 {
-        schema: LAYER_SCHEMA_VERSION,
+        // **产出 v2，不是当前版本。** 迁移梯子一级一级走，
+        // 否则这个函数的名字与它实际产出的东西会对不上。
+        schema: LAYER_SCHEMA_VERSION_V2,
         timebase: project.timebase,
         markers: Vec::new(),
         tracks,
     })
+}
+
+/// v2 → v3。**字段一个都不动，只把版本号推上去。**
+///
+/// # 为什么单为"单位"升一个版本
+///
+/// v3 改的是 source_in 的**单位**：v2 及以前它按"第 N 帧素材"被消费
+/// （后端直接数解码器吐出的第 N 帧），v3 起它明确是**素材自己的帧号**，
+/// 由时间线的时间基换算过去。
+///
+/// 数值上是连续的（旧行为本来就是"文件第 N 帧"），所以**不需要改任何字段** ——
+/// 但**含义变了**，而含义变了比加字段更容易出静默错误：
+/// 素材帧率与时间线一致时两者完全相同，不一致时画面节奏会变。
+/// 这正是"该升版本"的定义。
+pub fn migrate_v2_to_v3(timeline: &TimelineV2) -> TimelineV2 {
+    let mut next = timeline.clone();
+    next.schema = LAYER_SCHEMA_VERSION;
+    next
+}
+
+/// source_in 的单位换算：**时间线上的局部帧号 → 素材自己的帧号**。
+///
+/// # 语义
+///
+/// source_in 是**素材的帧号**（PR 的 in 点是源时间码，这里同理）；
+/// local_frame 是"这一层自己的第几帧"（帧号减去 layer.start）。
+/// 两者相加之前，先把 local_frame 按**时间**换算到素材的帧率上。
+///
+/// # 为什么是纯整数
+///
+/// 全仓的铁律是"时间一律用整数帧号，不用浮点秒"。用浮点算这一步，
+/// 0.1 + 0.2 那类误差会变成"某些帧被吃掉/重复"，而那种错只在导出后才看得见。
+/// 中间量用 i128，溢出不发生在 i64 上。
+///
+/// # 取整方向
+///
+/// **向下取整**（div_euclid，负数也朝下）。理由：它让"60fps 素材 / 30fps 时间线"
+/// 精确地取 +0,+2,+4…（舍去一半），而"30fps 素材 / 60fps 时间线"取 +0,+0,+1,+1
+/// （每帧停两次，**时长不变**）。四舍五入在两种最常见的情形里给出同样结果，
+/// 但在 30000/1001 这类非整数帧率上会产生周期性抖动 —— 向下取整是可预测的那一个。
+pub fn source_frame_at(
+    source_in: Frame,
+    local_frame: Frame,
+    timeline: &TimebaseDto,
+    asset: &TimebaseDto,
+) -> Result<Frame, String> {
+    if timeline.num == 0 || timeline.den == 0 {
+        return Err(format!("时间线的时间基不合法：{}/{}", timeline.num, timeline.den));
+    }
+    if asset.num == 0 || asset.den == 0 {
+        return Err(format!("素材的时间基不合法：{}/{}", asset.num, asset.den));
+    }
+    // local 是时间线上的帧数；先换成"秒"的分子，再换成素材的帧数，全程整数。
+    let numerator = i128::from(local_frame) * i128::from(timeline.den) * i128::from(asset.num);
+    let denominator = i128::from(timeline.num) * i128::from(asset.den);
+    let scaled = numerator.div_euclid(denominator);
+    let clamped = scaled.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64;
+    Ok(source_in.saturating_add(clamped))
+}
+
+/// 素材帧号 → 秒。**用素材自己的时间基**，不是时间线的。
+///
+/// 宿主靠它把"这一帧要 video 元素停在哪一秒"算出来。用错时间基的表现是
+/// **画面看起来正常但比预期慢/快**，而那是查起来最费劲的一类。
+pub fn seconds_at_asset_frame(asset_frame: Frame, asset: &TimebaseDto) -> Option<f64> {
+    if asset.num == 0 {
+        return None;
+    }
+    Some(asset_frame as f64 * f64::from(asset.den) / f64::from(asset.num))
+}
+
+/// 「素材 id → 它的时间基」。给求值层用来做上面那个换算。
+///
+/// 用 BTreeMap 而不是 HashMap：工程文件里的迭代顺序要**逐字节稳定**
+/// （同一份数据序列化两次必须一样），而遍历顺序会影响任何"顺手聚合"的结果。
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct AssetTimebases {
+    entries: BTreeMap<String, TimebaseDto>,
+}
+
+impl AssetTimebases {
+    pub fn new() -> Self {
+        Self { entries: BTreeMap::new() }
+    }
+
+    pub fn insert(&mut self, asset_id: impl Into<String>, timebase: TimebaseDto) {
+        self.entries.insert(asset_id.into(), timebase);
+    }
+
+    pub fn get(&self, asset_id: &str) -> Option<&TimebaseDto> {
+        self.entries.get(asset_id)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -343,10 +449,100 @@ mod tests {
         }
     }
 
+    fn tb(num: u32, den: u32) -> TimebaseDto {
+        TimebaseDto { num, den }
+    }
+
+    #[test]
+    fn 迁移梯子的末端是当前版本() {
+        let v2 = migrate_v1_to_v2(&v1_project()).expect("v1 应当能迁移");
+        assert_eq!(v2.schema, LAYER_SCHEMA_VERSION_V2);
+        let v3 = migrate_v2_to_v3(&v2);
+        assert_eq!(v3.schema, LAYER_SCHEMA_VERSION, "梯子末端必须是当前版本");
+        // **字段一个都不动**：v3 改的是单位，不是形状。
+        assert_eq!(v3.timebase, v2.timebase);
+        assert_eq!(v3.tracks, v2.tracks);
+    }
+
+    #[test]
+    fn 六十帧素材放进三十帧时间线要舍去一半() {
+        // 这是这轮的核心判据：60fps 的素材、30fps 的时间线，
+        // 时间线每前进一步，素材要走两步 —— 也就是**舍去一半的画面**。
+        let timeline = tb(30, 1);
+        let asset = tb(60, 1);
+        let got: Vec<Frame> = (0..6)
+            .map(|local| source_frame_at(100, local, &timeline, &asset).expect("合法"))
+            .collect();
+        assert_eq!(got, vec![100, 102, 104, 106, 108, 110]);
+    }
+
+    #[test]
+    fn 三十帧素材放进六十帧时间线要每帧停两次_时长不变() {
+        let timeline = tb(60, 1);
+        let asset = tb(30, 1);
+        let got: Vec<Frame> = (0..6)
+            .map(|local| source_frame_at(0, local, &timeline, &asset).expect("合法"))
+            .collect();
+        assert_eq!(got, vec![0, 0, 1, 1, 2, 2]);
+    }
+
+    #[test]
+    fn 帧率一致时换算就是恒等() {
+        // **这一条是兼容性的根据**：既有工程（素材帧率 == 时间线）行为逐字节不变。
+        let timeline = tb(30000, 1001);
+        for local in [0, 1, 17, 999, 100_000] {
+            assert_eq!(source_frame_at(7, local, &timeline, &timeline).expect("合法"), 7 + local);
+        }
+    }
+
+    #[test]
+    fn 非整数帧率的换算不靠浮点() {
+        // 29.97 -> 59.94：每一步正好两步。
+        let timeline = tb(30000, 1001);
+        let asset = tb(60000, 1001);
+        let got: Vec<Frame> = (0..5)
+            .map(|local| source_frame_at(0, local, &timeline, &asset).expect("合法"))
+            .collect();
+        assert_eq!(got, vec![0, 2, 4, 6, 8]);
+        // 反向：59.94 -> 29.97，每帧停两次。
+        let back: Vec<Frame> = (0..5)
+            .map(|local| source_frame_at(0, local, &asset, &timeline).expect("合法"))
+            .collect();
+        assert_eq!(back, vec![0, 0, 1, 1, 2]);
+    }
+
+    #[test]
+    fn 时间基不合法要报错而不是猜() {
+        assert!(source_frame_at(0, 0, &tb(0, 1), &tb(30, 1)).is_err());
+        assert!(source_frame_at(0, 0, &tb(30, 1), &tb(30, 0)).is_err());
+        assert!(source_frame_at(0, 0, &tb(30, 1), &tb(0, 0)).is_err());
+    }
+
+    #[test]
+    fn 素材帧号换算成秒要用素材自己的时间基() {
+        // 同一个素材帧号，在 60fps 与 30fps 下是不同的时刻。
+        let at60 = seconds_at_asset_frame(60, &tb(60, 1)).expect("合法");
+        let at30 = seconds_at_asset_frame(60, &tb(30, 1)).expect("合法");
+        assert!((at60 - 1.0).abs() < 1e-12, "{at60}");
+        assert!((at30 - 2.0).abs() < 1e-12, "{at30}");
+        assert!(seconds_at_asset_frame(0, &tb(0, 1)).is_none());
+    }
+
+    #[test]
+    fn 资产时间基表按_id_查_没登记就是没有() {
+        let mut table = AssetTimebases::new();
+        table.insert("a.mp4", tb(60, 1));
+        assert_eq!(table.len(), 1);
+        assert_eq!(table.get("a.mp4").map(|t| t.num), Some(60));
+        // 没登记 = 走恒等换算。**不许猜一个帧率。**
+        assert!(table.get("b.mp4").is_none());
+    }
+
     #[test]
     fn 迁移把字段逐个搬对() {
         let migrated = migrate_v1_to_v2(&v1_project()).expect("v1 应当能迁移");
-        assert_eq!(migrated.schema, LAYER_SCHEMA_VERSION);
+        // **一级一级走**：这个函数产出 v2，再往上那一级由 migrate_v2_to_v3 做。
+        assert_eq!(migrated.schema, LAYER_SCHEMA_VERSION_V2);
         assert_eq!(migrated.timebase.num, 30000);
         let layer = &migrated.tracks[0].layers[0];
         assert_eq!(layer.id, "c1");
