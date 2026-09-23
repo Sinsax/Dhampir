@@ -235,6 +235,20 @@ function reportApp(stderr) {
 
   // 用工程的时间基定帧率：整数帧号 -> 有理数帧率 -> 编码器要的浮点，只在这一步换算。
   const fps = frameRate();
+  // **--frames-only：只出帧，不编码、不写里程碑。**
+  // 双端比对的编排器会调这个脚本，而验收工具**不该改动交付物** ——
+  // 否则跑一次比对就把 milestones/edited-milestone.mp4 覆盖了。
+  if (argv.includes('--frames-only')) {
+    console.log('--frames-only：跳过编码与里程碑写入');
+    console.log('收到帧数 ' + state.frames + '，期望 ' + expected);
+    if (state.frames !== expected) {
+      console.error('帧数与工程长度不符');
+      process.exitCode = 1;
+      return;
+    }
+    console.log('帧已就绪（未写里程碑）');
+    return;
+  }
   const encode = spawnSync('ffmpeg', [
     '-y', '-framerate', String(fps),
     '-i', join(FRAMES_DIR, 'frame-%04d.png'),

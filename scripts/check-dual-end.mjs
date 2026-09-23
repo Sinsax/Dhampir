@@ -110,8 +110,10 @@ function main() {
   mkdirSync(NATIVE_DIR, { recursive: true });
 
   console.log('\n[1/3] 浏览器逐帧导出 …');
-  const browser = run(process.execPath, ['scripts/web-check.mjs']);
-  if (browser.status !== 0 || !browser.stdout.includes('验收通过')) {
+  const browser = // **--frames-only：验收工具不该改动交付物** —— 不加这个参数，
+  // 跑一次比对就会把 milestones/edited-milestone.mp4 覆盖掉。
+  run(process.execPath, ['scripts/web-check.mjs', '--frames-only']);
+  if (browser.status !== 0 || !browser.stdout.includes('帧已就绪')) {
     console.error('浏览器侧导出没成功（退出码 ' + browser.status + '）');
     console.error((browser.stdout + browser.stderr).slice(-2000));
     process.exitCode = 1;
