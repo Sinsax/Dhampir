@@ -98,6 +98,19 @@ async function main() {
   console.log(describeRatio(ratio, jobs));
   console.log('');
   console.log('**它量的是渲染这一段**：worker 用合成源、不解码视频，所以不含解码开销。');
+  // **量纲警告必须在这里说，不能只留在提交信息里。**
+  //
+  // 实测：60 帧 x 320x180 太小，GPU 远没吃满；而每次运行约 1 秒的
+  // 进程启动 + wgpu 初始化是在**并行**里同时付掉的，它把比值压向 1.0。
+  // 所以那个比值里有相当一部分是「启动并行」而不是「渲染并行」。
+  console.log('');
+  console.log('⚠️ 这个比值**不能**外推成「能并发 N 个」：');
+  console.log('   本次负载是 ' + frames + ' 帧 x 320x180（worker 侧尺寸目前写死），GPU 远没吃满；');
+  console.log('   而且每次约 1 秒的进程启动与 wgpu 初始化是在并行里同时付掉的，');
+  console.log('   它把比值压向 1.0 —— 这里面有相当一部分是「启动并行」而非「渲染并行」。');
+  console.log('   诚实的结论只有一句：**在这个量级下 GPU 有余量。**');
+  console.log('   要在真实输出尺寸下重测，需要 render_project 支持尺寸参数 ——');
+  console.log('   那与 G5 的输入对齐是同一个待办。');
 }
 
 main();
