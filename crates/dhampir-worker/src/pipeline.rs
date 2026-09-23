@@ -45,6 +45,7 @@ use std::time::Instant;
 
 use dhampir_core::compose;
 use dhampir_core::gpu::NATIVE_BACKENDS;
+use dhampir_core::overlay::{SubtitleTable, evaluate_overlay};
 use dhampir_core::readback;
 use dhampir_core::render::{RenderSpace, SourceResolver, TimelineRenderer};
 use dhampir_core::timeline::layer::{AssetTimebases, TimelineV2};
@@ -52,6 +53,7 @@ use dhampir_core::timeline::schema::{Frame, Issue, TimebaseDto};
 use dhampir_core::wgpu;
 
 use crate::baseline::open_leg;
+use crate::text_overlay::{OverlayPainter, OverlayStats};
 
 /// 解码器吐出来的像素格式。**两条路与两个宿主都用它**，别在这里换格式：
 /// 换格式等于给「两端同一个渲染图」这句话加一个未验证的转换。
@@ -158,7 +160,11 @@ pub const MAX_ISSUES: usize = 24;
 
 impl IssueLog {
     pub fn new() -> Self {
-        Self { seen: BTreeSet::new(), issues: Vec::new(), suppressed: 0 }
+        Self {
+            seen: BTreeSet::new(),
+            issues: Vec::new(),
+            suppressed: 0,
+        }
     }
 
     /// 记一条。同一个 (code, path) 只记第一次；超出上限的部分只计数。
@@ -207,7 +213,9 @@ pub struct SourceTable {
 
 impl SourceTable {
     pub fn new() -> Self {
-        Self { entries: HashMap::new() }
+        Self {
+            entries: HashMap::new(),
+        }
     }
 
     pub fn insert(&mut self, asset_id: impl Into<String>, file: impl Into<PathBuf>) {
@@ -228,8 +236,11 @@ impl SourceTable {
 
     /// 按 id 排序的 (id, 文件) 列表。给「要开几路解码器」这种确定性输出用。
     pub fn sorted(&self) -> Vec<(String, PathBuf)> {
-        let mut rows: Vec<(String, PathBuf)> =
-            self.entries.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let mut rows: Vec<(String, PathBuf)> = self
+            .entries
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         rows.sort();
         rows
     }
@@ -266,10 +277,14 @@ struct SourceStream {
 fn probe_size(file: &Path) -> Result<(u32, u32), String> {
     let output = Command::new("ffprobe")
         .args([
-            "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=width,height",
-            "-of", "csv=p=0",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0",
         ])
         .arg(file)
         .output()
@@ -290,8 +305,14 @@ fn probe_size(file: &Path) -> Result<(u32, u32), String> {
             text.trim()
         ));
     }
-    let width: u32 = fields[0].trim().parse().map_err(|_| format!("宽度不是数：{}", fields[0]))?;
-    let height: u32 = fields[1].trim().parse().map_err(|_| format!("高度不是数：{}", fields[1]))?;
+    let width: u32 = fields[0]
+        .trim()
+        .parse()
+        .map_err(|_| format!("宽度不是数：{}", fields[0]))?;
+    let height: u32 = fields[1]
+        .trim()
+        .parse()
+        .map_err(|_| format!("高度不是数：{}", fields[1]))?;
     if width == 0 || height == 0 {
         return Err(format!("ffprobe 给出了 {width}x{height}，无法按帧切分"));
     }
@@ -315,9 +336,12 @@ impl SourceStream {
             .args(["-v", "error", "-i"])
             .arg(file)
             .args([
-                "-vf", "scale=out_color_matrix=bt709",
-                "-f", "rawvideo",
-                "-pix_fmt", DECODE_PIXEL_FORMAT,
+                "-vf",
+                "scale=out_color_matrix=bt709",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                DECODE_PIXEL_FORMAT,
                 "-",
             ])
             .stdout(Stdio::piped())
@@ -328,7 +352,11 @@ impl SourceStream {
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("dhampir pipeline source"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -620,6 +648,18 @@ pub struct RenderPlan<'a> {
     /// 行为与引入 RenderSpace 之前逐字节一致。显式指定了别的导出尺寸时才发生缩放 ——
     /// 那正是「同一个工程在不同尺寸下位移比例不同」被修掉的地方。
     pub sequence: (u32, u32),
+    /// 字幕素材 id → 解析好的字幕条。**由调用方读文件 + 解析**（core 是纯函数、不做 I/O）。
+    ///
+    /// 空表表示"没有字幕可画"，与"有字幕轨但这一帧是空的"处理相同：什么都不画。
+    /// 但**表里缺了某条轨道引用的 id** 就是宿主自己的错 —— 那种情况由调用方
+    /// 在装载阶段报错，不许静默降级成"这部片子没有字幕"。
+    pub subtitles: &'a SubtitleTable,
+    /// 栅格化用的字体文件。`None` 表示这个宿主没有字体 ——
+    /// 于是"有字要画"会变成 `subtitle_font_missing` 这条问题，让整次出片判失败。
+    ///
+    /// 为什么不给一个默认字体：本仓不内嵌字体、也不去猜系统字体在哪。
+    /// 猜错的后果是**产出一份字全是方框的片子**，而"看起来成功、其实不对"正是要消灭的。
+    pub font_file: Option<&'a Path>,
     pub output: &'a Path,
 }
 
@@ -640,6 +680,11 @@ pub struct RenderReport {
     pub opened_streams: usize,
     /// 合成本该有内容、却一层都没画出来的帧号。
     pub empty_frames: Vec<Frame>,
+    /// 字幕那边发生了什么（画了几行、切了几行、丢了几行、缓存命中多少）。
+    ///
+    /// **它是事实，不是判据** —— 画不出来与画被切都进了 `issues`，
+    /// 于是 `failed()` 只看问题清单就能判；而"超过 max_lines 丢了几行"不会把出片判失败。
+    pub overlay: OverlayStats,
     pub issues: Vec<Issue>,
 }
 
@@ -665,13 +710,28 @@ fn spawn_encoder(plan: &RenderPlan, fps: f64) -> Result<Child, String> {
         }
     }
     Command::new("ffmpeg")
-        .args(["-v", "error", "-f", "rawvideo", "-pix_fmt", DECODE_PIXEL_FORMAT])
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            DECODE_PIXEL_FORMAT,
+        ])
         .arg("-s")
         .arg(format!("{}x{}", plan.width, plan.height))
         .args(["-r", &format!("{fps}"), "-i", "-"])
         .args([
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-            "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
         ])
         .arg("-y")
         .arg(plan.output)
@@ -685,11 +745,15 @@ fn spawn_encoder(plan: &RenderPlan, fps: f64) -> Result<Child, String> {
 fn probe_output_frames(path: &Path) -> Result<(u32, u32, usize), String> {
     let output = Command::new("ffprobe")
         .args([
-            "-v", "error",
-            "-select_streams", "v:0",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
             "-count_frames",
-            "-show_entries", "stream=nb_read_frames,width,height",
-            "-of", "csv=p=0",
+            "-show_entries",
+            "stream=nb_read_frames,width,height",
+            "-of",
+            "csv=p=0",
         ])
         .arg(path)
         .output()
@@ -709,9 +773,18 @@ fn probe_output_frames(path: &Path) -> Result<(u32, u32, usize), String> {
             text.trim()
         ));
     }
-    let width: u32 = fields[0].trim().parse().map_err(|_| "宽度不是数".to_string())?;
-    let height: u32 = fields[1].trim().parse().map_err(|_| "高度不是数".to_string())?;
-    let frames: usize = fields[2].trim().parse().map_err(|_| "帧数不是数".to_string())?;
+    let width: u32 = fields[0]
+        .trim()
+        .parse()
+        .map_err(|_| "宽度不是数".to_string())?;
+    let height: u32 = fields[1]
+        .trim()
+        .parse()
+        .map_err(|_| "高度不是数".to_string())?;
+    let frames: usize = fields[2]
+        .trim()
+        .parse()
+        .map_err(|_| "帧数不是数".to_string())?;
     Ok((width, height, frames))
 }
 
@@ -735,7 +808,11 @@ pub fn render_plan(
 
     let target = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dhampir pipeline target"),
-        size: wgpu::Extent3d { width: plan.width, height: plan.height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: plan.width,
+            height: plan.height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -747,6 +824,10 @@ pub fn render_plan(
 
     let mut sources = DecodingSources::new(&ctx.device, &ctx.queue, plan.sources);
     let mut encoder = spawn_encoder(plan, fps)?;
+    // 字幕的账走**自己一份** IssueLog：源那边的那份在 sources 里（按 (code,path) 去重），
+    // 两份在收尾时合并 —— 于是"同一行字画不下"按行内容去重，不会按帧号刷满清单。
+    let mut overlay_log = IssueLog::new();
+    let mut painter = OverlayPainter::new(plan.font_file);
     let started = Instant::now();
     let mut frames = 0usize;
     let mut empty_frames: Vec<Frame> = Vec::new();
@@ -754,13 +835,14 @@ pub fn render_plan(
     let mut result: Result<(), String> = Ok(());
     for frame in plan.from..=plan.to {
         sources.begin_frame(frame);
-        let composite = compose::evaluate_v2_with_assets(
-            plan.timeline,
-            frame,
-            Some(plan.asset_timebases),
-        );
+        let composite =
+            compose::evaluate_v2_with_assets(plan.timeline, frame, Some(plan.asset_timebases));
         // 调整图层没有素材，所以「本该有内容」只数有素材的那些层。
-        let source_layers = composite.layers.iter().filter(|layer| !layer.is_adjustment).count();
+        let source_layers = composite
+            .layers
+            .iter()
+            .filter(|layer| !layer.is_adjustment)
+            .count();
 
         let mut command = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("dhampir pipeline encoder"),
@@ -770,7 +852,10 @@ pub fn render_plan(
             &ctx.queue,
             &mut command,
             &target_view,
-            RenderSpace { sequence: plan.sequence, target: (plan.width, plan.height) },
+            RenderSpace {
+                sequence: plan.sequence,
+                target: (plan.width, plan.height),
+            },
             &composite,
             &mut sources,
             wgpu::Color::TRANSPARENT,
@@ -782,7 +867,7 @@ pub fn render_plan(
             empty_frames.push(frame);
         }
 
-        let image = match pollster::block_on(readback::read_texture_rgba8(
+        let mut image = match pollster::block_on(readback::read_texture_rgba8(
             &ctx.device,
             &ctx.queue,
             &target,
@@ -793,6 +878,18 @@ pub fn render_plan(
                 break;
             }
         };
+        // 文字**叠在读回来的帧上**，再送进编码器：与 PNG 那条路用的是同一个函数、
+        // 同一份结构（都在 evaluate_overlay + painter.paint 上），所以两条路不会分叉。
+        if let Some(overlay) =
+            evaluate_overlay(plan.timeline, frame, plan.sequence, Some(plan.subtitles))
+        {
+            painter.paint(
+                &mut image,
+                &overlay,
+                (plan.width, plan.height),
+                &mut overlay_log,
+            );
+        }
         let stdin = match encoder.stdin.as_mut() {
             Some(stdin) => stdin,
             None => {
@@ -823,7 +920,9 @@ pub fn render_plan(
     }
 
     let elapsed_ms = started.elapsed().as_millis();
-    let issues = sources.issues();
+    let mut issues = sources.issues();
+    issues.extend(overlay_log.into_vec());
+    let overlay = painter.stats();
     let (width, height, encoded_frames) = probe_output_frames(plan.output)?;
     Ok(RenderReport {
         output: plan.output.to_path_buf(),
@@ -836,20 +935,33 @@ pub fn render_plan(
         elapsed_ms,
         opened_streams,
         empty_frames,
+        overlay,
         issues,
     })
+}
+
+/// 一张 PNG 的出图结果。
+#[derive(Debug, Clone)]
+pub struct FramePng {
+    pub frame: Frame,
+    pub path: PathBuf,
+    /// 写出去那份像素的 FNV-1a 摘要（**含字幕**：先叠再摘，摘的是落地的东西）。
+    pub digest: String,
+    /// 字幕那边到现在为止的账（**累计**，从这次调用的第一帧算起 ——
+    /// frame 子命令一次只要一帧，所以它就是这一帧的数）。
+    pub overlay: OverlayStats,
+    /// 这一帧的字幕问题。非空 = 这张图里的字幕不对，调用方该判失败。
+    pub issues: Vec<Issue>,
 }
 
 /// 只出几帧 PNG（给 CLI 的 frame 子命令与调试用）。
 ///
 /// 走**同一条**求值/合成/读回路径，只是 sink 换成 PNG 文件 ——
 /// 另起一条「只画一帧」的路就会让 render 与 frame 从那天起开始分叉。
+/// 字幕也**走同一条**：evaluate_overlay + painter.paint，与出片那条路径一份实现。
 ///
 /// 输出目录取计划里 output 的父目录；文件名是 frame-<帧号>.png。
-pub fn render_frames_png(
-    plan: &RenderPlan,
-    frames: &[Frame],
-) -> Result<Vec<(Frame, PathBuf, String)>, String> {
+pub fn render_frames_png(plan: &RenderPlan, frames: &[Frame]) -> Result<Vec<FramePng>, String> {
     if plan.width == 0 || plan.height == 0 {
         return Err(format!("输出尺寸不合法：{}x{}", plan.width, plan.height));
     }
@@ -858,7 +970,11 @@ pub fn render_frames_png(
     let renderer = TimelineRenderer::new(&ctx.device, WORK_FORMAT);
     let target = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dhampir frame target"),
-        size: wgpu::Extent3d { width: plan.width, height: plan.height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: plan.width,
+            height: plan.height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -869,18 +985,20 @@ pub fn render_frames_png(
     let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
     let mut sources = DecodingSources::new(&ctx.device, &ctx.queue, plan.sources);
 
-    let dir = plan.output.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+    let dir = plan
+        .output
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
     std::fs::create_dir_all(&dir).map_err(|e| format!("建不了目录 {}：{e}", dir.display()))?;
 
+    let mut painter = OverlayPainter::new(plan.font_file);
     let mut written = Vec::new();
     for frame in frames {
         let frame = *frame;
         sources.begin_frame(frame);
-        let composite = compose::evaluate_v2_with_assets(
-            plan.timeline,
-            frame,
-            Some(plan.asset_timebases),
-        );
+        let composite =
+            compose::evaluate_v2_with_assets(plan.timeline, frame, Some(plan.asset_timebases));
         let mut command = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("dhampir frame encoder"),
         });
@@ -889,22 +1007,45 @@ pub fn render_frames_png(
             &ctx.queue,
             &mut command,
             &target_view,
-            RenderSpace { sequence: plan.sequence, target: (plan.width, plan.height) },
+            RenderSpace {
+                sequence: plan.sequence,
+                target: (plan.width, plan.height),
+            },
             &composite,
             &mut sources,
             wgpu::Color::TRANSPARENT,
         );
         ctx.queue.submit([command.finish()]);
-        let image = pollster::block_on(readback::read_texture_rgba8(
+        let mut image = pollster::block_on(readback::read_texture_rgba8(
             &ctx.device,
             &ctx.queue,
             &target,
         ))
         .map_err(|error| format!("第 {frame} 帧读回失败：{error}"))?;
+        let mut overlay_log = IssueLog::new();
+        if let Some(overlay) =
+            evaluate_overlay(plan.timeline, frame, plan.sequence, Some(plan.subtitles))
+        {
+            painter.paint(
+                &mut image,
+                &overlay,
+                (plan.width, plan.height),
+                &mut overlay_log,
+            );
+        }
+        // 摘要在**叠完之后**取：它就是落进 PNG 的那些字节。
         let digest = dhampir_core::timeline::selfcheck::fnv1a64(&image.pixels);
         let path = dir.join(format!("frame-{frame:04}.png"));
-        image.write_png(&path).map_err(|e| format!("写 PNG 失败：{e:?}"))?;
-        written.push((frame, path, format!("{digest:016x}")));
+        image
+            .write_png(&path)
+            .map_err(|e| format!("写 PNG 失败：{e:?}"))?;
+        written.push(FramePng {
+            frame,
+            path,
+            digest: format!("{digest:016x}"),
+            overlay: painter.stats(),
+            issues: overlay_log.into_vec(),
+        });
     }
     sources.close();
     Ok(written)
@@ -966,7 +1107,11 @@ mod tests {
     fn 问题按代码与路径去重并封顶() {
         let mut log = IssueLog::new();
         for _ in 0..90 {
-            log.record("source_rewind", "frame[3].source[a.mp4]", "回退".to_string());
+            log.record(
+                "source_rewind",
+                "frame[3].source[a.mp4]",
+                "回退".to_string(),
+            );
         }
         // 90 次同一个缺陷 -> 只留一条。
         let issues = log.into_vec();
@@ -1010,17 +1155,27 @@ mod tests {
             elapsed_ms: 1,
             opened_streams: 4,
             empty_frames: Vec::new(),
+            overlay: OverlayStats::default(),
             issues: Vec::new(),
         };
         assert!(!base.failed());
         // 帧数不符 -> 失败。
-        let short = RenderReport { encoded_frames: Some(89), ..base.clone() };
+        let short = RenderReport {
+            encoded_frames: Some(89),
+            ..base.clone()
+        };
         assert!(short.failed());
         // 数不出来 -> 失败（不是「没验」当「通过」）。
-        let unknown = RenderReport { encoded_frames: None, ..base.clone() };
+        let unknown = RenderReport {
+            encoded_frames: None,
+            ..base.clone()
+        };
         assert!(unknown.failed());
         // 有空的合成帧 -> 失败。
-        let empty = RenderReport { empty_frames: vec![3], ..base.clone() };
+        let empty = RenderReport {
+            empty_frames: vec![3],
+            ..base.clone()
+        };
         assert!(empty.failed());
         // 有问题清单 -> 失败。
         let dirty = RenderReport {

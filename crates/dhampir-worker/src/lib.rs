@@ -26,6 +26,11 @@
 //!
 //! 两个模块都不自己拿 GPU 上下文：上下文由 `dhampir-render` 建好传进来，与 M0 的
 //! [`offscreen`] 一致。这样"有没有显卡"这件事只在一个地方出错，而不是三处。
+//!
+//! ## T2 内容
+//!
+//! - [`text_raster`]：一行文字 → 直排 RGBA8 位图（ffmpeg drawtext，带缓存）。
+//!   结构由 `dhampir_timeline::text_layout` 给，字形在这里画 —— 本仓不引字体库。
 
 // 明确的守卫：如果谁在 wasm32 上编译本 crate，让他看到一句人话，
 // 而不是一堆 `ash` 的报错。
@@ -40,5 +45,7 @@ pub mod baseline;
 pub mod offscreen;
 pub mod pipeline;
 pub mod scenes;
+pub mod text_overlay;
+pub mod text_raster;
 
 pub use dhampir_core::timeline::{probe_digest, probe_report};

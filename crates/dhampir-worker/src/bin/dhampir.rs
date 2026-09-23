@@ -31,15 +31,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use dhampir_core::compose;
-use dhampir_core::overlay::{SubtitleTable, evaluate_overlay};
-use dhampir_core::timeline::subtitle::{parse_ass, parse_srt};
 use dhampir_core::effects::REGISTRY;
-use dhampir_core::timeline::host_api::{AssetInfoView, SampleView, gop_slices};
+use dhampir_core::overlay::{SubtitleTable, evaluate_overlay};
 use dhampir_core::timeline::edit::{EditOp, apply as apply_edit};
+use dhampir_core::timeline::host_api::{AssetInfoView, SampleView, gop_slices};
 use dhampir_core::timeline::project::{
     Asset, AssetKind, ProjectDoc, asset_reference_counts, load_doc, validate_project_doc,
 };
 use dhampir_core::timeline::schema::{TimebaseDto, TrackKind};
+use dhampir_core::timeline::subtitle::{parse_ass, parse_srt};
 use dhampir_worker::pipeline::{RenderPlan, SourceTable, render_frames_png, render_plan};
 
 const USAGE: &str = "\
@@ -73,6 +73,10 @@ const USAGE: &str = "\
                          **只补工程文件没登记的 id**：工程文件里的位置永远优先
   --width <像素>        输出宽度（默认取工程文件里的 render_hints.width）
   --height <像素>       输出高度（默认取工程文件里的 render_hints.height）
+  --font-file <文件>    frame / render 画字幕用的字体文件（ttf/ttc/otf）。
+                        工程里有字幕轨时**必须给**：本仓不内嵌字体、也不猜系统字体，
+                        画不出来就判失败（问题码 subtitle_font_missing），
+                        而不是静默出一份没有字幕的片子
   -h, --help            显示本帮助
 
   subtitle 子命令不需要 GPU，也不需要 ffmpeg —— 它只出结构，不画图。
@@ -99,19 +103,32 @@ struct Args {
     frame: Option<i64>,
     width: Option<u32>,
     height: Option<u32>,
+    font_file: Option<String>,
     help: bool,
 }
 
 /// 认得的**带值**选项。不在表里的一律报错。
-const KNOWN_VALUE_FLAGS: [&str; 12] = [
-    "--project", "--asset", "--out", "--asset-root", "--asset-map", "--file", "--id", "--op",
-    "--from", "--to", "--width", "--height",
+const KNOWN_VALUE_FLAGS: [&str; 13] = [
+    "--project",
+    "--asset",
+    "--out",
+    "--asset-root",
+    "--asset-map",
+    "--file",
+    "--id",
+    "--op",
+    "--from",
+    "--to",
+    "--width",
+    "--height",
+    "--font-file",
 ];
 /// 认得的**不带值**选项。
 const KNOWN_FLAGS: [&str; 5] = ["--frame", "--write", "--replace", "-h", "--help"];
 /// 认得的子命令。
-const COMMANDS: [&str; 9] =
-    ["probe", "info", "gop", "frame", "render", "import", "library", "edit", "subtitle"];
+const COMMANDS: [&str; 9] = [
+    "probe", "info", "gop", "frame", "render", "import", "library", "edit", "subtitle",
+];
 
 /// 解析。**纯函数**，所以能脱离命令行单测。
 fn parse(argv: &[String]) -> Result<Args, String> {
@@ -165,6 +182,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--frame" => args.frame = Some(parse_int(&token, &value)?),
             "--width" => args.width = Some(parse_uint(&token, &value)?),
             "--height" => args.height = Some(parse_uint(&token, &value)?),
+            "--font-file" => args.font_file = Some(value),
             other => return Err(format!("不认识的选项：{other}")),
         }
         index += 2;
@@ -173,7 +191,9 @@ fn parse(argv: &[String]) -> Result<Args, String> {
 }
 
 fn parse_int(name: &str, value: &str) -> Result<i64, String> {
-    value.parse().map_err(|_| format!("{name} 要一个整数，得到 {value}"))
+    value
+        .parse()
+        .map_err(|_| format!("{name} 要一个整数，得到 {value}"))
 }
 
 fn parse_uint(name: &str, value: &str) -> Result<u32, String> {
@@ -249,9 +269,7 @@ fn field_text(item: &serde_json::Value, name: &str) -> Option<String> {
 ///
 /// 键名是**单字母**（o/s/d/u/k），那是契约层定下的，别改 ——
 /// 这里只是把 ffprobe 的字段搬进去，不重新发明一套。
-pub fn samples_from_packets(
-    packets: &serde_json::Value,
-) -> Result<(Vec<SampleView>, i64), String> {
+pub fn samples_from_packets(packets: &serde_json::Value) -> Result<(Vec<SampleView>, i64), String> {
     let list = packets
         .get("packets")
         .and_then(serde_json::Value::as_array)
@@ -266,8 +284,8 @@ pub fn samples_from_packets(
             .ok_or_else(|| format!("第 {index} 个包没有 size"))?
             .parse()
             .map_err(|_| format!("第 {index} 个包的 size 不是数"))?;
-        let dts_text = field_text(packet, "dts")
-            .ok_or_else(|| format!("第 {index} 个包没有 dts"))?;
+        let dts_text =
+            field_text(packet, "dts").ok_or_else(|| format!("第 {index} 个包没有 dts"))?;
         let dts: i64 = dts_text
             .parse()
             .map_err(|_| format!("第 {index} 个包的 dts 不是数：{dts_text}"))?;
@@ -295,22 +313,30 @@ pub fn samples_from_packets(
 }
 
 const PACKET_ARGS: [&str; 9] = [
-    "-v", "error",
-    "-select_streams", "v:0",
+    "-v",
+    "error",
+    "-select_streams",
+    "v:0",
     "-show_packets",
-    "-show_entries", "packet=pos,size,dts,duration,flags",
-    "-of", "json",
+    "-show_entries",
+    "packet=pos,size,dts,duration,flags",
+    "-of",
+    "json",
 ];
 
 /// 素材信息。**形状就是契约里的 AssetInfoView**，不另造一套。
 fn asset_info(file: &Path) -> Result<AssetInfoView, String> {
     let stream = ffprobe_json(
         &[
-            "-v", "error",
-            "-select_streams", "v:0",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
             "-count_frames",
-            "-show_entries", "stream=nb_read_frames,width,height,avg_frame_rate",
-            "-of", "json",
+            "-show_entries",
+            "stream=nb_read_frames,width,height,avg_frame_rate",
+            "-of",
+            "json",
         ],
         file,
     )?;
@@ -413,7 +439,11 @@ pub fn load_asset_map(path: &str, asset_root: &Path) -> Result<Vec<(String, Path
         let raw = Path::new(file);
         rows.push((
             id.clone(),
-            if raw.is_absolute() { raw.to_path_buf() } else { asset_root.join(raw) },
+            if raw.is_absolute() {
+                raw.to_path_buf()
+            } else {
+                asset_root.join(raw)
+            },
         ));
     }
     Ok(rows)
@@ -423,7 +453,11 @@ pub fn load_asset_map(path: &str, asset_root: &Path) -> Result<Vec<(String, Path
 ///
 /// 优先级：**工程文件的 assets 先来，兜底表只补缺**。
 /// 反过来的话，兜底表会悄悄盖掉工程文件里写的真实位置，而用户看不到。
-fn build_sources(doc: &ProjectDoc, asset_root: &Path, fallback: &[(String, PathBuf)]) -> SourceTable {
+fn build_sources(
+    doc: &ProjectDoc,
+    asset_root: &Path,
+    fallback: &[(String, PathBuf)],
+) -> SourceTable {
     let mut table = SourceTable::new();
     for asset in &doc.assets {
         if asset.uri.is_empty() {
@@ -509,7 +543,11 @@ fn cmd_probe(args: &Args) -> Result<ExitCode, String> {
     let issues = validate_project_doc(&doc, REGISTRY);
     // 校验有 error 就让退出码说话 —— 调用方不该去解析 JSON 才知道失败了。
     // 但 stdout 上仍然给完整清单：**退出码与内容是两件事**。
-    let code = if issues.is_ok() { ExitCode::SUCCESS } else { ExitCode::from(2) };
+    let code = if issues.is_ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(2)
+    };
     print_json(&issues)?;
     Ok(code)
 }
@@ -568,8 +606,19 @@ fn cmd_frame(args: &Args) -> Result<ExitCode, String> {
         return Ok(code);
     }
     let (width, height) = resolve_size(args, &doc);
-    let root = PathBuf::from(args.asset_root.clone().unwrap_or_else(|| "target/s3".to_string()));
+    let root = PathBuf::from(
+        args.asset_root
+            .clone()
+            .unwrap_or_else(|| "target/s3".to_string()),
+    );
     let sources = build_sources(&doc, &root, &resolve_fallback(args, &root)?);
+    let font_file = match resolve_font(args) {
+        Ok(font) => font,
+        Err(code) => return Ok(code),
+    };
+    // 字幕：与 subtitle 子命令**同一份装载**。工程里没有字幕素材时它是空表，
+    // 于是 evaluate_overlay 直接给 None —— 无字幕工程的输出逐字节不变。
+    let subtitles = load_subtitles(&doc, &sources)?;
 
     // 文件名固定按帧号，调用方给的是**目录** —— 这样同一帧重跑一定落在同一个路径上。
     let output = PathBuf::from(out).join("frame.png");
@@ -585,18 +634,31 @@ fn cmd_frame(args: &Args) -> Result<ExitCode, String> {
         width,
         height,
         sequence: doc.sequence_size(),
+        subtitles: &subtitles,
+        font_file,
         output: &output,
     };
     let written = render_frames_png(&plan, &[frame])?;
-    let (_, path, digest) = written.first().ok_or("一帧都没出")?;
+    let first = written.first().ok_or("一帧都没出")?;
+    // 字幕画不出来 / 被切 -> 这张 PNG 里的字幕不对，**不能报成功**。
+    // 与 render 的判据同源：都读问题清单，不另设一套。
+    let failed = !first.issues.is_empty();
     print_json(&serde_json::json!({
         "frame": frame,
-        "path": path.display().to_string(),
-        "digest": digest,
+        "path": first.path.display().to_string(),
+        "digest": first.digest,
         "width": width,
         "height": height,
         "project_frames": project_frames(&doc),
-    }))
+        "overlay": first.overlay,
+        "issues": first.issues,
+        "failed": failed,
+    }))?;
+    if failed {
+        eprintln!("这一帧的字幕有问题（见 issues）—— 出图了，但图里的字幕不对。");
+        return Ok(ExitCode::from(1));
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn cmd_render(args: &Args) -> Result<ExitCode, String> {
@@ -620,8 +682,26 @@ fn cmd_render(args: &Args) -> Result<ExitCode, String> {
 
     let (from, to) = resolve_range(args, &doc)?;
     let (width, height) = resolve_size(args, &doc);
-    let root = PathBuf::from(args.asset_root.clone().unwrap_or_else(|| "target/s3".to_string()));
+    let root = PathBuf::from(
+        args.asset_root
+            .clone()
+            .unwrap_or_else(|| "target/s3".to_string()),
+    );
     let sources = build_sources(&doc, &root, &resolve_fallback(args, &root)?);
+    let font_file = match resolve_font(args) {
+        Ok(font) => font,
+        Err(code) => return Ok(code),
+    };
+    let subtitles = load_subtitles(&doc, &sources)?;
+    if !subtitles.is_empty() && font_file.is_none() {
+        // 提前出声：这个组合的结果是**整趟出片判失败**（每一帧都记 subtitle_font_missing），
+        // 而等待一趟分钟级的出片之后再看到失败，是最没有用的失败方式。
+        eprintln!(
+            "工程里有 {} 份字幕素材，却没给 --font-file —— 这一趟会判失败。\
+             本仓不内嵌字体、也不猜系统字体。",
+            subtitles.len()
+        );
+    }
     let output = PathBuf::from(out);
 
     let total = (to - from + 1) as usize;
@@ -648,11 +728,16 @@ fn cmd_render(args: &Args) -> Result<ExitCode, String> {
         width,
         height,
         sequence: doc.sequence_size(),
+        subtitles: &subtitles,
+        font_file,
         output: &output,
     };
     let report = render_plan(&plan, |done, total| {
         // 每帧一行，调用方自己决定要不要节流 —— 这里不替它做决定。
-        println!("{}", serde_json::json!({"event": "progress", "done": done, "total": total}));
+        println!(
+            "{}",
+            serde_json::json!({"event": "progress", "done": done, "total": total})
+        );
     })?;
 
     let failed = report.failed();
@@ -670,10 +755,25 @@ fn cmd_render(args: &Args) -> Result<ExitCode, String> {
             "elapsed_ms": report.elapsed_ms,
             "opened_streams": report.opened_streams,
             "empty_frames": report.empty_frames,
+            "overlay": report.overlay,
             "issues": report.issues,
             "failed": failed,
         })
     );
+    // 事实与判据分开说：字幕画了几行/丢了几行是**事实**（走 stderr，stdout 只给机器读），
+    // 而"画不出来"与"被切"进的是问题清单 —— 判失败的是后者。
+    if !report.overlay.is_silent() {
+        eprintln!(
+            "字幕：画了 {} 行、被切 {} 行、丢弃 {} 行（超过 max_lines）、画不出 {} 行；\
+             栅格化缓存命中 {} / 未命中 {}",
+            report.overlay.lines_drawn,
+            report.overlay.lines_clipped,
+            report.overlay.lines_dropped,
+            report.overlay.lines_failed,
+            report.overlay.cache_hits,
+            report.overlay.cache_misses,
+        );
+    }
     if failed {
         eprintln!("出片报告判定为失败（问题清单或空帧不为空，或帧数对不上）—— 见 done 那一行。");
         return Ok(ExitCode::from(1));
@@ -726,8 +826,11 @@ fn cmd_import(args: &Args) -> Result<ExitCode, String> {
         eprintln!("文件不在：{file}");
         return Ok(ExitCode::from(2));
     }
-    let asset_root =
-        PathBuf::from(args.asset_root.clone().unwrap_or_else(|| "target/s3".to_string()));
+    let asset_root = PathBuf::from(
+        args.asset_root
+            .clone()
+            .unwrap_or_else(|| "target/s3".to_string()),
+    );
     let id = match args.id.clone() {
         Some(explicit) => explicit,
         None => path
@@ -786,7 +889,11 @@ fn cmd_import(args: &Args) -> Result<ExitCode, String> {
         "asset_count": doc.assets.len(),
         "issues": issues,
     }))?;
-    Ok(if issues.is_ok() { ExitCode::SUCCESS } else { ExitCode::from(2) })
+    Ok(if issues.is_ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(2)
+    })
 }
 
 fn cmd_library(args: &Args) -> Result<ExitCode, String> {
@@ -825,26 +932,19 @@ fn cmd_library(args: &Args) -> Result<ExitCode, String> {
     }))
 }
 
-/// 打印某一帧的**文字覆盖层**：要画哪几行字、每行占哪个归一化矩形。
+/// 字幕素材 id -> 已解析的字幕条：**读文件 + 解析**。
 ///
-/// 两个作用：
-///   * 给「两端要画的那份结构」一个可以逐字段核对的参照 ——
-///     宿主的输出与它不一致，就是宿主错了；
-///   * 让 core 的文字评估**一出生就有调用方**。只写不用的公共 API 比没有更容易误导。
+/// 三条命令（subtitle / frame / render）共用它。各写一遍的话，就会出现
+/// 「subtitle 说这一帧有字、render 画不出来」这种最难查的分叉 ——
+/// 而两端结构一致正是 T2 全部工作的目的。
 ///
-/// 它**不画图**：栅格化是宿主的事，所以这里不需要 GPU，也不需要 ffmpeg。
-fn cmd_subtitle(args: &Args) -> Result<ExitCode, String> {
-    let project = args.project.as_ref().ok_or("subtitle 要 --project <文件>")?;
-    let frame = args.frame.ok_or("subtitle 要 --frame <帧号>")?;
-    let doc = match load_project_or_usage(project) {
-        Ok(doc) => doc,
-        Err(code) => return Ok(code),
-    };
-    let asset_root = PathBuf::from(args.asset_root.clone().unwrap_or_else(|| "target/s3".to_string()));
-    let fallback = resolve_fallback(args, &asset_root)?;
-    let sources = build_sources(&doc, &asset_root, &fallback);
-
-    // 字幕素材：读文件 + 解析。**解析只有一个实现，在契约 crate 里。**
+/// 读不了、解析不了都**报错**，不静默当成「这部片子没有字幕」：
+/// 那两种情况的输出一模一样，而后者是「看起来成功、其实不对」的典型。
+///
+/// 引用不存在的素材、或者引到非字幕素材，都不在这里管 ——
+/// 那些是 `validate_project_doc` 的 error（unknown_asset / subtitle_asset_kind），
+/// 在命令开头就被 gate 拦掉了。这里再查一遍就是第二份实现。
+fn load_subtitles(doc: &ProjectDoc, sources: &SourceTable) -> Result<SubtitleTable, String> {
     let mut table = SubtitleTable::new();
     let mut unreadable: Vec<String> = Vec::new();
     for asset in &doc.assets {
@@ -858,7 +958,11 @@ fn cmd_subtitle(args: &Args) -> Result<ExitCode, String> {
         let text = match std::fs::read_to_string(file) {
             Ok(text) => text,
             Err(error) => {
-                unreadable.push(format!("{}：读不了 {}（{error}）", asset.id, file.display()));
+                unreadable.push(format!(
+                    "{}：读不了 {}（{error}）",
+                    asset.id,
+                    file.display()
+                ));
                 continue;
             }
         };
@@ -870,7 +974,9 @@ fn cmd_subtitle(args: &Args) -> Result<ExitCode, String> {
         let parsed = match extension.as_str() {
             "srt" => parse_srt(&text),
             "ass" | "ssa" => parse_ass(&text),
-            other => Err(format!("不认得这个字幕格式：{other}（现在只认 srt/ass/ssa）")),
+            other => Err(format!(
+                "不认得这个字幕格式：{other}（现在只认 srt/ass/ssa）"
+            )),
         };
         match parsed {
             Ok(report) => {
@@ -882,11 +988,54 @@ fn cmd_subtitle(args: &Args) -> Result<ExitCode, String> {
             Err(error) => return Err(format!("{} 解析失败：{error}", asset.id)),
         }
     }
-
-    // 读不了就**失败**，不静默当成「没有字幕」——那两种情况的输出一模一样。
     if !unreadable.is_empty() {
         return Err(format!("字幕素材读不了：{}", unreadable.join("；")));
     }
+    Ok(table)
+}
+
+/// 字体文件：没给就是**没有字体**（见 `RenderPlan::font_file` 的说明）。
+///
+/// 给了但指不到文件就报**用法错**（退出码 2）：把路径打错字的人应该马上看到这句话，
+/// 而不是等着看「每一行字幕都画不出来」的清单 —— 那是同一个错，但难查得多。
+fn resolve_font(args: &Args) -> Result<Option<&Path>, ExitCode> {
+    let Some(text) = args.font_file.as_deref() else {
+        return Ok(None);
+    };
+    let file = Path::new(text);
+    if !file.is_file() {
+        eprintln!("--font-file 指不到一个文件：{text}");
+        return Err(ExitCode::from(2));
+    }
+    Ok(Some(file))
+}
+
+/// 打印某一帧的**文字覆盖层**：要画哪几行字、每行占哪个归一化矩形。
+///
+/// 两个作用：
+///   * 给「两端要画的那份结构」一个可以逐字段核对的参照 ——
+///     宿主的输出与它不一致，就是宿主错了；
+///   * 让 core 的文字评估**一出生就有调用方**。只写不用的公共 API 比没有更容易误导。
+///
+/// 它**不画图**：栅格化是宿主的事，所以这里不需要 GPU，也不需要 ffmpeg。
+fn cmd_subtitle(args: &Args) -> Result<ExitCode, String> {
+    let project = args
+        .project
+        .as_ref()
+        .ok_or("subtitle 要 --project <文件>")?;
+    let frame = args.frame.ok_or("subtitle 要 --frame <帧号>")?;
+    let doc = match load_project_or_usage(project) {
+        Ok(doc) => doc,
+        Err(code) => return Ok(code),
+    };
+    let asset_root = PathBuf::from(
+        args.asset_root
+            .clone()
+            .unwrap_or_else(|| "target/s3".to_string()),
+    );
+    let fallback = resolve_fallback(args, &asset_root)?;
+    let sources = build_sources(&doc, &asset_root, &fallback);
+    let table = load_subtitles(&doc, &sources)?;
 
     let sequence = doc.sequence_size();
     let overlay = evaluate_overlay(&doc.timeline, frame, sequence, Some(&table));
@@ -911,7 +1060,12 @@ fn cmd_subtitle(args: &Args) -> Result<ExitCode, String> {
             serde_json::json!(overlay.outline),
             overlay.dropped_lines,
         ),
-        None => (Vec::new(), serde_json::Value::Null, serde_json::Value::Null, 0),
+        None => (
+            Vec::new(),
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            0,
+        ),
     };
 
     print_json(&serde_json::json!({
@@ -952,7 +1106,11 @@ fn cmd_edit(args: &Args) -> Result<ExitCode, String> {
         "written": args.write && outcome.is_ok(),
         "issues": outcome.issues,
     }))?;
-    Ok(if outcome.is_ok() { ExitCode::SUCCESS } else { ExitCode::from(2) })
+    Ok(if outcome.is_ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(2)
+    })
 }
 
 fn main() -> ExitCode {
@@ -980,7 +1138,7 @@ fn main() -> ExitCode {
         "import" => cmd_import(&args),
         "library" => cmd_library(&args),
         "edit" => cmd_edit(&args),
-    "subtitle" => cmd_subtitle(&args),
+        "subtitle" => cmd_subtitle(&args),
         other => Err(format!("不认识的子命令：{other}")),
     };
     match result {
@@ -1003,7 +1161,15 @@ mod tests {
     #[test]
     fn 子命令与选项能被解析出来() {
         let args = parse(&argv(&[
-            "render", "--project", "p.json", "--from", "0", "--to", "9", "--out", "o.mp4",
+            "render",
+            "--project",
+            "p.json",
+            "--from",
+            "0",
+            "--to",
+            "9",
+            "--out",
+            "o.mp4",
         ]))
         .expect("合法");
         assert_eq!(args.command, "render");
@@ -1117,7 +1283,10 @@ mod tests {
         });
         let (samples, origin) = samples_from_packets(&packets).expect("能解析");
         assert_eq!(origin, -512);
-        assert_eq!(samples.iter().map(|s| s.dts).collect::<Vec<_>>(), vec![0, 256, 512]);
+        assert_eq!(
+            samples.iter().map(|s| s.dts).collect::<Vec<_>>(),
+            vec![0, 256, 512]
+        );
     }
 
     #[test]
@@ -1132,12 +1301,16 @@ mod tests {
         let table = build_sources(&doc, Path::new("target/s3"), &[]);
         // 相对 uri 挂到根上。
         assert_eq!(
-            table.file_for("a.mp4").map(|path| path.to_string_lossy().replace('\\', "/")),
+            table
+                .file_for("a.mp4")
+                .map(|path| path.to_string_lossy().replace('\\', "/")),
             Some("target/s3/proxy.mp4".to_string())
         );
         // 绝对 uri 原样。
         assert_eq!(
-            table.file_for("b.mp4").map(|path| path.to_string_lossy().replace('\\', "/")),
+            table
+                .file_for("b.mp4")
+                .map(|path| path.to_string_lossy().replace('\\', "/")),
             Some("C:/abs/b.mp4".to_string())
         );
         // uri 为空的不进表 —— 位置未知就不假装知道。
@@ -1158,11 +1331,15 @@ mod tests {
         ];
         let table = build_sources(&doc, Path::new("target/s3"), &fallback);
         assert_eq!(
-            table.file_for("a.mp4").map(|p| p.to_string_lossy().replace('\\', "/")),
+            table
+                .file_for("a.mp4")
+                .map(|p| p.to_string_lossy().replace('\\', "/")),
             Some("target/s3/real.mp4".to_string())
         );
         assert_eq!(
-            table.file_for("b.mp4").map(|p| p.to_string_lossy().replace('\\', "/")),
+            table
+                .file_for("b.mp4")
+                .map(|p| p.to_string_lossy().replace('\\', "/")),
             Some("target/s3/fallback.mp4".to_string())
         );
     }
@@ -1176,7 +1353,10 @@ mod tests {
         .expect("能载入");
         let empty = Args::default();
         assert_eq!(resolve_size(&empty, &doc), (1280, 720));
-        let explicit = Args { width: Some(640), ..Args::default() };
+        let explicit = Args {
+            width: Some(640),
+            ..Args::default()
+        };
         // 命令行只给了一个：另一个仍取提示值，不强行配对。
         assert_eq!(resolve_size(&explicit, &doc), (640, 720));
     }
@@ -1190,7 +1370,10 @@ mod tests {
                           {"id":"a2","kind":"audio","layers":[]}]}}"#,
         )
         .expect("能载入");
-        assert_eq!(audio_track_ids(&doc.timeline), vec!["a1".to_string(), "a2".to_string()]);
+        assert_eq!(
+            audio_track_ids(&doc.timeline),
+            vec!["a1".to_string(), "a2".to_string()]
+        );
     }
 
     #[test]
@@ -1202,7 +1385,11 @@ mod tests {
         // 空工程 -> end=0 -> to = -1 < from = 0，要报错而不是"出 0 帧"。
         assert!(resolve_range(&Args::default(), &doc).is_err());
         // 显式给区间就照给。
-        let args = Args { from: Some(0), to: Some(89), ..Args::default() };
+        let args = Args {
+            from: Some(0),
+            to: Some(89),
+            ..Args::default()
+        };
         assert_eq!(resolve_range(&args, &doc).expect("合法"), (0, 89));
     }
 }

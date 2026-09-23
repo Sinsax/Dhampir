@@ -1,0 +1,772 @@
+//! 宿主那一半：把共享布局算出来的那几行字**画进帧里**。
+//!
+//! # 分工（别把这三件事混起来）
+//!
+//! * 共享布局（`dhampir-timeline::text_layout`）决定**要画什么**：几行、每行什么文本、
+//!   占哪个归一化行盒。两端必须一致，所以它在契约层、是纯函数、零依赖。
+//! * 栅格化（[`crate::text_raster`]）把一行文字变成一张 RGBA8 位图。两端各做各的：
+//!   本机走 ffmpeg drawtext，浏览器走 canvas。**字形像素允许不同**。
+//! * 叠上去（本模块）是「把那张位图按行盒放进目标像素」这一步。它同样两端各有一份，
+//!   但判据是同一条：位图中心对准行盒中心（见下）。
+//!
+//! # 几何：位图中心对准行盒中心
+//!
+//! 位图的宽度取**整条目标宽**（理由见 text_raster 的模块文档），而 drawtext 把文字
+//! 在位图里居中，所以「这一行画在哪」只剩一个自由度：位图放在哪。规则是
+//! **位图的中心对准行盒的中心**：
+//!
+//! ```text
+//! x = round(rect.center_x * 目标宽 - 位图宽 / 2)
+//! y = round(rect.center_y * 目标高 - 位图高 / 2)
+//! ```
+//!
+//! 为什么是中心而不是左上角：位图比行盒**高**（上下各留一份 pad，给描边、抗锯齿与
+//! 真字体超出 1.2em 行盒的部分），按左上角对齐会让文字整体下移一个 pad。
+//! 而中心对齐不需要知道 pad 是多少就成立。
+//!
+//! 字号由行盒高度反推：`font_px = round(行盒高[目标像素] / LINE_HEIGHT_EM)`。
+//! 这一条只依赖 [`TextOverlay`] 里的结构（面积是共享布局算的），
+//! 不需要宿主再去读一遍轨道样式 —— 若两处各算一次，就会漂。
+//!
+//! # 混合：直排 alpha 的 source-over
+//!
+//! 位图是直排 RGBA8（`text_raster` 的契约），帧缓冲也是直排（`readback` 的契约），
+//! 所以就是教科书式的 source-over：
+//!
+//! ```text
+//! out.rgb = src.rgb × src.a + dst.rgb × (1 - src.a)
+//! out.a   = src.a + dst.a × (1 - src.a)
+//! ```
+//!
+//! 全不透明的像素直接搬字节（不做乘除）—— 白字就还是精确的白，不会因为取整差 1。
+//!
+//! # 判据：三条问题 + 一条事实
+//!
+//! | 情况 | 落地成什么 | 为什么 |
+//! |---|---|---|
+//! | 有字要画，宿主没有字体 | 问题 `subtitle_font_missing` | 画不出来就是画不出来。**不能**静默出一份没有字幕的片子 —— 那正是这套东西要消灭的失效模式 |
+//! | ffmpeg 画不出这一行 | 问题 `subtitle_raster_failed` | 同上；消息带 ffmpeg 的原文 |
+//! | 墨迹被切（顶到位图边界，或有墨像素落在画面外） | 问题 `subtitle_ink_clipped` | 结构说这行放得下、像素说被切了，两者不一致就必须红 |
+//! | 超过 max_lines 被丢掉的行 | **事实**：只计数、出声，不判失败 | 它是样式里写明的上限（不是渲染失败），计数在 [`OverlayStats::lines_dropped`] 与 CLI 的 stderr 提示里 |
+//!
+//! `subtitle_ink_clipped` 值不值得红，是量出来决定的，不是口味：
+//! 实测（`plan/measurements.md` 那批字）真字体比共享布局的按字宽分类模型**宽 3%~25%**
+//! （CJK +11%、小写拉丁 +5%~25%）。布局按模型的宽度换行，于是「模型说刚好放得下、
+//! 真字体放不下」是可达的（模型 88% 宽的行 × 1.25 = 110%）。
+//! 那种片子里的字是真的被画面边缘切掉了，属于「看起来成功、其实不对」——
+//! 所以判失败，并把数字写进消息里让人能直接改。
+//!
+//! 反过来，丢行**不**判失败：`max_lines` 是样式里明写的上限，五行的字幕被压到两行
+//! 是它自己的规则在起作用。判失败会把「按样式办事」变成失败，而失败一旦变得常见，
+//! 人就开始忽略它。
+//!
+//! # 已知缺口（写下来，不藏着）
+//!
+//! 一条字幕**全部**超过 max_lines 时（例如 max_lines = 0），`evaluate_overlay` 按契约
+//! 返回 `None`（它约定「没有可画的东西」与「没有字幕」同形），于是那份丢弃计数在中途
+//! 就没了 —— 这里收不到，也就计不出来。改它要动 core 的返回口径（T2.1 的契约），
+//! 不在这一段的范围里，记在 plan/t2-evidence.md 的覆盖边界里。
+
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+
+use dhampir_core::overlay::TextOverlay;
+use dhampir_core::readback::Rgba8Image;
+use dhampir_core::timeline::text_layout::{LINE_HEIGHT_EM, NormalizedRect};
+
+use crate::pipeline::IssueLog;
+use crate::text_raster::{TextBitmap, TextRasterKey, TextRasterizer, bitmap_size};
+
+// ---------------------------------------------------------------------------
+// 几何：行盒 -> 目标像素里的落点
+// ---------------------------------------------------------------------------
+
+/// 一行在目标像素坐标系里的落点与位图尺寸。
+///
+/// `x` / `y` 允许为负：行盒顶边离画面顶边比 pad 还近时就会这样。
+/// 负值不是「算错了」，是「这一段位图落在画面外」——由 [`blit`] 数出来。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinePlacement {
+    /// 位图左上角在目标帧里的像素坐标。
+    pub x: i32,
+    pub y: i32,
+    /// 位图宽（像素），见 [`bitmap_size`] —— 现在恒等于目标宽。
+    pub bitmap_width: u32,
+    /// 位图高（像素）。
+    pub bitmap_height: u32,
+    /// 字号（目标像素）。行盒高除以 [`LINE_HEIGHT_EM`]，至少 1。
+    pub font_px: u32,
+}
+
+/// 行盒（归一化，文档坐标）-> 目标像素里的落点。
+///
+/// 目标尺寸为 0、或行盒没有高度时给 `None`：**没有可画的东西**，
+/// 而不是「画失败」—— 两者在下游的处理不同（前者跳过，后者记问题）。
+pub fn place_line(rect: NormalizedRect, target: (u32, u32)) -> Option<LinePlacement> {
+    if target.0 == 0 || target.1 == 0 {
+        return None;
+    }
+    let target_width = target.0 as f32;
+    let target_height = target.1 as f32;
+    let line_box_px = rect.height * target_height;
+    // 这一行同时挡掉 NaN（NaN 的比较恒为假）。
+    if !(line_box_px > 0.0) {
+        return None;
+    }
+    // 字号从行盒高反推，不读轨道样式：结构里已经有全部信息，
+    // 再读一遍样式就是第二个实现，迟早与共享布局漂开。
+    let raw_font_px = (line_box_px / LINE_HEIGHT_EM).round();
+    let font_px = if raw_font_px < 1.0 {
+        1
+    } else {
+        raw_font_px as u32
+    };
+    let (bitmap_width, bitmap_height) = bitmap_size(target.0, line_box_px, font_px);
+
+    let center_x = rect.center_x() * target_width;
+    let center_y = (rect.y + rect.height / 2.0) * target_height;
+    Some(LinePlacement {
+        x: (center_x - bitmap_width as f32 / 2.0).round() as i32,
+        y: (center_y - bitmap_height as f32 / 2.0).round() as i32,
+        bitmap_width,
+        bitmap_height,
+        font_px,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// 叠上去
+// ---------------------------------------------------------------------------
+
+/// 一次叠图的账。两个数都是**有墨的像素**（全透明的不算）：
+/// 落在画面里的与落在画面外被丢掉的。后者大于 0 就是「字被切了」。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BlitReport {
+    pub written: u64,
+    pub skipped: u64,
+}
+
+/// 8 位通道乘一个 0..255 的系数，四舍五入。
+fn mul_alpha(value: u32, factor: u32) -> u32 {
+    (value * factor + 127) / 255
+}
+
+/// 把一张直排 RGBA8 位图叠到一帧紧密打包的 RGBA8 上（source-over）。
+///
+/// 越界的部分丢掉并计数，**不 panic、也不回绕**（回绕会把字画到对面去，
+/// 那是比丢掉更坏的一类错：看起来有字，位置全错）。
+pub fn blit(
+    image: &mut Rgba8Image,
+    bitmap: &TextBitmap,
+    x: i32,
+    y: i32,
+) -> Result<BlitReport, String> {
+    let expected = image.width as usize * image.height as usize * 4;
+    if image.pixels.len() != expected {
+        return Err(format!(
+            "帧缓冲大小对不上：{}x{} 要 {expected} 字节，实际 {}",
+            image.width,
+            image.height,
+            image.pixels.len()
+        ));
+    }
+    let width = image.width as i32;
+    let height = image.height as i32;
+    let mut report = BlitReport::default();
+
+    for row in 0..bitmap.height {
+        let target_y = y + row as i32;
+        for column in 0..bitmap.width {
+            let source = ((row as usize) * (bitmap.width as usize) + column as usize) * 4;
+            let alpha = bitmap.pixels[source + 3] as u32;
+            if alpha == 0 {
+                continue;
+            }
+            let target_x = x + column as i32;
+            if target_x < 0 || target_y < 0 || target_x >= width || target_y >= height {
+                report.skipped += 1;
+                continue;
+            }
+            let destination =
+                ((target_y as usize) * (image.width as usize) + target_x as usize) * 4;
+            if alpha == 255 {
+                // 全不透明的墨：直接搬字节。省一次乘除，也保证「白字是精确的白」。
+                image.pixels[destination..destination + 4]
+                    .copy_from_slice(&bitmap.pixels[source..source + 4]);
+            } else {
+                let inverse = 255 - alpha;
+                for channel in 0..3 {
+                    let source_channel = bitmap.pixels[source + channel] as u32;
+                    let destination_channel = image.pixels[destination + channel] as u32;
+                    image.pixels[destination + channel] = (mul_alpha(source_channel, alpha)
+                        + mul_alpha(destination_channel, inverse))
+                        as u8;
+                }
+                let destination_alpha = image.pixels[destination + 3] as u32;
+                // 上界：alpha + inverse = 255（mul_alpha 的取整不会超过它乘的那个系数）。
+                image.pixels[destination + 3] =
+                    (alpha + mul_alpha(destination_alpha, inverse)) as u8;
+            }
+            report.written += 1;
+        }
+    }
+    Ok(report)
+}
+
+// ---------------------------------------------------------------------------
+// 一帧一帧地画：缓存与计数在这里
+// ---------------------------------------------------------------------------
+
+/// 这一趟里字幕都发生了什么。**是事实，不是判据** —— 判据在 [`IssueLog`] 里。
+///
+/// 分开写是有意的：「画了几行、切了几行、丢了几行」与「哪些情况算失败」
+/// 是两件事。前者进报告，后者进问题清单，而 [`crate::pipeline::RenderReport::failed`]
+/// 只读后者 —— 于是「丢弃计数」不会把一次合法的出片判成失败。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct OverlayStats {
+    /// 真的叠上画面的行数。
+    pub lines_drawn: usize,
+    /// 被切的（顶到位图边界，或有墨像素落在画面外）。
+    pub lines_clipped: usize,
+    /// 因为超过 max_lines 被共享布局丢掉的行数。
+    pub lines_dropped: usize,
+    /// 没能画出来的行数（没有字体、ffmpeg 画不出、几何对不上）。
+    pub lines_failed: usize,
+    /// 栅格化缓存命中次数 —— 「省了多少次进程」是量出来的。
+    pub cache_hits: usize,
+    pub cache_misses: usize,
+}
+
+impl OverlayStats {
+    /// 这一趟有没有字幕的事。CLI 用它决定要不要出声。
+    pub fn is_silent(&self) -> bool {
+        self.lines_drawn == 0
+            && self.lines_clipped == 0
+            && self.lines_dropped == 0
+            && self.lines_failed == 0
+    }
+}
+
+/// 出片期间的叠加器：**跨帧存活**，因为它带着栅格化缓存。
+#[derive(Debug, Default)]
+pub struct OverlayPainter {
+    rasterizer: TextRasterizer,
+    font_file: Option<PathBuf>,
+    stats: OverlayStats,
+}
+
+impl OverlayPainter {
+    /// `font_file` 为 `None` 表示这个宿主没给字体。**不是「不要字幕」**：
+    /// 真有字要画时会记一条问题（见模块文档的判据表）。
+    pub fn new(font_file: Option<&Path>) -> Self {
+        Self {
+            rasterizer: TextRasterizer::new(),
+            font_file: font_file.map(Path::to_path_buf),
+            stats: OverlayStats::default(),
+        }
+    }
+
+    /// 把这一帧的覆盖层叠上去。画不动的地方记问题，不返回 Err ——
+    /// 一条字幕画不出来不该让整次出片在这里中断（报告会把这次出片判失败，
+    /// 而已经画出来的帧仍然值得看、值得查）。
+    pub fn paint(
+        &mut self,
+        image: &mut Rgba8Image,
+        overlay: &TextOverlay,
+        target: (u32, u32),
+        log: &mut IssueLog,
+    ) {
+        let rasterizer = &mut self.rasterizer;
+        let stats = &mut self.stats;
+        paint_lines(
+            &mut |key| rasterizer.rasterize(key),
+            self.font_file.as_deref(),
+            image,
+            overlay,
+            target,
+            log,
+            stats,
+        );
+    }
+
+    /// 累计计数。缓存的命中/未命中从栅格化器现取。
+    pub fn stats(&self) -> OverlayStats {
+        OverlayStats {
+            cache_hits: self.rasterizer.hits(),
+            cache_misses: self.rasterizer.misses(),
+            ..self.stats
+        }
+    }
+}
+
+/// 真正干活的那一段。**栅格化器是参数**：于是「落点、叠加、问题、计数」这四件事
+/// 能在不起 ffmpeg 的前提下被单测（与 text_raster 里那个缓存缝同一个理由）。
+fn paint_lines(
+    rasterize: &mut impl FnMut(&TextRasterKey) -> Result<Rc<TextBitmap>, String>,
+    font_file: Option<&Path>,
+    image: &mut Rgba8Image,
+    overlay: &TextOverlay,
+    target: (u32, u32),
+    log: &mut IssueLog,
+    stats: &mut OverlayStats,
+) {
+    stats.lines_dropped += overlay.dropped_lines;
+
+    for item in &overlay.items {
+        let Some(placement) = place_line(item.rect, target) else {
+            continue;
+        };
+        let path = issue_path(&item.text);
+        let Some(font_file) = font_file else {
+            stats.lines_failed += 1;
+            log.record(
+                "subtitle_font_missing",
+                &path,
+                format!(
+                    "这一帧要画「{}」，而宿主没有给字体（--font-file）。\
+                     本仓不内嵌字体、也不猜系统字体，所以这里画不出来 —— \
+                     不给字体就不出一份「看起来成功、其实没有字幕」的片子",
+                    item.text
+                ),
+            );
+            continue;
+        };
+        let key = TextRasterKey {
+            text: item.text.clone(),
+            font_px: placement.font_px,
+            color: overlay.color,
+            outline: overlay.outline,
+            font_file: font_file.to_path_buf(),
+            width: placement.bitmap_width,
+            height: placement.bitmap_height,
+        };
+        let bitmap = match rasterize(&key) {
+            Ok(bitmap) => bitmap,
+            Err(error) => {
+                stats.lines_failed += 1;
+                log.record("subtitle_raster_failed", &path, error);
+                continue;
+            }
+        };
+        let report = match blit(image, &bitmap, placement.x, placement.y) {
+            Ok(report) => report,
+            Err(error) => {
+                stats.lines_failed += 1;
+                log.record("subtitle_blit_failed", &path, error);
+                continue;
+            }
+        };
+        stats.lines_drawn += 1;
+        if let Some(message) = clip_message(&item.text, &bitmap, placement, target, report.skipped)
+        {
+            stats.lines_clipped += 1;
+            log.record("subtitle_ink_clipped", &path, message);
+        }
+    }
+}
+
+/// 问题清单里的路径：按**行内容**而不是帧号。
+///
+/// 同一条字幕会连续出现在几十帧里，按帧号记会把清单刷满（上限 24 条），
+/// 而人真正想看到的是「哪一行字画不下」。截断是为了让清单还能一眼扫过去。
+fn issue_path(text: &str) -> String {
+    const MAX_CHARS: usize = 24;
+    let mut short: String = text.chars().take(MAX_CHARS).collect();
+    if text.chars().count() > MAX_CHARS {
+        short.push('…');
+    }
+    format!("overlay[{short}]")
+}
+
+/// 「字被切了」的判词。没这回事就给 `None`。
+///
+/// 两个信号，两个都独立成立、都要报：
+///
+/// * `skipped`：有墨像素落在画面外 —— **确定**被切；
+/// * 墨迹顶到位图的边界 —— **可能**被切。横向的位图边界就是画面边界（位图宽等于目标宽），
+///   所以横向顶边意味着「这一行比画面还宽」；纵向顶边意味着行盒加上下边距都装不下这个字。
+fn clip_message(
+    text: &str,
+    bitmap: &TextBitmap,
+    placement: LinePlacement,
+    target: (u32, u32),
+    skipped: u64,
+) -> Option<String> {
+    let (x0, y0, x1, y1) = bitmap.ink_bounds()?;
+    let mut reasons: Vec<String> = Vec::new();
+    if skipped > 0 {
+        reasons.push(format!("有 {skipped} 个有墨像素落在画面外"));
+    }
+    if x0 == 0 || x1 == bitmap.width.saturating_sub(1) {
+        reasons.push("墨迹顶到位图的左右边界（位图宽就是画面宽）".to_string());
+    }
+    if y0 == 0 || y1 == bitmap.height.saturating_sub(1) {
+        reasons.push("墨迹顶到位图的上下边界（行盒加上下边距装不下这个字）".to_string());
+    }
+    if reasons.is_empty() {
+        return None;
+    }
+    let left = placement.x + x0 as i32;
+    let top = placement.y + y0 as i32;
+    let right = placement.x + x1 as i32;
+    let bottom = placement.y + y1 as i32;
+    Some(format!(
+        "「{text}」的墨迹在画面里是 {left}..{right} / {top}..{bottom}（画面 {}x{}），{}。\
+         共享布局按「按字宽分类」的模型换行，而真字体比模型宽 3%~25%，\
+         所以这是可达的：调小 font_ratio，或者把这一行改短",
+        target.0,
+        target.1,
+        reasons.join("；")
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dhampir_core::overlay::TextItem;
+    use dhampir_core::timeline::schema::Issue;
+
+    fn rect(x: f32, y: f32, width: f32, height: f32) -> NormalizedRect {
+        NormalizedRect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    fn overlay(lines: &[(&str, NormalizedRect)], dropped: usize) -> TextOverlay {
+        TextOverlay {
+            items: lines
+                .iter()
+                .map(|(text, rect)| TextItem {
+                    text: (*text).to_string(),
+                    rect: *rect,
+                })
+                .collect(),
+            color: [255, 255, 255, 255],
+            outline: true,
+            dropped_lines: dropped,
+        }
+    }
+
+    /// 一张 8x8 的位图：全不透明。用来验「叠上去」这件事本身。
+    fn opaque_bitmap(width: u32, height: u32) -> TextBitmap {
+        TextBitmap {
+            width,
+            height,
+            pixels: vec![255u8; width as usize * height as usize * 4],
+        }
+    }
+
+    fn frame(width: u32, height: u32, value: [u8; 4]) -> Rgba8Image {
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for _ in 0..(width * height) {
+            pixels.extend_from_slice(&value);
+        }
+        Rgba8Image {
+            width,
+            height,
+            pixels,
+        }
+    }
+
+    /// 一张只有中间一块墨的位图：四周留白，于是**不会**触发「墨迹顶到边界」那条判据 ——
+    /// 真位图就是这样（drawtext 把字放在中间，四周是 pad）。拿「整张全不透明」当假位图
+    /// 会把切线判据顺带点着，测试就不再只验它想验的那件事。
+    fn ink_bitmap(width: u32, height: u32) -> TextBitmap {
+        let mut bitmap = TextBitmap::blank(width, height);
+        let x0 = width / 2 - width / 8;
+        let x1 = width / 2 + width / 8;
+        let y0 = height / 2 - height / 4;
+        let y1 = height / 2 + height / 4;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let at = ((y as usize) * (width as usize) + x as usize) * 4;
+                bitmap.pixels[at..at + 4].copy_from_slice(&[255, 255, 255, 255]);
+            }
+        }
+        bitmap
+    }
+
+    /// 起一次假栅格化：要画的那行按给定尺寸造一张带墨的位图。
+    fn fake_rasterizer(
+        calls: &mut usize,
+    ) -> impl FnMut(&TextRasterKey) -> Result<Rc<TextBitmap>, String> + '_ {
+        move |key: &TextRasterKey| {
+            *calls += 1;
+            Ok(Rc::new(ink_bitmap(key.width, key.height)))
+        }
+    }
+
+    fn codes(log: &[Issue]) -> Vec<&str> {
+        log.iter().map(|issue| issue.code.as_str()).collect()
+    }
+
+    // ---- 几何 ----
+
+    #[test]
+    fn 落点把位图中心对准行盒中心() {
+        // 文档坐标 640x360、目标就是 640x360（默认路径）：字号 0.055*360 = 19.8 -> 20。
+        let placement = place_line(rect(0.25, 0.5, 0.5, 0.066), (640, 360)).expect("能落点");
+        assert_eq!(placement.font_px, 20);
+        assert_eq!((placement.bitmap_width, placement.bitmap_height), (640, 36));
+        // 行盒中心 = (0.5, 0.5 + 0.033) -> (320, 191.88)；位图中心对准它。
+        assert_eq!(placement.x, 0);
+        assert_eq!(placement.y, 174);
+    }
+
+    #[test]
+    fn 字号跟着目标高度走而不是文档坐标() {
+        // 同一个行盒，目标高一倍：字号与位图都要跟着放大 —— 归一化矩形与渲染尺寸无关，
+        // 但**像素**当然有关。
+        let small = place_line(rect(0.25, 0.5, 0.5, 0.066), (640, 360)).expect("能落点");
+        let large = place_line(rect(0.25, 0.5, 0.5, 0.066), (1280, 720)).expect("能落点");
+        assert_eq!(small.font_px, 20);
+        assert_eq!(large.font_px, 40);
+        assert_eq!(large.bitmap_height, 74);
+    }
+
+    #[test]
+    fn 零高度或零尺寸没有可画的东西() {
+        // 行盒零高：没有字可画 -> 不是「画失败」，是「没东西」。
+        assert!(place_line(rect(0.5, 0.5, 0.2, 0.0), (640, 360)).is_none());
+        // NaN 也要挡住（比较恒假，于是走同一条分支）。
+        assert!(place_line(rect(0.5, 0.5, 0.2, f32::NAN), (640, 360)).is_none());
+        assert!(place_line(rect(0.5, 0.5, 0.2, 0.1), (0, 360)).is_none());
+    }
+
+    // ---- 叠加 ----
+
+    #[test]
+    fn 全不透明的位图是逐字节覆盖() {
+        let mut image = frame(16, 16, [10, 20, 30, 255]);
+        let bitmap = opaque_bitmap(8, 8);
+        let report = blit(&mut image, &bitmap, 2, 3).expect("叠得上");
+        assert_eq!(
+            report,
+            BlitReport {
+                written: 64,
+                skipped: 0
+            }
+        );
+        // 盖住的地方是位图的字节，其余一个字节没动。
+        for y in 0..16u32 {
+            for x in 0..16u32 {
+                let got = image.pixel(x, y).expect("在画面里");
+                let inside = (2..10).contains(&x) && (3..11).contains(&y);
+                let want = if inside {
+                    [255, 255, 255, 255]
+                } else {
+                    [10, 20, 30, 255]
+                };
+                assert_eq!(got, want, "({x},{y}) 不对");
+            }
+        }
+    }
+
+    #[test]
+    fn 半透明按直排_alpha_叠加() {
+        let mut image = frame(4, 4, [0, 0, 0, 255]);
+        let mut pixels = vec![0u8; 4 * 4 * 4];
+        for px in pixels.chunks_exact_mut(4) {
+            px.copy_from_slice(&[255, 255, 255, 128]);
+        }
+        let bitmap = TextBitmap {
+            width: 4,
+            height: 4,
+            pixels,
+        };
+        let report = blit(&mut image, &bitmap, 0, 0).expect("叠得上");
+        assert_eq!(report.written, 16);
+        // 白 128/255 叠在黑上：每通道 128；alpha 直排相加 -> 满。
+        let got = image.pixel(1, 1).expect("在画面里");
+        assert_eq!(got, [128, 128, 128, 255], "直排 source-over 的算术不对");
+    }
+
+    #[test]
+    fn 全透明的像素一个字节都不动() {
+        let mut image = frame(4, 4, [7, 8, 9, 200]);
+        let before = image.clone();
+        let bitmap = TextBitmap::blank(4, 4);
+        let report = blit(&mut image, &bitmap, 0, 0).expect("叠得上");
+        assert_eq!(
+            report,
+            BlitReport {
+                written: 0,
+                skipped: 0
+            }
+        );
+        assert_eq!(image, before, "没有墨的位图不该动任何字节");
+    }
+
+    #[test]
+    fn 落在画面外的墨迹要被数出来而不是回绕() {
+        let mut image = frame(16, 16, [0, 0, 0, 255]);
+        let bitmap = opaque_bitmap(4, 4);
+        let report = blit(&mut image, &bitmap, -2, -2).expect("叠得上");
+        // 4x4 里只有右下 2x2 落在画面内。
+        assert_eq!(
+            report,
+            BlitReport {
+                written: 4,
+                skipped: 12
+            }
+        );
+        assert_eq!(image.pixel(0, 0).expect("在画面里"), [255, 255, 255, 255]);
+        // 回绕的话右下角会被画上（x = -2 绕到末尾）——这条把它钉住。
+        assert_eq!(image.pixel(15, 15).expect("在画面里"), [0, 0, 0, 255]);
+    }
+
+    // ---- 判据 ----
+
+    #[test]
+    fn 没有覆盖层就一个字节都不动() {
+        let mut painter = OverlayPainter::new(Some(Path::new("C:/fake/font.ttf")));
+        let mut image = frame(16, 16, [1, 2, 3, 4]);
+        let before = image.clone();
+        let mut log = IssueLog::new();
+        painter.paint(&mut image, &overlay(&[], 0), (16, 16), &mut log);
+        assert_eq!(image, before);
+        assert!(log.is_empty(), "空覆盖层不该记问题");
+        assert!(painter.stats().is_silent());
+    }
+
+    #[test]
+    fn 有字要画而宿主没有字体是问题而不是空操作() {
+        let mut painter = OverlayPainter::new(None);
+        let mut image = frame(64, 64, [0, 0, 0, 255]);
+        let before = image.clone();
+        let mut log = IssueLog::new();
+        let lines = overlay(&[("第一行中文", rect(0.25, 0.8, 0.5, 0.066))], 0);
+        painter.paint(&mut image, &lines, (64, 64), &mut log);
+        let issues = log.into_vec();
+        assert_eq!(codes(&issues), vec!["subtitle_font_missing"]);
+        assert_eq!(image, before, "画不出来就不该动像素");
+        assert_eq!(painter.stats().lines_failed, 1);
+        assert_eq!(painter.stats().lines_drawn, 0);
+    }
+
+    #[test]
+    fn 墨迹顶到边界要记成问题_没顶到就不记() {
+        // 反向用例：两张位图只差「墨迹在不在边界上」，判定必须跟着变 ——
+        // 否则这条判据要么恒真、要么恒假。
+        let inside = rect(0.25, 0.8, 0.5, 0.066);
+        for (ink_at_edge, expected) in [(true, 1usize), (false, 0usize)] {
+            let mut painter = OverlayPainter::new(Some(Path::new("C:/fake/font.ttf")));
+            let mut image = frame(640, 360, [0, 0, 0, 255]);
+            let mut log = IssueLog::new();
+            let mut calls = 0;
+            let rasterize = |key: &TextRasterKey| {
+                let mut bitmap = TextBitmap::blank(key.width, key.height);
+                let (x0, x1) = if ink_at_edge {
+                    (0, key.width - 1)
+                } else {
+                    (key.width / 2 - 4, key.width / 2 + 4)
+                };
+                for y in 4..8u32 {
+                    for x in x0..=x1 {
+                        let at = ((y as usize) * (key.width as usize) + x as usize) * 4;
+                        bitmap.pixels[at..at + 4].copy_from_slice(&[255, 255, 255, 255]);
+                    }
+                }
+                Ok(Rc::new(bitmap))
+            };
+            let counter = &mut calls;
+            let lines = overlay(&[("一", inside)], 0);
+            let stats = &mut painter.stats;
+            paint_lines(
+                &mut |key| {
+                    *counter += 1;
+                    rasterize(key)
+                },
+                painter.font_file.as_deref(),
+                &mut image,
+                &lines,
+                (640, 360),
+                &mut log,
+                stats,
+            );
+            let issues = log.into_vec();
+            assert_eq!(issues.len(), expected, "边界判定反了：{issues:?}");
+            assert_eq!(painter.stats().lines_clipped, expected);
+            assert_eq!(painter.stats().lines_drawn, 1, "画还是画了的");
+            assert_eq!(calls, 1);
+        }
+    }
+
+    #[test]
+    fn 叠到画面外的行要被报成被切() {
+        let mut painter = OverlayPainter::new(Some(Path::new("C:/fake/font.ttf")));
+        // 行盒整个在画面之上（中心 y = -0.4 + 0.033），于是位图连同上下边距一起露在画面外。
+        let mut image = frame(640, 360, [0, 0, 0, 255]);
+        let before = image.clone();
+        let mut log = IssueLog::new();
+        let mut calls = 0;
+        let lines = overlay(&[("一", rect(0.25, -0.4, 0.5, 0.066))], 0);
+        paint_lines(
+            &mut |key| fake_rasterizer(&mut calls)(key),
+            Some(Path::new("C:/fake/font.ttf")),
+            &mut image,
+            &lines,
+            (640, 360),
+            &mut log,
+            &mut painter.stats,
+        );
+        let issues = log.into_vec();
+        assert_eq!(codes(&issues), vec!["subtitle_ink_clipped"]);
+        assert!(
+            issues[0].message.contains("落在画面外"),
+            "{}",
+            issues[0].message
+        );
+        assert_eq!(painter.stats().lines_clipped, 1);
+        assert_eq!(painter.stats().lines_drawn, 1);
+        assert_eq!(calls, 1);
+        assert_eq!(image, before, "整行都在画面外就不该动任何字节");
+    }
+
+    #[test]
+    fn 画不出来要记成问题() {
+        let mut painter = OverlayPainter::new(Some(Path::new("C:/fake/font.ttf")));
+        let mut image = frame(64, 64, [0, 0, 0, 255]);
+        let before = image.clone();
+        let mut log = IssueLog::new();
+        let stats = &mut painter.stats;
+        let lines = overlay(&[("一", rect(0.25, 0.8, 0.5, 0.066))], 0);
+        paint_lines(
+            &mut |_key| Err("ffmpeg 画不出这一行（退出码 1）：字体不认得".to_string()),
+            Some(Path::new("C:/fake/font.ttf")),
+            &mut image,
+            &lines,
+            (64, 64),
+            &mut log,
+            stats,
+        );
+        let issues = log.into_vec();
+        assert_eq!(codes(&issues), vec!["subtitle_raster_failed"]);
+        assert_eq!(image, before);
+        assert_eq!(painter.stats().lines_failed, 1);
+    }
+
+    #[test]
+    fn 丢掉的行是事实不是问题() {
+        let mut painter = OverlayPainter::new(Some(Path::new("C:/fake/font.ttf")));
+        let mut image = frame(64, 64, [0, 0, 0, 255]);
+        let mut log = IssueLog::new();
+        let mut calls = 0;
+        let lines = overlay(&[("一", rect(0.25, 0.8, 0.5, 0.066))], 3);
+        paint_lines(
+            &mut |key| fake_rasterizer(&mut calls)(key),
+            Some(Path::new("C:/fake/font.ttf")),
+            &mut image,
+            &lines,
+            (64, 64),
+            &mut log,
+            &mut painter.stats,
+        );
+        assert!(log.is_empty(), "丢行不该判失败：那是样式自己写的上限");
+        assert_eq!(painter.stats().lines_dropped, 3);
+        assert_eq!(painter.stats().lines_drawn, 1);
+    }
+}
