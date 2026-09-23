@@ -657,3 +657,155 @@ mod asset_tests {
         }
     }
 }
+
+/// 按**同步样本**把样本表切成 GOP 段。
+///
+/// # 为什么按 is_sync 切，而不是"每 N 个样本切一刀"
+///
+/// 真正的 GOP 边界就是关键帧，而 gop_length 只是「通常如此」的期望值。
+/// 拿它当切分依据，一旦素材的实际关键帧间隔与期望不符（转码参数变了、或 VFR），
+/// 切出来的段就会**起点不是关键帧** —— 前端解不出第一帧。
+/// 用 is_sync 则是**读事实**，不是**信期望**。
+///
+/// # 段与样本表的关系
+///
+/// 每一段从它的同步样本开始，到下一个同步样本**之前**为止。
+/// 样本表开头若有不属于任何关键帧的样本，它们**不属于任何段** ——
+/// 那些样本没有可起解的关键帧，本来就解不出来。
+/// 所以第 0 段的 first_sample 可能不是 0，这是事实，不是缺口。
+///
+/// 一个同步样本都没有时返回**空**：那意味着这份素材根本没法按帧定位，
+/// 此时切一刀出一个"看起来能用"的段，只会让前端在解码时才失败。
+pub fn gop_slices(samples: &[SampleView]) -> Vec<GopSliceView> {
+    let sync_indices: Vec<usize> = samples
+        .iter()
+        .enumerate()
+        .filter(|(_, sample)| sample.is_sync)
+        .map(|(index, _)| index)
+        .collect();
+    if sync_indices.is_empty() {
+        return Vec::new();
+    }
+
+    let mut slices = Vec::with_capacity(sync_indices.len());
+    for (position, &first) in sync_indices.iter().enumerate() {
+        let end = sync_indices.get(position + 1).copied().unwrap_or(samples.len());
+        let head = &samples[first];
+        // 字节范围取这一段所有样本的并集 —— 用 max 而不是只取最后一个，
+        // 免得样本在文件里的顺序与表里的顺序不一致时算短了。
+        let mut last_end = head.offset.saturating_add(head.size);
+        for sample in &samples[first..end] {
+            last_end = last_end.max(sample.offset.saturating_add(sample.size));
+        }
+        slices.push(GopSliceView {
+            index: position as u64,
+            first_sample: first as u32,
+            sample_count: (end - first) as u32,
+            byte_offset: head.offset as u64,
+            byte_length: last_end.saturating_sub(head.offset) as u64,
+        });
+    }
+    slices
+}
+
+#[cfg(test)]
+mod gop_slice_tests {
+    use super::*;
+
+    /// 造一张样本表：每 gop 个样本一个关键帧，偏移从 0 开始每条 100 字节。
+    fn samples(len: usize, gop: usize) -> Vec<SampleView> {
+        (0..len)
+            .map(|index| SampleView {
+                offset: index * 100,
+                size: 100,
+                dts: index as u64,
+                duration: 1,
+                is_sync: index % gop == 0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn 每段从关键帧开始且到下一个关键帧之前为止() {
+        let slices = gop_slices(&samples(10, 3));
+        assert_eq!(slices.len(), 4, "10 个样本、每 3 个一个关键帧 -> 4 段");
+        assert_eq!(slices[0].first_sample, 0);
+        assert_eq!(slices[0].sample_count, 3);
+        assert_eq!(slices[1].first_sample, 3);
+        assert_eq!(slices[2].first_sample, 6);
+        // 最后一段到表尾为止（9 是最后一个关键帧，只剩它自己）。
+        assert_eq!(slices[3].first_sample, 9);
+        assert_eq!(slices[3].sample_count, 1);
+    }
+
+    #[test]
+    fn 相邻两段首尾相接() {
+        // 有空洞会让前端"少一帧"，重叠会让同一帧被取两次。
+        let slices = gop_slices(&samples(20, 4));
+        for pair in slices.windows(2) {
+            assert_eq!(
+                pair[0].first_sample + pair[0].sample_count,
+                pair[1].first_sample,
+                "第 {} 段与下一段不相接",
+                pair[0].index
+            );
+        }
+    }
+
+    #[test]
+    fn 每段的字节范围覆盖它自己那些样本() {
+        let slices = gop_slices(&samples(10, 3));
+        for slice in &slices {
+            let first = slice.first_sample as usize;
+            let last = first + slice.sample_count as usize - 1;
+            assert_eq!(slice.byte_offset, (first * 100) as u64);
+            // 最后一条样本的末尾（偏移 + 长度）。
+            assert_eq!(slice.byte_length, ((last + 1) * 100 - first * 100) as u64);
+        }
+    }
+
+    #[test]
+    fn 开头没有关键帧时那些样本不属于任何段() {
+        // 这是事实而不是缺口：它们前面没有可起解的关键帧，本来就解不出来。
+        let mut table = samples(10, 3);
+        table[0].is_sync = false;
+        let slices = gop_slices(&table);
+        assert_eq!(slices[0].first_sample, 3, "第 0 段应当从第一个**关键帧**开始");
+    }
+
+    #[test]
+    fn 一个关键帧都没有时返回空而不是切一刀() {
+        // 那意味着这份素材没法按帧定位。切出一个"看起来能用"的段，
+        // 只会让前端在解码时才失败 —— 明确失败好得多。
+        let mut table = samples(10, 3);
+        for sample in &mut table {
+            sample.is_sync = false;
+        }
+        assert!(gop_slices(&table).is_empty());
+        assert!(gop_slices(&[]).is_empty());
+    }
+
+    #[test]
+    fn 实际关键帧间隔与期望不符时仍然正确() {
+        // 这才是"按 is_sync 切"的意义：gop_length 只是期望值。
+        // 混合间隔（3、3、7）也要切对，因为它读的是事实。
+        let mut table = samples(13, 3);
+        for (index, sample) in table.iter_mut().enumerate() {
+            sample.is_sync = index == 0 || index == 3 || index == 6;
+        }
+        let slices = gop_slices(&table);
+        assert_eq!(slices.len(), 3);
+        assert_eq!(slices[0].sample_count, 3);
+        assert_eq!(slices[1].sample_count, 3);
+        assert_eq!(slices[2].sample_count, 7, "最后一段一直延伸到表尾");
+    }
+
+    #[test]
+    fn 每个样本都是关键帧时每段一个样本() {
+        let slices = gop_slices(&samples(5, 1));
+        assert_eq!(slices.len(), 5);
+        for slice in &slices {
+            assert_eq!(slice.sample_count, 1);
+        }
+    }
+}
