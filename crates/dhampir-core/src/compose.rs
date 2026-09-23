@@ -286,6 +286,34 @@ pub fn end_frame(project: &Project) -> Option<Frame> {
         .max()
 }
 
+/// v2 的第一条有内容的帧。
+///
+/// **与 v1 那份分开写而不是共用一个**：v1 的轨道是 clips（轨内唯一一条活着的），
+/// v2 是 layers（每层自带 start/end）。共用一个就得先降级到某一种形态，
+/// 而那正是"两份真相"的开头。两份实体都只有四行，重复的代价比降级小。
+pub fn first_frame_v2(timeline: &TimelineV2) -> Option<Frame> {
+    timeline
+        .tracks
+        .iter()
+        .filter(|track| track.kind == TrackKind::Video)
+        .flat_map(|track| track.layers.iter())
+        .filter(|layer| layer.enabled)
+        .map(|layer| layer.start)
+        .min()
+}
+
+/// v2 的时间线长度（下一位）。空时间线或只有音轨时返回 None。
+pub fn end_frame_v2(timeline: &TimelineV2) -> Option<Frame> {
+    timeline
+        .tracks
+        .iter()
+        .filter(|track| track.kind == TrackKind::Video)
+        .flat_map(|track| track.layers.iter())
+        .filter(|layer| layer.enabled)
+        .map(|layer| layer.end)
+        .max()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

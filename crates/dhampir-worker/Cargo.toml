@@ -10,6 +10,13 @@ license.workspace = true
 name = "dhampir-render"
 path = "src/main.rs"
 
+# 底座的命令行入口。**它同时是本机后端的渲染实现** ——
+# scripts/dhampir-local.mjs 只做 HTTP 与任务记账，渲染一律调它，
+# 于是"本机与远端行为一致"是结构保证，而不是靠两边各写一遍。
+[[bin]]
+name = "dhampir"
+path = "src/bin/dhampir.rs"
+
 [dependencies]
 dhampir-core = { workspace = true }
 dhampir-media = { workspace = true }

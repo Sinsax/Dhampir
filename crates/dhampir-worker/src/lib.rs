@@ -38,6 +38,7 @@ compile_error!(
 
 pub mod baseline;
 pub mod offscreen;
+pub mod pipeline;
 pub mod scenes;
 
 pub use dhampir_core::timeline::{probe_digest, probe_report};

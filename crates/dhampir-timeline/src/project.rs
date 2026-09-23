@@ -160,7 +160,11 @@ pub struct ProjectDoc {
 ///
 /// **刻意分成 errors 与 warnings，而不是给 Issue 加一个 severity 字段** ——
 /// Issue 是已冻结契约的一部分，为了一处提示去动它的形状不划算。
-#[derive(Debug, Clone, Default, PartialEq)]
+// Serialize 是**必须的**，不是顺手加的：这份清单要跨进程交给宿主
+// （CLI 的 stdout、HTTP 的响应体），而宿主不该为它再写一遍翻译。
+// 与 Issue 共用同一套形状（code/path/message），前端只认一种错误。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DocIssues {
     pub errors: Vec<Issue>,
     /// 警告**不阻断**载入（例如「登记了但没被引用」）。
