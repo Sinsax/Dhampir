@@ -296,7 +296,7 @@ fn 调整图层模糊下方而不影响上方() {
             top.clone(),
         ],
     };
-    let only_top = Composite { frame: 0, layers: vec![top] };
+    let only_top = Composite { frame: 0, layers: vec![top.clone()] };
 
     let plain = render(&ctx, &source, &bottom_only);
     let blurred = render(&ctx, &source, &adjusted);
@@ -307,6 +307,26 @@ fn 调整图层模糊下方而不影响上方() {
     assert_ne!(
         plain, blurred,
         "挂上调整图层后下方没变 —— 分段合成没生效"
+    );
+
+    // **1.5 归因**：让「只有上层」也走**同一条分段路径**。
+    //
+    // 原判据拿 covered（分段路径）去比 only_top（**非**分段路径），
+    // 两个数来自两条路 —— 差异可能只是那条搬运引入的，而不是模糊泄漏。
+    // 这里用一个 radius 为 0 的调整层：它不会真的模糊，
+    // 但会让计划里出现 Adjust 步，于是路径与 covered 一致。
+    // **这一步是为了分清「实现错」还是「判据错」，不是为了把测试弄绿。**
+    let mut noop_adjustment = layer("noop", 1.0, 1.0, vec![blur_effect(0.0)]);
+    noop_adjustment.is_adjustment = true;
+    noop_adjustment.source = String::new();
+    let only_top_segmented = Composite {
+        frame: 0,
+        layers: vec![noop_adjustment, top.clone()],
+    };
+    let with_top_segmented = render(&ctx, &source, &only_top_segmented);
+    assert_eq!(
+        with_top, with_top_segmented,
+        "两边都走分段路径后仍不同 —— 差异来自模糊泄漏到上层，是**实现**问题"
     );
 
     // 2. **上方一个字都没变。**
