@@ -159,6 +159,12 @@ async function bindAllSources() {
     video.muted = true;
     video.playsInline = true;
     video.preload = "auto";
+    // **必须声明 crossorigin。**
+    // 本机/分离模式下素材是跨源的，而不带 crossorigin 的 video 是"被污染"的：
+    // WebGPU 的 copyExternalImageToTexture 会拒绝它 —— 表现不是报错，
+    // 而是 wasm 里一个 unreachable（wgpu 的校验失败变成了 panic），
+    // 外面只看到"启动失败：unreachable"。这条路本地跑了很久才定位到这里。
+    video.crossOrigin = "anonymous";
     video.src = await backend.mediaUrlFor(assetId);
     host.appendChild(video);
     try {

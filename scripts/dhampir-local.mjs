@@ -60,7 +60,29 @@ function issue(code, path, message) {
   return { code: code, path: path, message: message };
 }
 
-const CORS = { 'access-control-allow-origin': '*' };
+const CORS = {
+  'access-control-allow-origin': '*',
+  // **跨源读得到的响应头要显式列出来。** 不列的话 JS 读 content-range 会拿到 null，
+  // 而"读不到"和"没有这个头"在代码里长得一样。
+  'access-control-expose-headers': 'content-range, accept-ranges, content-length',
+};
+
+/**
+ * 预检的回答。
+ *
+ * **跨源的 POST + content-type: application/json 会先发一个 OPTIONS。**
+ * 不回答它的表现是浏览器里的 "Failed to fetch" —— 看起来像后端没起来，
+ * 而 curl 打同一个地址是通的（curl 不做预检）。本机模式第一次跑就是这么卡的。
+ */
+function preflight(res) {
+  res.writeHead(204, {
+    ...CORS,
+    'access-control-allow-methods': 'GET, POST, DELETE, OPTIONS',
+    'access-control-allow-headers': 'content-type, range',
+    'access-control-max-age': '600',
+  });
+  res.end();
+}
 
 // ---------------------------------------------------------------------------
 // 纯逻辑
@@ -366,6 +388,10 @@ function projectFromBody(parsed) {
 function handle(req, res, context, url) {
   const path = url.pathname;
   const { backend, cli, assetRoot, assets } = context;
+
+  // 预检**排在所有路由之前**：它是浏览器问"这个跨源请求能不能发"，
+  // 与该请求要落到哪个路由无关。
+  if (req.method === 'OPTIONS') return preflight(res);
 
   if (req.method === 'GET' && path === '/health') {
     return sendJson(res, 200, { ok: true });
