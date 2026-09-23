@@ -16,6 +16,7 @@
 //   node scripts/web-check.mjs --synthetic N 合成源导出（双端比对用）
 //
 // 另有 --frames-only（只出帧，不编码不写里程碑）、--canvas WxH、--timeout-ms N。
+// **--ready-only** 只验"页面启动完成"，不做任何导出 —— 页面起不来的那类问题先跑它。
 //
 // # 为什么 --local 与默认跑法要分开
 //
@@ -266,27 +267,65 @@ if (mode === 'serve') {
   console.log('  调试端口：' + (debugPort === null ? '（读不到 DevToolsActivePort）' : debugPort));
   const timer = setTimeout(() => { try { child.kill(); } catch (error) { /* 已经没了 */ } state.settle(); }, timeoutMs);
 
-  await finished;
+  const readyOnly = argv.includes('--ready-only');
+  if (readyOnly) {
+    // **只问一句"页面起来了没有"。**
+    // 这一条不依赖任何导出路径 —— 导出跑不通的时候，最先要知道的就是
+    // 页面本身到底起没起来、停在哪一步。
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      pageMarks = await readPageMarks(debugPort);
+      if (pageMarks !== null && pageMarks.ready === true) break;
+      if (state.pageErrors.some((text) => text.includes('启动失败'))) break;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  } else {
+    await finished;
+  }
   clearTimeout(timer);
   // **收尾之前先把页面里的脚印读出来** —— 杀掉 Chrome 之后就读不到了。
-  pageMarks = await readPageMarks(debugPort);
+  if (!readyOnly) pageMarks = await readPageMarks(debugPort);
   try { child.kill(); } catch (error) { /* 已经没了 */ }
   server.close();
 
-  if (mode === 'probe') {
-    reportProbe();
-  } else if (mode === 'app') {
-    // **报告要在杀掉后端之前跑完。** 产品路径的最后一步是下载产物，
-    // 而后端一停就下载不了 —— 上一次就是这样拿到了 ECONNRESET。
-    try {
+  // **报告要在杀掉后端之前跑完。** 产品路径的最后一步是下载产物，
+  // 而后端一停就下载不了 —— 上一次就是这样拿到了 ECONNRESET。
+  try {
+    if (readyOnly) reportReady(stderr);
+    else if (mode === 'probe') reportProbe();
+    else if (mode === 'app') {
       if (backendMode === null) reportApp(stderr);
       else await reportBackendExport(stderr);
-    } finally {
-      // **跑完就杀，不能只靠 process.on('exit')** —— 子进程自己会让事件循环活着，
-      // 于是 Node 永不退出、管道永不刷出，看起来像浏览器卡住。
-      if (backendProcess) { backendProcess.kill(); backendProcess = null; }
     }
+  } finally {
+    // **跑完就杀，不能只靠 process.on('exit')** —— 子进程自己会让事件循环活着，
+    // 于是 Node 永不退出、管道永不刷出，看起来像浏览器卡住。
+    if (backendProcess) { backendProcess.kill(); backendProcess = null; }
   }
+}
+
+/**
+ * 只验「页面启动完成」。**不依赖导出** ——
+ * 页面起不来的时候导出路径根本走不到，而那时最需要知道的恰恰是"它停在哪一步"。
+ */
+function reportReady(browserStderr) {
+  printPageSignals();
+  const ready = pageMarks !== null && pageMarks.ready === true;
+  if (!ready) {
+    // 页面没起来时，**浏览器的输出才是第一手材料**：
+    // wasm 的 panic 消息（"panicked at ..."）只打在那里，页面上只看到一句 trap。
+    const dump = join(REPO_ROOT, 'target', 'p6', 'web-check-browser-stderr.txt');
+    mkdirSync(dirname(dump), { recursive: true });
+    writeFileSync(dump, browserStderr, 'utf8');
+    console.error('✗ 页面没有进入 ready 状态（window.dhampirReady 不是 true）');
+    console.error('  浏览器全量输出：' + dump);
+    const panic = String(browserStderr).split(String.fromCharCode(10))
+      .filter((line) => line.includes('panicked at'));
+    for (const line of panic.slice(0, 5)) console.error('  ' + line.trim());
+    process.exitCode = 1;
+    return;
+  }
+  console.log('✓ 页面启动完成（ready）');
 }
 
 // ---------------------------------------------------------------------------

@@ -55,6 +55,48 @@ export function scanApp(text) {
   return problems;
 }
 
+/** 一个目录（或文件）里最新的 mtime。目录递归。 */
+export function newestMtime(path) {
+  if (!existsSync(path)) return null;
+  const stats = statSync(path);
+  if (stats.isFile()) return stats.mtimeMs;
+  let newest = stats.mtimeMs;
+  for (const entry of readdirSync(path, { withFileTypes: true })) {
+    const child = join(path, entry.name);
+    const childNewest = newestMtime(child);
+    if (childNewest !== null && childNewest > newest) newest = childNewest;
+  }
+  return newest;
+}
+
+/**
+ * wasm pkg 比它的源码旧吗？
+ *
+ * # 为什么这条值得有守卫
+ *
+ * `crates/dhampir-wasm/www/pkg` 是 gitignore 的构建产物，**没有版本号、也没有校验**。
+ * 改了 Rust 却没重建 pkg 时，浏览器拿旧 wasm 跑，于是：
+ *
+ *   * 新导出的函数不存在 -> "engine.doc is not a function"；
+ *   * 或者更坏：新旧形状对不上，在 wasm 里撞一个 trap，
+ *     页面上只有一句 "启动失败：unreachable executed"。
+ *
+ * 两种情况报的错**都与真正的原因（没重建）毫无关系**。这条把它变成一句能照做的话。
+ */
+export function scanStaleWasmPkg(pkgMtimeMs, newestSourceMs, pkgPath) {
+  const problems = [];
+  // pkg 不在就不判：它是构建产物，没构建过不是"不变量被破坏"。
+  if (pkgMtimeMs === null || newestSourceMs === null) return problems;
+  if (pkgMtimeMs < newestSourceMs) {
+    problems.push(
+      'wasm pkg 比它的源码旧（' + pkgPath + '）：页面会拿旧 wasm 跑，' +
+      '报出来的错与原因毫无关系。重建：wasm-pack build crates/dhampir-wasm ' +
+      '--target web --out-dir www/pkg --dev'
+    );
+  }
+  return problems;
+}
+
 export function scanCrateDeps(root, manifests) {
   const problems = [];
   for (const manifest of manifests) {
@@ -84,6 +126,10 @@ function runSelfTest() {
   expect('单引号 import Vue 被抓', scanEngine('import Vue from ' + SQ + 'vue' + SQ + ';').length > 0);
   expect('vite 被抓', scanEngine('// built with vite').length > 0);
   expect('干净的 app 通过', scanApp('const r = engine.validate(project);').length === 0);
+  expect('pkg 不在 -> 不判', scanStaleWasmPkg(null, 100, 'pkg.wasm').length === 0);
+  expect('pkg 比源码新 -> 通过', scanStaleWasmPkg(200, 100, 'pkg.wasm').length === 0);
+  expect('pkg 比源码旧 -> 必须红', scanStaleWasmPkg(100, 200, 'pkg.wasm').length === 1);
+  expect('红的时候要给出重建命令', scanStaleWasmPkg(100, 200, 'pkg.wasm')[0].includes('wasm-pack build'));
   expect('业务规则被抓', scanApp('if (issue.code === ' + DQ + 'clip_overlap' + DQ + ') {}').length > 0);
 
   const dir = mkdtempSync(join(tmpdir(), 'dhampir-web-guard-'));
@@ -124,6 +170,20 @@ function main() {
   const video = join(REPO_ROOT, 'milestones', 'edited-milestone.mp4');
   if (!existsSync(video)) problems.push('缺少里程碑文件 milestones/edited-milestone.mp4');
   else if (!(statSync(video).size > 0)) problems.push('里程碑文件是空的');
+
+  // ---- wasm pkg 是不是旧的 ----
+  // 这一条**在这轮之前不存在**，而它正是让"启动失败：unreachable executed"
+  // 这种错看起来毫无头绪的原因之一：拿旧 wasm 跑新前端。
+  const pkgWasm = join(REPO_ROOT, 'crates', 'dhampir-wasm', 'www', 'pkg', 'dhampir_wasm_bg.wasm');
+  let pkgMtime = null;
+  try { pkgMtime = statSync(pkgWasm).mtimeMs; } catch (error) { pkgMtime = null; }
+  const newestSource = [
+    join(REPO_ROOT, 'crates', 'dhampir-wasm', 'src'),
+    join(REPO_ROOT, 'crates', 'dhampir-core', 'src'),
+    join(REPO_ROOT, 'crates', 'dhampir-timeline', 'src'),
+    join(REPO_ROOT, 'Cargo.toml'),
+  ].map(newestMtime).filter((value) => value !== null).reduce((a, b) => Math.max(a, b), 0);
+  problems.push(...scanStaleWasmPkg(pkgMtime, newestSource === 0 ? null : newestSource, pkgWasm));
 
   if (existsSync(join(REPO_ROOT, 'web', 'node_modules'))) {
     problems.push('web/node_modules 存在——说明引了 npm 依赖，与「零构建」的约定冲突');

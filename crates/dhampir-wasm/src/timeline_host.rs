@@ -97,9 +97,32 @@ impl SourceResolver for BoundVideos<'_> {
         // 这里**不**按 source_frame 定位：那一帧已经由 JS 侧 seek 好了。
         // source_frame 的意义体现在 sources_for 返回的秒数上。
         let video = self.videos.get(source)?;
-        if !self.textures.contains_key(source) {
-            let width = video.video_width().max(1);
-            let height = video.video_height().max(1);
+
+        // **这一帧还没有可用画面就跳过这一层。**
+        //
+        // HAVE_CURRENT_DATA = 2。低于它的时候 video_width() 可能是 0，
+        // 而 0 会被 max(1) 兜成 1x1 —— 接着 copy_external_image_to_texture 拿
+        // 1920x1080 的源往 1x1 的纹理里拷，**在 wasm 里就是一个 unreachable**，
+        // 页面上只剩一句 "启动失败：unreachable executed"，看不出跟素材有关。
+        //
+        // 契约本来就写着"给不出来就返回 None（该层会被跳过）"：
+        // 宁可少画一层，也不能让整页死掉。
+        if video.ready_state() < 2 {
+            return None;
+        }
+        let width = video.video_width();
+        let height = video.video_height();
+        if width == 0 || height == 0 {
+            return None;
+        }
+
+        // 尺寸与缓存不一致就重建：同一 source 换了素材、或元数据晚到都会走到这里。
+        // **不重建的话**，纹理尺寸与源不符 -> 又是上面那个 unreachable。
+        let needs_texture = match self.textures.get(source) {
+            Some((_, _, size)) => *size != (width, height),
+            None => true,
+        };
+        if needs_texture {
             let texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("dhampir project source"),
                 size: wgpu::Extent3d {
