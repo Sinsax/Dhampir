@@ -132,6 +132,55 @@ async function runTrimParity(name) {
   });
 }
 
+/**
+ * 验收判据（T2.5）：**画面上的字，两端必须落在同一个地方、看着同一份清单。**
+ *
+ * 页面只做两件事：
+ *   1. seek 那一帧 —— 宿主算出清单（哪几行、各占哪个归一化矩形、各落在哪几个
+ *      目标像素），这里把每一行栅格化（canvas -> createImageBitmap -> 交回宿主）；
+ *   2. 把宿主的两份结果**原样回传**：清单（dhampir_project_text_frame）与墨迹报告
+ *      （dhampir_project_text_probe：每次"减去一行"差出来的像素落在哪、有没有被切）。
+ *
+ * **结论不在这里下**：「两端一致」由驱动拿 CLI 的同一帧对照着判（容差写在驱动里）。
+ * 页面自己说"我一致"是没用的 —— 那正是第二份判据。这里只保证通道通、清单与位图
+ * 是同一份（所以判定路径**不碰** textFrame：那会重算清单并作废刚提交的位图）。
+ *
+ * 帧是按样本字幕的节奏挑的（fixtures/sample-subtitle.doc.json：4 条 cue 各 2 秒 @30fps）：
+ * 0 = 第一条（单行）、60 = 第二条（按估宽换成两行）、120 = 第三条（单字）、
+ * 180 = 第四条（5 行，max_lines=2，丢 3 行）、240 = 全部结束之后（空）。
+ * 挑错帧不影响判据（两边**同帧**对照），只影响覆盖面。
+ */
+async function runSubtitleVerdict(name) {
+  const report = async (ok, reason, extra) => {
+    await reportVerdict(name, Object.assign({ kind: "subtitle", ok: ok, reason: reason }, extra || {}));
+  };
+  if (state.doc === null || state.doc === undefined) return report(false, "页面里还没有工程");
+  if (subtitleAssets().length === 0) return report(false, "这份工程的资产表里没有字幕素材");
+
+  const subtitles = await loadProjectSubtitles();
+  const frames = [0, 60, 120, 180, 240];
+  const manifests = [];
+  const probes = [];
+  let unplaced = 0;
+  for (const frame of frames) {
+    await state.engine.seek(frame);
+    manifests.push(state.engine.textManifest);
+    probes.push(await state.engine.textProbe(frame));
+  }
+  for (const manifest of manifests) unplaced += Number(manifest.unplaced_lines) || 0;
+  const ok = subtitles.failed.length === 0 && probes.length === frames.length && unplaced === 0;
+  // 理由里把三个数都写出来：只说"没成立"的话，看的人还得回去数一遍。
+  const reason = ok ? "" : ("字幕判定没成立：" + subtitles.failed.length + " 路没登记上、"
+    + unplaced + " 行算不出落点、拿到 " + probes.length + "/" + frames.length + " 份墨迹报告");
+  return report(ok, reason, { subtitles: subtitles, frames: manifests, probes: probes });
+}
+
+/** 判定按**名字**选路。表在这里，规则在各判定函数里。 */
+const VERDICTS = {
+  "trim-parity": runTrimParity,
+  subtitle: runSubtitleVerdict,
+};
+
 /** 状态栏：写一条最新的进展/结果。 */
 function log(message) {
   state.hint = String(message);
@@ -253,6 +302,53 @@ async function bindAllSources() {
     }
   }
   return loaded;
+}
+
+// --- 字幕 -------------------------------------------------------------------------
+
+/** 资产表里登记的字幕素材。**不看谁引用它** —— 引用关系归 Rust 判（library）。 */
+function subtitleAssets() {
+  const assets = state.doc && Array.isArray(state.doc.assets) ? state.doc.assets : [];
+  return assets.filter((asset) => asset.kind === "subtitle");
+}
+
+/**
+ * 从 uri 的后缀读格式。**不嗅探内容**：
+ * CLI 认的就是文件名后缀，嗅探会多出第二套判定，而两套判定迟早不同。
+ */
+function subtitleFormat(asset) {
+  const uri = typeof asset.uri === "string" ? asset.uri : "";
+  const dot = uri.lastIndexOf(".");
+  return dot < 0 ? "" : uri.slice(dot + 1).toLowerCase();
+}
+
+/**
+ * 取回并登记这份工程的字幕素材。
+ *
+ * 位置由 backend 回答（mediaUrlFor），解析在 Rust（parse_srt / parse_ass）——
+ * 这里只做一次 fetch 并把两端接上。**失败要看得见**：登记不上的那一路，
+ * 宿主随后会在每一帧报 `subtitle_unregistered`，但那时已经看不出原因了。
+ */
+async function loadProjectSubtitles() {
+  const assets = subtitleAssets();
+  if (assets.length === 0) return { registered: [], failed: [] };
+  const entries = [];
+  for (const asset of assets) {
+    entries.push({
+      assetId: asset.id,
+      url: await backend.mediaUrlFor(asset.id),
+      format: subtitleFormat(asset),
+    });
+  }
+  const result = await state.engine.loadSubtitles(entries);
+  for (const item of result.registered) {
+    const skipped = item.skipped > 0 ? "（跳过 " + item.skipped + " 条）" : "";
+    log("字幕 " + item.asset + "：读到 " + item.cues + " 条" + skipped);
+  }
+  for (const failure of result.failed) {
+    notice("字幕 " + failure.assetId + " 没登记上（" + failure.error + "）—— 这一路不会被画出来。");
+  }
+  return result;
 }
 
 // --- 素材库 -----------------------------------------------------------------------
@@ -765,6 +861,10 @@ async function main() {
   mark("已上屏到 canvas（源模式：" + engine.sourceMode + "）");
   await bindAllSources();
   mark("视频源已绑定");
+  // 字幕要**在第一次 seek 之前**登记：绘制路径只认宿主手上的那份表，
+  // 而"还没登记"与"这部片子没有字幕"在画面上完全一样。
+  await loadProjectSubtitles();
+  mark("字幕源已登记");
 
   const end = engine.endFrame();
   mark("endFrame 已返回: " + end);
@@ -818,7 +918,17 @@ async function main() {
   // 与 export 一样只在显式带参数时生效 —— 这是给验收用的入口，不是产品功能。
   const verdictName = new URLSearchParams(location.search).get("verdict");
   if (verdictName !== null && verdictName !== "") {
-    await runTrimParity(verdictName);
+    const run = VERDICTS[verdictName];
+    if (run === undefined) {
+      // 名字写错也要回传一条 —— 什么都不回传的话，驱动看到的是"没拿到判定"，
+      // 那是通道问题（后端没起来/页面没到那一步），与"名字写错了"完全不是一回事。
+      await reportVerdict(verdictName, {
+        ok: false,
+        reason: "没有这个判定：" + verdictName + "（认得的是 " + Object.keys(VERDICTS).join(" / ") + "）",
+      });
+    } else {
+      await run(verdictName);
+    }
     // **告诉驱动这一轮结束了。** 不然它只能靠超时收场，而"等超时"看起来和"卡住"一样。
     try { navigator.sendBeacon("/result", JSON.stringify({ verdict: verdictName })); }
     catch (error) { /* 观测手段不该影响结论 */ }
@@ -850,6 +960,8 @@ window.dhampir = {
   // 判定回传：页面自己把结果送出去，而不是让驱动钻进来取。
   reportVerdict: reportVerdict,
   runTrimParity: runTrimParity,
+  runSubtitleVerdict: runSubtitleVerdict,
+  loadProjectSubtitles: loadProjectSubtitles,
   loadLibrary: loadLibrary,
   select: (trackIndex, layerIndex) => {
     state.selected = { trackIndex: trackIndex, layerIndex: layerIndex };

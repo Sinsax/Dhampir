@@ -33,7 +33,7 @@
 // 直接把页面里的 window.__dhampirMarks 读出来。卡住比失败难查，观测要先做对。
 
 import { createServer } from 'node:http';
-import { createReadStream, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, createReadStream, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -52,6 +52,19 @@ const VIDEO_PATH = join(REPO_ROOT, 'milestones', 'edited-milestone.mp4');
 const BACKEND_EXPORT_PATH = join(REPO_ROOT, 'target', 'p6', 'webcheck-export.mp4');
 const MEDIA = 'target/s3/proxy1080p.mp4';
 
+/**
+ * 归一化矩形的容差。**判定口径的一部分，写死在这里。**
+ *
+ * 两端跑的是同一份 `dhampir_timeline::text_layout`（f32 起步），所以正常情况下逐位相同；
+ * 留一点余地的唯一理由是数值要过一趟十进制打印/解析。
+ * 1e-6 比一个字宽（font_ratio 0.055、360 行高时约 2e-2 归一化单位）小四个数量级 ——
+ * 大到不会因为末位抖动误红，小到落点真错了必红。
+ *
+ * **放在文件顶部**：用它的函数在模块末尾，而调它们的那一段在中间 ——
+ * 声明留在后面就是一处 TDZ 陷阱（第一版正是这么红的）。
+ */
+const SUBTITLE_TOLERANCE = 1e-6;
+
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -59,6 +72,12 @@ const MIME = {
   '.wasm': 'application/wasm',
   '.mp4': 'video/mp4',
   '.css': 'text/css; charset=utf-8',
+  // 字幕文本。静态白名单里暂时不服务它们（页面的字幕走后端 /assets/<id>/media），
+  // 但 MIME 表与 scripts/dhampir-local.mjs 那张对齐 —— 两张表不一致，
+  // 今天只是少一个 content-type、明天就是"同一条路两种行为"。
+  '.srt': 'text/plain; charset=utf-8',
+  '.ass': 'text/plain; charset=utf-8',
+  '.ssa': 'text/plain; charset=utf-8',
 };
 
 const argv = process.argv.slice(2);
@@ -195,6 +214,15 @@ if (backendMode !== null && mode !== 'probe') {
   backendUrl = valueOf('--remote-url', null);
   if (backendUrl === null) {
     backendPort = Number(valueOf('--backend-port', '8802'));
+    // **把 fixture 里的字幕摆到后端的 asset root 下。** 后端按「asset root + uri」
+    // 解析素材位置（工程文件的 assets 表优先），而这份仓库里素材本来就分两处：
+    // 视频在 target/s3（本机素材，默认跑法早已依赖它），字幕在 fixtures/（跟踪目录，
+    // 判定的对照半边也要读它）。一个 asset root 装不下两边，所以把字幕这一份拷过去。
+    // 不做这一步的失败形状是 `/assets/sub.srt/media` 回 404 asset_file_missing，
+    // 而页面上的表现只是"字幕登记不上"—— 看起来像判定逻辑写错了。
+    const subtitleFixture = join(REPO_ROOT, 'fixtures', 'sample-subtitle.srt');
+    const subtitleStaged = join(REPO_ROOT, 'target', 's3', 'sample-subtitle.srt');
+    if (existsSync(subtitleFixture)) copyFileSync(subtitleFixture, subtitleStaged);
     backendProcess = spawn(process.execPath, ['scripts/dhampir-local.mjs', '--port', String(backendPort)], {
       cwd: REPO_ROOT, stdio: ['ignore', 'ignore', 'inherit'],
     });
@@ -218,7 +246,6 @@ if (backendMode !== null && mode !== 'probe') {
   }
 }
 
-const projectId = 'sample-project.doc';
 // 查询串拼一次、三种模式共用。**手工看的时候也要带上后端参数** ——
 // 只起页面不起后端（或反过来）会让人自己拼 URL，而拼错的表现是"页面能用但没连上后端"。
 // --verdict <name>：让页面跑一次验收判定并**主动回传**，驱动只读后端拿结果。
@@ -229,6 +256,16 @@ if (verdictName !== null && backendMode === null) {
   console.error('--verdict 需要后端（--local 或 --remote）：判定是页面 POST 到后端、驱动再读回来的');
   process.exit(2);
 }
+// 判定跑哪份工程。**按判定名给默认值，但要说出来** —— 判定名偷偷决定"在测什么"，
+// 报告里就只剩一句"通过了"，看不出验的是哪一份工程。
+const PROJECT_FOR_VERDICT = {
+  'trim-parity': 'sample-project.doc',
+  subtitle: 'sample-subtitle.doc',
+};
+const projectId = valueOf('--project', null)
+  || (verdictName !== null && PROJECT_FOR_VERDICT[verdictName] !== undefined
+    ? PROJECT_FOR_VERDICT[verdictName]
+    : 'sample-project.doc');
 const params = [];
 if (mode === 'app' && !argv.includes('--no-export') && verdictName === null) params.push('export=1');
 if (backendMode === 'local') {
@@ -824,6 +861,232 @@ function runCliParity(value) {
   return { ok: true, detail: '预览与 CLI 对同一个 op 给出逐字段相同的工程' };
 }
 
+// ---------------------------------------------------------------------------
+// 字幕判定（T2.5）：两端结构一致 + 页内墨迹自洽
+// ---------------------------------------------------------------------------
+
+/**
+ * 一列数字（字色这类小数组）逐一比。**只给数组用** —— 布尔/字符串用 `!==` 直接比
+ * （第一版把 `outline` 也塞进来，于是每一帧都报「形状不同（CLI true、页面 true）」，
+ * 一条分不清对错的判据比没有更坏）。null 只和 null 相等。容差见文件顶部的 SUBTITLE_TOLERANCE。
+ */
+function compareNumberList(label, left, right) {
+  if (left === null || left === undefined || right === null || right === undefined) {
+    return (left === null || left === undefined) && (right === null || right === undefined)
+      ? []
+      : [label + '：一端没有、另一端有（CLI ' + JSON.stringify(left ?? null) + '、页面 ' + JSON.stringify(right ?? null) + '）'];
+  }
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+    return [label + '：形状不同（CLI ' + JSON.stringify(left) + '、页面 ' + JSON.stringify(right) + '）'];
+  }
+  const problems = [];
+  for (let index = 0; index < left.length; index += 1) {
+    if (typeof left[index] !== 'number' || typeof right[index] !== 'number'
+      || Math.abs(left[index] - right[index]) > SUBTITLE_TOLERANCE) {
+      problems.push(label + '[' + index + ']：CLI ' + left[index] + '、页面 ' + right[index]);
+    }
+  }
+  return problems;
+}
+
+/** 清单对清单：项数、文本（逐字节）、归一化矩形（容差内）。 */
+function compareSubtitleManifest(frame, cli, manifest) {
+  const where = '帧 ' + frame;
+  const problems = [];
+  for (const key of ['subtitle_assets', 'dropped_lines']) {
+    if (cli[key] !== manifest[key]) {
+      problems.push(where + '：' + key + ' 不同（CLI ' + cli[key] + '、页面 ' + manifest[key] + '）');
+    }
+  }
+  problems.push(...compareNumberList(where + '：字色', cli.color, manifest.color));
+  if (cli.outline !== manifest.outline) {
+    problems.push(where + '：描边不同（CLI ' + cli.outline + '、页面 ' + manifest.outline + '）');
+  }
+
+  const left = Array.isArray(cli.items) ? cli.items : [];
+  const right = Array.isArray(manifest.items) ? manifest.items : [];
+  if (left.length !== right.length) {
+    problems.push(where + '：项数不同（CLI ' + left.length + '、页面 ' + right.length + '）');
+    return problems;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    const label = where + ' 第 ' + index + ' 项';
+    if (left[index].text !== right[index].text) {
+      problems.push(label + '：文本不同（CLI ' + JSON.stringify(left[index].text)
+        + '、页面 ' + JSON.stringify(right[index].text) + '）');
+    }
+    const a = left[index].rect;
+    const b = right[index].rect;
+    if (a === undefined || b === undefined) {
+      problems.push(label + '：一端没有 rect');
+      continue;
+    }
+    for (const key of ['x', 'y', 'width', 'height']) {
+      if (typeof a[key] !== 'number' || typeof b[key] !== 'number') {
+        problems.push(label + '：rect.' + key + ' 不是数（CLI ' + a[key] + '、页面 ' + b[key] + '）');
+      } else if (Math.abs(a[key] - b[key]) > SUBTITLE_TOLERANCE) {
+        problems.push(label + '：rect.' + key + ' 差 ' + Math.abs(a[key] - b[key])
+          + '（CLI ' + a[key] + '、页面 ' + b[key] + '）');
+      }
+    }
+  }
+  return problems;
+}
+
+/**
+ * 墨迹报告（只有宿主这一侧有）：**不是和 CLI 比，而是页内自洽**。
+ *
+ * 三件事：有字就得有墨迹（否则这一行贴了个空）、没有字的帧不能有墨迹
+ * （两趟渲染之间除了文字不该有别的差别）、逐行减出来的像素之和必须等于整帧的
+ * （不等就是两行压在一起了）。宿主自己报的问题（`subtitle_*`）也一并搬上来 ——
+ * 它在报告里，不在这里复述一遍就等于没看。
+ */
+function compareSubtitleProbe(frame, manifest, probe) {
+  const where = '帧 ' + frame;
+  const problems = [];
+  if (probe === null || probe === undefined || typeof probe !== 'object') {
+    return [where + '：没有墨迹报告'];
+  }
+  const issues = Array.isArray(probe.issues) ? probe.issues : null;
+  if (issues === null) problems.push(where + '：墨迹报告里没有 issues');
+  else {
+    for (const issue of issues) {
+      problems.push(where + '：宿主报了 ' + issue.code + '（' + issue.path + '）：' + issue.message);
+    }
+  }
+  const lines = Array.isArray(probe.lines) ? probe.lines : [];
+  const placements = Array.isArray(manifest.placements) ? manifest.placements : [];
+  if (lines.length !== placements.length) {
+    problems.push(where + '：清单 ' + placements.length + ' 行、墨迹报告 ' + lines.length + ' 行 —— 不是同一份');
+    return problems;
+  }
+  const ink = probe.ink;
+  if (ink === null || ink === undefined || typeof ink !== 'object') {
+    problems.push(where + '：墨迹报告里没有 ink');
+    return problems;
+  }
+  if (ink.lines_overlap === true) {
+    problems.push(where + '：逐行墨迹之和（' + ink.lines_pixels + '）与整帧墨迹（' + ink.pixels + '）不等 —— 两行压在一起了');
+  }
+  if (probe.subtitle_assets !== manifest.subtitle_assets) {
+    problems.push(where + '：字幕素材数两处不同（清单 ' + manifest.subtitle_assets + '、报告 ' + probe.subtitle_assets + '）');
+  }
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const placement = placements[index];
+    const label = where + ' 第 ' + index + ' 行';
+    if (line.text !== placement.text) {
+      problems.push(label + '：两次导出的文本不同（清单 ' + JSON.stringify(placement.text)
+        + '、报告 ' + JSON.stringify(line.text) + '）—— 中间清单被重算过');
+    }
+    // 落点两处同源，必须逐字段相同；不同就说明这一趟判的不是那份清单。
+    for (const key of ['x', 'y', 'bitmap_width', 'bitmap_height', 'font_px']) {
+      if (line.placement === undefined || line.placement[key] !== placement[key]) {
+        problems.push(label + '：落点 ' + key + ' 两处不同（清单 ' + placement[key]
+          + '、报告 ' + (line.placement === undefined ? '没有 placement' : line.placement[key]) + '）');
+      }
+    }
+    // 归一化矩形也是两处都有（清单一项一份、报告一行一份）。它是两端比对的那份数字，
+    // 页内先自比一次：两处不同就说明中间清单被重算过。
+    for (const key of ['x', 'y', 'width', 'height']) {
+      const a = placement.rect === undefined ? undefined : placement.rect[key];
+      const b = line.rect === undefined ? undefined : line.rect[key];
+      if (typeof a !== 'number' || typeof b !== 'number' || Math.abs(a - b) > SUBTITLE_TOLERANCE) {
+        problems.push(label + '：rect.' + key + ' 两处不同（清单 ' + a + '、报告 ' + b + '）');
+      }
+    }
+    const lineInk = line.ink === undefined ? null : line.ink;
+    if (placement.visible === true) {
+      if (line.bitmap === null || line.bitmap === undefined) problems.push(label + '：这一行可见却没有位图');
+      if (lineInk === null || lineInk.pixels === 0) problems.push(label + '：这一行可见却没有留下墨迹');
+    } else if (lineInk !== null && lineInk.pixels !== 0) {
+      problems.push(label + '：这一行是空白却留下了 ' + lineInk.pixels + ' 个像素');
+    }
+  }
+  // 这一帧一个字都没有：整帧墨迹必须是 0（两趟渲染的底必须一模一样）。
+  if (placements.length === 0 && ink.pixels !== 0) {
+    problems.push(where + '：这一帧没有字，却读出 ' + ink.pixels + ' 个像素的墨迹');
+  }
+  return problems;
+}
+
+/** 一帧的实测事实（判定成立时才打出来）：几行、墨迹多少像素、位图多大落在哪。 */
+function subtitleFrameNote(frame, manifest, probe) {
+  const placements = Array.isArray(manifest.placements) ? manifest.placements : [];
+  const lines = probe !== null && probe !== undefined && Array.isArray(probe.lines) ? probe.lines : [];
+  const per = lines.map((line) => (line.ink === undefined ? 0 : line.ink.pixels));
+  const target = probe !== null && probe !== undefined && Array.isArray(probe.target)
+    ? '，画布 ' + probe.target[0] + 'x' + probe.target[1]
+    : '';
+  const first = placements.length > 0 ? placements[0] : null;
+  const at = first === null
+    ? ''
+    : '；头一行位图 ' + first.bitmap_width + 'x' + first.bitmap_height
+      + ' @(' + first.x + ',' + first.y + ') 字号 ' + first.font_px;
+  const ink = probe === null || probe === undefined || probe.ink === undefined ? '（没有报告）' : probe.ink.pixels;
+  return '帧 ' + frame + '：' + placements.length + ' 行' + target + '，墨迹 ' + ink
+    + ' px（逐行 ' + per.join('/') + '）' + at;
+}
+
+/**
+ * 判据：**同一帧，浏览器宿主与 CLI 给出的清单必须一致**（T2.5 的验收口径）。
+ *
+ * 两端跑的是同一份 `text_layout`，所以这里比的是结构：项数、文本、归一化矩形、字色/描边。
+ * **字形不在判据里** —— 浏览器那边用系统字体（sans-serif）、CLI 用 --font-file，
+ * 像素本来就允许不同（plan/roadmap.md 的 T2 验收：结构一致、字形允许不同）。
+ *
+ * CLI 那一半读的是 fixtures/ 下这份工程（跟踪目录）—— 与页面读到的是同一个文件：
+ * web-check 起本机后端之前把 fixture 里的 .srt 摆到了 target/s3 下（后端只有一个 asset root）。
+ */
+function runSubtitleParity(value) {
+  const found = findCli();
+  if (found.cli === null) return { ok: false, detail: found.error + ' —— 没法对照' };
+  const manifests = Array.isArray(value.frames) ? value.frames : [];
+  const probes = Array.isArray(value.probes) ? value.probes : [];
+  if (manifests.length === 0) return { ok: false, detail: '页面没回传任何一帧的清单' };
+  if (probes.length !== manifests.length) {
+    return { ok: false, detail: '清单 ' + manifests.length + ' 帧、墨迹 ' + probes.length + ' 帧 —— 对不上' };
+  }
+  const projectFile = join(REPO_ROOT, 'fixtures', projectId + '.json');
+  if (!existsSync(projectFile)) return { ok: false, detail: '对照用的工程不在：' + projectFile };
+
+  const problems = [];
+  const frames = [];
+  const notes = [];
+  for (let index = 0; index < manifests.length; index += 1) {
+    const manifest = manifests[index];
+    const frame = Number(manifest.frame);
+    frames.push(frame);
+    const result = spawnSync(found.cli, ['subtitle', '--project', projectFile, '--frame', String(frame),
+      '--asset-root', 'fixtures'], { cwd: REPO_ROOT, encoding: 'utf8' });
+    const stderrText = String(result.stderr || '').trim();
+    if (result.status !== 0) {
+      problems.push('帧 ' + frame + '：CLI subtitle 退出 ' + result.status + '：'
+        + (stderrText || String(result.stdout || '').trim()));
+      continue;
+    }
+    let cli = null;
+    try { cli = JSON.parse(result.stdout); } catch (error) {
+      problems.push('帧 ' + frame + '：CLI 的输出不是 JSON：' + String(error && error.message ? error.message : error));
+      continue;
+    }
+    problems.push(...compareSubtitleManifest(frame, cli, manifest));
+    problems.push(...compareSubtitleProbe(frame, manifest, probes[index]));
+    notes.push(subtitleFrameNote(frame, manifest, probes[index]));
+  }
+  if (problems.length > 0) {
+    const shown = problems.slice(0, 6);
+    const more = problems.length > shown.length ? '；…还有 ' + (problems.length - shown.length) + ' 条' : '';
+    return { ok: false, detail: shown.join('；') + more };
+  }
+  return {
+    ok: true,
+    detail: '帧 ' + frames.join('/') + '：两端清单一致（文本逐字节、矩形容差 ' + SUBTITLE_TOLERANCE
+      + '）；墨迹逐行自洽（可见的行都有像素、没有字的帧为 0、行间不重叠）',
+    notes: notes,
+  };
+}
+
 /** 读后端上的判定并下结论。**拿不到就是没拿到，不算通过。** */
 async function reportVerdict(name) {
   console.log('判定回传：' + name);
@@ -848,6 +1111,17 @@ async function reportVerdict(name) {
     const reason = value !== null && typeof value === 'object' ? value.reason : '回传的值不是对象';
     console.log('  - 页面自己说这次编辑没成立：' + String(reason));
     process.exitCode = 1;
+    return;
+  }
+  // **按 kind 分派。** 判定名只选跑哪一份判定，判据按回传的形状走 ——
+  // 加一条判定要动的是这里加一支，而不是在别的判定里加 if。
+  if (value.kind === 'subtitle') {
+    const parity = runSubtitleParity(value);
+    console.log((parity.ok ? '  ✓ ' : '  - ') + parity.detail);
+    // 成功时把每帧的实测事实一并打出来：**结论之外要有事实**，
+    // 不然「✓」这一行既看不出墨迹是多少，也看不出画布是不是与契约同尺寸。
+    for (const note of parity.notes || []) console.log('  · ' + note);
+    if (!parity.ok) process.exitCode = 1;
     return;
   }
   console.log('  op：' + JSON.stringify(value.op));

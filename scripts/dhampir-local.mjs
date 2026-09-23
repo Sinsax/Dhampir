@@ -53,6 +53,12 @@ const MIME = {
   '.wav': 'audio/wav',
   '.m4a': 'audio/mp4',
   '.json': 'application/json; charset=utf-8',
+  // 字幕是**文本**：页面 fetch 它再交给 Rust 解析。不给类型的话响应头会说
+  // application/octet-stream —— fetch.text() 照样能用，但"头里说的是什么"
+  // 是查问题时的一条线索，说错了就少一条。
+  '.srt': 'text/plain; charset=utf-8',
+  '.ass': 'text/plain; charset=utf-8',
+  '.ssa': 'text/plain; charset=utf-8',
 };
 
 /** 错误一律走这个形状 —— 与 Rust 侧的 Issue 同一套，前端只认一种。 */

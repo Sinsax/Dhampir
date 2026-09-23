@@ -10,8 +10,77 @@
 // <video> 的 seek 是异步的（set_current_time 立刻返回，那一帧还没解码），
 // 而 Rust 侧的 SourceResolver 是同步接口。所以：先问「这一帧需要哪些源、各在第几秒」，
 // 逐个 seek 并等 seeked，再让 Rust 画。异步留在 JS，Rust 保持同步。
+//
+// # 文字为什么也走这一步
+//
+// 「这一帧要画哪几行字、各落在目标像素的哪儿」是**共享算术**（core 的 evaluate_overlay
+// 与契约层的 place_line），由宿主算好给出来（dhampir_project_text_frame）—— 这里不许
+// 自己推一遍落点。字**形**像素则只有在浏览器里才拿得到，所以栅格化在这一层做：
+// canvas 画一张图，createImageBitmap 之后交回宿主（dhampir_project_set_text_bitmap）。
+// 两端允许不同的只有字形（CLI 走 ffmpeg drawtext，浏览器只有系统字体），
+// 结构与落点必须同源 —— 判据见 plan/t2-evidence.md。
 
 const hann = (resolve) => (event) => resolve(event);
+
+/**
+ * 画字的字体。**这一层没有"字体从哪来"的输入**，因为浏览器没有那种东西。
+ *
+ * CLI 那一侧是 ffmpeg drawtext，可以给 --font-file；于是两端的字形**本来就不同源**。
+ * 判据里比的是"哪几行、各占哪个归一化矩形、墨迹在不在落点方框里"，不比字形。
+ */
+const TEXT_FONT = "sans-serif";
+
+/** `[r,g,b,a]`（各 0-255）-> canvas 认的颜色串。 */
+function cssColor(rgba) {
+  const parts = Array.isArray(rgba) && rgba.length >= 3 ? rgba : [255, 255, 255, 255];
+  const alpha = parts.length > 3 ? parts[3] / 255 : 1;
+  return "rgba(" + parts[0] + "," + parts[1] + "," + parts[2] + "," + alpha + ")";
+}
+
+/**
+ * 把一行字栅格化成**落点声明的那个尺寸**。
+ *
+ * # 尺寸一个字都不多不少
+ *
+ * 位图尺寸与落点声明不符时宿主会拒绝画它（compose_overlay 拦下并计数），于是那一行
+ * 静默消失。所以这里**不按设备像素比放大** —— 那是把预览尺寸与契约尺寸混在一起，
+ * 而契约尺寸是算好的。
+ *
+ * # 为什么居中画就等于画在行盒上
+ *
+ * 位图宽 = 整条目标宽（见契约层 text_layout::bitmap_size），而落点的 x 已经把位图
+ * 中心对准了行盒中心。所以「在位图里居中」与「落在行盒中心」是同一件事。
+ *
+ * # 描边与填色为什么不用再染一遍
+ *
+ * CLI 那一侧是白字 + 黑描边，再由 tint() 把白映射成 style.color、黑保持黑
+ * （alpha 只随覆盖度走）。于是这里**直接照着那份结果落笔**：填 style.color、描黑边，
+ * 而不是在 JS 里再写一遍逐像素公式（那就是第二份实现，迟早与 tint 漂开）。
+ */
+function rasterizeLine(line, color, outline) {
+  const canvas = document.createElement("canvas");
+  canvas.width = line.bitmap_width;
+  canvas.height = line.bitmap_height;
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.font = line.font_px + "px " + TEXT_FONT;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.lineJoin = "round";
+  ctx.miterLimit = 2;
+  const x = canvas.width / 2;
+  const y = canvas.height / 2;
+  if (outline === true && line.border_px > 0) {
+    // 边宽取两倍：drawtext 的 borderw 是**向外**扩一圈，而 canvas 的描边压在字上。
+    // 先描边后填字，内半边被字盖掉，剩下的外半边就是那一圈。
+    ctx.lineWidth = line.border_px * 2;
+    ctx.strokeStyle = "black";
+    ctx.strokeText(line.text, x, y);
+  }
+  ctx.fillStyle = cssColor(color);
+  ctx.fillText(line.text, x, y);
+  return canvas;
+}
 
 export class Engine {
   constructor(mod) {
@@ -29,6 +98,15 @@ export class Engine {
     // 源从哪来：'video'（直接拿 <video> 去 copy）或 'bitmap'（JS 先转成位图）。
     // attach 时由 probeVideoCopy 决定，见那里的说明。
     this.sourceMode = "video";
+    // 文字清单的**代**。行号是按位置编的，而栅格化是异步的 —— 两次 seek 交叠时，
+    // 老的那一趟回来手上指的行可能已经是另一条字幕了（见 prepareText）。
+    this.textToken = 0;
+    // 最近一次**算好并交给宿主**的清单（`prepareText` 里写的）。
+    //
+    // 判定通道读它，而不是再调一次 `textFrame`：那会重算一份新清单并把刚提交的位图
+    // 全部作废（宿主那边清单与位图是一起作废的），于是 probe 判的是"没有位图的清单"。
+    // 交互路径不读它。
+    this.textManifest = null;
   }
 
   /**
@@ -146,6 +224,69 @@ export class Engine {
     return JSON.parse(this.mod.dhampir_project_sources_for(frame)).sources || [];
   }
 
+  /**
+   * 取回并登记这份工程的字幕素材。
+   *
+   * `entries` 是 `[{assetId, url, format}]`：**「素材在哪」不由这里回答** ——
+   * 那是部署形态（backend 的 mediaUrlFor），页面把它拼好递进来。
+   * `format` 是扩展名（"srt"/"ass"/"ssa"）：CLI 认的就是文件名后缀，
+   * 让浏览器按内容嗅探就会多出第二套判定。
+   *
+   * 「这段文本是哪几条字幕」由 Rust 回答（parse_srt / parse_ass）—— 与 CLI 的
+   * load_subtitles 是同一份实现。这里只做一次 fetch。
+   *
+   * 取是网络、登记是同步的 wasm 调用：所以**先把所有请求一起起起来**再逐个登记，
+   * 而不是逐个 await 取（那会白等一个来回）。
+   *
+   * 一路坏了**不抛**：那一份字幕就登记不上，宿主会在每一帧报 `subtitle_unregistered`。
+   * 「这部片子没有字幕」与「字幕没读进来」的输出必须不一样 —— 这里正是那个分岔点。
+   */
+  async loadSubtitles(entries) {
+    const list = Array.isArray(entries) ? entries : [];
+    const fetched = await Promise.all(list.map(async (entry) => {
+      try {
+        const response = await fetch(entry.url);
+        if (response.ok !== true) return { entry: entry, error: "HTTP " + response.status + " " + entry.url };
+        return { entry: entry, text: await response.text() };
+      } catch (error) {
+        return { entry: entry, error: String(error && error.message ? error.message : error) };
+      }
+    }));
+    const registered = [];
+    const failed = [];
+    for (const item of fetched) {
+      if (item.text === undefined) {
+        failed.push({ assetId: item.entry.assetId, error: item.error });
+        continue;
+      }
+      const result = JSON.parse(this.mod.dhampir_project_set_subtitles(item.entry.assetId, item.text, item.entry.format));
+      if (result.ok === true) registered.push(result);
+      else failed.push({ assetId: item.entry.assetId, error: "解析失败：" + JSON.stringify(result.issues) });
+    }
+    return { registered: registered, failed: failed };
+  }
+
+  /**
+   * 这一帧要画哪几行字、各落在哪（**目标像素**）。
+   *
+   * 清单由宿主给：它同时把宿主手上的清单换成这一帧的，并作废上一帧的行位图
+   * （行号是按位置编的，留着旧位图就会拿另一条字幕的像素去贴）。
+   * 于是**必须在 draw 之前、就在这一帧上调一次**。
+   */
+  textFrame(frame) {
+    return JSON.parse(this.mod.dhampir_project_text_frame(frame));
+  }
+
+  /**
+   * 判定入口：把「加字之前 / 加字之后 / 逐行减掉一行」三张图比一比（T2.5）。
+   *
+   * 判定本身在 Rust —— 这里只是通道。在 JS 里重写一遍判据，两端就会各自演化，
+   * 而判据漂开的症状是"两边都自洽、只是结论不同"。
+   */
+  async textProbe(frame) {
+    return JSON.parse(await this.mod.dhampir_project_text_probe(frame));
+  }
+
   /** 把一个 video 定位到指定秒数，等它真的 seek 完。 */
   async seekVideo(video, seconds) {
     return new Promise((resolve) => {
@@ -179,7 +320,52 @@ export class Engine {
         }
       }
     }
+    // 文字排在视频之后：上面的 seek 是这一步唯一的长等待，而画字是本地画布上的活。
+    // 反过来（先画字再等 seek）只会让"字先到、画面还没到"多出一个中间态。
+    await this.prepareText(frame);
     return sources;
+  }
+
+  /**
+   * 按清单把这一帧的文字栅格化并交给宿主。
+   *
+   * # 为什么要有"代"
+   *
+   * 行号是**按位置**编的，而 `createImageBitmap` 是异步的。拖播放头时两次 seek 会交叠：
+   * 老的那一趟可能在新清单算好之后才回来，那时它手上的第 i 行已经是**另一条字幕**，
+   * 贴上去的症状是"位置对、内容是上一条"。所以每一趟领一个号，`await` 回来之后再比一次
+   * —— 比对与提交之间没有 await，所以这一次检查是原子的。
+   *
+   * （新清单算好的时候宿主已经把旧位图全丢了，所以过期的那一趟什么也不欠。）
+   */
+  async prepareText(frame) {
+    const manifest = this.textFrame(frame);
+    // **先记清单再栅格化**：`textProbe` 要求判的正是这一份，而它只在
+    // 「宿主的清单 == 这一帧」时才肯判（见 Rust 侧的 text_probe）。
+    this.textManifest = manifest;
+    const token = (this.textToken += 1);
+    for (let index = 0; index < manifest.placements.length; index += 1) {
+      const line = manifest.placements[index];
+      // 全是空白字符的行**不做位图**：宿主不判它（栅格化出来本来就是空的），
+      // 硬塞一张空的进去只会让"这一行没有位图"那条判据失去意义。
+      if (line.visible !== true) continue;
+      let bitmap = null;
+      try {
+        // **直排 alpha**：宿主用 copy_external_image_to_texture 上传，并且声明
+        // premultiplied_alpha = false。两边必须一致 —— 说错不会报错，只会让字的边缘发暗，
+        // 而那看起来像"字体没渲染好"，不像"叠加算错了"。
+        bitmap = await createImageBitmap(rasterizeLine(line, manifest.color, manifest.outline), {
+          premultiplyAlpha: "none",
+        });
+      } catch (error) {
+        // 不静默：宿主那边这一行会被判成 subtitle_raster_failed（有字要画、却没有位图）。
+        console.warn("dhampir: 第 " + index + " 行字做不出位图：" + error);
+        continue;
+      }
+      if (token !== this.textToken) { bitmap.close(); return manifest; }
+      this.mod.dhampir_project_set_text_bitmap(index, bitmap);
+    }
+    return manifest;
   }
 
   /** seek 并渲染到 canvas。 */

@@ -1,0 +1,268 @@
+{
+  "project_schema": 1,
+  "generator": {
+    "app": "dhampir",
+    "version": "0.0.1"
+  },
+  "meta": {
+    "title": "样本工程（带字幕轨）",
+    "created_at": null,
+    "modified_at": null
+  },
+  "assets": [
+    {
+      "id": "a.mp4",
+      "kind": "video",
+      "name": "A 段",
+      "uri": "proxy1080p.mp4",
+      "frame_count": 480,
+      "timebase": {
+        "num": 60,
+        "den": 1
+      },
+      "width": 1920,
+      "height": 1080,
+      "content_hash": null,
+      "tags": {},
+      "note": "四个 asset id 指向同一个真文件：仓库里只有这一份素材。"
+    },
+    {
+      "id": "b.mp4",
+      "kind": "video",
+      "name": "B 段",
+      "uri": "proxy1080p.mp4",
+      "frame_count": 480,
+      "timebase": {
+        "num": 60,
+        "den": 1
+      },
+      "width": 1920,
+      "height": 1080,
+      "content_hash": null,
+      "tags": {},
+      "note": ""
+    },
+    {
+      "id": "c.mp4",
+      "kind": "video",
+      "name": "C 段",
+      "uri": "proxy1080p.mp4",
+      "frame_count": 480,
+      "timebase": {
+        "num": 60,
+        "den": 1
+      },
+      "width": 1920,
+      "height": 1080,
+      "content_hash": null,
+      "tags": {},
+      "note": ""
+    },
+    {
+      "id": "d.mp4",
+      "kind": "video",
+      "name": "D 段",
+      "uri": "proxy1080p.mp4",
+      "frame_count": 480,
+      "timebase": {
+        "num": 60,
+        "den": 1
+      },
+      "width": 1920,
+      "height": 1080,
+      "content_hash": null,
+      "tags": {},
+      "note": ""
+    },
+    {
+      "id": "sub.srt",
+      "kind": "subtitle",
+      "name": "样本字幕",
+      "uri": "sample-subtitle.srt",
+      "frame_count": null,
+      "timebase": null,
+      "width": null,
+      "height": null,
+      "content_hash": null,
+      "tags": {},
+      "note": "字幕也是一种素材：轨道引用它，与引用一段视频没有区别。"
+    }
+  ],
+  "timeline": {
+    "schema": 3,
+    "timebase": {
+      "num": 30,
+      "den": 1
+    },
+    "markers": [
+      {
+        "id": "m1",
+        "frame": 30,
+        "name": "转场",
+        "color": "#d09a3c"
+      }
+    ],
+    "tracks": [
+      {
+        "id": "v1",
+        "kind": "video",
+        "layers": [
+          {
+            "id": "a",
+            "start": 0,
+            "end": 30,
+            "source": {
+              "asset_id": "a.mp4",
+              "source_in": 0
+            },
+            "note": "基础元素 + 素材引用"
+          },
+          {
+            "id": "b",
+            "start": 30,
+            "end": 60,
+            "source": {
+              "asset_id": "b.mp4",
+              "source_in": 10
+            },
+            "transition_in": {
+              "kind": "cross_dissolve",
+              "duration": 10
+            }
+          },
+          {
+            "id": "c",
+            "start": 60,
+            "end": 90,
+            "source": {
+              "asset_id": "c.mp4",
+              "source_in": 5
+            },
+            "opacity": 0.8,
+            "effects": [
+              {
+                "kind": "gaussian_blur",
+                "params": {
+                  "radius": 4
+                }
+              }
+            ],
+            "keyframes": [
+              {
+                "frame": 0,
+                "value": 0,
+                "easing": "linear"
+              },
+              {
+                "frame": 15,
+                "value": 1,
+                "easing": "ease_in_out"
+              },
+              {
+                "frame": 29,
+                "value": 0.5,
+                "easing": "ease_out"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "v2",
+        "kind": "video",
+        "layers": [
+          {
+            "id": "d",
+            "start": 10,
+            "end": 50,
+            "source": {
+              "asset_id": "d.mp4",
+              "source_in": 0
+            },
+            "transform": {
+              "x": 100,
+              "y": -50,
+              "scale": 0.5,
+              "rotation": 15
+            },
+            "opacity": 0.6,
+            "blend": "multiply",
+            "effects": [
+              {
+                "kind": "gaussian_blur",
+                "params": {
+                  "radius": 2
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "adj",
+        "kind": "video",
+        "layers": [
+          {
+            "id": "adj-blur",
+            "start": 20,
+            "end": 60,
+            "effects": [
+              {
+                "kind": "gaussian_blur",
+                "params": {
+                  "radius": 6
+                }
+              }
+            ],
+            "note": "调整图层：没有素材，只有特效，影响它下面已经画上去的全部内容。",
+            "markers": [
+              {
+                "id": "adj-m1",
+                "frame": 0,
+                "name": "开始糊"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "sub",
+        "kind": "subtitle",
+        "layers": [
+          {
+            "id": "cue",
+            "start": 0,
+            "end": 240,
+            "source": {
+              "asset_id": "sub.srt",
+              "source_in": 0
+            }
+          }
+        ],
+        "subtitle": {
+          "font_ratio": 0.055,
+          "bottom_margin": 0.06,
+          "max_lines": 2,
+          "color": [
+            255,
+            255,
+            255,
+            255
+          ],
+          "outline": true
+        }
+      }
+    ]
+  },
+  "view": {
+    "playhead": 0,
+    "selection": "c",
+    "zoom": 1
+  },
+  "render_hints": {
+    "width": 640,
+    "height": 360,
+    "format": "mp4"
+  },
+  "extensions": {}
+}

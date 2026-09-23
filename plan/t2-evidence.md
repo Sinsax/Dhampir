@@ -2,6 +2,179 @@
 
 分段记录。T2 还没收口，所以这里先只有已完成的那几段。
 
+## T2.5 浏览器侧 canvas 栅格化（D5 / A4 的后一半）—— 已完成
+
+### 它解决什么
+
+到 T2.4 为止，只有**本机**那一侧的字真的进了像素。这一段把浏览器那半接上：
+页面把每一行字画在 canvas 上、转成位图交给宿主，宿主叠进画面 ——
+「两端都画字」第一次同时成立，「两端画出来一致」才第一次谈得上。
+
+两个字面从头到尾**不许混**：
+
+* **字形像素允许不同**：浏览器用系统无衬线字体（`web/engine.js` 的 `TEXT_FONT = "sans-serif"`，
+  这一层连字体输入都没有）；CLI 用 `--font-file` 的真字体。两套字体、两套抗锯齿，像素本来就不一样；
+* **清单与落点必须同源**：哪几行、每行什么字、各占哪个归一化矩形、各落在哪几个目标像素 ——
+  全部由 wasm 宿主按共享几何（`dhampir_timeline::text_layout`）算好交给 JS，JS 只照着 `placements` 画。
+
+判定走 T0.4 的判定通道：页面把宿主的两份结果**原样**回传到本机后端，驱动拿 CLI 的同一帧对照着判。
+**不依赖 `--exec`**（本机 Chrome 上它回空对象，见 D8）。
+
+### 六步分工
+
+| 步 | 落在哪 | 状态 |
+|---|---|---|
+| 1 | `dhampir_timeline::text_layout`：行盒与像素落点收进契约层，两端共用一份 | `b3eea83` 已提交 |
+| 2 | `dhampir_core::render`：`compose_overlay` / `ink_report` / `placement_transform`（叠加与墨迹原语） | `59b8219` 已提交 |
+| 3 | wasm 宿主 `crates/dhampir-wasm/src/timeline_host.rs`：清单、字幕登记、位图上传、墨迹判定；`TimelineRenderer::compositor()` 借用缝；`docs/api-surface.md` 重生成 | 本段 |
+| 4 | `web/engine.js`：canvas 栅格化 → `createImageBitmap(..., { premultiplyAlpha: "none" })` → 交给宿主 | 本段 |
+| 5 | `web/app.js`：`?verdict=subtitle` 分派与回传（`loadProjectSubtitles`） | 本段 |
+| 6 | `scripts/web-check.mjs`：判定分派 + CLI 同帧对照（容差写死）；`dhampir-local.mjs` 补字幕 MIME | 本段 |
+
+第 1、2 步单独提交，是因为它们是「契约层与 core」的改动 —— 与「宿主怎么用」不是一个问题。
+
+### 五个新导出，与一条禁令
+
+| 导出 | 干什么 |
+|---|---|
+| `dhampir_project_text_frame(frame)` | 清单：`items[{text,rect}]` 与 `placements[{text,rect,x,y,bitmap_width,bitmap_height,font_px,border_px,visible}]`；判据字段与 CLI `subtitle --frame` **逐字段同名**（比对不需要映射表） |
+| `dhampir_project_set_subtitles(asset_id, text, format)` | 收字幕原文，**解析在 Rust**（`parse_srt` / `parse_ass` 与 CLI 同一份实现） |
+| `dhampir_project_set_text_bitmap(index, bitmap)` / `dhampir_project_clear_text_bitmaps()` | 行位图按清单下标上、下 |
+| `dhampir_project_text_probe(frame)`（async） | 判定入口：无字 / 全画 / 逐行减一行，共 2 + 行数 次渲染，读回来比墨迹 |
+
+**清单与位图一起作废**（换清单、换字幕都调 `invalidate_text`）：行号是按位置编的，
+旧位图留在同号上就会拿另一条字幕的像素去贴，而画面看起来只是「这一帧的字没变」。
+
+**判定路径不许再调 `text_frame`**：那会重算清单并把刚提交的位图全作废，probe 判的就成了
+「没有位图的清单」。页面读的是 `engine.textManifest`（`prepareText` 里写下的那一份）。
+
+### 落在 JS 的两处决定
+
+* **染色不逐像素算**：CLI 那边是白字 + 黑描边再由 `tint()` 乘样式色；浏览器这边**不写第二份公式**，
+  直接填 `style.color`、先描黑边（`lineWidth = border_px * 2`：drawtext 的 borderw 向外扩一圈，
+  canvas 的描边压在字上，先描边后填字，内半边被盖掉，剩下的外半边就是那一圈）；
+* **计划的 `premultiplyAlpha` 就是实做的那个字**：JS 写 `createImageBitmap(canvas,
+  { premultiplyAlpha: "none" })`（`ImageBitmapOptions` 的属性名），宿主侧声明
+  `premultiplied_alpha: false`（wgpu 上传的字段名）—— 两个名字差一个字母、说的是同一件事：
+  直排 alpha、别预乘。说错**不报错**，只会让字的边缘发暗，而那看起来像「字体没渲染好」，
+  不像「叠加算错了」。栅格化用「代」（`textToken`）串行化：异步回来时若代变了，那一趟直接放弃。
+
+### 判定通道：`--verdict subtitle`（不碰 `--exec`）
+
+判定名按查询串分发（`web/app.js` 的 `VERDICTS`）；对照哪份工程由判定名给默认值
+（`PROJECT_FOR_VERDICT`），`--project` 可覆盖。页面逐帧 seek、收清单、调 `text_probe`，
+再回传；驱动对每一帧跑一次 CLI 算对照：
+
+    dhampir subtitle --project fixtures/sample-subtitle.doc.json --frame N --asset-root fixtures
+
+判据（`scripts/web-check.mjs`）分三层，容差 `SUBTITLE_TOLERANCE = 1e-6` **写死在驱动里**：
+
+* 两端清单：`subtitle_assets` / `dropped_lines` 严格比，`color` 走数组容差，
+  `outline` 用 `!==` 直接比（布尔不许塞进数组比较器），项数 + 文本逐字节 + 矩形四字段容差；
+* 页内墨迹自洽：可见的行必须有位图且有墨迹、没有字的帧必须 0 像素、
+  逐行减出来的像素之和必须等于整帧（`ink.lines_overlap !== true`）、
+  清单与墨迹报告里各出现一次的矩形必须相同（不同 = 中间清单被重算过）；
+* 宿主报的 `subtitle_*` 问题全部搬上报红；`lines.length` 必须等于 `placements.length`。
+
+1e-6 的理由：一个字的宽度在这个尺寸下是 2e-2 归一化单位量级，1e-6 小四个数量级 ——
+末位抖动不足以误红，落点真错了必红。常量**放在文件顶部**：用它的函数在模块末尾，
+第一版写在后面，于是每一帧都撞 TDZ 红掉（这行说明就写在常量旁边）。
+
+两个正例（同一台机器、同一个 Chrome、都走本机后端，exit 0）：
+
+    $ node scripts/web-check.mjs --local --verdict subtitle --timeout-ms 240000
+      判定回传：subtitle
+      ✓ 帧 0/60/120/180/240：两端清单一致（文本逐字节、矩形容差 0.000001）；墨迹逐行自洽
+        （可见的行都有像素、没有字的帧为 0、行间不重叠）
+      · 帧 0：1 行，画布 640x360，墨迹 1397 px（逐行 1397）；头一行位图 640x36 @(0,309) 字号 20
+      · 帧 60：2 行，画布 640x360，墨迹 8642 px（逐行 7173/1469）；头一行位图 640x36 @(0,285) 字号 20
+      · 帧 120：1 行，画布 640x360，墨迹 394 px（逐行 394）；头一行位图 640x36 @(0,309) 字号 20
+      · 帧 180：2 行，画布 640x360，墨迹 248 px（逐行 88/160）；头一行位图 640x36 @(0,285) 字号 20
+      · 帧 240：0 行，画布 640x360，墨迹 0 px（逐行 ）
+
+    $ node scripts/web-check.mjs --local --verdict subtitle --canvas 480x270 --timeout-ms 240000
+      ✓ 帧 0/60/120/180/240：两端清单一致（文本逐字节、矩形容差 0.000001）；墨迹逐行自洽
+        （可见的行都有像素、没有字的帧为 0、行间不重叠）
+      · 帧 0：1 行，画布 480x270，墨迹 934 px（逐行 934）；头一行位图 480x28 @(0,231) 字号 15
+      · 帧 60：2 行，画布 480x270，墨迹 5583 px（逐行 4653/930）；头一行位图 480x28 @(0,213) 字号 15
+      · 帧 120：1 行，画布 480x270，墨迹 256 px（逐行 256）；头一行位图 480x28 @(0,231) 字号 15
+      · 帧 180：2 行，画布 480x270，墨迹 204 px（逐行 72/132）；头一行位图 480x28 @(0,213) 字号 15
+      · 帧 240：0 行，画布 480x270，墨迹 0 px（逐行 ）
+
+同一帧在两套画布下：位图 640x36 @(0,309) / 字号 20 对 480x28 @(0,231) / 字号 15，
+墨迹 1397 对 934 px —— 落点是按**目标像素**换算出来的，不是照着 CLI 的 640x360 写死的
+（页面画布尺寸由查询串给，与工程 `render_hints` 无关）。
+
+### 两个反例（都真的红了，也确实还原了）
+
+判定通道要能**红**才算判据。两次都只改一处、跑同一条命令、看到 exit 1、按备份还原：
+
+1. **一笔都不画**（`web/engine.js` 的 `rasterizeLine` 提前 `return canvas`）：exit 1，12 条问题 ——
+   宿主侧 6 条 `subtitle_blit_failed`（每条可见的行一条：「这一行没有留下任何墨迹」）+
+   驱动侧 6 条「这一行可见却没有留下墨迹」；
+2. **落点挪 0.01**（把**回传清单**里第一项的 `rect.x` 加 0.01）：exit 1，一条指到项 ——
+   帧 60 第 0 项：rect.x 差 0.009999999999999995（CLI 0.09394532442092896、页面 0.10394532442092895）。
+
+还原后 `web/engine.js` 与 `web/app.js` 都与备份**逐字节一致**（SHA256 头 16 位
+`86A32953C15F5416` / `7AF185CB3F91A116`）。全部原始输出留在：
+
+    target/t2/t2-5-verdict/{canvas-640x360.txt,canvas-480x270.txt,
+                           negative-no-ink.txt,negative-rect-tampered.txt}
+
+### 没有字要画时：像素逐字节不变（重跑）
+
+判据里还有一条「无文字工程逐字节不变」—— 它不看浏览器，看的是**产物**：
+T2.3a 之前的二进制（`target/wt-head-target`，dc517fe 的独立 worktree）与当前构建，
+同一个无字幕工程（`fixtures/sample-project.doc.json`）、同参数出片：
+
+    $ node target/t2/byte-identical.cjs
+    === head  exe=target/wt-head-target/debug/dhampir.exe  退出码=0 ===
+    字节 22552   SHA256 42E6195C0E090D3CA7545D1E8FE3EFE3ABE2771BEA4B6E2A8A808B6DA04D21A6
+    === now  exe=target/debug/dhampir.exe  退出码=0 ===
+    字节 22552   SHA256 42E6195C0E090D3CA7545D1E8FE3EFE3ABE2771BEA4B6E2A8A808B6DA04D21A6
+
+同一个 SHA256，与 T2.4 那版对账表里的数字相同 —— 于是 T2.4 与 T2.5 的改动
+（契约层的 text_layout、core 的叠加原语、wasm 宿主的五个导出）都没有碰过无字工程的产物。
+当前版本的 done 里多一个 `overlay` 字段，全零。
+
+### `fixtures/sample-subtitle.doc.json`：为什么许它进 fixtures/
+
+`fixtures/` 是**判定输入**的目录：本机后端的资产索引要读它下面每一个 `.json`，
+`check-local-backend` 又把 `sample-project.doc` 的形状钉死（assets=4 / 无未引用素材）。
+所以这里的规矩是「不许动 `sample-project.doc.json` 与 `sample-project.json`」，而不是
+「不许加文件」—— 这一段要一份**带字幕轨的完整工程**，只两个做法：
+
+* 改 `sample-project.doc.json`：「无文字工程逐字节不变」那条对账从此没有参照，
+  而且 `check-local-backend` 的 22 条判据要一起改写 —— 拿判定输入去迁就新功能，方向是反的；
+* 新开一份（选了这个）：由 `sample-project.doc.json` 派生，5 个 asset（4 个视频 + `sub.srt` →
+  `sample-subtitle.srt`）、4 条轨（3 条视频 + 1 条字幕轨，字号 0.055 / 底边距 0.06 / 最多 2 行）。
+  **它是完整工程、不是中间产物**，加进去之后 16 个守卫仍全绿（`check-local-backend` 22 / 22）。
+
+它同时是两条路的输入：页面（`project=sample-subtitle.doc`）与 CLI 对照
+（`--project fixtures/sample-subtitle.doc.json --asset-root fixtures`）。
+本机后端只有一个 asset root，所以驱动起后端前把 `fixtures/sample-subtitle.srt` 拷到
+`target/s3/sample-subtitle.srt`（不做这一步的失败形状是 404 `asset_file_missing`，
+看起来像判定逻辑写错了）；CLI 对照那半边不依赖这份拷贝，它读 `fixtures/` 本身 ——
+两种 asset root 实测给出同一份结果。
+
+（`meta.title` 里是中文；PowerShell 直接回显可能显示成乱码，那是控制台编码，
+文件本身是合法 UTF-8 —— `check-text-hygiene` 盯着。）
+
+### 覆盖边界（不假装）
+
+* **字形不在判据里**：比的是清单（项数/文本/归一化矩形）与落点、墨迹的**有无与归属**，
+  不是像素 —— 含解码的逐像素双端比对本来就测不了（D15），这一段也没有改变那个边界；
+* **只验了 5 帧**（0/60/120/180/240，覆盖单行、换行成两行、单字、超 max_lines 丢行、空帧）；
+  字幕的**相接帧**（59/60/119/120…）没逐帧验，靠 core 的评估测试；
+* **一条字幕全部超 max_lines 时丢行计数拿不到**（`evaluate_overlay` 返回 `None`）——
+  与 T2.4 同一处已知边界，这一段没有改变它；
+* **ASS 的字幕半边没验**：链路上 `set_subtitles` 认 ass/ssa（解析是同一份 `parse_ass`），
+  但没有一份 ASS 样片走过判定；
+* **弹幕没接**（T3）：这一段只到「字幕」；
+* **没有跨浏览器矩阵**：本机只有 Chrome 走了判定通道；
+* **判定耗时长**（单次约 1–3 分钟：真实浏览器 + 本机后端 + 每帧一次 CLI 对照），
+  所以它不在 16 个守卫里，是**手动**通道 —— 这份证据就是它的原始输出。
+
 ## T2.3a 栅格化：一行文字 → RGBA8 位图 —— 已完成
 
 ### 它解决什么

@@ -99,17 +99,18 @@ scripts/check-preview-parity.mjs 与它的 12 条自检断言全绿。
 调 font_ratio 只能整体挪，不能让两端更接近。它只影响**换行点**，不影响字形像素 ——
 而 T2 的验收口径要的正是「结构一致、字形允许不同」。
 
-- T2.1（A4、D5）契约 —— **评估层那一半已完成，栅格化还没做**。
+- T2.1（A4、D5）契约 —— **评估层已完成**；两端「真的把字画出来」在 T2.3 / T2.5 里接上。
   **计划改了，理由记在这里**：没有把 overlay 塞进 Composite，而是新出一份结果
   （dhampir-core::overlay 的 evaluate_overlay）。因为文字的「要画什么」与图层的
   「哪张纹理怎么叠」是两件事：文字没有纹理，它要先由宿主栅格化。塞进一个结构里会让
   「谁负责栅格化」变含糊，而含糊的代价是两端各自决定。
-  代价是宿主必须**两个都调**，所以接线要由结构守卫盯着（与 check-preview-parity 同一手法）。
+  代价是宿主必须**两个都调**，所以接线要由结构守卫盯着（与 check-preview-parity 同一手法）——
+  该守卫写在 next-steps.md 的 T2.6 里，两个宿主都接上之后才写（提前写就是恒真守卫）。
   已落地：TextItem（归一化矩形）/ TextOverlay / SubtitleTable / evaluate_overlay（13 条单测），
   以及它的第一个真实调用方 —— CLI 的 subtitle 子命令（`dhampir subtitle --project P --frame N`，
   只出结构、不需要 GPU，宿主的输出与它不一致就是宿主错）。
-  **还没做的**：任意宿主真的把文字画出来（栅格化 + overlay 渲染阶段）、HOST_API_VERSION 1 到 2、
-  --subtitle-out 侧挂导出。
+  **还没做的**（A4/D5 的余下部分）：HOST_API_VERSION 1 到 2（T2.7）、--subtitle-out 侧挂导出（T2.6）；
+  弹幕见 T3。
 - T2.2（A3）共享布局 —— **已完成**（见 [t2-evidence.md](./t2-evidence.md)）：
   crates/dhampir-timeline/src/text_layout.rs，零依赖，17 条单测含 2 条反向用例；
   参照输出 crates/dhampir-timeline/examples/layout_subtitles.rs（宿主与它不一致就是宿主错）。

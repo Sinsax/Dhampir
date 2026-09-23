@@ -32,6 +32,7 @@
 - `dhampir_project_attach`
 - `dhampir_project_bind_source`
 - `dhampir_project_clear_bitmaps`
+- `dhampir_project_clear_text_bitmaps`
 - `dhampir_project_doc`
 - `dhampir_project_draw`
 - `dhampir_project_edit`
@@ -44,7 +45,11 @@
 - `dhampir_project_resize`
 - `dhampir_project_set_bitmap`
 - `dhampir_project_set_bitmap_mode`
+- `dhampir_project_set_subtitles`
+- `dhampir_project_set_text_bitmap`
 - `dhampir_project_sources_for`
+- `dhampir_project_text_frame`
+- `dhampir_project_text_probe`
 - `dhampir_sample_project_render_png`
 
 ## 宿主内部
