@@ -21,6 +21,37 @@ use serde::{Deserialize, Serialize};
 
 use crate::schema::{Frame, Issue};
 
+/// `dhampir_demux_samples` 里的一条样本。
+///
+/// **键名保持单字母**（o/s/d/u/k）：那是当初手写时定下的，改键名属于破坏性改动。
+/// 但字段名现在是可读的 —— 这正是「给形状命名」的意义：
+/// 以前它只是 json! 里的一个字符串，没人说得清 d 到底是偏移还是时间戳。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SampleView {
+    #[serde(rename = "o")]
+    pub offset: usize,
+    #[serde(rename = "s")]
+    pub size: usize,
+    #[serde(rename = "d")]
+    pub dts: u64,
+    #[serde(rename = "u")]
+    pub duration: u32,
+    #[serde(rename = "k")]
+    pub is_sync: bool,
+}
+
+/// `dhampir_cache_stats` 的返回体。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheStatsView {
+    pub vram_bytes: usize,
+    pub ram_bytes: usize,
+    pub vram_len: usize,
+    pub ram_len: usize,
+    pub vram_over: bool,
+    pub ram_over: bool,
+}
 /// 序列化成 JSON 字符串。
 ///
 /// 所有字段都可序列化，所以这里的兜底**理论上不可达** ——
@@ -247,5 +278,26 @@ mod tests {
         };
         let value = serde_json::to_value(&result).unwrap();
         assert_eq!(keys(&value), sorted(&["frame", "layers", "error"]));
+    }
+
+    #[test]
+    fn 样本表的键仍是单字母() {
+        // 改键名是破坏性改动，所以 o/s/d/u/k 原样保留；
+        // 但字段名（offset/size/dts/duration/is_sync）让含义第一次有了出处。
+        let sample = SampleView { offset: 100, size: 4, dts: 0, duration: 1000, is_sync: true };
+        let value = serde_json::to_value(sample).unwrap();
+        assert_eq!(keys(&value), sorted(&["o", "s", "d", "u", "k"]));
+    }
+
+    #[test]
+    fn 缓存账的键是钉死的() {
+        let stats = CacheStatsView {
+            vram_bytes: 1, ram_bytes: 2, vram_len: 3, ram_len: 4, vram_over: false, ram_over: true,
+        };
+        let value = serde_json::to_value(&stats).unwrap();
+        assert_eq!(
+            keys(&value),
+            sorted(&["vram_bytes", "ram_bytes", "vram_len", "ram_len", "vram_over", "ram_over"])
+        );
     }
 }

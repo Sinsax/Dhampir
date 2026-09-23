@@ -15,6 +15,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::demux::{self, VideoTrack};
 use crate::web::js_err;
+use dhampir_core::timeline::host_api;
 
 thread_local! {
     /// 最近一次解析出来的轨。页面只需要同时持有**一条**——预览是单片段路径，
@@ -81,18 +82,19 @@ pub fn dhampir_demux_samples() -> String {
         let Some(track) = borrowed.as_ref() else {
             return String::from("[]");
         };
-        let mut out = String::from("[");
-        for (i, s) in track.samples.iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
-            out.push_str(&format!(
-                "{{\"o\":{},\"s\":{},\"d\":{},\"u\":{},\"k\":{}}}",
-                s.offset, s.size, s.dts, s.duration, s.is_sync
-            ));
-        }
-        out.push(']');
-        out
+        // 形状**一字不改**（键仍是 o/s/d/u/k），但现在它有个名字。
+        let samples: Vec<host_api::SampleView> = track
+            .samples
+            .iter()
+            .map(|s| host_api::SampleView {
+                offset: s.offset,
+                size: s.size,
+                dts: s.dts,
+                duration: s.duration,
+                is_sync: s.is_sync,
+            })
+            .collect();
+        host_api::to_json(&samples)
     })
 }
 

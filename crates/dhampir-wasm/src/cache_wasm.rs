@@ -10,6 +10,7 @@
 use std::cell::RefCell;
 
 use dhampir_core::cache::FrameCache;
+use dhampir_core::timeline::host_api;
 use wasm_bindgen::prelude::*;
 
 thread_local! {
@@ -33,18 +34,16 @@ fn json_i64_array(values: &[i64]) -> String {
 fn stats_json() -> String {
     CACHE.with(|c| {
         let cache = c.borrow();
-        format!(
-            "{{\"vram_bytes\":{},\"ram_bytes\":{},\"vram_len\":{},\"ram_len\":{},\"vram_over\":{},\"ram_over\":{}}}",
-            cache.vram_bytes(),
-            cache.ram_bytes(),
-            cache.vram_len(),
-            cache.ram_len(),
-            cache.vram_over_budget(),
-            cache.ram_over_budget(),
-        )
+        host_api::to_json(&host_api::CacheStatsView {
+            vram_bytes: cache.vram_bytes(),
+            ram_bytes: cache.ram_bytes(),
+            vram_len: cache.vram_len(),
+            ram_len: cache.ram_len(),
+            vram_over: cache.vram_over_budget(),
+            ram_over: cache.ram_over_budget(),
+        })
     })
 }
-
 /// 开一份账。两份预算都按**字节**给（张数由页面自己换算，见 cache.rs 的说明）。
 #[wasm_bindgen]
 pub fn dhampir_cache_open(vram_bytes: usize, ram_bytes: usize) -> String {
