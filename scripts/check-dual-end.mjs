@@ -150,13 +150,18 @@ function main() {
 
   const problems = judge(entries, compare.status);
   // 通过线的出处见文件顶部注释；换算只认「完全一致」这一档。
+  // 通过线的出处见文件顶部注释；换算只认「完全一致」这一档。
+  //
+  // **上一轮这里只有用法、没有定义** —— 于是脚本一跑到这里就 ReferenceError，
+  // 而「崩溃」在外面看起来与「没输出」一样。修的时候顺带补上定义。
+  const REACHED = /最差 SSIM = inf/;
   if (!REACHED.test(compare.stdout)) {
     problems.push("SSIM 没有达到 1.000000（通过线出处：M4 记录）");
     problems.push("若两边输入本就不同源（浏览器解码真视频、worker 用合成源），这个数没有意义 —— 先对齐输入，再谈一致性");
   }
   if (problems.length > 0) {
-    for (const problem of problems) console.error('  - ' + problem);
-    console.error('双端一致性未通过');
+    for (const problem of problems) console.log('  - ' + problem);
+    console.log('双端一致性未通过');
     process.exitCode = 1;
     return;
   }
