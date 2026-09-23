@@ -34,6 +34,8 @@
 //! * **字距微调 / 连字**没做。
 //! * 行盒与字形外框的差异由宿主自行处理：这里给的是**行盒**，
 //!   宿主把文字画进这个盒子（基线位置由宿主定），像素允许不同。
+//!   但**盒子放在目标像素的哪个位置**也在这里（[`place_line`]）——
+//!   那是结构的一部分，两个宿主各写一份就会漂。
 
 use crate::layer::SubtitleStyle;
 
@@ -166,7 +168,11 @@ fn flush_word(atoms: &mut Vec<Atom>, word: &mut String, word_width: &mut f32) {
     if word.is_empty() {
         return;
     }
-    atoms.push(Atom { text: std::mem::take(word), width: *word_width, is_space: false });
+    atoms.push(Atom {
+        text: std::mem::take(word),
+        width: *word_width,
+        is_space: false,
+    });
     *word_width = 0.0;
 }
 
@@ -187,12 +193,20 @@ fn atoms_of(paragraph: &str) -> Vec<Atom> {
         }
         if ch == ' ' || ch == '\t' {
             flush_word(&mut atoms, &mut word, &mut word_width);
-            atoms.push(Atom { text: " ".to_string(), width: SPACE_EM, is_space: true });
+            atoms.push(Atom {
+                text: " ".to_string(),
+                width: SPACE_EM,
+                is_space: true,
+            });
             continue;
         }
         if is_full_width(ch) {
             flush_word(&mut atoms, &mut word, &mut word_width);
-            atoms.push(Atom { text: ch.to_string(), width: advance_em(ch), is_space: false });
+            atoms.push(Atom {
+                text: ch.to_string(),
+                width: advance_em(ch),
+                is_space: false,
+            });
             continue;
         }
         word.push(ch);
@@ -259,7 +273,10 @@ fn wrap_paragraph(paragraph: &str, max_width_em: f32, out: &mut Vec<String>) {
 /// 入参的 sequence 是**文档坐标系**（工程的 render_hints），不是渲染目标尺寸 ——
 /// 归一化矩形与渲染尺寸无关是这段代码存在的意义之一。
 pub fn layout(text: &str, style: &SubtitleStyle, sequence: (u32, u32)) -> TextLayout {
-    let empty = TextLayout { lines: Vec::new(), dropped_lines: 0 };
+    let empty = TextLayout {
+        lines: Vec::new(),
+        dropped_lines: 0,
+    };
     if text.is_empty() {
         return empty;
     }
@@ -310,7 +327,114 @@ pub fn layout(text: &str, style: &SubtitleStyle, sequence: (u32, u32)) -> TextLa
         });
     }
 
-    TextLayout { lines, dropped_lines }
+    TextLayout {
+        lines,
+        dropped_lines,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 宿主用的几何：行盒 -> 目标像素里的落点
+//
+// 这一段的两个调用方是 worker（ffmpeg 栅格化 + CPU 叠加）与 wasm 宿主
+// （canvas 栅格化 + GPU 叠加）。字形像素允许不同，**落点必须同源** ——
+// 各写一份「行盒放在哪」的算术，就一定会漂，而漂了以后两端各自都是「自洽」的。
+// ---------------------------------------------------------------------------
+
+/// 描边宽度（像素）：字号 / 16，至少 1。
+///
+/// 常见字幕描边大致是字号的 1/16。不许为 0 是因为 0 宽的描边在栅格化那边
+/// 等于没开描边 ——「开了描边却看不见」是最难查的那类。
+pub fn border_px(font_px: u32) -> u32 {
+    (font_px / 16).max(1)
+}
+
+/// 行盒上下各留的边距（像素）：描边 + 抗锯齿 + 行盒与字体实际行高的差。
+///
+/// 共享布局给的是**行盒**（1.2em），而真字体的行高由它自己的 ascent/descent 决定，
+/// 两者不相等。这份边距就是那个差，加上描边宽度与抗锯齿的余量。
+pub fn pad_px(font_px: u32) -> u32 {
+    (font_px / 3).max(4)
+}
+
+/// 一行文字的位图尺寸：宽取整条目标宽，高取行盒加上下各一份 [`pad_px`]。
+///
+/// 宽度**不取这一行的估算宽度**：模型宽度与真字宽有偏差（见模块文档），
+/// 按估算宽度开画布会把真字体下溢出的墨迹裁掉；取整条目标宽就永远裁不到横向。
+pub fn bitmap_size(target_width: u32, line_box_px: f32, font_px: u32) -> (u32, u32) {
+    let box_px = line_box_px.max(0.0).round() as u32;
+    (target_width, box_px + 2 * pad_px(font_px))
+}
+
+/// 一行在目标像素坐标系里的落点与位图尺寸。
+///
+/// `x` / `y` 允许为负：行盒顶边离画面顶边比 pad 还近时就会这样。
+/// 负值不是「算错了」，是「这一段位图落在画面外」——由宿主数出来。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinePlacement {
+    /// 位图左上角在目标帧里的像素坐标。
+    pub x: i32,
+    pub y: i32,
+    /// 位图宽（像素），见 [`bitmap_size`] —— 现在恒等于目标宽。
+    pub bitmap_width: u32,
+    /// 位图高（像素）。
+    pub bitmap_height: u32,
+    /// 字号（目标像素）。行盒高除以 [`LINE_HEIGHT_EM`]，至少 1。
+    pub font_px: u32,
+}
+
+/// 行盒（归一化，文档坐标）-> 目标像素里的落点。
+///
+/// # 规则：位图中心对准行盒中心
+///
+/// 位图的宽度取**整条目标宽**，栅格化那一侧把文字在位图里居中，所以
+/// 「这一行画在哪」只剩一个自由度：位图放在哪。规则是**位图的中心对准行盒的中心**：
+///
+/// ```text
+/// x = round(rect.center_x   × 目标宽 - 位图宽 / 2)
+/// y = round(rect.center_y × 目标高 - 位图高 / 2)
+/// ```
+///
+/// 为什么是中心而不是左上角：位图比行盒**高**（上下各留一份 [`pad_px`]，
+/// 给描边、抗锯齿与真字体超出 1.2em 行盒的部分），按左上角对齐会让文字整体
+/// 下移一个 pad。而中心对齐不需要知道 pad 是多少就成立。
+///
+/// 字号由行盒高度反推：`font_px = round(行盒高[目标像素] / LINE_HEIGHT_EM)`。
+/// 这一条只依赖归一化矩形（尺寸是共享布局算的），不需要宿主再去读一遍轨道样式 ——
+/// 若两处各算一次，就会漂。
+///
+/// 目标尺寸为 0、或行盒没有高度时给 `None`：**没有可画的东西**，
+/// 而不是「画失败」—— 两者在下游的处理不同（前者跳过，后者记问题）。
+pub fn place_line(rect: NormalizedRect, target: (u32, u32)) -> Option<LinePlacement> {
+    if target.0 == 0 || target.1 == 0 {
+        return None;
+    }
+    let target_width = target.0 as f32;
+    let target_height = target.1 as f32;
+    let line_box_px = rect.height * target_height;
+    // 这一行同时挡掉 NaN（NaN 的比较恒为假）。
+    if !(line_box_px > 0.0) {
+        return None;
+    }
+    // 字号从行盒高反推，不读轨道样式：结构里已经有全部信息，
+    // 再读一遍样式就是第二个实现，迟早与共享布局漂开。
+    let raw_font_px = (line_box_px / LINE_HEIGHT_EM).round();
+    let font_px = if raw_font_px < 1.0 {
+        1
+    } else {
+        raw_font_px as u32
+    };
+    let (bitmap_width, bitmap_height) = bitmap_size(target.0, line_box_px, font_px);
+
+    let center_x = rect.center_x() * target_width;
+    let center_y = (rect.y + rect.height / 2.0) * target_height;
+    Some(LinePlacement {
+        x: (center_x - bitmap_width as f32 / 2.0).round() as i32,
+        y: (center_y - bitmap_height as f32 / 2.0).round() as i32,
+        bitmap_width,
+        bitmap_height,
+        font_px,
+    })
 }
 
 #[cfg(test)]
@@ -412,7 +536,10 @@ mod tests {
         let result = layout(&text, &style(), SEQUENCE);
         assert!(result.lines.len() >= 2);
         let first = result.lines[0].text.chars().count();
-        assert!((20..=29).contains(&first), "第一行应当是二十来个汉字，实际 {first}");
+        assert!(
+            (20..=29).contains(&first),
+            "第一行应当是二十来个汉字，实际 {first}"
+        );
     }
 
     #[test]
@@ -466,7 +593,10 @@ mod tests {
         let result = layout("一行", &style(), SEQUENCE);
         let height = result.lines[0].rect.height;
         let expected = style().font_ratio * LINE_HEIGHT_EM;
-        assert!((height - expected).abs() < 1e-6, "行高应当是 font_ratio * 1.2 = {expected}");
+        assert!(
+            (height - expected).abs() < 1e-6,
+            "行高应当是 font_ratio * 1.2 = {expected}"
+        );
     }
 
     #[test]
@@ -480,8 +610,14 @@ mod tests {
         let (ra, rb) = (a.lines[0].rect, b.lines[0].rect);
         assert!((ra.x - rb.x).abs() < 1e-5, "x：{ra:?} vs {rb:?}");
         assert!((ra.y - rb.y).abs() < 1e-5, "y：{ra:?} vs {rb:?}");
-        assert!((ra.width - rb.width).abs() < 1e-5, "width：{ra:?} vs {rb:?}");
-        assert!((ra.height - rb.height).abs() < 1e-5, "height：{ra:?} vs {rb:?}");
+        assert!(
+            (ra.width - rb.width).abs() < 1e-5,
+            "width：{ra:?} vs {rb:?}"
+        );
+        assert!(
+            (ra.height - rb.height).abs() < 1e-5,
+            "height：{ra:?} vs {rb:?}"
+        );
     }
 
     #[test]
@@ -509,8 +645,150 @@ mod tests {
         let text = "混合 mixed 文本 text 混排 很长很长很长很长很长很长很长很长";
         let result = layout(text, &style(), SEQUENCE);
         for line in &result.lines {
-            assert!(line.rect.width <= 1.0 + 1e-6, "行宽超预算：{}", line.rect.width);
+            assert!(
+                line.rect.width <= 1.0 + 1e-6,
+                "行宽超预算：{}",
+                line.rect.width
+            );
             assert!(line.rect.x >= -1e-6, "左边越界：{}", line.rect.x);
         }
+    }
+
+    // ---- 宿主用的几何 ----
+
+    /// 落点的定义性质：**位图中心 = 行盒中心**。
+    ///
+    /// 这一条不写数值而是写关系：数值会随 pad / 取整口径漂，而关系是那段代码
+    /// 存在的全部理由（模块文档里那张 ASCII 图）。
+    #[test]
+    fn 落点把位图中心对准行盒中心() {
+        let rects = [
+            NormalizedRect {
+                x: 0.25,
+                y: 0.5,
+                width: 0.5,
+                height: 0.066,
+            },
+            NormalizedRect {
+                x: 0.1,
+                y: 0.02,
+                width: 0.8,
+                height: 0.12,
+            },
+            NormalizedRect {
+                x: 0.3,
+                y: 0.9,
+                width: 0.4,
+                height: 0.08,
+            },
+        ];
+        for rect in rects {
+            for target in [(640, 360), (1280, 720), (1920, 1080)] {
+                let placement = place_line(rect, target).expect("有高度就能落点");
+                let bitmap_center_x = placement.x as f32 + placement.bitmap_width as f32 / 2.0;
+                let bitmap_center_y = placement.y as f32 + placement.bitmap_height as f32 / 2.0;
+                let box_center_x = rect.center_x() * target.0 as f32;
+                let box_center_y = (rect.y + rect.height / 2.0) * target.1 as f32;
+                // 取整到像素，所以只要求半像素以内。
+                assert!(
+                    (bitmap_center_x - box_center_x).abs() <= 0.5,
+                    "横向中心对不上：位图 {bitmap_center_x} vs 行盒 {box_center_x}（{rect:?} @ {target:?}）"
+                );
+                assert!(
+                    (bitmap_center_y - box_center_y).abs() <= 0.5,
+                    "纵向中心对不上：位图 {bitmap_center_y} vs 行盒 {box_center_y}（{rect:?} @ {target:?}）"
+                );
+            }
+        }
+    }
+
+    /// 字号由**行盒高**反推，所以同一批归一化矩形在更大的目标上得到更大的字号。
+    /// 位图宽恒等于目标宽、高 = 行盒 + 上下各一份 pad。
+    #[test]
+    fn 字号与位图尺寸跟着目标走() {
+        let rect = NormalizedRect {
+            x: 0.25,
+            y: 0.5,
+            width: 0.5,
+            height: 0.066,
+        };
+        let small = place_line(rect, (640, 360)).expect("能落点");
+        let large = place_line(rect, (1280, 720)).expect("能落点");
+        assert_eq!(
+            small.font_px, 20,
+            "0.066 × 360 = 23.76 行盒 -> /1.2 = 19.8 -> 20"
+        );
+        assert_eq!(large.font_px, 40, "目标高一倍，字号也一倍");
+        assert_eq!(small.bitmap_width, 640, "位图宽取整条目标宽");
+        assert_eq!(large.bitmap_width, 1280);
+        assert_eq!(
+            small.bitmap_height,
+            24 + 2 * pad_px(20),
+            "行盒 23.76 四舍五入到 24"
+        );
+        assert_eq!(
+            large.bitmap_height,
+            48 + 2 * pad_px(40),
+            "行盒 47.52 四舍五入到 48"
+        );
+    }
+
+    /// 没有可画的东西与画失败是两回事：这里给 `None`，由宿主决定「跳过」。
+    #[test]
+    fn 零尺寸或零行高没有可画的东西() {
+        let ok = NormalizedRect {
+            x: 0.5,
+            y: 0.5,
+            width: 0.2,
+            height: 0.1,
+        };
+        assert!(place_line(ok, (640, 360)).is_some());
+        let zero_height = NormalizedRect { height: 0.0, ..ok };
+        assert!(place_line(zero_height, (640, 360)).is_none(), "零高行盒");
+        let nan_height = NormalizedRect {
+            height: f32::NAN,
+            ..ok
+        };
+        assert!(place_line(nan_height, (640, 360)).is_none(), "NaN 也要挡住");
+        assert!(place_line(ok, (0, 360)).is_none(), "目标宽为 0");
+        assert!(place_line(ok, (640, 0)).is_none(), "目标高为 0");
+    }
+
+    /// 反向：**下界不许被优化掉**。描边 0 宽与边距 0 都会让「开了描边/留了余量」
+    /// 变成看不见的假话，所以极小字号也必须落在下界上。
+    #[test]
+    fn 描边与边距有下界() {
+        assert_eq!(border_px(48), 3);
+        assert_eq!(border_px(16), 1);
+        assert_eq!(border_px(1), 1, "字号再小，描边也不许是 0 宽");
+        assert_eq!(pad_px(48), 16);
+        assert_eq!(pad_px(1), 4, "字号再小，上下边距也不许是 0");
+        // 位图高度里两份 pad 都要在 —— 少一份就是「字被自己的位图切了」。
+        let (_, height) = bitmap_size(320, 12.0, 10);
+        assert_eq!(height, 12 + 2 * pad_px(10));
+        assert_eq!(
+            bitmap_size(320, -5.0, 10).1,
+            2 * pad_px(10),
+            "负行盒按 0 算，不 panic"
+        );
+    }
+
+    /// 布局与落点串起来：默认样式下第一行的落点必须落在画面里、且文字中心居中。
+    #[test]
+    fn 布局出来的行能直接落进目标像素() {
+        let laid = layout("第一行中文", &style(), SEQUENCE);
+        let line = &laid.lines[0];
+        let placement = place_line(line.rect, SEQUENCE).expect("能落点");
+        assert!(placement.font_px > 0);
+        assert!(
+            placement.y >= 0,
+            "默认样式下不该有负落点，得到 {}",
+            placement.y
+        );
+        let center = placement.x as f32 + placement.bitmap_width as f32 / 2.0;
+        assert!(
+            (center - 320.0).abs() <= 0.5,
+            "居中排版的落点中心该在 320，得到 {center}"
+        );
     }
 }

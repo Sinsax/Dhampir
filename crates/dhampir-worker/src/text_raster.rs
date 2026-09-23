@@ -77,29 +77,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// 32 张 ≈ 32 MB。
 pub const CACHE_CAPACITY: usize = 32;
 
-/// 描边宽度（像素）：字号 / 16，至少 1。
-///
-/// 常见字幕描边大致是字号的 1/16。不许为 0 是因为 0 宽的 `borderw` 在 ffmpeg 那边
-/// 等于没开描边 ——「开了描边却看不见」是最难查的那类。
-pub fn border_px(font_px: u32) -> u32 {
-    (font_px / 16).max(1)
-}
-
-/// 行盒上下各留的边距（像素）：描边 + 抗锯齿 + 行盒与字体实际行高的差。
-///
-/// 共享布局给的是**行盒**（1.2em），而真字体的行高由它自己的 ascent/descent 决定，
-/// 两者不相等。这份边距就是那个差，加上描边宽度与抗锯齿的余量。
-pub fn pad_px(font_px: u32) -> u32 {
-    (font_px / 3).max(4)
-}
-
-/// 一行文字的位图尺寸：宽取整条目标宽，高取行盒加上下各一份 [`pad_px`]。
-///
-/// 宽度**不取这一行的估算宽度**，理由见模块文档（模型宽度与真字宽有偏差）。
-pub fn bitmap_size(target_width: u32, line_box_px: f32, font_px: u32) -> (u32, u32) {
-    let box_px = line_box_px.max(0.0).round() as u32;
-    (target_width, box_px + 2 * pad_px(font_px))
-}
+// 几何（描边宽度、上下边距、位图尺寸）**不在这个文件里**：它必须在两端共用
+// 一份，所以住在契约层 `dhampir_timeline::text_layout`（推导也写在那里）。
+// 这里只把它们带出来 —— 本模块的调用方与既有测试不用改路径。
+pub use dhampir_core::timeline::text_layout::{bitmap_size, border_px, pad_px};
 
 /// 一次栅格化的入参 —— **它自己就是缓存键**。
 ///

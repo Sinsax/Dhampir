@@ -9,24 +9,15 @@
 //! * 叠上去（本模块）是「把那张位图按行盒放进目标像素」这一步。它同样两端各有一份，
 //!   但判据是同一条：位图中心对准行盒中心（见下）。
 //!
-//! # 几何：位图中心对准行盒中心
+//! # 几何：规则在契约层，这里只调用
 //!
-//! 位图的宽度取**整条目标宽**（理由见 text_raster 的模块文档），而 drawtext 把文字
-//! 在位图里居中，所以「这一行画在哪」只剩一个自由度：位图放在哪。规则是
-//! **位图的中心对准行盒的中心**：
+//! 「行盒放在目标像素的哪个位置」**不在这里**：它住在
+//! `dhampir_timeline::text_layout`（`place_line` / `LinePlacement`），与浏览器
+//! 那半共用一份。两端各写一份落点算术，就一定会漂 —— 而漂了以后两边各自
+//! 都是「自洽」的，只有把两张画面摆在一起才看得出来。
 //!
-//! ```text
-//! x = round(rect.center_x * 目标宽 - 位图宽 / 2)
-//! y = round(rect.center_y * 目标高 - 位图高 / 2)
-//! ```
-//!
-//! 为什么是中心而不是左上角：位图比行盒**高**（上下各留一份 pad，给描边、抗锯齿与
-//! 真字体超出 1.2em 行盒的部分），按左上角对齐会让文字整体下移一个 pad。
-//! 而中心对齐不需要知道 pad 是多少就成立。
-//!
-//! 字号由行盒高度反推：`font_px = round(行盒高[目标像素] / LINE_HEIGHT_EM)`。
-//! 这一条只依赖 [`TextOverlay`] 里的结构（面积是共享布局算的），
-//! 不需要宿主再去读一遍轨道样式 —— 若两处各算一次，就会漂。
+//! 规则本身（位图中心对准行盒中心、字号由行盒高反推）的推导写在共享层的文档里，
+//! 这里不再抄一遍。
 //!
 //! # 混合：直排 alpha 的 source-over
 //!
@@ -72,67 +63,18 @@ use std::rc::Rc;
 
 use dhampir_core::overlay::TextOverlay;
 use dhampir_core::readback::Rgba8Image;
-use dhampir_core::timeline::text_layout::{LINE_HEIGHT_EM, NormalizedRect};
 
 use crate::pipeline::IssueLog;
-use crate::text_raster::{TextBitmap, TextRasterKey, TextRasterizer, bitmap_size};
+use crate::text_raster::{TextBitmap, TextRasterKey, TextRasterizer};
 
 // ---------------------------------------------------------------------------
 // 几何：行盒 -> 目标像素里的落点
 // ---------------------------------------------------------------------------
 
-/// 一行在目标像素坐标系里的落点与位图尺寸。
-///
-/// `x` / `y` 允许为负：行盒顶边离画面顶边比 pad 还近时就会这样。
-/// 负值不是「算错了」，是「这一段位图落在画面外」——由 [`blit`] 数出来。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LinePlacement {
-    /// 位图左上角在目标帧里的像素坐标。
-    pub x: i32,
-    pub y: i32,
-    /// 位图宽（像素），见 [`bitmap_size`] —— 现在恒等于目标宽。
-    pub bitmap_width: u32,
-    /// 位图高（像素）。
-    pub bitmap_height: u32,
-    /// 字号（目标像素）。行盒高除以 [`LINE_HEIGHT_EM`]，至少 1。
-    pub font_px: u32,
-}
-
-/// 行盒（归一化，文档坐标）-> 目标像素里的落点。
-///
-/// 目标尺寸为 0、或行盒没有高度时给 `None`：**没有可画的东西**，
-/// 而不是「画失败」—— 两者在下游的处理不同（前者跳过，后者记问题）。
-pub fn place_line(rect: NormalizedRect, target: (u32, u32)) -> Option<LinePlacement> {
-    if target.0 == 0 || target.1 == 0 {
-        return None;
-    }
-    let target_width = target.0 as f32;
-    let target_height = target.1 as f32;
-    let line_box_px = rect.height * target_height;
-    // 这一行同时挡掉 NaN（NaN 的比较恒为假）。
-    if !(line_box_px > 0.0) {
-        return None;
-    }
-    // 字号从行盒高反推，不读轨道样式：结构里已经有全部信息，
-    // 再读一遍样式就是第二个实现，迟早与共享布局漂开。
-    let raw_font_px = (line_box_px / LINE_HEIGHT_EM).round();
-    let font_px = if raw_font_px < 1.0 {
-        1
-    } else {
-        raw_font_px as u32
-    };
-    let (bitmap_width, bitmap_height) = bitmap_size(target.0, line_box_px, font_px);
-
-    let center_x = rect.center_x() * target_width;
-    let center_y = (rect.y + rect.height / 2.0) * target_height;
-    Some(LinePlacement {
-        x: (center_x - bitmap_width as f32 / 2.0).round() as i32,
-        y: (center_y - bitmap_height as f32 / 2.0).round() as i32,
-        bitmap_width,
-        bitmap_height,
-        font_px,
-    })
-}
+// 规则在契约层（两端共用一份），这里只把它们带出来 —— 于是既有调用点
+// （`paint_lines`、下面的测试）不用改路径。改规则要去
+// crates/dhampir-timeline/src/text_layout.rs，**不许在这里重写一份**。
+pub use dhampir_core::timeline::text_layout::{LinePlacement, place_line};
 
 // ---------------------------------------------------------------------------
 // 叠上去
@@ -425,6 +367,8 @@ mod tests {
     use super::*;
     use dhampir_core::overlay::TextItem;
     use dhampir_core::timeline::schema::Issue;
+    // 落点几何搬去契约层之后，矩形类型只在这个测试模块里还用到。
+    use dhampir_core::timeline::text_layout::NormalizedRect;
 
     fn rect(x: f32, y: f32, width: f32, height: f32) -> NormalizedRect {
         NormalizedRect {
