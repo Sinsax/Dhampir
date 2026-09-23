@@ -917,3 +917,177 @@ mod gop_length_tests {
         assert!(gop_length_mismatch(&one_sync, 60).is_none());
     }
 }
+
+// ============================================================================
+// 出片任务契约
+// ============================================================================
+//
+// 出片是**分钟级**的（实测：90 帧 640x360 的逐帧渲染加编码就要几分钟），
+// 所以它**不能**是同步 HTTP —— 必须「提交 -> 任务号 -> 轮询/推送」。
+//
+// 这一组形状就是那条链路的契约。放在这里而不是散在服务端代码里，
+// 是因为**分离模式与本机模式必须说同一种话**。
+
+/// 出片任务的状态。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportState {
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+impl ExportState {
+    /// 是不是**终态** —— 到了这里任务就不该再动。
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+    }
+
+    /// 允不允许转到 next。
+    ///
+    /// # 为什么要把这张表写死
+    ///
+    /// 不写死的话，「任务从完成又变回运行中」这类错误**只在并发下复现**，
+    /// 而且一旦发生，前端已经拿到 download_url 又被告知"还在跑" ——
+    /// 表现是随机闪烁，几乎不可能靠复现去查。
+    ///
+    /// 允许 Queued 直接到 Succeeded：任务可能在第一次轮询之前就跑完了。
+    /// 那是正常情形，不该被状态机判成非法。
+    pub const fn can_transition_to(self, next: Self) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
+        matches!(
+            (self, next),
+            (Self::Queued, Self::Running)
+                | (Self::Queued, Self::Succeeded)
+                | (Self::Queued, Self::Failed)
+                | (Self::Queued, Self::Cancelled)
+                | (Self::Running, Self::Succeeded)
+                | (Self::Running, Self::Failed)
+                | (Self::Running, Self::Cancelled)
+        )
+    }
+}
+
+/// 提交出片后的回执。**只有任务号** —— 别的一律靠查状态拿。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExportAcceptedView {
+    pub job_id: String,
+}
+
+/// 查一个出片任务。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExportStatusView {
+    pub job_id: String,
+    pub state: ExportState,
+    /// 0.0..=1.0。**未知时为 None，不要用 0.0 冒充** ——
+    /// 「进度未知」与「进度是零」是两件事，前者界面上该显示不确定态。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_url: Option<String>,
+    /// 失败原因。**复用同一套 Issue**，不新造一种错误格式 ——
+    /// 前端已经在渲染那一套了，多一种就要多认一次。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<Issue>,
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+
+    #[test]
+    fn 终态不许再转() {
+        for state in [ExportState::Succeeded, ExportState::Failed, ExportState::Cancelled] {
+            assert!(state.is_terminal());
+            for next in [
+                ExportState::Queued,
+                ExportState::Running,
+                ExportState::Succeeded,
+                ExportState::Failed,
+                ExportState::Cancelled,
+            ] {
+                assert!(
+                    !state.can_transition_to(next),
+                    "{state:?} 是终态，不该能转到 {next:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn 未终态只能沿着可行的边走() {
+        assert!(ExportState::Queued.can_transition_to(ExportState::Running));
+        assert!(ExportState::Queued.can_transition_to(ExportState::Succeeded), "任务可能在第一次轮询前就跑完");
+        assert!(ExportState::Queued.can_transition_to(ExportState::Cancelled));
+        assert!(ExportState::Running.can_transition_to(ExportState::Succeeded));
+        assert!(ExportState::Running.can_transition_to(ExportState::Failed));
+        assert!(ExportState::Running.can_transition_to(ExportState::Cancelled));
+        // 回不去：这就是「完成又变回运行中」那条。
+        assert!(!ExportState::Running.can_transition_to(ExportState::Queued));
+        assert!(!ExportState::Running.can_transition_to(ExportState::Running));
+    }
+
+    #[test]
+    fn 状态序列化用蛇形且是稳定的字符串() {
+        // 状态串是**跨进程**的：本机后端写、前端读。所以它不能随枚举改名字而变。
+        assert_eq!(serde_json::to_string(&ExportState::Running).unwrap(), "\"running\"");
+        assert_eq!(serde_json::to_string(&ExportState::Succeeded).unwrap(), "\"succeeded\"");
+        assert_eq!(serde_json::to_string(&ExportState::Cancelled).unwrap(), "\"cancelled\"");
+    }
+
+    #[test]
+    fn 可选字段为空时不出现而不是塞_null() {
+        let status = ExportStatusView {
+            job_id: "j1".to_string(),
+            state: ExportState::Running,
+            progress: None,
+            download_url: None,
+            error: None,
+        };
+        let value = serde_json::to_value(&status).unwrap();
+        let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["job_id", "state"], "为空的可选项不该出现");
+    }
+
+    #[test]
+    fn 完成时带上下载地址且不带错误() {
+        let status = ExportStatusView {
+            job_id: "j1".to_string(),
+            state: ExportState::Succeeded,
+            progress: Some(1.0),
+            download_url: Some("/export/j1/download".to_string()),
+            error: None,
+        };
+        let value = serde_json::to_value(&status).unwrap();
+        assert!(value.get("download_url").is_some());
+        assert!(value.get("error").is_none(), "成功时不该有 error 键");
+    }
+
+    #[test]
+    fn 失败时带的是同一套_Issue_而不是自定义错误串() {
+        let status = ExportStatusView {
+            job_id: "j1".to_string(),
+            state: ExportState::Failed,
+            progress: None,
+            download_url: None,
+            error: Some(Issue::new(
+                "encoder_missing",
+                "ffmpeg",
+                "找不到 ffmpeg".to_string(),
+            )),
+        };
+        let value = serde_json::to_value(&status).unwrap();
+        let error = &value["error"];
+        let mut keys: Vec<&str> = error.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["code", "message", "path"], "要复用 Issue 的形状");
+    }
+}
