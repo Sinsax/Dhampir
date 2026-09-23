@@ -31,6 +31,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use dhampir_core::compose;
+use dhampir_core::overlay::{SubtitleTable, evaluate_overlay};
+use dhampir_core::timeline::subtitle::{parse_ass, parse_srt};
 use dhampir_core::effects::REGISTRY;
 use dhampir_core::timeline::host_api::{AssetInfoView, SampleView, gop_slices};
 use dhampir_core::timeline::edit::{EditOp, apply as apply_edit};
@@ -73,6 +75,8 @@ const USAGE: &str = "\
   --height <像素>       输出高度（默认取工程文件里的 render_hints.height）
   -h, --help            显示本帮助
 
+  subtitle 子命令不需要 GPU，也不需要 ffmpeg —— 它只出结构，不画图。
+
 退出码：0 成功 / 2 用法或校验错 / 1 运行期失败";
 
 /// 解析出来的选项。**用显式字段而不是一张 HashMap** ——
@@ -106,8 +110,8 @@ const KNOWN_VALUE_FLAGS: [&str; 12] = [
 /// 认得的**不带值**选项。
 const KNOWN_FLAGS: [&str; 5] = ["--frame", "--write", "--replace", "-h", "--help"];
 /// 认得的子命令。
-const COMMANDS: [&str; 8] =
-    ["probe", "info", "gop", "frame", "render", "import", "library", "edit"];
+const COMMANDS: [&str; 9] =
+    ["probe", "info", "gop", "frame", "render", "import", "library", "edit", "subtitle"];
 
 /// 解析。**纯函数**，所以能脱离命令行单测。
 fn parse(argv: &[String]) -> Result<Args, String> {
@@ -821,6 +825,107 @@ fn cmd_library(args: &Args) -> Result<ExitCode, String> {
     }))
 }
 
+/// 打印某一帧的**文字覆盖层**：要画哪几行字、每行占哪个归一化矩形。
+///
+/// 两个作用：
+///   * 给「两端要画的那份结构」一个可以逐字段核对的参照 ——
+///     宿主的输出与它不一致，就是宿主错了；
+///   * 让 core 的文字评估**一出生就有调用方**。只写不用的公共 API 比没有更容易误导。
+///
+/// 它**不画图**：栅格化是宿主的事，所以这里不需要 GPU，也不需要 ffmpeg。
+fn cmd_subtitle(args: &Args) -> Result<ExitCode, String> {
+    let project = args.project.as_ref().ok_or("subtitle 要 --project <文件>")?;
+    let frame = args.frame.ok_or("subtitle 要 --frame <帧号>")?;
+    let doc = match load_project_or_usage(project) {
+        Ok(doc) => doc,
+        Err(code) => return Ok(code),
+    };
+    let asset_root = PathBuf::from(args.asset_root.clone().unwrap_or_else(|| "target/s3".to_string()));
+    let fallback = resolve_fallback(args, &asset_root)?;
+    let sources = build_sources(&doc, &asset_root, &fallback);
+
+    // 字幕素材：读文件 + 解析。**解析只有一个实现，在契约 crate 里。**
+    let mut table = SubtitleTable::new();
+    let mut unreadable: Vec<String> = Vec::new();
+    for asset in &doc.assets {
+        if asset.kind != AssetKind::Subtitle {
+            continue;
+        }
+        let Some(file) = sources.file_for(&asset.id) else {
+            unreadable.push(format!("{}：没有登记文件位置", asset.id));
+            continue;
+        };
+        let text = match std::fs::read_to_string(file) {
+            Ok(text) => text,
+            Err(error) => {
+                unreadable.push(format!("{}：读不了 {}（{error}）", asset.id, file.display()));
+                continue;
+            }
+        };
+        let extension = file
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let parsed = match extension.as_str() {
+            "srt" => parse_srt(&text),
+            "ass" | "ssa" => parse_ass(&text),
+            other => Err(format!("不认得这个字幕格式：{other}（现在只认 srt/ass/ssa）")),
+        };
+        match parsed {
+            Ok(report) => {
+                if report.skipped > 0 {
+                    eprintln!("{}：跳过了 {} 个解析不了的块", asset.id, report.skipped);
+                }
+                table.insert(asset.id.clone(), report.cues);
+            }
+            Err(error) => return Err(format!("{} 解析失败：{error}", asset.id)),
+        }
+    }
+
+    // 读不了就**失败**，不静默当成「没有字幕」——那两种情况的输出一模一样。
+    if !unreadable.is_empty() {
+        return Err(format!("字幕素材读不了：{}", unreadable.join("；")));
+    }
+
+    let sequence = doc.sequence_size();
+    let overlay = evaluate_overlay(&doc.timeline, frame, sequence, Some(&table));
+    let (items, color, outline, dropped_lines) = match overlay {
+        Some(overlay) => (
+            overlay
+                .items
+                .iter()
+                .map(|item| {
+                    serde_json::json!({
+                        "text": item.text,
+                        "rect": {
+                            "x": item.rect.x,
+                            "y": item.rect.y,
+                            "width": item.rect.width,
+                            "height": item.rect.height,
+                        },
+                    })
+                })
+                .collect::<Vec<_>>(),
+            serde_json::json!(overlay.color),
+            serde_json::json!(overlay.outline),
+            overlay.dropped_lines,
+        ),
+        None => (Vec::new(), serde_json::Value::Null, serde_json::Value::Null, 0),
+    };
+
+    print_json(&serde_json::json!({
+        "frame": frame,
+        "sequence": [sequence.0, sequence.1],
+        "subtitle_assets": table.len(),
+        "items": items,
+        "color": color,
+        "outline": outline,
+        "dropped_lines": dropped_lines,
+    }))?;
+    Ok(ExitCode::SUCCESS)
+}
+
 fn cmd_edit(args: &Args) -> Result<ExitCode, String> {
     let project = args.project.as_ref().ok_or("edit 要 --project <文件>")?;
     let op_text = args.op.as_ref().ok_or("edit 要 --op <JSON>")?;
@@ -875,6 +980,7 @@ fn main() -> ExitCode {
         "import" => cmd_import(&args),
         "library" => cmd_library(&args),
         "edit" => cmd_edit(&args),
+    "subtitle" => cmd_subtitle(&args),
         other => Err(format!("不认识的子命令：{other}")),
     };
     match result {

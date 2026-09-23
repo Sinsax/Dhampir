@@ -32,7 +32,7 @@ const ASSET = 'target/s3/proxy1080p.mp4';
 /** CLI 的子命令名单。**必须与 crates/dhampir-worker/src/bin/dhampir.rs 的 COMMANDS 表一致** ——
  * 这是一条真判据：「加了命令但没登记」和「登记了但 --help 没列出来」都要红。
  * 名单长度写进结论文案，所以文案不会自己漂成假的。 */
-export const SUBCOMMANDS = ['probe', 'info', 'gop', 'frame', 'render', 'import', 'library', 'edit'];
+export const SUBCOMMANDS = ['probe', 'info', 'gop', 'frame', 'render', 'import', 'library', 'edit', 'subtitle'];
 
 /** 每一条判据的名字。**改这里就必须改采集端**。 */
 export const EXPECTED = [

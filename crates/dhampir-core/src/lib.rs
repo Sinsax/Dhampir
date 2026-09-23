@@ -35,6 +35,7 @@
 
 pub mod cache;
 pub mod compose;
+pub mod overlay;
 pub mod effects;
 pub mod gpu;
 pub mod io;
