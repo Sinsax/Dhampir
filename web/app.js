@@ -596,7 +596,9 @@ async function main() {
     }
   }
   await engine.attach("preview");
-  mark("已上屏到 canvas");
+  // 源模式是个**会随浏览器不同而不同**的事实，所以它属于脚印的一部分 ——
+  // 出问题时第一眼就该看到它。
+  mark("已上屏到 canvas（源模式：" + engine.sourceMode + "）");
   await bindAllSources();
   mark("视频源已绑定");
 

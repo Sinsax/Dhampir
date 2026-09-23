@@ -26,6 +26,47 @@ export class Engine {
     // 于是 engine.doc() 会变成 "engine.doc is not a function"。
     this.projectFile = null;
     this.attached = false;
+    // 源从哪来：'video'（直接拿 <video> 去 copy）或 'bitmap'（JS 先转成位图）。
+    // attach 时由 probeVideoCopy 决定，见那里的说明。
+    this.sourceMode = "video";
+  }
+
+  /**
+   * 这个浏览器的 WebGPU 接不接受 <video> 作为 copy_external_image_to_texture 的源？
+   *
+   * # 为什么要"问"而不是"试"
+   *
+   * 不支持的时候，wgpu 会把浏览器抛的那个 TypeError **unwrap 成 panic**，
+   * 而 wasm 的 panic 抓不住 —— 整个模块死掉，页面上只剩一句
+   * "启动失败：unreachable executed"，完全看不出跟素材有关。
+   * 所以这里**绕开 wgpu**，直接用浏览器的 WebGPU API 问一句，代价是一次
+   * requestAdapter + requestDevice。
+   *
+   * 判据：联合类型不接受时错误消息里有 "could not be converted"；
+   * 接受但内容不可用报的是另一种错（源没有数据），那说明类型这一关已经过了。
+   */
+  static async probeVideoCopy() {
+    if (typeof navigator === "undefined" || !navigator.gpu) return false;
+    try {
+      const adapter = await navigator.gpu.requestAdapter();
+      if (adapter === null) return false;
+      const device = await adapter.requestDevice();
+      const video = document.createElement("video");
+      const texture = device.createTexture({
+        size: [2, 2, 1],
+        format: "rgba8unorm",
+        usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+      });
+      try {
+        device.queue.copyExternalImageToTexture({ source: video }, { texture: texture }, [2, 2]);
+        return true;
+      } catch (error) {
+        const message = String(error && error.message ? error.message : error);
+        return !/could not be converted/i.test(message);
+      }
+    } catch (error) {
+      return false;
+    }
   }
 
   /** 载入并校验一份工程。失败时 Rust 侧**保留上一份可用工程**（UI 不该因为一次非法编辑就崩）。 */
@@ -59,10 +100,19 @@ export class Engine {
     return JSON.parse(this.mod.dhampir_project_frame(frame));
   }
 
-  /** 建预览宿主。canvas 尺寸决定预览尺寸——schema v1 里没有分辨率字段。 */
+  /** 建预览宿主。canvas 尺寸决定预览尺寸——契约里没有分辨率字段。 */
   async attach(canvasId) {
     const info = JSON.parse(await this.mod.dhampir_project_attach(canvasId));
     this.attached = true;
+    // 源模式：默认**问浏览器**；?src=video / ?src=bitmap 可以强制，
+    // 用来比较两条路的画面与速度（两条路的输出应当逐字节相同）。
+    const override = new URLSearchParams(location.search).get("src");
+    if (override === "video" || override === "bitmap") {
+      this.sourceMode = override;
+    } else {
+      this.sourceMode = (await Engine.probeVideoCopy()) ? "video" : "bitmap";
+    }
+    this.mod.dhampir_project_set_bitmap_mode(this.sourceMode === "bitmap");
     return info;
   }
 
@@ -89,13 +139,27 @@ export class Engine {
     });
   }
 
-  /** 把某一帧所需的源全部 seek 到位。 */
+  /** 把某一帧所需的源全部 seek 到位（位图模式下顺带把位图做好）。 */
   async prepare(frame) {
     const sources = this.sourcesFor(frame);
+    // 位图模式**先清**：不清的话，这一帧不再出现的 source 会拿着上一帧的位图被画出来，
+    // 而画面看起来完全正常，只是"慢了半拍"。
+    if (this.sourceMode === "bitmap") this.mod.dhampir_project_clear_bitmaps();
     for (const entry of sources) {
       const video = this.videos.get(entry.source);
       if (video === undefined) continue;
       await this.seekVideo(video, entry.seconds);
+      if (this.sourceMode === "bitmap") {
+        // **必须在 seek 之后**：早了拿到的是上一帧，而画面看起来完全正常。
+        try {
+          const bitmap = await createImageBitmap(video);
+          this.mod.dhampir_project_set_bitmap(entry.source, bitmap);
+        } catch (error) {
+          // 这一路这一帧没有画面 -> 那一层会被跳过（宿主侧 require_bitmap 会让它返回 None）。
+          // **不许退回 video**：那正好会撞上这个浏览器不支持的那条路。
+          console.warn("dhampir: 源 " + entry.source + " 这一帧做不出位图：" + error);
+        }
+      }
     }
     return sources;
   }

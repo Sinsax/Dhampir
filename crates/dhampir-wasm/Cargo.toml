@@ -43,6 +43,9 @@ web-sys = { workspace = true, features = [
     # 预览链路的源帧来自 <video> 元素：Rust 侧要拿到它才能走
     # copy_external_image_to_texture（见 preview.rs）。
     "HtmlVideoElement",
+    # **位图源**：有的 WebGPU 实现不接受 <video> 作为 copy 源，
+    # 而 ImageBitmap 每个实现都有。见 timeline_host.rs 里 BoundVideos 的说明。
+    "ImageBitmap",
     # `window.performance().now()`——计时用。web-sys 每个类型一个 feature，
     # 少了它 `Window::performance` 根本不存在（报 "method not found"）。
     "Performance",

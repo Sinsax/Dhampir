@@ -72,9 +72,25 @@ pub struct ProjectHost {
     ctx: dhampir_core::gpu::GpuContext,
     sink: CanvasFrameSink,
     renderer: dhampir_core::render::TimelineRenderer,
-    /// source 标识 -> 对应的 <video>。v1 允许多路：一个 source 一个元素。
+    /// source 标识 -> 对应的 <video>。一个 source 一个元素。
     videos: HashMap<String, HtmlVideoElement>,
-    /// 预览尺寸。**由 canvas 决定**，不由工程决定——schema v1 里没有分辨率字段。
+    /// source 标识 -> JS 预先转好的位图（当前帧）。
+    ///
+    /// **为什么需要这条路**：不是每个 WebGPU 实现都接受 <video> 作为
+    /// copy_external_image_to_texture 的源。实测某个浏览器的
+    /// GPUCopyExternalImageSource 联合类型里**没有 HTMLVideoElement**：
+    ///
+    ///   TypeError: 'source' member of GPUCopyExternalImageSourceInfo could not be
+    ///   converted to any of: ImageBitmap, HTMLImageElement, HTMLCanvasElement,
+    ///   OffscreenCanvas.
+    ///
+    /// 而 wgpu 把那个 TypeError unwrap 成 panic —— 整个 wasm 死在那一句上，
+    /// 页面上只剩「启动失败：unreachable executed」，看不出跟素材有关。
+    /// ImageBitmap 在**每一个**实现的联合类型里都有，所以它是最稳的源。
+    bitmaps: HashMap<String, web_sys::ImageBitmap>,
+    /// 强制走位图。JS 探测过之后告诉宿主；此时**不许退回 video**（退回去就是 trap）。
+    require_bitmap: bool,
+    /// 预览尺寸。**由 canvas 决定**，不由工程决定。
     size: (u32, u32),
 }
 
@@ -83,9 +99,47 @@ struct BoundVideos<'a> {
     device: &'a wgpu::Device,
     queue: &'a wgpu::Queue,
     videos: &'a HashMap<String, HtmlVideoElement>,
+    bitmaps: &'a HashMap<String, web_sys::ImageBitmap>,
+    require_bitmap: bool,
     format: wgpu::TextureFormat,
     /// 一份源纹理的缓存。缓存的是**纹理**不是像素：每次渲染仍重新拷一次。
     textures: HashMap<String, (wgpu::Texture, wgpu::TextureView, (u32, u32))>,
+}
+
+impl BoundVideos<'_> {
+    /// 保证 source 的纹理存在、且尺寸与源一致。
+    ///
+    /// **尺寸不符必须重建**：拿尺寸不符的纹理去 copy_external_image_to_texture
+    /// 在 wasm 里就是一个 unreachable（整页死），而不是一个可捕获的错误。
+    fn ensure_texture(&mut self, source: &str, size: (u32, u32)) {
+        let needs = match self.textures.get(source) {
+            Some((_, _, current)) => *current != size,
+            None => true,
+        };
+        if !needs {
+            return;
+        }
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("dhampir project source"),
+            size: wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.format,
+            // RENDER_ATTACHMENT 不是可选的：Dawn 要求 copyExternalImageToTexture 的目标
+            // 同时带这个用途，少了它不报错而是**静默失败**（S3.1 与 preview.rs 都记过）。
+            usage: wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.textures.insert(source.to_string(), (texture, view, size));
+    }
 }
 
 impl SourceResolver for BoundVideos<'_> {
@@ -96,6 +150,47 @@ impl SourceResolver for BoundVideos<'_> {
     ) -> Option<(wgpu::TextureView, (u32, u32))> {
         // 这里**不**按 source_frame 定位：那一帧已经由 JS 侧 seek 好了。
         // source_frame 的意义体现在 sources_for 返回的秒数上。
+
+        // ---- 位图优先 ----
+        // 见 ProjectHost::bitmaps 的说明：有的 WebGPU 实现不接受 <video>，
+        // 而传进去的代价不是报错，是整个 wasm 死在那一句上。
+        if let Some(bitmap) = self.bitmaps.get(source) {
+            let width = bitmap.width();
+            let height = bitmap.height();
+            if width == 0 || height == 0 {
+                return None;
+            }
+            self.ensure_texture(source, (width, height));
+            let (texture, view, size) = self.textures.get(source)?;
+            self.queue.copy_external_image_to_texture(
+                &wgpu::wgt::CopyExternalImageSourceInfo {
+                    source: wgpu::wgt::ExternalImageSource::ImageBitmap(bitmap.clone()),
+                    origin: wgpu::wgt::Origin2d::ZERO,
+                    flip_y: false,
+                },
+                wgpu::wgt::CopyExternalImageDestInfo {
+                    texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                    color_space: wgpu::wgt::PredefinedColorSpace::Srgb,
+                    premultiplied_alpha: false,
+                },
+                wgpu::Extent3d {
+                    width: size.0,
+                    height: size.1,
+                    depth_or_array_layers: 1,
+                },
+            );
+            return Some((view.clone(), *size));
+        }
+
+        // JS 探过之后说「这个浏览器不接受 video」时**不许偷偷退回 video** ——
+        // 那正好会撞上它不支持的那条路。宁可这一层不画。
+        if self.require_bitmap {
+            return None;
+        }
+
         let video = self.videos.get(source)?;
 
         // **这一帧还没有可用画面就跳过这一层。**
@@ -116,35 +211,7 @@ impl SourceResolver for BoundVideos<'_> {
             return None;
         }
 
-        // 尺寸与缓存不一致就重建：同一 source 换了素材、或元数据晚到都会走到这里。
-        // **不重建的话**，纹理尺寸与源不符 -> 又是上面那个 unreachable。
-        let needs_texture = match self.textures.get(source) {
-            Some((_, _, size)) => *size != (width, height),
-            None => true,
-        };
-        if needs_texture {
-            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("dhampir project source"),
-                size: wgpu::Extent3d {
-                    width,
-                    height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: self.format,
-                // RENDER_ATTACHMENT 不是可选的：Dawn 要求 copyExternalImageToTexture 的目标
-                // 同时带这个用途，少了它不报错而是**静默失败**（S3.1 与 preview.rs 都记过）。
-                usage: wgpu::TextureUsages::COPY_DST
-                    | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            self.textures
-                .insert(source.to_string(), (texture, view, (width, height)));
-        }
+        self.ensure_texture(source, (width, height));
         let (texture, view, size) = self.textures.get(source)?;
         self.queue.copy_external_image_to_texture(
             &wgpu::wgt::CopyExternalImageSourceInfo {
@@ -182,7 +249,7 @@ impl ProjectHost {
         };
 
         // 拆分借用：四个字段互不相干，解析器只需要其中两个的不可变借用。
-        let Self { ctx, sink, renderer, videos, size } = self;
+        let Self { ctx, sink, renderer, videos, bitmaps, require_bitmap, size } = self;
         let (width, height) = *size;
         let sink_format = sink.format();
         let sink_view = sink.acquire(&ctx.device);
@@ -190,6 +257,8 @@ impl ProjectHost {
             device: &ctx.device,
             queue: &ctx.queue,
             videos,
+            bitmaps,
+            require_bitmap: *require_bitmap,
             format: sink_format,
             textures: HashMap::new(),
         };
@@ -610,6 +679,8 @@ pub async fn dhampir_project_attach(canvas_id: String) -> Result<String, JsValue
             sink,
             renderer,
             videos: HashMap::new(),
+            bitmaps: HashMap::new(),
+            require_bitmap: false,
             size,
         });
     });
@@ -631,6 +702,49 @@ pub fn dhampir_project_bind_source(source: String, video_id: String) -> Result<(
         host.videos.insert(source, video);
         Ok(())
     })
+}
+
+/// 告诉宿主：这个浏览器的 WebGPU 接不接受 <video> 作为 copy 源。
+///
+/// 由 JS 探测后设置（见 web/engine.js 的 probeVideoCopy）。设成 true 之后
+/// BoundVideos **不再尝试 video 那条路** —— 试一次的代价是整页死。
+#[wasm_bindgen]
+pub fn dhampir_project_set_bitmap_mode(required: bool) {
+    PROJECT_HOST.with(|h| {
+        if let Some(host) = h.borrow_mut().as_mut() {
+            host.require_bitmap = required;
+        }
+    });
+}
+
+/// 清掉上一帧的位图。
+///
+/// **每帧都要先清。** 不清的话，这一帧不再出现的 source 会拿着上一帧的位图
+/// 被画出来 —— 而画面看起来完全正常，只是"慢了半拍"。那种错没人查得出来。
+#[wasm_bindgen]
+pub fn dhampir_project_clear_bitmaps() {
+    PROJECT_HOST.with(|h| {
+        if let Some(host) = h.borrow_mut().as_mut() {
+            for (_, bitmap) in host.bitmaps.drain() {
+                bitmap.close();
+            }
+        }
+    });
+}
+
+/// JS 把某个 source **当前帧**转成位图交给宿主。
+///
+/// 必须在 seek 完成之后做 —— 早了拿到的是上一帧，而画面看起来完全正常。
+/// 换掉旧位图时把它 close() 掉：不关会一直占着显存/内存。
+#[wasm_bindgen]
+pub fn dhampir_project_set_bitmap(source: String, bitmap: web_sys::ImageBitmap) {
+    PROJECT_HOST.with(|h| {
+        if let Some(host) = h.borrow_mut().as_mut() {
+            if let Some(previous) = host.bitmaps.insert(source, bitmap) {
+                previous.close();
+            }
+        }
+    });
 }
 
 /// 这一帧需要哪些源、各自停在**第几秒**。

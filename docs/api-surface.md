@@ -31,6 +31,7 @@
 
 - `dhampir_project_attach`
 - `dhampir_project_bind_source`
+- `dhampir_project_clear_bitmaps`
 - `dhampir_project_doc`
 - `dhampir_project_draw`
 - `dhampir_project_end_frame`
@@ -40,6 +41,8 @@
 - `dhampir_project_precheck`
 - `dhampir_project_render_probe`
 - `dhampir_project_resize`
+- `dhampir_project_set_bitmap`
+- `dhampir_project_set_bitmap_mode`
 - `dhampir_project_sources_for`
 - `dhampir_sample_project_render_png`
 

@@ -233,6 +233,10 @@ if (backendMode === 'local') {
 }
 const canvasValue = argv.indexOf('--canvas') >= 0 ? argv[argv.indexOf('--canvas') + 1] : null;
 if (canvasValue !== null) params.push('canvas=' + canvasValue);
+// --src video|bitmap：强制源模式。**用来比较两条路的输出是否逐字节相同** ——
+// 两条路都该给出同一张画面，不同就说明其中一条错了。
+const srcValue = valueOf('--src', null);
+if (srcValue !== null) params.push('src=' + srcValue);
 const query = params.length > 0 ? '?' + params.join('&') : '';
 
 let suffix;
@@ -257,19 +261,41 @@ if (mode === 'serve') {
   const timeoutMs = Number(valueOf('--timeout-ms', mode === 'app' ? '300000' : '90000'));
   const profile = join(REPO_ROOT, 'target', 'web-check-profile');
   rmSync(profile, { recursive: true, force: true });
-  const child = spawn(findChrome(), [
-    '--headless=new', '--disable-gpu-sandbox', '--no-first-run', '--no-default-browser-check',
-    '--user-data-dir=' + profile, '--enable-unsafe-webgpu', '--use-angle=default',
-    // **把调试端口开起来**：卡住的时候要靠它读页面里的脚印，而不是等页面自己上报。
-    '--remote-debugging-port=0',
-    // **把页面的 console 转到 stderr** —— 没有它，页面里抛的错在外面看不到，
-    // 而表现是「什么都没发生」。
-    '--enable-logging=stderr', '--v=0', url,
-  ], { stdio: ['ignore', 'ignore', 'pipe'] });
+  // **换浏览器要换一整套启动参数。** --browser 让"这段代码在别的浏览器里行不行"
+  // 变成一条命令，而不是把 URL 拷出去手工试 —— 后者正是这次踩坑的方式。
+  const browser = valueOf('--browser', null) || findChrome();
+  const isFirefox = /firefox/i.test(browser);
+  if (isFirefox) {
+    // 无头 Firefox 默认不开 WebGPU。写一份 user.js 把它打开 ——
+    // **不改用户自己的配置**，profile 是本仓库 target/ 下的一次性目录。
+    mkdirSync(profile, { recursive: true });
+    writeFileSync(join(profile, 'user.js'), [
+      'user_pref("dom.webgpu.enabled", true);',
+      'user_pref("dom.webgpu.force-enabled", true);',
+      'user_pref("gfx.webrender.all", true);',
+      'user_pref("gfx.webrender.software", false);',
+      'user_pref("media.hardware-video-decoding.force-enabled", true);',
+    ].join(String.fromCharCode(10)) + String.fromCharCode(10), 'utf8');
+  }
+  const browserArgs = isFirefox
+    // Firefox 没有 CDP。读不到脚印时靠页面自己的 beacon，
+    // 所以这一条照样能用，只是「页面卡点」那一行会显示读不到。
+    ? ['--headless', '--no-remote', '--profile', profile, url]
+    : [
+        '--headless=new', '--disable-gpu-sandbox', '--no-first-run', '--no-default-browser-check',
+        '--user-data-dir=' + profile, '--enable-unsafe-webgpu', '--use-angle=default',
+        // **把调试端口开起来**：卡住的时候要靠它读页面里的脚印，而不是等页面自己上报。
+        '--remote-debugging-port=0',
+        // **把页面的 console 转到 stderr** —— 没有它，页面里抛的错在外面看不到，
+        // 而表现是「什么都没发生」。
+        '--enable-logging=stderr', '--v=0', url,
+      ];
+  console.log('  浏览器：' + browser);
+  const child = spawn(browser, browserArgs, { stdio: ['ignore', 'ignore', 'pipe'] });
   let stderr = '';
   child.stderr.on('data', (chunk) => { stderr += chunk; });
 
-  const debugPort = await readDebugPort(profile);
+  const debugPort = isFirefox ? null : await readDebugPort(profile);
   console.log('  调试端口：' + (debugPort === null ? '（读不到 DevToolsActivePort）' : debugPort));
   const timer = setTimeout(() => { try { child.kill(); } catch (error) { /* 已经没了 */ } state.settle(); }, timeoutMs);
 
