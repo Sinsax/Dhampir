@@ -40,13 +40,17 @@ export function createStaticBackend(options) {
 }
 
 /** 本机/远端模式：工程与素材都问后端。 */
-export function createLocalBackend(baseUrl) {
+export function createLocalBackend(baseUrl, projectId) {
+  const defaultProject = projectId || 'sample-project';
   const base = String(baseUrl || "").replace(/\/$/, "");
   return {
     kind: "local",
     baseUrl: base,
+    projectId: defaultProject,
     async loadProject(projectId) {
-      const response = await fetch(base + "/projects/" + encodeURIComponent(projectId));
+      // 没给就用手上这一个 —— 否则会拼出 /projects/undefined，而那是 404 不是报错。
+      const wanted = projectId || defaultProject;
+      const response = await fetch(base + "/projects/" + encodeURIComponent(wanted));
       if (!response.ok) throw new Error("取工程失败：" + response.status);
       return response.text();
     },
@@ -67,8 +71,9 @@ export function activeBackendFrom(search) {
   const params = new URLSearchParams(search || "");
   const kind = params.get("backend");
   if (kind === "local") {
+    const projectId = params.get("project") || undefined;
     const port = params.get("port") || "8791";
-    return createLocalBackend("http://127.0.0.1:" + port);
+    return createLocalBackend("http://127.0.0.1:" + port, projectId);
   }
   // 默认降级模式：不依赖任何服务也能用。
   return createStaticBackend();
