@@ -79,6 +79,14 @@ impl TimelineRenderer {
     ///
     /// 源解析不出来时跳过那一层而不是整帧失败：一行轨道的素材暂时没准备好，
     /// 不该让整帧变黑——预览里那表现为"闪一下"，比少一层更烦人。
+    /// 画一帧，返回**实际画了几层**。
+    ///
+    /// 源解析不出来时跳过那一层而不是整帧失败：一行轨道的素材暂时没准备好，
+    /// 不该让整帧变黑 —— 预览里那表现为「闪一下」，比少一层更烦人。
+    ///
+    /// **它是薄包装**：真正的合成在 compose_layers 里。
+    /// 分段合成（下一步）会直接调 compose_layers 并传中间纹理，
+    /// 所以那个函数一出生就有两个调用方，不会成为「写了没人用」的代码。
     #[allow(clippy::too_many_arguments)]
     pub fn render_frame(
         &self,
@@ -91,6 +99,34 @@ impl TimelineRenderer {
         resolver: &mut dyn SourceResolver,
         clear: wgpu::Color,
     ) -> usize {
+        self.compose_layers(
+            device,
+            queue,
+            encoder,
+            target,
+            target_size,
+            &composite.layers,
+            resolver,
+            Some(clear),
+        )
+    }
+
+    /// 把这几层合成到 dest，返回**实际画了几层**。
+    ///
+    /// **这是分段合成的可复用入口**：现有路径传 target 与 Some(clear)；
+    /// 分段路径（下一步）传中间纹理与 None。
+    #[allow(clippy::too_many_arguments)]
+    fn compose_layers(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        dest: &wgpu::TextureView,
+        dest_size: (u32, u32),
+        layers: &[crate::compose::Layer],
+        resolver: &mut dyn SourceResolver,
+        clear: Option<wgpu::Color>,
+    ) -> usize {
         // **先看分段计划。** 调整图层要求「先合成一部分 -> 对结果跑特效 -> 再继续」，
         // 那需要中间纹理与多次 pass，而这里现在只有一次 pass。
         //
@@ -99,7 +135,7 @@ impl TimelineRenderer {
         // 「特效没生效但看不出哪里不对」的图。
         //
         // 这正是本项目一以贯之的取舍：**明确失败优于静默降级。**
-        let plan = plan_steps(&composite.layers);
+        let plan = plan_steps(layers);
         if plan.iter().any(|step| matches!(step, Step::Adjust { .. })) {
             // **不要用 debug_assert**：那会让这条路径在 debug 下 panic、在 release 下返回 0，
             // 同一条路径两种行为。而 wasm-pack --dev 就是 debug 构建 ——
@@ -121,7 +157,7 @@ impl TimelineRenderer {
         let mut prepared: Vec<(&crate::compose::Layer, wgpu::TextureView, (u32, u32))> =
             Vec::new();
 
-        for layer in &composite.layers {
+        for layer in layers {
             let Some((view, size)) = resolver.texture_for(&layer.source, layer.source_frame) else {
                 continue;
             };
@@ -194,10 +230,10 @@ impl TimelineRenderer {
             device,
             queue,
             encoder,
-            target,
-            target_size,
+            dest,
+            dest_size,
             &draws,
-            Some(clear),
+            clear,
         );
 
         // 让编译器和读者都看得见这些纹理活到了这里。
