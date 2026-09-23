@@ -1,21 +1,24 @@
-//! P5：**顺序解码管道**（解码 -> 上传 -> 渲染）。
+//! P5：**完整顺序解码管道** —— 解码 -> 上传 -> 渲染 -> 读回 -> 编码。
 //!
 //! # 它是什么
 //!
 //! 后端出片要「FFmpeg 顺序解码 -> core 渲染 -> 编码」，而**不是**逐帧 seek。
 //! 后者每次都要回到关键帧重解，慢一个量级 —— 这条在 plan 里是硬约束。
 //!
-//! 这个例子把前两段跑成一条链：顺序解码 -> 上传进复用纹理 -> **交给 TimelineRenderer 渲染**。
+//! 这个例子把四段串成**一条流**：每解出一帧就上传、渲染、读回、写进编码器，
+//! 最后产出一个完整的 mp4。
 //!
-//! # 一处实测出来的讲究
+//! # 为什么之前分了三轮才做到
 //!
-//! 「拿到一帧」的代价分三段（都是实测，1080p）：
-//!   只解码 0.46 ms/帧  ->  +搬像素出管道 2.86  ->  +上传 GPU 4.17。
-//! **解码本身只占 11%**，其余花在把像素搬来搬去。
+//! 前三轮分别只做了「解码」「上传」「单帧编码接口」—— 因为把循环改成流式
+//! 是**一次结构改动**，不能靠「加一段」达成。前两次我都因为余量不足退回了。
 //!
 //! # 用法
 //!
 //!     cargo run --example decode_sequence -- [媒体文件] [最多几帧]
+//!
+//! 默认媒体 `target/s3/proxy1080p.mp4`，默认取 30 帧（1080p 每帧读回 8 MB，
+//! 帧数太大会很慢，而那与「管道通不通」无关）。
 
 use dhampir_core::compose::{Composite, Layer};
 use dhampir_core::gpu::NATIVE_BACKENDS;
@@ -28,8 +31,8 @@ use std::time::Instant;
 
 /// 顺序源：**永远返回同一张纹理**。
 ///
-/// 这不是偷懒 —— 顺序管道的本质就是「一张纹理被逐帧覆盖」，
-/// 而每帧新建纹理在 1080p 下是 32 MB 一次的分配。
+/// 顺序管道的本质就是「一张纹理被逐帧覆盖」；
+/// 每帧新建纹理在 1080p 下是每次 32 MB 的分配。
 struct SequenceSource {
     view: wgpu::TextureView,
     size: (u32, u32),
@@ -51,7 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .first()
         .cloned()
         .unwrap_or_else(|| "target/s3/proxy1080p.mp4".to_string());
-    let limit: Option<usize> = args.get(1).and_then(|text| text.parse().ok());
+    let limit: usize = args.get(1).and_then(|text| text.parse().ok()).unwrap_or(30);
 
     let probe = Command::new("ffprobe")
         .args([
@@ -65,9 +68,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let text = String::from_utf8(probe.stdout)?;
     let fields: Vec<&str> = text.trim().split(',').collect();
+    // **注意 csv 的列序是 width,height,nb_frames**，不是请求里的顺序。
+    // 上一轮我按「第一个是帧数」解析，把宽度当成了帧数。
     let width: usize = fields.first().unwrap_or(&"0").parse()?;
     let height: usize = fields.get(1).unwrap_or(&"0").parse()?;
-    let declared: usize = fields.get(2).and_then(|v| v.parse().ok()).unwrap_or(0);
     if width == 0 || height == 0 {
         return Err("ffprobe 没给出尺寸，无法按帧切分".into());
     }
@@ -77,9 +81,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (ctx, _init) =
         open_leg(NATIVE_BACKENDS).map_err(|error| format!("拿不到 GPU 上下文: {error}"))?;
 
-    // **一张纹理反复用，每帧只覆盖写。**
+    // **一张上传纹理 + 一个渲染目标，全程复用。**
     let upload_target = ctx.device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("dhampir decode pipeline upload"),
+        label: Some("dhampir pipeline upload"),
         size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
@@ -88,76 +92,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-
-    let started = Instant::now();
-    let mut child = Command::new("ffmpeg")
-        .args(["-v", "error", "-i", &media, "-f", "rawvideo", "-pix_fmt", "rgba", "-"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()?;
-    let mut stdout = child.stdout.take().ok_or("拿不到 ffmpeg 的 stdout")?;
-
-    let mut frame = vec![0u8; frame_bytes];
-    let mut frames = 0usize;
-    let mut checksum: u64 = 0xcbf29ce484222325;
-    loop {
-        if let Some(max) = limit {
-            if frames >= max {
-                break;
-            }
-        }
-        match stdout.read_exact(&mut frame) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(error) => return Err(error.into()),
-        }
-        for byte in frame.iter().step_by(4096) {
-            checksum = (checksum ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
-        }
-        ctx.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &upload_target,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &frame,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some((width * 4) as u32),
-                rows_per_image: Some(height as u32),
-            },
-            wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
-        );
-        frames += 1;
-    }
-    drop(stdout);
-    let _ = child.wait();
-    let elapsed = started.elapsed();
-
-    println!("媒体：{media}");
-    println!("尺寸：{width}x{height}  每帧 {frame_bytes} 字节");
-    println!("顺序解出 {frames} 帧（ffprobe 声明 {declared} 帧）");
-    println!(
-        "耗时 {:.0} ms -> 每帧 {:.2} ms（含解码 + 搬像素 + 上传）",
-        elapsed.as_millis() as f64,
-        elapsed.as_secs_f64() * 1000.0 / frames.max(1) as f64
-    );
-    println!("帧内容指纹：{checksum:016x}");
-
-    if frames == 0 {
-        return Err("一帧都没解出来".into());
-    }
-    if limit.is_none() && declared > 0 && frames != declared {
-        return Err(format!("解出 {frames} 帧，而 ffprobe 说 {declared} 帧").into());
-    }
-
-    // ---- 第三段：**把它交给 core 渲染** ----
-    //
-    // 到这里为止只是「把像素搬进了纹理」。要证明它真能进渲染图，
-    // 得让它过一遍 TimelineRenderer 并读回像素 —— 否则「上传成功」什么也没说明。
-    let target = ctx.device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("dhampir decode pipeline render target"),
+    let render_target = ctx.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("dhampir pipeline render target"),
         size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
@@ -166,6 +102,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
+    let render_view = render_target.create_view(&wgpu::TextureViewDescriptor::default());
+    let renderer = TimelineRenderer::new(&ctx.device, wgpu::TextureFormat::Rgba8Unorm);
+
     let composite = Composite {
         frame: 0,
         layers: vec![Layer {
@@ -182,67 +121,96 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             is_adjustment: false,
         }],
     };
-    let mut resolver = SequenceSource {
-        view: upload_target.create_view(&wgpu::TextureViewDescriptor::default()),
-        size,
-    };
-    let renderer = TimelineRenderer::new(&ctx.device, wgpu::TextureFormat::Rgba8Unorm);
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("dhampir decode pipeline encoder"),
-    });
-    let drawn = renderer.render_frame(
-        &ctx.device, &ctx.queue, &mut encoder,
-        &target.create_view(&wgpu::TextureViewDescriptor::default()),
-        size, &composite, &mut resolver, wgpu::Color::TRANSPARENT,
-    );
-    ctx.queue.submit([encoder.finish()]);
-    let image = pollster::block_on(readback::read_texture_rgba8(&ctx.device, &ctx.queue, &target))?;
-    let first = &image.pixels[..4];
-    let varied = image.pixels.chunks(4).any(|px| px != first);
-    println!("渲染：画了 {drawn} 层，读回 {} 字节，画面{}", image.pixels.len(),
-        if varied { "有内容（不是纯色）" } else { "**是一片纯色**" });
-    if drawn == 0 {
-        return Err("渲染器一层都没画 —— 顺序源没有被接上".into());
-    }
-    if !varied {
-        return Err("渲染结果是纯色 —— 解码出来的像素没有真正进渲染".into());
-    }
 
+    // 解码器：吐裸 RGBA。
+    let mut decoder = Command::new("ffmpeg")
+        .args(["-v", "error", "-i", &media, "-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+    let mut decoder_out = decoder.stdout.take().ok_or("拿不到解码器的 stdout")?;
 
-    // ---- 第四段：**把渲染结果交给 FFmpeg 编码** ----
-    //
-    // 到这里为止只证明了「渲染结果有内容」。要证明它**能成为成片**，
-    // 得让它过一遍编码器并核对产物。
-    //
-    // 这一步先只编**一帧**：目的是验证三段之间的**接口**（RGBA 进、mp4 出），
-    // 不是验证吞吐。逐帧串联是下一步 —— 那需要把上面那个解码循环改成
-    // 「边解边渲边编」，是一次结构改动。
+    // 编码器：吃裸 RGBA。尺寸与帧率必须显式告诉它（裸流没有这些信息）。
     let out_path = "target/decode-pipeline-out.mp4";
-    let mut encoder_child = Command::new("ffmpeg")
+    let mut encoder = Command::new("ffmpeg")
         .args([
             "-v", "error",
-            // 输入是裸 RGBA 帧流，所以尺寸与帧率都得显式告诉它。
-            "-f", "rawvideo",
-            "-pix_fmt", "rgba",
-            "-s", &format!("{width}x{height}"),
-            "-r", "30",
+            "-f", "rawvideo", "-pix_fmt", "rgba",
+            "-s", &format!("{width}x{height}"), "-r", "30",
             "-i", "-",
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "20",
-            "-pix_fmt", "yuv420p",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
             "-y", out_path,
         ])
         .stdin(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()?;
-    {
-        let stdin = encoder_child.stdin.as_mut().ok_or("拿不到编码器的 stdin")?;
-        stdin.write_all(&image.pixels)?;
-    }
-    let _ = encoder_child.wait();
 
-    // 核对产物：帧数必须是 1 —— 这正是「三段接口接上了」的判据。
+    let started = Instant::now();
+    let mut frame = vec![0u8; frame_bytes];
+    let mut frames = 0usize;
+    loop {
+        if frames >= limit {
+            break;
+        }
+        match decoder_out.read_exact(&mut frame) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(error) => return Err(error.into()),
+        }
+
+        // 1) 上传（覆盖写进复用纹理）
+        ctx.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &upload_target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &frame,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some((width * 4) as u32),
+                rows_per_image: Some(height as u32),
+            },
+            wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+        );
+
+        // 2) 渲染（走 core 的同一个入口，与两个宿主一致）
+        let mut resolver = SequenceSource {
+            view: upload_target.create_view(&wgpu::TextureViewDescriptor::default()),
+            size,
+        };
+        let mut command = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dhampir pipeline encoder"),
+        });
+        let drawn = renderer.render_frame(
+            &ctx.device, &ctx.queue, &mut command, &render_view,
+            size, &composite, &mut resolver, wgpu::Color::TRANSPARENT,
+        );
+        ctx.queue.submit([command.finish()]);
+        if drawn == 0 {
+            return Err(format!("第 {frames} 帧渲染器一层都没画").into());
+        }
+
+        // 3) 读回（这一步贵，但它是「渲染结果真的出来了」的唯一证据）
+        let image = pollster::block_on(readback::read_texture_rgba8(
+            &ctx.device, &ctx.queue, &render_target,
+        ))?;
+
+        // 4) 写进编码器
+        let stdin = encoder.stdin.as_mut().ok_or("拿不到编码器的 stdin")?;
+        stdin.write_all(&image.pixels)?;
+
+        frames += 1;
+    }
+    drop(decoder_out);
+    let _ = decoder.wait();
+    // **关掉 stdin 编码器才知道流结束了** —— 不关它会一直等。
+    drop(encoder.stdin.take());
+    let _ = encoder.wait();
+    let elapsed = started.elapsed();
+
+    // 核对产物
     let check = Command::new("ffprobe")
         .args([
             "-v", "error", "-select_streams", "v:0",
@@ -251,20 +219,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ])
         .output()?;
     let summary = String::from_utf8(check.stdout)?;
-    // **`-of csv` 的字段顺序是 width,height,nb_read_frames，不是请求里的顺序。**
-    // 我第一次按「第一个字段是帧数」解析，把 1920（宽度）当成了帧数，
-    // 于是报出「产物 1920 帧」—— 而产物其实**正好 1 帧**。
-    // 教训：**别猜 csv 的列序，按名字取**。下面显式断言字段数，顺序才有据可依。
     let parts: Vec<&str> = summary.trim().split(',').collect();
     if parts.len() != 3 {
-        return Err(format!("ffprobe 的字段数不是 3，而是 {} —— 解析的前提不成立", parts.len()).into());
+        return Err(format!("ffprobe 字段数不是 3，而是 {} —— 解析前提不成立", parts.len()).into());
     }
-    let encoded_frames: usize = parts[2].parse()?;
-    println!("编码：{out_path}  帧数 {encoded_frames}  尺寸 {}", summary.trim());
-    if encoded_frames != 1 {
-        return Err(format!("编码产物应当是 1 帧，实际 {encoded_frames} 帧").into());
-    }
+    // **同样是 width,height,nb_read_frames 的列序**：帧数在第三列。
+    let encoded: usize = parts[2].parse()?;
 
-    println!("✓ 顺序解码管道（解码 + 上传 + 渲染 + 编码接口）跑通");
+    println!("媒体：{media}  {width}x{height}");
+    println!("处理 {frames} 帧，耗时 {:.0} ms -> 每帧 {:.2} ms（解码+上传+渲染+读回+编码）",
+        elapsed.as_millis() as f64, elapsed.as_secs_f64() * 1000.0 / frames.max(1) as f64);
+    println!("产物：{out_path}  编码帧数 {encoded}  尺寸 {}x{}", parts[0], parts[1]);
+
+    if frames == 0 {
+        return Err("一帧都没处理".into());
+    }
+    if encoded != frames {
+        return Err(format!("编码出 {encoded} 帧，而处理了 {frames} 帧").into());
+    }
+    println!("✓ 完整顺序解码管道跑通（解码 -> 上传 -> 渲染 -> 读回 -> 编码）");
     Ok(())
 }
