@@ -36,6 +36,7 @@
 - `dhampir_project_first_frame`
 - `dhampir_project_frame`
 - `dhampir_project_open`
+- `dhampir_project_precheck`
 - `dhampir_project_render_probe`
 - `dhampir_project_resize`
 - `dhampir_project_sources_for`

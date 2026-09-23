@@ -649,3 +649,44 @@ pub fn dhampir_project_resize(width: u32, height: u32) -> Result<(), JsValue> {
     })
 }
 
+
+/// 出片前的预检：这份工程里有没有**超出对端能力**的东西。
+///
+/// # 为什么在前端做这件事，但规则不写在前端
+///
+/// 前端确实要"提交前就知道哪一条不支持"（不然要等分钟级任务跑完才报错）。
+/// 但**判定规则只有一个实现，在 Rust 里** —— 这个导出就是那条通道。
+/// 在 JS 里重写一遍过滤逻辑，两端就会各自演化，
+/// 而「两端说同一种话」正是这个项目最贵的东西。
+///
+/// 入参是对端的能力声明（就是 /capabilities 返回的那份），
+/// 出参是 Issue 数组 —— **复用同一套错误格式**，前端不需要再翻译一次。
+///
+/// 当前实现先从 v1 契约迁移到 v2 再预检：宿主持有的还是 v1 的 Project。
+#[wasm_bindgen]
+pub fn dhampir_project_precheck(capabilities_json: &str) -> String {
+    let capabilities: host_api::Capabilities = match serde_json::from_str(capabilities_json) {
+        Ok(capabilities) => capabilities,
+        Err(error) => {
+            return host_api::to_json(&host_api::OpenResult::unparsed(format!(
+                "能力声明解析失败：{error}"
+            )))
+        }
+    };
+
+    PROJECT.with(|slot| {
+        let borrowed = slot.borrow();
+        let Some(project) = borrowed.as_ref() else {
+            return host_api::to_json(&host_api::OpenResult::unparsed(
+                "还没有载入通过校验的工程".to_string(),
+            ));
+        };
+        let timeline = match dhampir_core::timeline::layer::migrate_v1_to_v2(project) {
+            Ok(timeline) => timeline,
+            Err(error) => {
+                return host_api::to_json(&host_api::OpenResult::unparsed(error.to_string()))
+            }
+        };
+        host_api::to_json(&host_api::precheck(&timeline, &capabilities))
+    })
+}
