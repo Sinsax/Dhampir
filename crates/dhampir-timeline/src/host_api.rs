@@ -197,6 +197,10 @@ pub struct OpenResult {
     pub ok: bool,
 #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issues: Option<Vec<Issue>>,
+    /// **warnings**：不阻断载入（例如「登记了但没被引用」）。
+    /// 与 errors 分开而不是给 Issue 加 severity —— Issue 是已冻结契约的一部分。
+#[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warnings: Option<Vec<Issue>>,
 #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -204,12 +208,24 @@ pub struct OpenResult {
 impl OpenResult {
     /// 解析成功。`ok` 表示**校验**是否通过（解析成功但校验不过也是正常的）。
     pub fn opened(issues: Vec<Issue>) -> Self {
-        Self { parsed: true, ok: issues.is_empty(), issues: Some(issues), error: None }
+        Self { parsed: true, ok: issues.is_empty(), issues: Some(issues), warnings: None, error: None }
+    }
+
+    /// 从工程文件的校验结果来。**errors 决定 ok，warnings 单独给出** ——
+    /// 把警告混进 errors 会让「有提示」看起来像「不能用」。
+    pub fn from_doc_issues(issues: &crate::project::DocIssues) -> Self {
+        Self {
+            parsed: true,
+            ok: issues.is_ok(),
+            issues: Some(issues.errors.clone()),
+            warnings: Some(issues.warnings.clone()),
+            error: None,
+        }
     }
 
     /// 连 JSON 都没解析成功。
     pub fn unparsed(message: String) -> Self {
-        Self { parsed: false, ok: false, issues: None, error: Some(message) }
+        Self { parsed: false, ok: false, issues: None, warnings: None, error: Some(message) }
     }
 }
 
@@ -318,6 +334,31 @@ mod tests {
         let value = serde_json::to_value(&result).unwrap();
         assert_eq!(keys(&value), sorted(&["parsed", "ok", "error"]));
         assert!(value.get("issues").is_none(), "失败形态不该有 issues 键");
+    }
+
+    #[test]
+    fn 工程文件校验有警告时_ok_仍为真_但警告要出现() {
+        // 「有提示」不该看起来像「不能用」。
+        let issues = crate::project::DocIssues {
+            errors: Vec::new(),
+            warnings: vec![Issue::new("unused_asset", "assets[0]", "登记了但没被引用".to_string())],
+        };
+        let result = OpenResult::from_doc_issues(&issues);
+        assert!(result.parsed && result.ok);
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(keys(&value), sorted(&["parsed", "ok", "issues", "warnings"]));
+        assert_eq!(value["warnings"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn 工程文件校验有错时_ok_为假() {
+        let issues = crate::project::DocIssues {
+            errors: vec![Issue::new("nope", "p", "m".to_string())],
+            warnings: Vec::new(),
+        };
+        let result = OpenResult::from_doc_issues(&issues);
+        assert!(result.parsed);
+        assert!(!result.ok);
     }
 
     #[test]

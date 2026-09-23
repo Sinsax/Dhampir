@@ -121,6 +121,9 @@ const server = createServer((req, res) => {
   else if (path === '/synthetic.html') file = join(WEB_DIR, 'synthetic.html');
   else if (path.startsWith('/pkg/')) file = join(PKG_DIR, path.slice('/pkg/'.length));
   else if (path === '/sample-project.json') file = join(REPO_ROOT, 'fixtures', 'sample-project.json');
+  // 工程文件形态（带资产表、v2 元素）。**页面默认要的是这一份** ——
+  // 裸契约没有资产表，页面读不到 assets，多素材就无从解析。
+  else if (path === '/sample-project.doc.json') file = join(REPO_ROOT, 'fixtures', 'sample-project.doc.json');
   else if (path === '/media/proxy.mp4') file = join(REPO_ROOT, MEDIA);
   // web/ 下的前端模块一律照原样服务。写死清单会在加文件时静默 404 ——
 // 而 404 的表现是「页面白屏」，不是「少一个文件」，很难查。

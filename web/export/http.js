@@ -6,15 +6,19 @@
 // # 契约
 //
 //   POST {base}/export
-//     request : { project: <schema v1 工程对象>, from: int, to: int,
+//     request : { project: <工程文件>, from: int, to: int,
 //                 format: "mp4"|"webm", width: int, height: int }
-//     response: { jobId: string }        —— 异步：出片是长任务，不让 HTTP 连接扛着
+//     response: { job_id: string }       —— 异步：出片是长任务，不让 HTTP 连接扛着
 //
-//   GET  {base}/export/{jobId}
-//     response: { state: "running"|"done"|"failed", progress: 0..1,
-//                 downloadUrl?: string, error?: string }
+//   GET  {base}/export/{job_id}
+//     response: { job_id: string, state: "queued"|"running"|"succeeded"|"failed"|"cancelled",
+//                 progress?: 0..1, download_url?: string, error?: <Issue> }
 //
-//   取消：DELETE {base}/export/{jobId}
+//   取消：DELETE {base}/export/{job_id}
+//
+// **键名与 Rust 侧的 ExportStatusView 逐字一致**（snake_case，download_url）。
+// 之前这里写的是 jobId / downloadUrl —— 那是照着"看起来该这样"编的，
+// 与契约对不上，而表现是"提交成功之后永远查不到结果"。
 //
 // 为什么是"提交 + 轮询"而不是一个长连接把成片吐回来：
 // 出片可能几分钟，长连接要处理超时、重连、断点，而任务查询本来就要有（用户会关页面）。
@@ -49,18 +53,32 @@ export function createHttpBackend(baseUrl) {
       await fetch(base + "/export/" + encodeURIComponent(jobId), { method: "DELETE" });
     },
 
-    /** 提交 + 轮询到结束。onProgress(比例)。 */
-    async exportProject(project, range, onProgress) {
-      const submitted = await this.submit(project, range);
-      const jobId = submitted.jobId;
-      if (jobId === undefined) throw new Error("服务端没返回 jobId");
+    /** 提交 + 轮询到结束。onProgress(比例)。options 透传给 submit（format/width/height）。 */
+    async exportProject(project, range, onProgress, options) {
+      const submitted = await this.submit(project, range, options);
+      const jobId = submitted.job_id;
+      if (jobId === undefined) throw new Error("服务端没返回 job_id");
       for (;;) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+        await new Promise((resolve) => setTimeout(resolve, 500));
         const status = await this.poll(jobId);
-        if (typeof onProgress === "function") onProgress(status.progress || 0, 1);
-        if (status.state === "done") return status;
-        if (status.state === "failed") throw new Error(status.error || "服务端报失败");
+        if (typeof onProgress === "function") {
+          // progress 缺省表示**未知**，不是 0 —— 传 null 让界面显示不确定态。
+          onProgress(typeof status.progress === "number" ? status.progress : null, status.state);
+        }
+        if (status.state === "succeeded") return status;
+        if (status.state === "failed" || status.state === "cancelled") {
+          const reason = status.error && status.error.message ? status.error.message : status.state;
+          throw new Error(reason);
+        }
       }
+    },
+
+    /** 把后端给的相对下载地址变成可点的绝对地址。 */
+    downloadUrl(status) {
+      const raw = status && status.download_url;
+      if (typeof raw !== "string" || raw.length === 0) return null;
+      if (/^https?:\/\//.test(raw)) return raw;
+      return base + (raw.startsWith("/") ? raw : "/" + raw);
     },
   };
 }
@@ -79,9 +97,9 @@ export function createEchoBackend() {
       counter += 1;
       const jobId = "echo-" + counter;
       jobs.set(jobId, {
-        state: "done",
+        state: "succeeded",
         progress: 1,
-        downloadUrl: null,
+        download_url: null,
         echo: {
           clips: project.tracks.reduce((sum, track) => sum + track.clips.length, 0),
           frames: range.to - range.from + 1,
@@ -98,8 +116,8 @@ export function createEchoBackend() {
     async cancel(jobId) { jobs.delete(jobId); },
     async exportProject(project, range, onProgress) {
       const submitted = await this.submit(project, range);
-      if (typeof onProgress === "function") onProgress(1, 1);
-      return this.poll(submitted.jobId);
+      if (typeof onProgress === "function") onProgress(1, "succeeded");
+      return this.poll(submitted.job_id);
     },
   };
 }

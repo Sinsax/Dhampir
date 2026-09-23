@@ -31,6 +31,7 @@
 
 - `dhampir_project_attach`
 - `dhampir_project_bind_source`
+- `dhampir_project_doc`
 - `dhampir_project_draw`
 - `dhampir_project_end_frame`
 - `dhampir_project_first_frame`

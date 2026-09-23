@@ -3,15 +3,22 @@
 //! # 这是 M3 与 M4 的分界
 //!
 //! M3 的预览宿主只知道"一个 video 元素、一帧"；从这里开始，宿主知道的是
-//! **一份 schema v1 工程**：多轨、片段、变换、不透明度、特效、转场、关键帧。
-//! 求值仍然在 `dhampir_core::compose` 里（纯函数、两端共用），这一层只做两件事：
-//! 把工程 JSON 收进来并校验、把图层清单落到真实的纹理上。
+//! **一份工程文件**（ProjectDoc，timeline 为 v2）：多轨、元素、变换、不透明度、
+//! 混合模式、特效、转场、关键帧、调整图层、标记。
+//! 求值仍然在 dhampir_core::compose 里（纯函数、两端共用），这一层只做三件事：
+//! 把工程 JSON 收进来并校验、按资产表绑源、把图层清单落到真实的纹理上。
 //!
-//! # v1 的宿主能力（写清楚，免得当成没有的）
+//! # 多源（写清楚，免得当成没有的）
 //!
-//! **只绑定一路源纹理**：所有图层都采当前这一帧。多源 / 每层各自的源内帧号
-//! 需要宿主维护纹理缓存与解码调度——那是 T4.4/M5 的事，不是这一层能糊弄过去的。
-//! 对"单片段工程"这个最常见的退化情形，它是**精确**的。
+//! **一个 source 一个 video 元素**（BoundVideos），每个 source 各自 seek 到
+//! 自己那一帧 —— 这是"帧号精确"在宿主接缝上的兑现。同样一份素材被多个元素引用
+//! 时，它们各自 seek，互不干扰。
+//!
+//! # 与后端那条路的边界
+//!
+//! 后端（dhampir CLI）按 asset 开一路 ffmpeg 顺序解码器。浏览器这侧没有解码器，
+//! 用的是 video 元素的 seek。所以两端能对齐的是**形状与图层清单**，
+//! 逐像素对齐要两端吃同一份像素 —— 那件事的边界写在 plan/consistency-criteria.md。
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -22,7 +29,7 @@ use dhampir_core::render::SourceResolver;
 // 宿主 API 的返回体形状：**有名字、有测试钉住**，不再用宏手写。
 use dhampir_core::timeline::host_api;
 use dhampir_core::wgpu;
-use dhampir_core::timeline::schema::{Project, validate_project_with_effects};
+use dhampir_core::timeline::project::{ProjectDoc, load_doc, validate_project_doc};
 use wasm_bindgen::prelude::*;
 use web_sys::{HtmlCanvasElement, HtmlVideoElement};
 
@@ -36,8 +43,12 @@ thread_local! {
 
 thread_local! {
     /// 当前载入的工程。**只有通过校验的工程才会被记住**——
-    /// 让一份有问题的工程留在里面，只会让后面每一步都要重新判断"它到底能不能用"。
-    static PROJECT: RefCell<Option<Project>> = const { RefCell::new(None) };
+    /// 让一份有问题的工程留在里面，只会让后面每一步都要重新判断「它到底能不能用」。
+    ///
+    /// 宿主持有的是**工程文件**（ProjectDoc，timeline 已是 v2），不是裸契约。
+    /// 于是「写入一律写工程文件」这条规矩在浏览器侧也真的落地了，
+    /// 而 v1 -> v2 的迁移只发生在 load_doc 一处。
+    static PROJECT: RefCell<Option<ProjectDoc>> = const { RefCell::new(None) };
 }
 
 
@@ -141,7 +152,7 @@ impl ProjectHost {
         let composite = PROJECT.with(|slot| {
             slot.borrow()
                 .as_ref()
-                .map(|project| compose::evaluate(project, frame))
+                .map(|doc| compose::evaluate_v2(&doc.timeline, frame))
         });
         let Some(composite) = composite else {
             return Err("还没有载入通过校验的工程".to_string());
@@ -237,19 +248,36 @@ fn composite_result(composite: &Composite) -> dhampir_core::timeline::host_api::
 /// UI 可以照着渲染成人话——不需要这一层再翻译一遍，翻译两遍就会有两套说法。
 #[wasm_bindgen]
 pub fn dhampir_project_open(json: &str) -> String {
-    let parsed: Result<Project, _> = serde_json::from_str(json);
-    match parsed {
-        Err(error) => dhampir_core::timeline::host_api::to_json(&host_api::OpenResult::unparsed(error.to_string())),
-        Ok(project) => {
-            let issues =
-                validate_project_with_effects(&project, dhampir_core::effects::REGISTRY);
-            let ok = issues.is_empty();
-            PROJECT.with(|slot| {
-                *slot.borrow_mut() = if ok { Some(project) } else { None };
-            });
-            dhampir_core::timeline::host_api::to_json(&dhampir_core::timeline::host_api::OpenResult::opened(issues))
+    // **三种形态都收**：工程文件 / 裸契约 v1 / 裸契约 v2。判定只在 load_doc 里做一次。
+    let doc = match load_doc(json) {
+        Ok(doc) => doc,
+        Err(error) => return host_api::to_json(&host_api::OpenResult::unparsed(error)),
+    };
+    let issues = validate_project_doc(&doc, dhampir_core::effects::REGISTRY);
+    let ok = issues.is_ok();
+    PROJECT.with(|slot| {
+        if ok {
+            *slot.borrow_mut() = Some(doc);
         }
-    }
+        // **校验不过时保留上一份可用工程。**
+        // 旧实现这里写的是 None，而 engine.js 的注释一直写着"失败时保留上一份"——
+        // 实现与注释不一致，后果是"编辑到一半"会让预览直接不再出图。
+        // 一次非法编辑不该让整个界面失效：问题显示在清单里就够了。
+    });
+    host_api::to_json(&host_api::OpenResult::from_doc_issues(&issues))
+}
+
+/// 当前工程的**工程文件本体**（壳 + 契约）。
+///
+/// 前端要它有三件事：按资产表解析素材地址、读 render_hints 作为出片尺寸、
+/// 以及把整份工程原样提交给后端。**没有载入时返回 null** ——
+/// 不返回一个空壳，因为空壳会被当成"载入了一个空工程"。
+#[wasm_bindgen]
+pub fn dhampir_project_doc() -> String {
+    PROJECT.with(|slot| match slot.borrow().as_ref() {
+        None => "null".to_string(),
+        Some(doc) => host_api::to_json(doc),
+    })
 }
 
 /// 这一帧要画什么。工程没载入（或没通过校验）时返回带 error 的空清单。
@@ -263,7 +291,10 @@ pub fn dhampir_project_frame(frame: i32) -> String {
                 layers: Vec::new(),
                 error: Some("还没有载入通过校验的工程".to_string()),
             }),
-            Some(project) => dhampir_core::timeline::host_api::to_json(&composite_result(&compose::evaluate(project, i64::from(frame)))),
+            Some(doc) => host_api::to_json(&composite_result(&compose::evaluate_v2(
+                &doc.timeline,
+                i64::from(frame),
+            ))),
         }
     })
 }
@@ -274,7 +305,7 @@ pub fn dhampir_project_end_frame() -> i32 {
     PROJECT.with(|slot| {
         slot.borrow()
             .as_ref()
-            .and_then(compose::end_frame)
+            .and_then(|doc| compose::end_frame_v2(&doc.timeline))
             .map(|end| i32::try_from(end).unwrap_or(i32::MAX))
             .unwrap_or(-1)
     })
@@ -286,7 +317,7 @@ pub fn dhampir_project_first_frame() -> i32 {
     PROJECT.with(|slot| {
         slot.borrow()
             .as_ref()
-            .and_then(compose::first_frame)
+            .and_then(|doc| compose::first_frame_v2(&doc.timeline))
             .map(|start| i32::try_from(start).unwrap_or(0))
             .unwrap_or(-1)
     })
@@ -306,7 +337,7 @@ pub async fn dhampir_project_render_probe(
     let composite = PROJECT.with(|slot| {
         slot.borrow()
             .as_ref()
-            .map(|project| compose::evaluate(project, i64::from(frame)))
+            .map(|doc| compose::evaluate_v2(&doc.timeline, i64::from(frame)))
     })
     .ok_or_else(|| js_err("还没有载入通过校验的工程"))?;
 
@@ -399,14 +430,20 @@ pub async fn dhampir_sample_project_render_png(
 ) -> Result<Vec<u8>, JsValue> {
     // 刻意**不碰** thread_local 里的工程：这个入口要能被独立调用（驱动直接喂 JSON），
     // 免得比对结果依赖"页面之前打开了什么"。
-    let project: Project = serde_json::from_str(&project_json)
-        .map_err(|e| js_err(format!("工程 JSON 解析失败：{e}")))?;
-    let issues = validate_project_with_effects(&project, dhampir_core::effects::REGISTRY);
-    if !issues.is_empty() {
-        return Err(js_err(format!("工程没通过校验：{}", issues.len())));
+    // 三种形态都收（这里是 v1 裸契约），但**求值一律走 v2** ——
+    // 这样浏览器侧只剩一条求值路径。这条路径与 native 的 render_project 一起被
+    // check-dual-end.mjs 逐像素盯着：如果迁移改了语义，那边会立刻变红。
+    let doc = load_doc(&project_json).map_err(|e| js_err(format!("工程载入失败：{e}")))?;
+    let issues = validate_project_doc(&doc, dhampir_core::effects::REGISTRY);
+    if !issues.is_ok() {
+        return Err(js_err(format!(
+            "工程没通过校验：{} 条错误 / {} 条警告",
+            issues.errors.len(),
+            issues.warnings.len()
+        )));
     }
 
-    let composite = compose::evaluate(&project, i64::from(frame));
+    let composite = compose::evaluate_v2(&doc.timeline, i64::from(frame));
     let instance = new_instance();
     let ctx = dhampir_core::gpu::request_context(&instance, None)
         .await
@@ -581,24 +618,24 @@ pub fn dhampir_project_bind_source(source: String, video_id: String) -> Result<(
 pub fn dhampir_project_sources_for(frame: i32) -> String {
     PROJECT.with(|slot| {
         let borrowed = slot.borrow();
-        let Some(project) = borrowed.as_ref() else {
-            return dhampir_core::timeline::host_api::to_json(&dhampir_core::timeline::host_api::SourcesResult {
+        let Some(doc) = borrowed.as_ref() else {
+            return host_api::to_json(&host_api::SourcesResult {
                 frame: i64::from(frame),
                 sources: Vec::new(),
                 error: Some("还没有载入通过校验的工程".to_string()),
             });
         };
-        let (num, den) = match project.timebase.to_timebase() {
+        let (num, den) = match doc.timeline.timebase.to_timebase() {
             Ok(timebase) => (f64::from(timebase.num), f64::from(timebase.den)),
             Err(error) => {
-                return dhampir_core::timeline::host_api::to_json(&dhampir_core::timeline::host_api::SourcesResult {
+                return host_api::to_json(&host_api::SourcesResult {
                     frame: i64::from(frame),
                     sources: Vec::new(),
                     error: Some(error.to_string()),
                 });
             }
         };
-        let composite = compose::evaluate(project, i64::from(frame));
+        let composite = compose::evaluate_v2(&doc.timeline, i64::from(frame));
         // 去重：同一个 (source, 帧) 只该 seek 一次。
         let mut seen = std::collections::BTreeSet::new();
         let mut sources = Vec::new();
@@ -606,13 +643,13 @@ pub fn dhampir_project_sources_for(frame: i32) -> String {
             if !seen.insert((layer.source.clone(), layer.source_frame)) {
                 continue;
             }
-            sources.push(dhampir_core::timeline::host_api::SourceView {
+            sources.push(host_api::SourceView {
                 source: layer.source.clone(),
                 source_frame: layer.source_frame,
                 seconds: (layer.source_frame as f64) * den / num,
             });
         }
-        dhampir_core::timeline::host_api::to_json(&dhampir_core::timeline::host_api::SourcesResult {
+        host_api::to_json(&host_api::SourcesResult {
             frame: i64::from(frame),
             sources,
             error: None,
@@ -676,17 +713,14 @@ pub fn dhampir_project_precheck(capabilities_json: &str) -> String {
 
     PROJECT.with(|slot| {
         let borrowed = slot.borrow();
-        let Some(project) = borrowed.as_ref() else {
+        let Some(doc) = borrowed.as_ref() else {
             return host_api::to_json(&host_api::OpenResult::unparsed(
                 "还没有载入通过校验的工程".to_string(),
             ));
         };
-        let timeline = match dhampir_core::timeline::layer::migrate_v1_to_v2(project) {
-            Ok(timeline) => timeline,
-            Err(error) => {
-                return host_api::to_json(&host_api::OpenResult::unparsed(error.to_string()))
-            }
-        };
-        host_api::to_json(&host_api::precheck(&timeline, &capabilities))
+        // **不再需要迁移**：载入时已经统一成 v2 了。
+        // 这段代码以前是"第二处迁移"—— 两份迁移实现迟早会漂，而漂了以后
+        // 「预检说能做、渲染却做不了」这类事就只能靠人盯。
+        host_api::to_json(&host_api::precheck(&doc.timeline, &capabilities))
     })
 }

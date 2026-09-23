@@ -19,18 +19,30 @@ export class Engine {
     // source 标识 -> video 元素。**每个 source 一个元素**：
     // 同一帧上不同图层可能是不同源、不同源内帧，共用一个 <video> 是做不到的。
     this.videos = new Map();
-    this.project = null;
+    // 宿主持有的是**工程文件**（ProjectDoc，timeline 为 v2），不是裸契约。
+    // 于是页面只认一种模型，而 v1 -> v2 的迁移只发生在 Rust 的 load_doc 一处。
+    //
+    // ⚠️ 字段不能叫 this.doc：**实例字段会盖住原型上的同名方法**，
+    // 于是 engine.doc() 会变成 "engine.doc is not a function"。
+    this.projectFile = null;
     this.attached = false;
   }
 
-  /** 载入并校验一份工程。失败时**保留上一份可用工程**（UI 不该因为一次非法编辑就崩）。 */
+  /** 载入并校验一份工程。失败时 Rust 侧**保留上一份可用工程**（UI 不该因为一次非法编辑就崩）。 */
   open(project) {
     const json = typeof project === "string" ? project : JSON.stringify(project);
     const result = JSON.parse(this.mod.dhampir_project_open(json));
     if (result.parsed === true && result.ok === true) {
-      this.project = JSON.parse(json);
+      // 向 Rust 要一份**规范化**的工程文件，而不是把输入原样存下来 ——
+      // 输入可能是不带资产表的裸契约，那样页面读不到 assets。
+      this.projectFile = JSON.parse(this.mod.dhampir_project_doc());
     }
     return result;
+  }
+
+  /** 当前工程的规范化副本（含 assets / view / render_hints）。没载入过是 null。 */
+  doc() {
+    return this.projectFile;
   }
 
   /** 重新校验当前工程但不改变它——编辑过程中用来显示问题。 */
