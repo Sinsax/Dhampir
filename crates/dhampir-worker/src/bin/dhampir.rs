@@ -33,7 +33,9 @@ use std::process::{Command, ExitCode};
 use dhampir_core::compose;
 use dhampir_core::effects::REGISTRY;
 use dhampir_core::timeline::host_api::{AssetInfoView, SampleView, gop_slices};
-use dhampir_core::timeline::project::{ProjectDoc, load_doc, validate_project_doc};
+use dhampir_core::timeline::project::{
+    Asset, AssetKind, ProjectDoc, asset_reference_counts, load_doc, validate_project_doc,
+};
 use dhampir_core::timeline::schema::{TimebaseDto, TrackKind};
 use dhampir_worker::pipeline::{RenderPlan, SourceTable, render_frames_png, render_plan};
 
@@ -48,6 +50,13 @@ const USAGE: &str = "\
                                                   出第 N 帧的 PNG（文件名 frame-<N>.png）
   render  --project <文件> --from <N> --to <N> --out <文件.mp4>
                                                   出片（stdout 是 NDJSON 进度）
+
+公共选项：
+  import  --project <文件> --file <素材> [--id <id>] [--replace] [--write]
+                         把一个文件登记成资产（ffprobe 自动填尺寸/帧数/时间基）。
+                         不给 --write 就是**干跑**：只打印将要写入的那一条
+  library --project <文件>
+                         列出素材库：每个资产被引用了多少次
 
 公共选项：
   --asset-root <目录>   工程文件里 asset.uri 的相对根（默认 target/s3）
@@ -69,6 +78,10 @@ struct Args {
     out: Option<String>,
     asset_root: Option<String>,
     asset_map: Option<String>,
+    file: Option<String>,
+    id: Option<String>,
+    write: bool,
+    replace: bool,
     from: Option<i64>,
     to: Option<i64>,
     frame: Option<i64>,
@@ -78,14 +91,14 @@ struct Args {
 }
 
 /// 认得的**带值**选项。不在表里的一律报错。
-const KNOWN_VALUE_FLAGS: [&str; 9] = [
-    "--project", "--asset", "--out", "--asset-root", "--asset-map", "--from", "--to", "--width",
-    "--height",
+const KNOWN_VALUE_FLAGS: [&str; 11] = [
+    "--project", "--asset", "--out", "--asset-root", "--asset-map", "--file", "--id",
+    "--from", "--to", "--width", "--height",
 ];
 /// 认得的**不带值**选项。
-const KNOWN_FLAGS: [&str; 3] = ["--frame", "-h", "--help"];
+const KNOWN_FLAGS: [&str; 5] = ["--frame", "--write", "--replace", "-h", "--help"];
 /// 认得的子命令。
-const COMMANDS: [&str; 5] = ["probe", "info", "gop", "frame", "render"];
+const COMMANDS: [&str; 7] = ["probe", "info", "gop", "frame", "render", "import", "library"];
 
 /// 解析。**纯函数**，所以能脱离命令行单测。
 fn parse(argv: &[String]) -> Result<Args, String> {
@@ -95,6 +108,15 @@ fn parse(argv: &[String]) -> Result<Args, String> {
         let token = argv[index].as_str();
         if token == "-h" || token == "--help" {
             args.help = true;
+            index += 1;
+            continue;
+        }
+        if token == "--write" || token == "--replace" {
+            if token == "--write" {
+                args.write = true;
+            } else {
+                args.replace = true;
+            }
             index += 1;
             continue;
         }
@@ -122,6 +144,8 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--out" => args.out = Some(value),
             "--asset-root" => args.asset_root = Some(value),
             "--asset-map" => args.asset_map = Some(value),
+            "--file" => args.file = Some(value),
+            "--id" => args.id = Some(value),
             "--from" => args.from = Some(parse_int(&token, &value)?),
             "--to" => args.to = Some(parse_int(&token, &value)?),
             "--frame" => args.frame = Some(parse_int(&token, &value)?),
@@ -641,6 +665,150 @@ fn cmd_render(args: &Args) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+// ---------------------------------------------------------------------------
+// 素材库：导入与清点
+// ---------------------------------------------------------------------------
+
+/// 按扩展名判素材种类。
+///
+/// **判不出来就按 video 处理**：ffprobe 会立刻给出答案（拿不到视频流就报错），
+/// 比在这里堆一张越来越长的扩展名表可靠。
+fn infer_kind(path: &Path) -> AssetKind {
+    let extension = path
+        .extension()
+        .and_then(|text| text.to_str())
+        .map(|text| text.to_ascii_lowercase());
+    match extension.as_deref() {
+        Some("srt") | Some("ass") | Some("ssa") | Some("vtt") => AssetKind::Subtitle,
+        Some("wav") | Some("mp3") | Some("aac") | Some("m4a") | Some("flac") => AssetKind::Audio,
+        Some("png") | Some("jpg") | Some("jpeg") | Some("webp") | Some("bmp") => AssetKind::Image,
+        _ => AssetKind::Video,
+    }
+}
+
+/// 把文件路径写成 uri：**在资产根下面就用相对路径，否则原样写**。
+///
+/// 不硬塞一个假的相对路径：那是把"这个素材不归我管"这件事藏起来，
+/// 而藏起来的结果是换台机器就找不到素材、且没人知道为什么。
+fn relativize_uri(path: &Path, asset_root: &Path) -> String {
+    let normalized = |value: &Path| value.to_string_lossy().replace('\\', "/");
+    let file = normalized(path);
+    let root = normalized(asset_root);
+    let root = root.trim_end_matches('/');
+    let prefix = format!("{root}/");
+    match file.strip_prefix(&prefix) {
+        Some(rest) => rest.to_string(),
+        None => file,
+    }
+}
+
+fn cmd_import(args: &Args) -> Result<ExitCode, String> {
+    let project = args.project.as_ref().ok_or("import 要 --project <文件>")?;
+    let file = args.file.as_ref().ok_or("import 要 --file <素材>")?;
+    let path = Path::new(file);
+    if !path.exists() {
+        eprintln!("文件不在：{file}");
+        return Ok(ExitCode::from(2));
+    }
+    let asset_root =
+        PathBuf::from(args.asset_root.clone().unwrap_or_else(|| "target/s3".to_string()));
+    let id = match args.id.clone() {
+        Some(explicit) => explicit,
+        None => path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .ok_or("这个路径没有文件名，请用 --id 指定")?,
+    };
+    let kind = infer_kind(path);
+    let mut built = Asset {
+        id: id.clone(),
+        kind,
+        name: id.clone(),
+        uri: relativize_uri(path, &asset_root),
+        frame_count: None,
+        timebase: None,
+        width: None,
+        height: None,
+        content_hash: None,
+        tags: std::collections::BTreeMap::new(),
+        note: String::new(),
+    };
+    // 只有视频流才有尺寸与帧数 —— 字幕/音频/图片问了也是白问。
+    if kind == AssetKind::Video {
+        let info = asset_info(path)?;
+        built.frame_count = Some(info.frame_count);
+        built.timebase = Some(info.timebase.clone());
+        built.width = Some(info.width);
+        built.height = Some(info.height);
+    }
+
+    let mut doc = match load_project_or_usage(project) {
+        Ok(doc) => doc,
+        Err(code) => return Ok(code),
+    };
+    match doc.assets.iter().position(|asset| asset.id == id) {
+        Some(index) => {
+            if !args.replace {
+                eprintln!("资产 id 已存在：{id}（要覆盖就加 --replace）");
+                return Ok(ExitCode::from(2));
+            }
+            doc.assets[index] = built.clone();
+        }
+        None => doc.assets.push(built.clone()),
+    }
+
+    let issues = validate_project_doc(&doc, REGISTRY);
+    if args.write {
+        // 写回：pretty + 结尾换行。**migrated_from 是 serde(skip) 的，不会进文件。**
+        let text = serde_json::to_string_pretty(&doc).map_err(|error| error.to_string())?;
+        std::fs::write(project, format!("{text}\n"))
+            .map_err(|error| format!("写不回工程 {project}：{error}"))?;
+    }
+    print_json(&serde_json::json!({
+        "asset": built,
+        "written": args.write,
+        "asset_count": doc.assets.len(),
+        "issues": issues,
+    }))?;
+    Ok(if issues.is_ok() { ExitCode::SUCCESS } else { ExitCode::from(2) })
+}
+
+fn cmd_library(args: &Args) -> Result<ExitCode, String> {
+    let project = args.project.as_ref().ok_or("library 要 --project <文件>")?;
+    let doc = match load_project_or_usage(project) {
+        Ok(doc) => doc,
+        Err(code) => return Ok(code),
+    };
+    let counts = asset_reference_counts(&doc);
+    let mut rows = Vec::with_capacity(doc.assets.len());
+    let mut unused = Vec::new();
+    for (index, asset) in doc.assets.iter().enumerate() {
+        let references = counts.get(&asset.id).copied().unwrap_or(0);
+        if references == 0 && !asset.id.is_empty() {
+            unused.push(asset.id.clone());
+        }
+        rows.push(serde_json::json!({
+            "index": index,
+            "id": asset.id,
+            "kind": asset.kind,
+            "uri": asset.uri,
+            "frame_count": asset.frame_count,
+            "timebase": asset.timebase,
+            "width": asset.width,
+            "height": asset.height,
+            "references": references,
+        }));
+    }
+    print_json(&serde_json::json!({
+        "total": doc.assets.len(),
+        "used": doc.assets.len() - unused.len(),
+        // **未被引用的列出来**：它们是 unused_asset 警告的来源，
+        // 而"库里有 12 条"和"库里 12 条里有 3 条没人用"是两件事。
+        "unused": unused,
+        "assets": rows,
+    }))
+}
+
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let args = match parse(&argv) {
@@ -663,6 +831,8 @@ fn main() -> ExitCode {
         "gop" => cmd_gop(&args),
         "frame" => cmd_frame(&args),
         "render" => cmd_render(&args),
+        "import" => cmd_import(&args),
+        "library" => cmd_library(&args),
         other => Err(format!("不认识的子命令：{other}")),
     };
     match result {

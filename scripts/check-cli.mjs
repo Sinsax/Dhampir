@@ -20,7 +20,7 @@
 //   node scripts/check-cli.mjs --cli target/debug/dhampir.exe
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -43,6 +43,10 @@ export const EXPECTED = [
   'frame',
   'render',
   'render-broken',
+  'import-dry',
+  'import-write',
+  'library',
+  'import-duplicate',
 ];
 
 /**
@@ -207,6 +211,40 @@ function collect(cli) {
   const brokenRender = run(cli, ['render', '--project', brokenPath, '--out', join(TMP, 'never.mp4')]);
   record('render-broken', brokenRender.code === 2 && !existsSync(join(TMP, 'never.mp4')),
     'exit=' + brokenRender.code);
+
+  // ---- import / library ----
+  // **在副本上真写**：检查工具不该改动 fixtures 下的交付物。
+  const workPath = join(TMP, 'lib-work.json');
+  copyFileSync(join(REPO_ROOT, PROJECT), workPath);
+  const original = readFileSync(join(REPO_ROOT, PROJECT), 'utf8');
+
+  const dry = run(cli, ['import', '--project', workPath, '--file', ASSET, '--id', 'extra']);
+  let dryBody = null;
+  try { dryBody = JSON.parse(dry.stdout); } catch (error) { dryBody = null; }
+  record('import-dry',
+    dry.code === 0 && dryBody !== null && dryBody.written === false
+      && dryBody.asset !== undefined && dryBody.asset.frame_count === 480
+      && dryBody.asset.uri === 'proxy1080p.mp4'
+      && readFileSync(workPath, 'utf8') === original,
+    'exit=' + dry.code + ' 文件未被改动=' + (readFileSync(workPath, 'utf8') === original));
+
+  const wrote = run(cli, ['import', '--project', workPath, '--file', ASSET, '--id', 'extra', '--write']);
+  let wroteBody = null;
+  try { wroteBody = JSON.parse(wrote.stdout); } catch (error) { wroteBody = null; }
+  record('import-write',
+    wrote.code === 0 && wroteBody !== null && wroteBody.written === true && wroteBody.asset_count === 5,
+    'exit=' + wrote.code + ' asset_count=' + (wroteBody === null ? 'none' : wroteBody.asset_count));
+
+  const library = run(cli, ['library', '--project', workPath]);
+  let libraryBody = null;
+  try { libraryBody = JSON.parse(library.stdout); } catch (error) { libraryBody = null; }
+  record('library',
+    library.code === 0 && libraryBody !== null && libraryBody.total === 5
+      && Array.isArray(libraryBody.unused) && libraryBody.unused.includes('extra'),
+    'exit=' + library.code + ' ' + (libraryBody === null ? 'none' : JSON.stringify(libraryBody.unused)));
+
+  const duplicate = run(cli, ['import', '--project', workPath, '--file', ASSET, '--id', 'extra']);
+  record('import-duplicate', duplicate.code === 2, 'exit=' + duplicate.code);
 
   return observed;
 }

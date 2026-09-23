@@ -34,7 +34,7 @@
 import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { dirname, extname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, extname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -421,6 +421,82 @@ function handle(req, res, context, url) {
       return sendJson(res, 404, { error: issue('no_such_project', path, '没有这份工程：' + project[1]) });
     }
     return sendFile(req, res, file, 'application/json; charset=utf-8');
+  }
+
+  // 素材库清点：**问 Rust**，不在这里数引用。
+  // "引用了没有"只有一份实现（asset_reference_counts），前端只是把它画出来。
+  const library = path.match(/^\/projects\/([A-Za-z0-9_.-]+)\/library$/);
+  if (req.method === 'GET' && library) {
+    if (cli === null) {
+      return sendJson(res, 503, { error: issue('cli_missing', path, '没找到 dhampir 可执行文件') });
+    }
+    const file = join(PROJECTS_DIR, library[1] + '.json');
+    if (!existsSync(file)) {
+      return sendJson(res, 404, { error: issue('no_such_project', path, '没有这份工程：' + library[1]) });
+    }
+    return void runCli(cli, ['library', '--project', file], 60000).then((result) => {
+      if (result.code !== 0) {
+        return sendJson(res, 500, {
+          error: issue('library_failed', path, (result.stderr || '').trim() || ('dhampir library 退出 ' + result.code)),
+        });
+      }
+      try {
+        return sendJson(res, 200, JSON.parse(result.stdout));
+      } catch (error) {
+        return sendJson(res, 500, { error: issue('library_bad_json', path, '清点器没给出 JSON：' + error.message) });
+      }
+    });
+  }
+
+  // 登记一个素材：**只接受资产根目录下面的文件**。
+  //
+  // 这是一个本机参考实现，不是上传服务：真正的上传（对象存储、账号、配额）属下游。
+  // 但"路径必须落在资产根下面"这条要守住 —— 否则任何一个页面都能让本机后端
+  // 把任意路径登记进工程，而那句"位置由宿主解释"就变成了"位置由网页解释"。
+  if (req.method === 'POST' && path === '/assets') {
+    if (cli === null) {
+      return sendJson(res, 503, { error: issue('cli_missing', path, '没找到 dhampir 可执行文件') });
+    }
+    return readBody(req, (body) => {
+      let request = null;
+      try { request = JSON.parse(body.toString('utf8')); } catch (error) {
+        return sendJson(res, 400, { error: issue('bad_request', path, '请求体不是 JSON：' + error.message) });
+      }
+      const projectId = typeof request.project === 'string' ? request.project : null;
+      const wanted = typeof request.path === 'string' ? request.path : null;
+      if (projectId === null || wanted === null) {
+        return sendJson(res, 400, { error: issue('bad_request', path, '需要 {project, path}') });
+      }
+      const file = join(PROJECTS_DIR, projectId + '.json');
+      if (!existsSync(file)) {
+        return sendJson(res, 404, { error: issue('no_such_project', path, '没有这份工程：' + projectId) });
+      }
+      const resolvedRoot = resolve(assetRoot);
+      const resolvedWanted = resolve(REPO_ROOT, wanted);
+      if (resolvedWanted !== resolvedRoot && !resolvedWanted.startsWith(resolvedRoot + sep)) {
+        return sendJson(res, 400, {
+          error: issue('path_outside_asset_root', path,
+            '只登记资产根（' + assetRoot + '）下面的文件，收到：' + wanted),
+        });
+      }
+      if (!existsSync(resolvedWanted)) {
+        return sendJson(res, 404, { error: issue('asset_file_missing', path, '文件不在：' + wanted) });
+      }
+      const cliArgs = ['import', '--project', file, '--file', resolvedWanted,
+        '--asset-root', assetRoot, '--write'];
+      if (typeof request.id === 'string' && request.id.length > 0) cliArgs.push('--id', request.id);
+      if (request.replace === true) cliArgs.push('--replace');
+      return void runCli(cli, cliArgs, 120000).then((result) => {
+        try {
+          return sendJson(res, result.code === 0 ? 200 : 400, JSON.parse(result.stdout));
+        } catch (error) {
+          return sendJson(res, 500, {
+            error: issue('import_failed', path,
+              (result.stderr || '').trim() || ('dhampir import 退出 ' + result.code)),
+          });
+        }
+      });
+    });
   }
 
   // 素材字节。位置**由索引解释**（工程文件的 assets 优先，兜底表补缺），

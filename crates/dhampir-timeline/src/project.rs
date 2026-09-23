@@ -61,6 +61,9 @@ pub enum AssetKind {
     Video,
     Audio,
     Image,
+    /// 字幕（SRT / ASS）。**它也是一种素材** —— 位置同样由 uri 给，
+    /// 于是"字幕"不必发明第二套引用机制：轨道引用它，与引用一段视频没有区别。
+    Subtitle,
 }
 
 /// 一条资产的登记项。
@@ -230,6 +233,23 @@ pub fn shell_from_timeline(timeline: TimelineV2) -> ProjectDoc {
     }
 }
 
+/// 每个资产被引用了多少次。
+///
+/// **判断"引用了没有"只有这一份实现** —— 校验里的 unused_asset 与 CLI 的
+/// library 都读它。两份实现一定会漂，而漂了以后"CLI 说没用、校验说用了"
+/// 这种自相矛盾会让人不信任何一边。
+pub fn asset_reference_counts(doc: &ProjectDoc) -> BTreeMap<String, usize> {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for track in &doc.timeline.tracks {
+        for layer in &track.layers {
+            if let Some(source) = &layer.source {
+                *counts.entry(source.asset_id.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+    counts
+}
+
 impl ProjectDoc {
     /// 资产 id → 时间基。求值层用它把时间线帧号换算成素材帧号。
     ///
@@ -349,11 +369,10 @@ pub fn validate_project_doc(doc: &ProjectDoc, effects: &[EffectSpec]) -> DocIssu
 
     // ---- 引用完整性 + 素材内越界 ----
     // 后半条是这次的主要收益：v1 做不到，因为容器层不知道素材有多长。
-    let mut used: BTreeSet<&str> = BTreeSet::new();
+    let counts = asset_reference_counts(doc);
     for (track_index, track) in doc.timeline.tracks.iter().enumerate() {
         for (layer_index, layer) in track.layers.iter().enumerate() {
             let Some(source) = &layer.source else { continue };
-            used.insert(source.asset_id.as_str());
             let base = format!("timeline.tracks[{track_index}].layers[{layer_index}]");
             match index_of.get(source.asset_id.as_str()) {
                 None => errors.push(Issue::new(
@@ -427,7 +446,7 @@ pub fn validate_project_doc(doc: &ProjectDoc, effects: &[EffectSpec]) -> DocIssu
 
     // ---- 登记了但没被引用：**警告**，不阻断 ----
     for (index, asset) in doc.assets.iter().enumerate() {
-        if !asset.id.is_empty() && !used.contains(asset.id.as_str()) {
+        if !asset.id.is_empty() && !counts.contains_key(asset.id.as_str()) {
             warnings.push(Issue::new(
                 "unused_asset",
                 &format!("assets[{index}]"),

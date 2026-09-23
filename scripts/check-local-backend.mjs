@@ -37,6 +37,8 @@ export const EXPECTED = [
   'assets-gop',
   'media-range',
   'media-missing',
+  'library',
+  'assets-guard',
   'validate-clean',
   'validate-broken',
   'export-accepted',
@@ -166,6 +168,26 @@ async function collect(port) {
 
     const missingAsset = await fetch(base + '/assets/nope.mp4/media');
     record('media-missing', missingAsset.status === 404, missingAsset.status);
+
+    // 素材库清点：**引用次数由 Rust 算**，这里只核对它确实报了出来。
+    const library = await (await fetch(base + '/projects/sample-project.doc/library')).json();
+    record('library',
+      library.total === 4 && Array.isArray(library.unused) && library.unused.length === 0
+        && library.assets.every((asset) => asset.references > 0),
+      'total=' + library.total + ' unused=' + JSON.stringify(library.unused));
+
+    // 登记素材的**守卫**：只许资产根下面的文件。
+    // 不守这条的话，任何一个页面都能让本机后端把任意路径登记进工程 ——
+    // "位置由宿主解释"就变成了"位置由网页解释"。
+    const outside = await fetch(base + '/assets', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ project: 'sample-project.doc', path: 'fixtures/sample-project.json' }),
+    });
+    const outsideBody = await outside.json();
+    record('assets-guard',
+      outside.status === 400 && outsideBody.error !== undefined
+        && outsideBody.error.code === 'path_outside_asset_root',
+      outside.status + ' ' + JSON.stringify(outsideBody).slice(0, 140));
 
     const clean = await fetch(base + '/validate', {
       method: 'POST', headers: { 'content-type': 'application/json' },
