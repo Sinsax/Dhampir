@@ -31,8 +31,10 @@ const ASSET = 'target/s3/proxy1080p.mp4';
 
 /** CLI 的子命令名单。**必须与 crates/dhampir-worker/src/bin/dhampir.rs 的 COMMANDS 表一致** ——
  * 这是一条真判据：「加了命令但没登记」和「登记了但 --help 没列出来」都要红。
- * 名单长度写进结论文案，所以文案不会自己漂成假的。 */
-export const SUBCOMMANDS = ['probe', 'info', 'gop', 'frame', 'render', 'import', 'library', 'edit', 'subtitle'];
+ * 名单长度写进结论文案，所以文案不会自己漂成假的。
+ * T7.1 加了五个具名子命令（undo / redo / clip / sequence / batch）。 */
+export const SUBCOMMANDS = ['probe', 'info', 'gop', 'frame', 'render', 'import', 'library', 'edit', 'subtitle',
+  'undo', 'redo', 'clip', 'sequence', 'batch'];
 
 /** 每一条判据的名字。**改这里就必须改采集端**。 */
 export const EXPECTED = [
@@ -58,6 +60,15 @@ export const EXPECTED = [
   'render-subtitle-out-format',
   'render-subtitle-out-refused',
   'render-subtitle-out-empty',
+  // T7.1：具名子命令是「同一实现的糖」，判据问的就是它到底是不是同一个实现。
+  'clip-equivalence',
+  'sequence-equivalence',
+  'history-alias',
+  'clip-dry-run',
+  'clip-rejects-bad-usage',
+  'batch-matches-edits',
+  'batch-atomic',
+  'batch-empty',
 ];
 
 /**
@@ -375,6 +386,112 @@ function collect(cli) {
       && existsSync(emptyPath) && statSync(emptyPath).size === 0,
     'exit=' + empty.code + ' entries=' + (emptyDone.length === 0 ? 'none' : emptyDone[0].subtitle_entries)
       + ' 大小=' + (existsSync(emptyPath) ? statSync(emptyPath).size : 'none'));
+
+  // ---- 具名子命令（T7.1）：**同一实现的糖** ----
+  //
+  // 这一组问的是同一个问题：具名写法与等价的 `edit --op` 到底是不是同一件事。
+  // 「同一实现」不许靠读代码相信 —— 这里比的是**产物字节**与 **stdout**，
+  // 比"看起来一样"强：summary 文案、issues、缩进格式里任何一处分叉都会红。
+  const fixtureText = readFileSync(join(REPO_ROOT, PROJECT), 'utf8');
+  const fresh = (name) => {
+    const path = join(TMP, name);
+    writeFileSync(path, fixtureText, 'utf8');
+    return path;
+  };
+  const same = (one, other) => readFileSync(one, 'utf8') === readFileSync(other, 'utf8');
+
+  const clipPath = fresh('named-clip.json');
+  const opPath = fresh('named-op.json');
+  const clipRun = run(cli, ['clip', 'split', '--project', clipPath, '--layer', 'c', '--at', '75', '--write']);
+  const opRun = run(cli, ['edit', '--project', opPath, '--op', '{"op":"split","layer":"c","at":75}', '--write']);
+  record('clip-equivalence',
+    clipRun.code === 0 && opRun.code === 0 && same(clipPath, opPath)
+      && clipRun.stdout.trim() === opRun.stdout.trim(),
+    'exit=' + clipRun.code + '/' + opRun.code + ' 产物相同=' + same(clipPath, opPath)
+      + ' stdout相同=' + (clipRun.stdout.trim() === opRun.stdout.trim()));
+
+  const seqPath = fresh('named-seq.json');
+  const setPath = fresh('named-set.json');
+  const seqRun = run(cli, ['sequence', 'set', '--project', seqPath, '--timebase', '30000/1001', '--write']);
+  const setRun = run(cli, ['edit', '--project', setPath, '--op',
+    '{"op":"set_sequence","timebase":{"num":30000,"den":1001},"width":0,"height":0}', '--write']);
+  record('sequence-equivalence',
+    seqRun.code === 0 && setRun.code === 0 && same(seqPath, setPath)
+      && seqRun.stdout.trim() === setRun.stdout.trim(),
+    'exit=' + seqRun.code + '/' + setRun.code + ' 产物相同=' + same(seqPath, setPath));
+
+  // 撤销的具名写法与 `edit --undo`：连函数都是同一个，所以这条**本来**该是恒真的。
+  // 留着它是因为"糖"最容易被写成第二份实现 —— 那正是这条要挡住的事。
+  const undPath = fresh('named-undo.json');
+  const flagPath = fresh('named-flag.json');
+  const undHist = join(TMP, 'named-undo-history.json');
+  const flagHist = join(TMP, 'named-flag-history.json');
+  run(cli, ['clip', 'split', '--project', undPath, '--layer', 'c', '--at', '75', '--history', undHist, '--write']);
+  run(cli, ['clip', 'split', '--project', flagPath, '--layer', 'c', '--at', '75', '--history', flagHist, '--write']);
+  const undRun = run(cli, ['undo', '--project', undPath, '--history', undHist, '--write']);
+  const flagRun = run(cli, ['edit', '--project', flagPath, '--history', flagHist, '--undo', '--write']);
+  record('history-alias',
+    undRun.code === 0 && flagRun.code === 0 && same(undPath, flagPath)
+      && undRun.stdout.trim() === flagRun.stdout.trim(),
+    'exit=' + undRun.code + '/' + flagRun.code + ' 产物相同=' + same(undPath, flagPath));
+
+  // 干跑：不给 --write 就**一个字节都不许动**（连历史文件也不许碰）。
+  const dryPath = fresh('named-dry.json');
+  const dryBefore = readFileSync(dryPath, 'utf8');
+  const dryRun = run(cli, ['clip', 'split', '--project', dryPath, '--layer', 'c', '--at', '75']);
+  let dryEdit = null;
+  try { dryEdit = JSON.parse(dryRun.stdout); } catch (error) { dryEdit = null; }
+  record('clip-dry-run',
+    dryRun.code === 0 && dryEdit !== null && dryEdit.written === false
+      && readFileSync(dryPath, 'utf8') === dryBefore,
+    'exit=' + dryRun.code + ' written=' + (dryEdit === null ? 'none' : dryEdit.written)
+      + ' 文件没被动=' + (readFileSync(dryPath, 'utf8') === dryBefore));
+
+  // 用法错一律退 2：不认识的动作名、以及**多给一个开关**。
+  // 多给比少给更容易被放过（"反正不用它"），而它的表现是那个开关被静静丢掉。
+  const badName = run(cli, ['clip', 'rotate', '--project', PROJECT]);
+  const extraFlag = run(cli, ['clip', 'split', '--project', PROJECT, '--layer', 'c', '--at', '75',
+    '--length', '2']);
+  record('clip-rejects-bad-usage', badName.code === 2 && extraFlag.code === 2,
+    'exit=' + badName.code + '/' + extraFlag.code);
+
+  // 批处理 = 一次写、一条历史；**结果必须与逐条 edit 一模一样**。
+  const scriptPath = join(TMP, 'named-batch.ndjson');
+  writeFileSync(scriptPath,
+    '# 两刀\n{"op":"split","layer":"c","at":75}\n\n{"op":"move","layer":"d","to":20,"track":"v2"}\n', 'utf8');
+  const batchPath = fresh('named-batch.json');
+  const stepPath = fresh('named-steps.json');
+  const batchRun = run(cli, ['batch', '--project', batchPath, '--script', scriptPath, '--write']);
+  run(cli, ['edit', '--project', stepPath, '--op', '{"op":"split","layer":"c","at":75}', '--write']);
+  run(cli, ['edit', '--project', stepPath, '--op', '{"op":"move","layer":"d","to":20,"track":"v2"}', '--write']);
+  record('batch-matches-edits',
+    batchRun.code === 0 && same(batchPath, stepPath),
+    'exit=' + batchRun.code + ' 产物相同=' + same(batchPath, stepPath));
+
+  // 中途有一步不成立：**整份不落盘**（不是"做到哪算哪"），并明说卡在第几行。
+  const badScript = join(TMP, 'named-bad.ndjson');
+  writeFileSync(badScript,
+    '{"op":"split","layer":"c","at":75}\n{"op":"split","layer":"nosuch","at":75}\n', 'utf8');
+  const atomicPath = fresh('named-atomic.json');
+  const atomicBefore = readFileSync(atomicPath, 'utf8');
+  const atomicRun = run(cli, ['batch', '--project', atomicPath, '--script', badScript, '--write']);
+  let atomicBody = null;
+  try { atomicBody = JSON.parse(atomicRun.stdout); } catch (error) { atomicBody = null; }
+  record('batch-atomic',
+    atomicRun.code === 2 && readFileSync(atomicPath, 'utf8') === atomicBefore
+      && atomicBody !== null && String(atomicBody.summary).includes('第 2 行'),
+    'exit=' + atomicRun.code + ' 文件没被动=' + (readFileSync(atomicPath, 'utf8') === atomicBefore)
+      + ' summary=' + (atomicBody === null ? 'none' : atomicBody.summary));
+
+  // 空脚本**不算成功**：它会打印 ok 却什么都没做，与"脚本路径写错了"分不开。
+  const emptyScript = join(TMP, 'named-empty.ndjson');
+  writeFileSync(emptyScript, '# 只有注释\n\n', 'utf8');
+  const emptyBatchPath = fresh('named-empty.json');
+  const emptyBefore = readFileSync(emptyBatchPath, 'utf8');
+  const emptyBatch = run(cli, ['batch', '--project', emptyBatchPath, '--script', emptyScript, '--write']);
+  record('batch-empty',
+    emptyBatch.code === 2 && readFileSync(emptyBatchPath, 'utf8') === emptyBefore,
+    'exit=' + emptyBatch.code + ' 文件没被动=' + (readFileSync(emptyBatchPath, 'utf8') === emptyBefore));
 
   return observed;
 }

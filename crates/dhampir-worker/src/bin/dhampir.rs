@@ -33,7 +33,7 @@ use std::process::{Command, ExitCode};
 use dhampir_core::compose;
 use dhampir_core::effects::REGISTRY;
 use dhampir_core::overlay::{OverlaySpan, SubtitleTable, evaluate_overlay, overlay_spans};
-use dhampir_core::timeline::edit::{EditOp, apply as apply_edit};
+use dhampir_core::timeline::edit::{EditOp, TrimEdge, apply as apply_edit};
 use dhampir_core::timeline::history::History;
 use dhampir_core::timeline::host_api::{AssetInfoView, SampleView, gop_slices};
 use dhampir_core::timeline::project::{
@@ -86,6 +86,30 @@ const USAGE: &str = "\
                         （静默什么都不做更难查）。
                         --history 只在 --write 时才落盘：干跑不碰磁盘
 
+具名子命令（**同一实现的糖**：与 edit 走同一个 apply、同一条落盘路径）：
+  undo / redo  --project <文件> --history <文件> [--write]
+                        就是 edit --undo / edit --redo。连调用的函数都一样，
+                        所以行为不可能有第二份
+  clip    <动作> --project <文件> [--history <文件>] [--write]
+                        把「动片段」写成具名动作，开关拼出来的操作与 --op **逐字段相同**：
+                          insert --track <轨> --asset <id> --at <帧>
+                                 --source-in <帧> --length <帧> [--id <id>]
+                          trim   --layer <片段> --edge in|out --to <帧>
+                          split  --layer <片段> --at <帧>
+                          move   --layer <片段> --to <帧> [--track <轨>]
+                          remove --layer <片段> [--ripple]
+                        每个动作**要哪些开关、认哪些开关**都在参数这一关判：
+                        少给会报，**多给也会报**（静静丢掉一个开关比报错难查得多）
+  sequence <set> --project <文件> [--timebase <num/den>] [--width <像素>]
+                 [--height <像素>] [--write]
+                        序列设置：改帧率会按时间重算所有序列帧号。
+                        不给 --timebase / --width / --height 的那一项就不动它
+  batch   --project <文件> --script <文件> [--history <文件>] [--write]
+                        --script 是脚本文件：**一行一个 op 的 JSON**
+                        （空行与 # 开头是注释）。一次写、一条历史。
+                        中途有一步不成立就**整份不落盘**，并明说卡在第几行 ——
+                        否则用户只能靠 diff 猜是哪一步的问题
+
 公共选项：
   --asset-root <目录>   工程文件里 asset.uri 的相对根（默认 target/s3）
   --asset-map <文件>     兜底资产登记表（形状：assets.<id>.file）。
@@ -112,9 +136,13 @@ const USAGE: &str = "\
 
 /// 解析出来的选项。**用显式字段而不是一张 HashMap** ——
 /// 拼错的名字要在解析阶段就变成错误，而不是到用的时候才发现取不到。
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 struct Args {
     command: String,
+    /// 第二个位置参数。**只有 `clip` / `sequence` 用** ——
+    /// 它们是「把 op 写成一个具名动作」，动作名跟在子命令后面
+    /// （`clip split …`），而不是塞进 `--op` 的 JSON 里。
+    op_name: Option<String>,
     project: Option<String>,
     asset: Option<String>,
     out: Option<String>,
@@ -136,6 +164,24 @@ struct Args {
     font_file: Option<String>,
     subtitle_out: Option<String>,
     format: Option<SidecarFormat>,
+    /// `--track` / `--layer`：`clip insert` 放哪条轨 / 其余动作动哪个片段。
+    track: Option<String>,
+    layer: Option<String>,
+    /// `--at`：插入的落点 / 剃刀的刀口。
+    at: Option<i64>,
+    /// `--source-in`：插入时**素材自己的**入点（素材帧号，不是序列帧号）。
+    source_in: Option<i64>,
+    /// `--length`：插入占多长（序列帧数）。
+    length: Option<i64>,
+    /// `--edge`：修剪哪一边（`in` / `out`）。**解析阶段就定死** ——
+    /// 与 `--format` 同理，打错字要在参数这一关退 2。
+    edge: Option<TrimEdge>,
+    /// `--timebase`：序列帧率，写作 `num/den`（如 `30000/1001`）或单个数（按 den=1）。
+    timebase: Option<TimebaseDto>,
+    /// `--ripple`：删除时是否把后面的内容往前拉。不给就是留空。
+    ripple: bool,
+    /// `--script`：批处理脚本文件（一行一个 op 的 JSON）。
+    script: Option<String>,
     /// `--no-audio`：明确不要声音。**明确**是要点 —— 它让"这次是故意静音的"
     /// 与"这次本该有声却没出"在日志里能分开。
     no_audio: bool,
@@ -183,7 +229,7 @@ impl SidecarFormat {
 }
 
 /// 认得的**带值**选项。不在表里的一律报错。
-const KNOWN_VALUE_FLAGS: [&str; 14] = [
+const KNOWN_VALUE_FLAGS: [&str; 22] = [
     "--project",
     "--asset",
     "--out",
@@ -198,15 +244,25 @@ const KNOWN_VALUE_FLAGS: [&str; 14] = [
     "--width",
     "--height",
     "--font-file",
+    // clip / sequence / batch 用的（见 EDIT_FAMILY）。
+    "--track",
+    "--layer",
+    "--at",
+    "--source-in",
+    "--length",
+    "--edge",
+    "--timebase",
+    "--script",
 ];
 /// 认得的**不带值**选项。
-const KNOWN_FLAGS: [&str; 8] = [
+const KNOWN_FLAGS: [&str; 9] = [
     "--frame",
     "--write",
     "--replace",
     "--undo",
     "--redo",
     "--no-audio",
+    "--ripple",
     "-h",
     "--help",
 ];
@@ -216,10 +272,97 @@ const KNOWN_FLAGS: [&str; 8] = [
 /// 只有 render 认（sidecar 是"一段区间"的导出，frame 只有一帧，谈区间没有意义），
 /// 而且 `--format` 的值只认 srt / ass。那两条都在解析阶段判 —— 打错字要立刻看到。
 const KNOWN_SIDECAR_FLAGS: [&str; 2] = ["--subtitle-out", "--format"];
-/// 认得的子命令。
-const COMMANDS: [&str; 9] = [
-    "probe", "info", "gop", "frame", "render", "import", "library", "edit", "subtitle",
+
+/// **编辑那一组**子命令。
+///
+/// 它们共用的不是"差不多的代码"，而是**同一个函数**：`apply_edit` 是唯一的操作入口，
+/// 写盘与历史也只有一条路径（`record_edit`）。具名子命令做的事只有一件 ——
+/// 把开关拼成同一个 `EditOp`。所以「同一实现的糖」这句话能被测出来：
+/// 具名写法与等价的 `edit --op` 摊出来的 `EditOp` **逐字段相同**（见本文件的单测）。
+const EDIT_FAMILY: [&str; 6] = ["edit", "undo", "redo", "clip", "sequence", "batch"];
+
+/// 认 `--write` 的子命令。
+///
+/// **比 `EDIT_FAMILY` 多一个 `import`** —— 它也要落盘（把资产登记进工程）。
+/// 这两张表分开写是有意的：把它们合成一张，"import 认不认 --history" 这个问题
+/// 就被顺手答成"认"了，而那是错的。
+const WRITE_FAMILY: [&str; 7] = [
+    "edit", "undo", "redo", "clip", "sequence", "batch", "import",
 ];
+
+/// `clip` 认的动作名。**与 `EditOp` 里那五个"动片段"的变体一一对应** ——
+/// `set_sequence` 不在这里，它是 `sequence set`（它动的是序列，不是片段）。
+const CLIP_OPS: [&str; 5] = ["insert", "trim", "split", "move", "remove"];
+
+/// 认得的子命令。
+const COMMANDS: [&str; 14] = [
+    "probe", "info", "gop", "frame", "render", "import", "library", "edit", "subtitle", "undo",
+    "redo", "clip", "sequence", "batch",
+];
+
+/// `clip` / `sequence` **专用**的那些开关（别处一个都不认）。
+///
+/// 这是一张**显式表**而不是"看一眼代码里哪些字段"，因为漏掉一个的表现是
+/// 「参数被静静丢掉」—— 正是这份文件开头在防的那件事。
+fn clip_only_flags(args: &Args) -> Vec<(&'static str, bool)> {
+    vec![
+        ("--track", args.track.is_some()),
+        ("--layer", args.layer.is_some()),
+        ("--at", args.at.is_some()),
+        ("--source-in", args.source_in.is_some()),
+        ("--length", args.length.is_some()),
+        ("--edge", args.edge.is_some()),
+        ("--ripple", args.ripple),
+        ("--timebase", args.timebase.is_some()),
+    ]
+}
+
+/// 那五个**别处也认**、但对具名动作也有意义的开关
+/// （`--asset` 归 info / import，`--to` 归 render，`--width` / `--height` 归 render / frame）。
+/// 它们不能进 `clip_only_flags`（那样会把 render 也判红），但**必须**进每个动作的"总共认"清单 ——
+/// 否则 `clip split --width 100` 会被静静收下。
+fn shared_op_flags(args: &Args) -> Vec<(&'static str, bool)> {
+    vec![
+        ("--asset", args.asset.is_some()),
+        ("--to", args.to.is_some()),
+        ("--id", args.id.is_some()),
+        ("--width", args.width.is_some()),
+        ("--height", args.height.is_some()),
+    ]
+}
+
+/// 一个具名动作**要**哪些开关、**总共认**哪些开关。
+///
+/// 返回"总共认"而不是"还可以给哪些"是有意的：多给一个开关等于**那个开关被丢掉**，
+/// 而它的值会被读成默认值 —— 那是一种很安静的错。
+fn op_shape(op: &str) -> (&'static [&'static str], &'static [&'static str]) {
+    match op {
+        "insert" => (
+            &["--track", "--asset", "--at", "--source-in", "--length"],
+            &[
+                "--track", "--asset", "--at", "--source-in", "--length", "--id",
+            ],
+        ),
+        "trim" => (
+            &["--layer", "--edge", "--to"],
+            &["--layer", "--edge", "--to"],
+        ),
+        "split" => (&["--layer", "--at"], &["--layer", "--at"]),
+        "move" => (&["--layer", "--to"], &["--layer", "--to", "--track"]),
+        "remove" => (&["--layer"], &["--layer", "--ripple"]),
+        "set" => (&["--timebase"], &["--timebase", "--width", "--height"]),
+        _ => (&[], &[]),
+    }
+}
+
+/// 报错文案里的名单。
+fn fmt_flags(names: &[&str]) -> String {
+    if names.is_empty() {
+        "（没有）".to_string()
+    } else {
+        names.join(" / ")
+    }
+}
 
 /// 解析。**纯函数**，所以能脱离命令行单测。
 fn parse(argv: &[String]) -> Result<Args, String> {
@@ -237,12 +380,14 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             || token == "--undo"
             || token == "--redo"
             || token == "--no-audio"
+            || token == "--ripple"
         {
             match token {
                 "--write" => args.write = true,
                 "--replace" => args.replace = true,
                 "--undo" => args.undo = true,
                 "--no-audio" => args.no_audio = true,
+                "--ripple" => args.ripple = true,
                 _ => args.redo = true,
             }
             index += 1;
@@ -254,6 +399,14 @@ fn parse(argv: &[String]) -> Result<Args, String> {
                     return Err(format!("不认识的子命令：{token}"));
                 }
                 args.command = token.to_string();
+                index += 1;
+                continue;
+            }
+            // 第二个位置参数：只有 clip / sequence 收，而且只收一个。
+            // 别的子命令多给一个词一律报错 —— 静默丢掉一个位置参数，
+            // 用户会以为它生效了（与"选项被丢掉"同一种坏）。
+            if (args.command == "clip" || args.command == "sequence") && args.op_name.is_none() {
+                args.op_name = Some(token.to_string());
                 index += 1;
                 continue;
             }
@@ -292,6 +445,32 @@ fn parse(argv: &[String]) -> Result<Args, String> {
                 })?;
                 args.format = Some(parsed);
             }
+            "--track" => args.track = Some(value),
+            "--layer" => args.layer = Some(value),
+            "--at" => args.at = Some(parse_int(&token, &value)?),
+            "--source-in" => args.source_in = Some(parse_int(&token, &value)?),
+            "--length" => args.length = Some(parse_int(&token, &value)?),
+            "--edge" => {
+                // 与 `--format` 同一条口径：**值只认两种，且在参数这一关判**。
+                // 等到动手时才发现边写错，是一条成功的编辑被报成用法错。
+                let parsed = match value.as_str() {
+                    "in" => TrimEdge::In,
+                    "out" => TrimEdge::Out,
+                    other => {
+                        return Err(format!("--edge 只认 in / out，得到 {other}"));
+                    }
+                };
+                args.edge = Some(parsed);
+            }
+            "--timebase" => {
+                let (num, den) = parse_rate(&value)
+                    .ok_or_else(|| format!("--timebase 要 num/den（如 30000/1001）或一个数，得到 {value}"))?;
+                if num == 0 {
+                    return Err(format!("--timebase 的分子不能是 0（得到 {value}）"));
+                }
+                args.timebase = Some(TimebaseDto { num, den });
+            }
+            "--script" => args.script = Some(value),
             other => return Err(format!("不认识的选项：{other}")),
         }
         index += 2;
@@ -310,14 +489,40 @@ fn parse(argv: &[String]) -> Result<Args, String> {
     if args.format.is_some() && args.subtitle_out.is_none() {
         return Err("--format 要跟着 --subtitle-out：它说明的是那份侧挂文件的格式".to_string());
     }
-    // 撤销/重做那一组只归 edit。口径与上面侧挂那两条**完全一样**：
-    // 别的子命令静默收下就是「参数被丢掉」——用户以为退了，结果什么都没发生，而退出码还是 0。
-    if (args.undo || args.redo || args.history.is_some())
+    // 撤销/重做那两个**旗标**只归 edit —— 它们的新写法是具名子命令 undo / redo。
+    // 口径与上面侧挂那两条**完全一样**：别的子命令静默收下就是「参数被丢掉」——
+    // 用户以为退了，结果什么都没发生，而退出码还是 0。
+    if (args.undo || args.redo) && !args.command.is_empty() && args.command != "edit" {
+        return Err(format!(
+            "--undo / --redo 只有 edit 认（现在给的是 {}）；\
+             另有两个具名写法：dhampir undo / dhampir redo",
+            args.command
+        ));
+    }
+    // `--history` / `--write` 的归属**不是同一张表**：`--history` 只有编辑那一组认，
+    // 而 `--write` 连 `import` 也认（它也要落盘）。合成一张就会把
+    // 「import 认不认 --history」顺手答成"认"，而那是错的。
+    if args.history.is_some()
         && !args.command.is_empty()
-        && args.command != "edit"
+        && !EDIT_FAMILY.contains(&args.command.as_str())
     {
         return Err(format!(
-            "--undo / --redo / --history 只有 edit 认（现在给的是 {}）",
+            "--history 只有 {} 认（现在给的是 {}）",
+            fmt_flags(&EDIT_FAMILY),
+            args.command
+        ));
+    }
+    if args.write && !args.command.is_empty() && !WRITE_FAMILY.contains(&args.command.as_str()) {
+        return Err(format!(
+            "--write 只有 {} 认（现在给的是 {}）",
+            fmt_flags(&WRITE_FAMILY),
+            args.command
+        ));
+    }
+    // `--op` 只归 edit：具名子命令存在的意义就是**不必**手写那段 JSON。
+    if args.op.is_some() && !args.command.is_empty() && args.command != "edit" {
+        return Err(format!(
+            "--op 只有 edit 认（现在给的是 {}）：clip / sequence 用开关拼同一个操作",
             args.command
         ));
     }
@@ -333,6 +538,86 @@ fn parse(argv: &[String]) -> Result<Args, String> {
         return Err(
             "--undo / --redo 要跟 --history <文件>：历史存哪得由你说，本工具不替你猜".to_string(),
         );
+    }
+    // ---- 具名子命令 ----
+    // undo / redo：与 `edit --undo` 同一条规矩（历史存哪必须由你说）。
+    if (args.command == "undo" || args.command == "redo") && args.history.is_none() {
+        return Err(format!(
+            "{} 要跟 --history <文件>：历史存哪得由你说，本工具不替你猜",
+            args.command
+        ));
+    }
+    // clip / sequence：动作名必给，而且必须在名单里。
+    if args.command == "clip" {
+        let op = args
+            .op_name
+            .as_deref()
+            .ok_or_else(|| format!("clip 要一个动作名：{}", fmt_flags(&CLIP_OPS)))?;
+        if !CLIP_OPS.contains(&op) {
+            return Err(format!(
+                "clip 不认识的动作：{op}（认 {}）",
+                fmt_flags(&CLIP_OPS)
+            ));
+        }
+    }
+    if args.command == "sequence" {
+        match args.op_name.as_deref() {
+            None => return Err("sequence 要一个动作名：set".to_string()),
+            Some("set") => {}
+            Some(other) => {
+                return Err(format!("sequence 不认识的动作：{other}（只认 set）"));
+            }
+        }
+    }
+    // batch：脚本文件必给。
+    if args.command == "batch" && args.script.is_none() {
+        return Err("batch 要 --script <文件>：一行一个 op 的 JSON".to_string());
+    }
+    // 那八个开关只归 clip / sequence。
+    if args.command != "clip" && args.command != "sequence" {
+        let stray: Vec<&str> = clip_only_flags(&args)
+            .into_iter()
+            .filter(|(_, present)| *present)
+            .map(|(name, _)| name)
+            .collect();
+        if !stray.is_empty() {
+            return Err(format!(
+                "{} 只有 clip / sequence 认（现在给的是 {}）",
+                fmt_flags(&stray),
+                if args.command.is_empty() {
+                    "（没给子命令）"
+                } else {
+                    args.command.as_str()
+                }
+            ));
+        }
+    }
+    // `--script` 只归 batch。
+    if args.script.is_some() && args.command != "batch" {
+        return Err(format!(
+            "--script 只有 batch 认（现在给的是 {}）",
+            args.command
+        ));
+    }
+    // 每个动作**要**哪些、**总共认**哪些。多给与少给都是错 —— 两种都会让"参数被丢掉"。
+    if args.command == "clip" || args.command == "sequence" {
+        let op = args.op_name.as_deref().unwrap_or_default();
+        let (need, allowed) = op_shape(op);
+        let mut given: Vec<(&'static str, bool)> = clip_only_flags(&args);
+        given.extend(shared_op_flags(&args));
+        for (name, present) in &given {
+            if *present && !allowed.contains(name) {
+                return Err(format!(
+                    "{op} 不吃 {name}（它认的是 {}）",
+                    fmt_flags(allowed)
+                ));
+            }
+        }
+        for name in need {
+            if !given.iter().any(|(n, present)| n == name && *present) {
+                return Err(format!("{op} 要 {name}（它认的是 {}）", fmt_flags(allowed)));
+            }
+        }
     }
     Ok(args)
 }
@@ -1467,7 +1752,10 @@ fn save_history(path: &str, history: &History) -> Result<(), String> {
 }
 
 fn cmd_edit(args: &Args) -> Result<ExitCode, String> {
-    let project = args.project.as_ref().ok_or("edit 要 --project <文件>")?;
+    let project = args
+        .project
+        .as_ref()
+        .ok_or_else(|| format!("{} 要 --project <文件>", command_name(args)))?;
     let doc = match load_project_or_usage(project) {
         Ok(doc) => doc,
         Err(code) => return Ok(code),
@@ -1486,23 +1774,61 @@ fn cmd_edit(args: &Args) -> Result<ExitCode, String> {
             return Ok(ExitCode::from(2));
         }
     };
-    let outcome = apply_edit(&doc, REGISTRY, &op);
+    record_edit(args, project, doc, &op)
+}
+
+/// 日志与报错里该把这个调用叫成什么。**`undo` 报错时不该说"edit 要…"** ——
+/// 用户敲的是哪个词，就回哪个词。
+fn command_name(args: &Args) -> &str {
+    if args.command.is_empty() {
+        "edit"
+    } else {
+        args.command.as_str()
+    }
+}
+
+/// 落盘这一步：**先历史、后工程**。
+///
+/// 顺序反过来的话，历史写失败会留下「编辑已经落盘、却退不回去」——
+/// 而用户看到的是一条错误，会以为没改。`record_edit` 与 `cmd_batch` 共用这一处，
+/// 所以这条顺序只有一份实现。
+fn commit_edit(
+    args: &Args,
+    project: &str,
+    before: &ProjectDoc,
+    after: &ProjectDoc,
+    label: &str,
+) -> Result<(), String> {
+    if let Some(history_path) = args.history.as_ref() {
+        let mut history = load_history(history_path)?;
+        history.push(label.to_string(), before.clone());
+        save_history(history_path, &history)?;
+    }
+    let text = serde_json::to_string_pretty(after).map_err(|error| error.to_string())?;
+    std::fs::write(project, format!("{text}\n"))
+        .map_err(|error| format!("写不回工程 {project}：{error}"))?;
+    Ok(())
+}
+
+/// **一次操作的唯一落点**：算、落盘、打印结果。
+///
+/// `edit --op` 与具名子命令 `clip` / `sequence` 都走这里 ——
+/// 「同一实现的糖」这句验收要求说的就是这件事，而且它是**可测**的：
+/// 具名写法与等价的 `edit --op` 给出的**工程字节**与 **stdout JSON** 逐字节相同。
+fn record_edit(
+    args: &Args,
+    project: &str,
+    doc: ProjectDoc,
+    op: &EditOp,
+) -> Result<ExitCode, String> {
+    let outcome = apply_edit(&doc, REGISTRY, op);
     if args.write && outcome.is_ok() {
-        // 顺序是**先历史、后工程**：反过来的话，历史写失败会留下
-        // 「编辑已经落盘、却退不回去」——而用户看到的是一条错误，会以为没改。
-        if let Some(history_path) = args.history.as_ref() {
-            let mut history = load_history(history_path)?;
-            let label = if outcome.summary.is_empty() {
-                "编辑".to_string()
-            } else {
-                outcome.summary.clone()
-            };
-            history.push(label, doc.clone());
-            save_history(history_path, &history)?;
-        }
-        let text = serde_json::to_string_pretty(&outcome.doc).map_err(|error| error.to_string())?;
-        std::fs::write(project, format!("{text}\n"))
-            .map_err(|error| format!("写不回工程 {project}：{error}"))?;
+        let label = if outcome.summary.is_empty() {
+            "编辑".to_string()
+        } else {
+            outcome.summary.clone()
+        };
+        commit_edit(args, project, &doc, &outcome.doc, &label)?;
     }
     print_json(&serde_json::json!({
         "ok": outcome.is_ok(),
@@ -1515,6 +1841,160 @@ fn cmd_edit(args: &Args) -> Result<ExitCode, String> {
     } else {
         ExitCode::from(2)
     })
+}
+
+/// 把具名动作的开关拼成**同一个** `EditOp`。
+///
+/// 全部字段在解析阶段已经过一遍（要哪些、认哪些），所以这里不再报用法错 ——
+/// 从这里报错会变成退出码 1，而"开关给错了"是退出码 2 的事。
+/// 两边万一对不上，`expect` 会当场炸掉，**不会静静用默认值跑完**
+/// （那正是最坏的结果：一次看着成功的编辑，内容却不是用户要的）。
+fn build_named_op(args: &Args) -> EditOp {
+    let op = args.op_name.as_deref().unwrap_or_default();
+    match op {
+        "insert" => EditOp::Insert {
+            track: args.track.clone().expect("--track 解析阶段就要求了"),
+            asset: args.asset.clone().expect("--asset 解析阶段就要求了"),
+            at: args.at.expect("--at 解析阶段就要求了"),
+            source_in: args.source_in.expect("--source-in 解析阶段就要求了"),
+            length: args.length.expect("--length 解析阶段就要求了"),
+            id: args.id.clone(),
+        },
+        "trim" => EditOp::Trim {
+            layer: args.layer.clone().expect("--layer 解析阶段就要求了"),
+            edge: args.edge.expect("--edge 解析阶段就要求了"),
+            to: args.to.expect("--to 解析阶段就要求了"),
+        },
+        "split" => EditOp::Split {
+            layer: args.layer.clone().expect("--layer 解析阶段就要求了"),
+            at: args.at.expect("--at 解析阶段就要求了"),
+        },
+        "move" => EditOp::Move {
+            layer: args.layer.clone().expect("--layer 解析阶段就要求了"),
+            to: args.to.expect("--to 解析阶段就要求了"),
+            track: args.track.clone(),
+        },
+        "remove" => EditOp::Remove {
+            layer: args.layer.clone().expect("--layer 解析阶段就要求了"),
+            ripple: args.ripple,
+        },
+        "set" => EditOp::SetSequence {
+            timebase: args.timebase.clone().expect("--timebase 解析阶段就要求了"),
+            width: args.width.unwrap_or(0),
+            height: args.height.unwrap_or(0),
+        },
+        other => unreachable!("{other} 在解析阶段就被挡掉了"),
+    }
+}
+
+/// `clip` / `sequence`：把开关拼成 op，然后走**同一条** `record_edit`。
+fn cmd_named_op(args: &Args) -> Result<ExitCode, String> {
+    let project = args
+        .project
+        .as_ref()
+        .ok_or_else(|| format!("{} 要 --project <文件>", command_name(args)))?;
+    let doc = match load_project_or_usage(project) {
+        Ok(doc) => doc,
+        Err(code) => return Ok(code),
+    };
+    let op = build_named_op(args);
+    record_edit(args, project, doc, &op)
+}
+
+/// `undo` / `redo`：**连函数都不换** —— 把旗标设上再调 `cmd_edit`。
+///
+/// 这是"糖"最诚实的形态：想有一处行为不同都不可能，因为根本没有第二份实现。
+fn cmd_named_history(args: &Args) -> Result<ExitCode, String> {
+    cmd_edit(&history_alias(args))
+}
+
+/// 把具名 `undo` / `redo` 折成 `edit` 那一组旗标。
+///
+/// **抽成纯函数是为了能测**：具名写法折出来的 `Args` 必须与
+/// `edit --undo` / `edit --redo` 解析出来的 `Args` **逐字段相同**。
+/// 留在这里当私有实现的话，"同一实现的糖"就只是一句注释。
+fn history_alias(args: &Args) -> Args {
+    let mut local = args.clone();
+    local.undo = args.command == "undo";
+    local.redo = args.command == "redo";
+    local.command = "edit".to_string();
+    local
+}
+
+/// `batch`：把脚本里的 op **一个接一个**走同一条 `apply`。
+///
+/// 语义是**一次写、一条历史**，不是一个"循环调 N 次 edit"的宏：
+///
+/// * 中途有一步不成立就**整份不落盘**，并明说**卡在第几行** ——
+///   否则用户只能靠 diff 猜是哪一步的问题；
+/// * 空脚本**不算成功**：它会打印 ok 却什么都没做，与"脚本路径写错了"分不开。
+fn cmd_batch(args: &Args) -> Result<ExitCode, String> {
+    let project = args.project.as_ref().ok_or("batch 要 --project <文件>")?;
+    let script = args.script.as_ref().expect("--script 解析阶段就要求了");
+    let doc = match load_project_or_usage(project) {
+        Ok(doc) => doc,
+        Err(code) => return Ok(code),
+    };
+    let text =
+        std::fs::read_to_string(script).map_err(|error| format!("读不了脚本 {script}：{error}"))?;
+    let mut ops: Vec<(usize, EditOp)> = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+        // 空行与 `#` 开头是注释：脚本是给人写的，得能写注释。
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let op: EditOp = serde_json::from_str(trimmed)
+            .map_err(|error| format!("脚本第 {} 行不是合法的编辑操作：{error}", index + 1))?;
+        ops.push((index + 1, op));
+    }
+    if ops.is_empty() {
+        eprintln!("脚本 {script} 里一个操作都没有（空行与 # 注释不算）");
+        return Ok(ExitCode::from(2));
+    }
+    // 留一份**批处理之前**的原样：它是历史里那一步的 before。
+    let mut current = doc.clone();
+    let mut summaries: Vec<String> = Vec::new();
+    for (line, op) in &ops {
+        let outcome = apply_edit(&current, REGISTRY, op);
+        if !outcome.is_ok() {
+            let issues: Vec<serde_json::Value> = outcome
+                .issues
+                .iter()
+                .map(|issue| {
+                    serde_json::json!({
+                        "code": issue.code,
+                        "path": issue.path,
+                        "message": format!("第 {line} 行：{}", issue.message),
+                    })
+                })
+                .collect();
+            print_json(&serde_json::json!({
+                "ok": false,
+                "summary": format!("批处理在第 {line} 行停下"),
+                "written": false,
+                "steps": ops.len(),
+                "issues": issues,
+            }))?;
+            return Ok(ExitCode::from(2));
+        }
+        if !outcome.summary.is_empty() {
+            summaries.push(outcome.summary.clone());
+        }
+        current = outcome.doc;
+    }
+    let label = format!("批处理：{} 步", ops.len());
+    if args.write {
+        commit_edit(args, project, &doc, &current, &label)?;
+    }
+    print_json(&serde_json::json!({
+        "ok": true,
+        "summary": format!("{label}（{}）", summaries.join("；")),
+        "written": args.write,
+        "steps": ops.len(),
+        "issues": [],
+    }))?;
+    Ok(ExitCode::SUCCESS)
 }
 
 /// 撤销 / 重做：从历史文件里退一步或进一步。
@@ -1587,6 +2067,9 @@ fn main() -> ExitCode {
         "library" => cmd_library(&args),
         "edit" => cmd_edit(&args),
         "subtitle" => cmd_subtitle(&args),
+        "undo" | "redo" => cmd_named_history(&args),
+        "clip" | "sequence" => cmd_named_op(&args),
+        "batch" => cmd_batch(&args),
         other => Err(format!("不认识的子命令：{other}")),
     };
     match result {
@@ -1690,12 +2173,69 @@ mod tests {
         // 表里列了却不处理的选项会落到 other 分支报错 —— 而它已经在表里，
         // 说明有人加了选项却没写分支。这条把它变成红。
         //
-        // 用 `edit` 探是因为有几个选项**只有某个子命令认**（--history 归 edit、
-        // --subtitle-out 归 render），拿 `probe` 探会把「限制」误报成「没处理」。
+        // 探针必须**挑对子命令**：有些选项只有某一组认
+        // （--history 归编辑那一组、--subtitle-out 归 render、--track 归 clip）。
+        // 一律拿 `edit` 探会把「限制」误报成「没处理」——那段注释当年就是这么写的，
+        // 直到 T7 把 `--layer` 这类选项加进来，它才真的不够用了。
+        //
+        // 所以这里是一张**显式**的"谁认它 + 一条完整的合法命令行"的表。
+        // 它必须盖住整张 KNOWN_VALUE_FLAGS：新加一个选项却不在这儿声明谁认它、
+        // 怎么用，这条就红。**这比原来那版强**——原来那版只需要选项能被 `edit` 收下。
+        let probe: [(&str, &[&str]); 22] = [
+            ("--project", &["probe", "--project", "1"]),
+            ("--asset", &["info", "--asset", "1"]),
+            ("--out", &["render", "--out", "1"]),
+            ("--asset-root", &["probe", "--asset-root", "1"]),
+            ("--asset-map", &["probe", "--asset-map", "1"]),
+            ("--file", &["import", "--file", "1"]),
+            ("--id", &["import", "--id", "1"]),
+            ("--op", &["edit", "--op", "1"]),
+            ("--history", &["edit", "--history", "1"]),
+            ("--from", &["render", "--from", "1"]),
+            ("--to", &["render", "--to", "1"]),
+            ("--width", &["render", "--width", "1"]),
+            ("--height", &["render", "--height", "1"]),
+            ("--font-file", &["frame", "--font-file", "1"]),
+            (
+                "--track",
+                &[
+                    "clip", "insert", "--track", "1", "--asset", "a", "--at", "1",
+                    "--source-in", "0", "--length", "1",
+                ],
+            ),
+            ("--layer", &["clip", "split", "--layer", "1", "--at", "1"]),
+            ("--at", &["clip", "split", "--layer", "1", "--at", "1"]),
+            (
+                "--source-in",
+                &[
+                    "clip", "insert", "--track", "1", "--asset", "a", "--at", "1",
+                    "--source-in", "0", "--length", "1",
+                ],
+            ),
+            (
+                "--length",
+                &[
+                    "clip", "insert", "--track", "1", "--asset", "a", "--at", "1",
+                    "--source-in", "0", "--length", "1",
+                ],
+            ),
+            ("--edge", &["clip", "trim", "--layer", "1", "--edge", "in", "--to", "1"]),
+            ("--timebase", &["sequence", "set", "--timebase", "30"]),
+            ("--script", &["batch", "--script", "1"]),
+        ];
+        assert_eq!(
+            probe.len(),
+            KNOWN_VALUE_FLAGS.len(),
+            "探针表要与 KNOWN_VALUE_FLAGS 一一对应"
+        );
         for flag in KNOWN_VALUE_FLAGS {
-            let parsed = parse(&argv(&["edit", flag, "1"]))
+            let (_, line) = probe
+                .iter()
+                .find(|(name, _)| *name == flag)
+                .unwrap_or_else(|| panic!("表里的选项 {flag} 没说谁认它"));
+            let parsed = parse(&argv(line))
                 .unwrap_or_else(|error| panic!("表里的选项 {flag} 解析不过：{error}"));
-            assert_eq!(parsed.command, "edit");
+            assert!(!parsed.command.is_empty());
         }
     }
 
@@ -1901,6 +2441,218 @@ mod tests {
             assert!(USAGE.contains(name), "帮助里没写 {name}");
         }
         assert!(USAGE.contains("只有 render 认"), "帮助里没说清谁能用");
+    }
+
+    #[test]
+    fn 帮助里列了每一个认得的子命令() {
+        // 写了一个子命令却没在帮助里说，等于它不存在。
+        // check-cli 也在真跑 `--help` 对账，这一条是最便宜的那道。
+        for name in COMMANDS {
+            assert!(USAGE.contains(name), "帮助里没写 {name}");
+        }
+    }
+
+    #[test]
+    fn 具名动作拼出来的操作与_op_那份逐字段相同() {
+        // 「同一实现的糖」这句验收要求，在这里变成一条可执行的判据：
+        // 开关拼出来的 EditOp 必须与手写 --op 的那份**完全相等**。
+        // 是相等而不是"差不多" —— 差一个字段就是两套实现。
+        let cases: [(&[&str], &str); 5] = [
+            (
+                &[
+                    "clip", "insert", "--project", "p.json", "--track", "c", "--asset", "a.mp4",
+                    "--at", "10", "--source-in", "3", "--length", "20", "--id", "x",
+                ],
+                r#"{"op":"insert","track":"c","asset":"a.mp4","at":10,"source_in":3,"length":20,"id":"x"}"#,
+            ),
+            (
+                &[
+                    "clip", "trim", "--project", "p.json", "--layer", "c", "--edge", "out", "--to",
+                    "40",
+                ],
+                r#"{"op":"trim","layer":"c","edge":"out","to":40}"#,
+            ),
+            (
+                &["clip", "split", "--project", "p.json", "--layer", "c", "--at", "75"],
+                r#"{"op":"split","layer":"c","at":75}"#,
+            ),
+            (
+                &[
+                    "clip", "move", "--project", "p.json", "--layer", "c", "--to", "30", "--track",
+                    "d",
+                ],
+                r#"{"op":"move","layer":"c","to":30,"track":"d"}"#,
+            ),
+            (
+                &["clip", "remove", "--project", "p.json", "--layer", "c", "--ripple"],
+                r#"{"op":"remove","layer":"c","ripple":true}"#,
+            ),
+        ];
+        for (cli, json) in cases {
+            let args = parse(&argv(cli)).expect("合法");
+            let manual: EditOp = serde_json::from_str(json).expect("参照 JSON 合法");
+            assert_eq!(
+                build_named_op(&args),
+                manual,
+                "具名写法与 --op 对不上：{}",
+                cli.join(" ")
+            );
+        }
+    }
+
+    #[test]
+    fn sequence_set_也拼成同一份操作() {
+        let args = parse(&argv(&[
+            "sequence", "set", "--project", "p.json", "--timebase", "30000/1001", "--width",
+            "1920", "--height", "1080",
+        ]))
+        .expect("合法");
+        let manual: EditOp = serde_json::from_str(
+            r#"{"op":"set_sequence","timebase":{"num":30000,"den":1001},"width":1920,"height":1080}"#,
+        )
+        .expect("参照 JSON 合法");
+        assert_eq!(build_named_op(&args), manual);
+        // 不给 --width / --height 时折成 0，而 0 在 set_sequence 里的意思是「不动它」。
+        let bare = parse(&argv(&["sequence", "set", "--project", "p.json", "--timebase", "30"]))
+            .expect("合法");
+        let manual: EditOp = serde_json::from_str(
+            r#"{"op":"set_sequence","timebase":{"num":30,"den":1},"width":0,"height":0}"#,
+        )
+        .expect("参照 JSON 合法");
+        assert_eq!(build_named_op(&bare), manual);
+    }
+
+    #[test]
+    fn undo_redo_折出来就是_edit_的那两个旗标() {
+        // 这一条比"看起来一样"强：它比的是**解析结果逐字段相同**。
+        let named =
+            parse(&argv(&["undo", "--project", "p.json", "--history", "h.json", "--write"]))
+                .expect("合法");
+        let flag = parse(&argv(&[
+            "edit", "--project", "p.json", "--history", "h.json", "--undo", "--write",
+        ]))
+        .expect("合法");
+        assert_eq!(
+            history_alias(&named),
+            flag,
+            "undo 与 edit --undo 必须折成同一件事"
+        );
+
+        let named = parse(&argv(&["redo", "--project", "p.json", "--history", "h.json"]))
+            .expect("合法");
+        let flag = parse(&argv(&[
+            "edit", "--project", "p.json", "--history", "h.json", "--redo",
+        ]))
+        .expect("合法");
+        assert_eq!(history_alias(&named), flag);
+    }
+
+    #[test]
+    fn 具名动作少给开关会报错() {
+        // 少给一个开关**不能**拿默认值顶上：`--source-in` 默认 0 的意思是"从素材头开始"，
+        // 而省掉它的那个人可能只是漏了。两种意图分不开，所以判错。
+        let err = parse(&argv(&[
+            "clip", "insert", "--project", "p.json", "--track", "c", "--asset", "a.mp4", "--at",
+            "10", "--length", "20",
+        ]))
+        .expect_err("少 --source-in 应当报错");
+        assert!(err.contains("--source-in"), "{err}");
+    }
+
+    #[test]
+    fn 具名动作多给开关也会报错() {
+        // **多给**与少给一样坏：那个开关会被丢掉，而用户以为它生效了。
+        let err = parse(&argv(&[
+            "clip", "split", "--project", "p.json", "--layer", "c", "--at", "75", "--length",
+            "20",
+        ]))
+        .expect_err("split 不吃 --length");
+        assert!(err.contains("--length"), "{err}");
+        // 连"别的子命令本来就认的"也不许混进来：--width 是 render / frame 的。
+        let err = parse(&argv(&[
+            "clip", "split", "--project", "p.json", "--layer", "c", "--at", "75", "--width", "640",
+        ]))
+        .expect_err("split 不吃 --width");
+        assert!(err.contains("--width"), "{err}");
+    }
+
+    #[test]
+    fn 不认识的具名动作与缺动作都被挡住() {
+        let err = parse(&argv(&["clip", "rotate", "--project", "p.json"])).expect_err("不认识");
+        assert!(err.contains("rotate"), "{err}");
+        let err = parse(&argv(&["clip", "--project", "p.json"])).expect_err("缺动作名");
+        assert!(err.contains("动作名"), "{err}");
+        let err = parse(&argv(&["sequence", "scale", "--project", "p.json"])).expect_err("不认识");
+        assert!(err.contains("scale"), "{err}");
+    }
+
+    #[test]
+    fn 那一组开关只归_clip_与_sequence() {
+        // 与 --subtitle-out 那两条同一个口径：别的子命令静默收下 = 参数被丢掉。
+        let err = parse(&argv(&["probe", "--project", "p.json", "--layer", "c"]))
+            .expect_err("probe 不认 --layer");
+        assert!(err.contains("--layer"), "{err}");
+        let err = parse(&argv(&["edit", "--project", "p.json", "--op", "{}", "--at", "3"]))
+            .expect_err("edit 不认 --at（它走 --op）");
+        assert!(err.contains("--at"), "{err}");
+    }
+
+    #[test]
+    fn 编辑那一组的选项不外流() {
+        // --op 只归 edit：具名子命令存在的意义就是不必手写那段 JSON。
+        let err = parse(&argv(&[
+            "clip", "split", "--project", "p.json", "--layer", "c", "--at", "1", "--op", "{}",
+        ]))
+        .expect_err("--op 只归 edit");
+        assert!(err.contains("--op"), "{err}");
+        // --write / --history **不是同一张表**：`import` 也落盘，所以它认 --write；
+        // 但它不认 --history。这两条一起测，是为了不让下一个人把它们合成一张表 ——
+        // 合成之后「import 认不认 --history」会被顺手答成"认"，而那是错的。
+        assert!(
+            parse(&argv(&["import", "--project", "p.json", "--file", "a.mp4", "--write"])).is_ok(),
+            "import 也要落盘，它必须认 --write"
+        );
+        let err = parse(&argv(&[
+            "import", "--project", "p.json", "--file", "a.mp4", "--history", "h.json",
+        ]))
+        .expect_err("import 不认 --history");
+        assert!(err.contains("--history"), "{err}");
+        let err = parse(&argv(&["probe", "--project", "p.json", "--write"]))
+            .expect_err("probe 不认 --write");
+        assert!(err.contains("--write"), "{err}");
+        // 具名 undo / redo 与旗标同一条规矩：历史存哪必须由你说。
+        let err = parse(&argv(&["undo", "--project", "p.json"])).expect_err("undo 缺 --history");
+        assert!(err.contains("--history"), "{err}");
+    }
+
+    #[test]
+    fn batch_要脚本文件_而脚本只归它() {
+        let err = parse(&argv(&["batch", "--project", "p.json"])).expect_err("batch 缺 --script");
+        assert!(err.contains("--script"), "{err}");
+        let err = parse(&argv(&[
+            "edit", "--project", "p.json", "--op", "{}", "--script", "s.ndjson",
+        ]))
+        .expect_err("--script 只归 batch");
+        assert!(err.contains("--script"), "{err}");
+    }
+
+    #[test]
+    fn edge_与_timebase_在参数这一关就定死() {
+        let err = parse(&argv(&[
+            "clip", "trim", "--project", "p.json", "--layer", "c", "--edge", "left", "--to", "1",
+        ]))
+        .expect_err("--edge 只认 in / out");
+        assert!(err.contains("--edge"), "{err}");
+        let err = parse(&argv(&[
+            "sequence", "set", "--project", "p.json", "--timebase", "0/1",
+        ]))
+        .expect_err("分子 0 不是帧率");
+        assert!(err.contains("--timebase"), "{err}");
+        let err = parse(&argv(&[
+            "sequence", "set", "--project", "p.json", "--timebase", "abc",
+        ]))
+        .expect_err("认不出的帧率");
+        assert!(err.contains("--timebase"), "{err}");
     }
 
     #[test]
