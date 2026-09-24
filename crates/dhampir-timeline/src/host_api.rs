@@ -205,7 +205,14 @@ pub fn to_json<T: Serialize>(value: &T) -> String {
 ///
 /// 对端问版本用的是 wasm 侧的 `dhampir_host_api_version`，不是这个常量本身 ——
 /// 文档在 `docs/host-api.md`，那份与这个值由 `scripts/api-surface.mjs` 比对。
-pub const HOST_API_VERSION: u32 = 3;
+///
+/// ## v3 -> v4（T4.3）
+///
+/// 多了一对导出 `dhampir_project_undo` / `dhampir_project_redo`。
+/// **形状一个都没变**（两者都沿用编辑那套 `{ok, summary, issues}`）—— 升版本是因为
+/// 对端能看到的**导出面**变了：老前端不会知道有这两条路，而新前端对着老宿主调它们
+/// 会直接 `undefined`。这正是「问一次版本」要拦的那类错配。
+pub const HOST_API_VERSION: u32 = 4;
 
 /// `dhampir_project_open` 的返回体。
 ///

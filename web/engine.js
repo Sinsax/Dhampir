@@ -182,6 +182,29 @@ export class Engine {
     return result;
   }
 
+  /**
+   * 撤销 / 重做一步。栈本身在 Rust（dhampir-timeline::history），
+   * 这里只是把宿主里那份工程按栈顶换掉，**规则不在 JS**。
+   *
+   * 退不动时宿主里那份一个字都没变，返回体的 `issues` 里带 `nothing_to_undo`
+   * / `nothing_to_redo`——所以这里可以无条件取回工程副本。
+   */
+  undo() {
+    const result = JSON.parse(this.mod.dhampir_project_undo());
+    if (result.ok === true) {
+      this.projectFile = JSON.parse(this.mod.dhampir_project_doc());
+    }
+    return result;
+  }
+
+  redo() {
+    const result = JSON.parse(this.mod.dhampir_project_redo());
+    if (result.ok === true) {
+      this.projectFile = JSON.parse(this.mod.dhampir_project_doc());
+    }
+    return result;
+  }
+
   /** 重新校验当前工程但不改变它——编辑过程中用来显示问题。 */
   validate(project) {
     const json = typeof project === "string" ? project : JSON.stringify(project);

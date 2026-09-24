@@ -187,10 +187,292 @@ async function runSubtitleVerdict(name) {
   return report(ok, reason, { subtitles: subtitles, frames: manifests, probes: probes });
 }
 
+/** 等到条件成立；超时就返回 false。
+ *
+ * 判定路径上**不能只 sleep 一段固定时间** —— 那样在慢机器上会把「还没跑完」
+ * 记成「没跑」（反过来也一样）。等的是**事实**（状态栏那一句变了），不是时间。 */
+async function waitUntil(predicate, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    let value = false;
+    try { value = predicate(); } catch (error) { value = false; }
+    if (value === true) return true;
+    if (Date.now() > deadline) return false;
+    await new Promise((resolve) => { setTimeout(resolve, 25); });
+  }
+}
+
+/** 在工程里按 id 找一个元素的起点；找不到给 null。
+ *
+ * **不能按下标找**：`move` 会把那条轨道上的元素按起点重排。 */
+function startOfLayer(doc, id) {
+  for (const track of doc.timeline.tracks) {
+    for (const layer of track.layers) {
+      if (layer.id === id) return layer.start;
+    }
+  }
+  return null;
+}
+
+/**
+ * 验收判据（T4.3）：**拖一下（带着吸附）→ 撤销 → 重做**。
+ *
+ * 页面做三件事，**结论不在这里下**（驱动拿 CLI 与 fixture 对照着判）：
+ *   1. 把某个元素的 bar **真的拖一下** —— 合成分派的 pointer 事件走的是与手拖
+ *      同一条 pointerdown/move/up 路；落点刻意停在「别人的边界旁边一帧」，
+ *      于是「有没有吸附」在回传的事实里看得见（原始落点不是任何边界、最终落点是）；
+ *   2. 把鼠标末位移出来的**预览帧**从 `bar.style.left` 读回来 —— 那一刻
+ *      `state.doc` 一个字都还没动，所以读到的只可能是预览；
+ *   3. 点那两颗真按钮（撤销 / 重做）各一次，把 拖动前 / 拖动后 / 撤销后 / 重做后
+ *      四份工程原样回传，并附上引擎自己给的那三句说明。
+ *
+ * 换算口径与拖拽实现共用同一份事实：总帧数**从界面上的百分比反解**出来
+ * （渲染时用的那个数才是拖拽实现手里的那个数），再与引擎的端帧对一次 ——
+ * 对不上就直说「界面上画的与模型对不上」，不猜。
+ */
+async function runUndoDragVerdict(name) {
+  const report = async (ok, reason, extra) => {
+    await reportVerdict(name, Object.assign({ kind: "undo-drag", ok: ok, reason: reason }, extra || {}));
+  };
+  if (state.doc === null || state.doc === undefined) return report(false, "页面里还没有工程");
+  const tracks = state.doc.timeline.tracks;
+  // 界面上的行：行按轨道顺序、每行里的 .layer 按元素顺序（renderTimeline 就是这么摆的）。
+  const timelineRows = () => Array.from($("timeline").querySelectorAll(".track"));
+  // 行与 bar **每次都现取**：一次成功改动会把时间线整块重画，旧节点随即脱离文档 ——
+  // 拖完还攥着同一个节点去读 `style.left`，读到的是被换掉的那一份。
+  const barOf = (trackIndex, layerId) => {
+    const row = timelineRows()[trackIndex];
+    if (row === undefined) return null;
+    const bar = Array.from(row.querySelectorAll(".layer")).find((item) => item.textContent === layerId);
+    return bar === undefined ? null : { row: row, bar: bar };
+  };
+  // 总帧数**从界面上反解**：挑一条没被最小宽度截断的 bar，把 left / width 两个百分比
+  // 与模型里的起点 / 长度联立 —— 渲染时用的那个数才是拖拽实现手里的那个数。
+  let end = null;
+  let geometry = null;
+  for (const track of tracks) {
+    const trackIndex = tracks.indexOf(track);
+    const row = timelineRows()[trackIndex];
+    if (row === undefined) continue;
+    const bars = Array.from(row.querySelectorAll(".layer"));
+    for (let index = 0; index < track.layers.length; index += 1) {
+      const bar = bars[index];
+      const layer = track.layers[index];
+      if (bar === undefined || layer === undefined) break;
+      const widthPct = Number.parseFloat(bar.style.width);
+      const leftPct = Number.parseFloat(bar.style.left);
+      const length = layer.end - layer.start;
+      if (!(widthPct > 1.5) || !(length > 0)) continue;
+      const solved = Math.round(length / (widthPct / 100));
+      if (!(solved > 0)) continue;
+      if (Math.abs(layer.start / solved * 100 - leftPct) > 0.5) {
+        return report(false, "界面上的位置与模型对不上：" + layer.id + " 的 left 是 " + bar.style.left
+          + "、按 " + solved + " 帧算是 " + (layer.start / solved * 100) + "%");
+      }
+      end = solved;
+      geometry = layer.id + " 的条反解出总帧数 " + solved + "（left " + bar.style.left + "、宽 " + bar.style.width + "）";
+      break;
+    }
+    if (end !== null) break;
+  }
+  if (end === null) {
+    return report(false, "时间线上每个元素都太短（宽度都被最小宽度截断过）—— 反解不出总帧数");
+  }
+  if (end !== Math.max(1, state.engine.endFrame())) {
+    return report(false, "界面上画的总帧数（" + end + "）与引擎的端帧（" + state.engine.endFrame()
+      + "）对不上 —— 时间线画的是旧的");
+  }
+  // 别人的边界：拖谁就按「除它以外」算一份（与拖拽实现里的候选集是同一套算法）。
+  const othersBoundaries = (layerId) => {
+    const out = [];
+    for (const track of tracks) {
+      for (const layer of track.layers) {
+        if (layer.id === layerId) continue;
+        out.push(layer.start, layer.end);
+      }
+    }
+    return out;
+  };
+  // 场景：把某个元素拖到**别人的边界旁边一帧**上 —— 只要吸附生效，它就该落在那条边界上。
+  // 顺序上先挑**只有一层**的轨道：那种轨道上「同轨重叠」这条规则不可能触发
+  // （规则还在 Rust 里，这里只是挑个大概率一次就过的场景，不代替它下结论）。
+  const single = tracks.filter((track) => track.layers.length === 1);
+  const rest = tracks.filter((track) => track.layers.length !== 1);
+  const scenes = [];
+  const seen = new Set();
+  for (const track of single.concat(rest)) {
+    const trackIndex = tracks.indexOf(track);
+    for (const layer of track.layers) {
+      const boundaries = othersBoundaries(layer.id);
+      const ordered = boundaries.slice().sort((a, b) => Math.abs(a - layer.start) - Math.abs(b - layer.start));
+      for (const boundary of ordered) {
+        if (boundary === layer.start) continue;
+        for (const candidate of [boundary + 1, boundary - 1]) {
+          if (candidate < 0 || candidate === layer.start || boundaries.includes(candidate)) continue;
+          const key = layer.id + "@" + boundary + "@" + candidate;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          scenes.push({ trackIndex: trackIndex, layer: layer, boundary: boundary, candidate: candidate });
+          break;
+        }
+      }
+    }
+  }
+  if (scenes.length === 0) {
+    return report(false, "这份工程里挑不出「停在边界旁边」的落点 —— 这一趟验不到吸附");
+  }
+  const before = JSON.parse(JSON.stringify(state.doc));
+  const pointer = (type, x, buttons) => new PointerEvent(type, {
+    bubbles: true, cancelable: true, button: 0, buttons: buttons,
+    clientX: x, clientY: 8, pointerId: 1, pointerType: "mouse", isPrimary: true,
+  });
+  // 逐场景试放。**收不收由引擎说**（状态栏那句话变了 = 引擎表过态了），
+  // 被拒（比如同轨重叠）就换下一个场景 —— 这里不复制任何一条规则、也不预测结果：
+  // 预测一份的话，「规则只有一份」这句话在这里就断了。
+  const attempts = [];
+  let accepted = null;
+  for (const scene of scenes) {
+    // 每次试放都从干净的界面开始：行与 bar 按 id 现取，不跨场景攥着旧节点。
+    renderTimeline();
+    await seekTo(state.frame);
+    const located = barOf(scene.trackIndex, scene.layer.id);
+    if (located === null) {
+      attempts.push(scene.layer.id + " 在时间线上找不到");
+      continue;
+    }
+    const trackWidth = located.row.clientWidth;
+    if (!(trackWidth > 0)) {
+      attempts.push("轨道 " + scene.trackIndex + " 量不到宽度");
+      continue;
+    }
+    const framesPerPixel = end / trackWidth;
+    const snapFrames = Math.max(0, Math.round(6 * framesPerPixel));
+    // 位移先按像素算，落点再**从界面上读回来**核对：像素↔帧的换算这条路上有两处
+    // （这里一份、拖拽实现里一份），只信自己算的那一份会把「没吸上」记成「吸上了」。
+    const startX = 120;
+    const from = scene.layer.start;
+    const wantedX = startX + (scene.candidate - from) / framesPerPixel;
+    if (!Number.isFinite(wantedX)) {
+      attempts.push("把 " + scene.layer.id + " 挪到第 " + scene.candidate + " 帧的像素换算不成立");
+      continue;
+    }
+    const hintBefore = state.hint;
+    const bar = located.bar;
+    bar.dispatchEvent(pointer("pointerdown", startX, 1));
+    let usedX = wantedX;
+    let preview = null;
+    for (const nudge of [0, -1, 1, -2, 2, -3, 3, -5, 5, -8, 8, -13, 13]) {
+      usedX = wantedX + nudge;
+      bar.dispatchEvent(pointer("pointermove", usedX, 1));
+      const movedPct = Number.parseFloat(bar.style.left);
+      preview = Number.isFinite(movedPct) ? Math.round(movedPct / 100 * end) : null;
+      if (preview === scene.candidate) break;
+    }
+    bar.dispatchEvent(pointer("pointerup", usedX, 0));
+    // 等引擎表个态：**成了与拒了都会写一句** —— 所以「没变」的意思是这一拖根本没生成编辑。
+    const spoke = await waitUntil(() => state.hint !== hintBefore, 4000);
+    if (!spoke) {
+      attempts.push("把 " + scene.layer.id + " 挪到第 " + scene.candidate + " 帧：拖了但状态栏没动静");
+      continue;
+    }
+    const dragged = JSON.parse(JSON.stringify(state.doc));
+    const landed = startOfLayer(dragged, scene.layer.id);
+    // 起点一动没动 = 工程一个字没变（引擎把人拒了）。场景挑边界时就跳过了起点本身，
+    // 所以「没动」与「落在场景那条边界上」是互斥的两条路，没有第三种。
+    if (landed === scene.layer.start) {
+      attempts.push("把 " + scene.layer.id + " 挪到第 " + scene.candidate + " 帧：落地在 " + landed
+        + " 帧（引擎说：" + state.hint + "）");
+      continue;
+    }
+    if (landed !== scene.boundary) {
+      // 起点**真的变了**，只是没落在场景挑的那条边界上：这一拖生效了，不是「被拒」。
+      // 混进「被拒」里继续往下试会把现场冲掉（工程已经改了），所以就地报出去。
+      return report(false, "把 " + scene.layer.id + " 挪到第 " + scene.candidate + " 帧：这一拖生效了，"
+        + "却落在第 " + landed + " 帧，不是场景挑的第 " + scene.boundary + " 帧（引擎说：" + state.hint + "）",
+        { end: end, scene: scene, landed: landed, dragged: dragged, attempts: attempts });
+    }
+    accepted = {
+      scene: scene,
+      from: from,
+      preview: preview,
+      landed: landed,
+      dragged: dragged,
+      dragHint: state.hint,
+      snapFrames: snapFrames,
+      trackWidth: trackWidth,
+      pixels: Math.round(usedX - startX),
+    };
+    break;
+  }
+  if (accepted === null) {
+    // 一个场景都没落地就不要报「吸上了」：如实说每一次都被拒了。
+    return report(false, "这份工程里每次试放都没拖成（" + attempts.length + " 次）：" + attempts.join("；"),
+      { end: end, scenes: scenes.length, attempts: attempts });
+  }
+  const scene = accepted.scene;
+  const layerId = scene.layer.id;
+  // 引擎自己会给的那三句说明（runEdit / runHistoryStep 就是这么拼的）。
+  const label = "把 " + layerId + " 移到第 " + scene.boundary + " 帧";
+  const problems = [];
+  if (accepted.preview !== scene.candidate) {
+    problems.push("预览停在 " + accepted.preview + " 帧，不是指针指的 " + scene.candidate + " 帧");
+  }
+  if (accepted.dragHint !== "移动：" + label) {
+    problems.push("引擎的说明是 " + JSON.stringify(accepted.dragHint) + "，不是 " + JSON.stringify("移动：" + label));
+  }
+  // 撤销 / 重做：**点那两颗真按钮**，走的就是用户点的那条路。
+  $("undoBtn").click();
+  const undoDone = await waitUntil(() => state.hint !== accepted.dragHint, 4000);
+  const undoHint = state.hint;
+  const undoneDoc = JSON.parse(JSON.stringify(state.doc));
+  const undoneStart = startOfLayer(undoneDoc, layerId);
+  if (!undoDone) problems.push("撤销之后状态栏没变（还停在 " + JSON.stringify(accepted.dragHint) + "）");
+  if (undoneStart !== accepted.from) {
+    problems.push("撤销之后 " + layerId + " 在 " + undoneStart + " 帧，不是拖动前的 " + accepted.from + " 帧");
+  }
+  if (undoHint !== "撤销：" + label) {
+    problems.push("撤销的说明是 " + JSON.stringify(undoHint) + "，不是 " + JSON.stringify("撤销：" + label));
+  }
+  $("redoBtn").click();
+  const redoDone = await waitUntil(() => state.hint !== undoHint, 4000);
+  const redoHint = state.hint;
+  const redoneDoc = JSON.parse(JSON.stringify(state.doc));
+  const redoneStart = startOfLayer(redoneDoc, layerId);
+  if (!redoDone) problems.push("重做之后状态栏没变（还停在 " + JSON.stringify(undoHint) + "）");
+  if (redoneStart !== scene.boundary) {
+    problems.push("重做之后 " + layerId + " 在 " + redoneStart + " 帧，不是 " + scene.boundary + " 帧");
+  }
+  if (redoHint !== "重做：" + label) {
+    problems.push("重做的说明是 " + JSON.stringify(redoHint) + "，不是 " + JSON.stringify("重做：" + label));
+  }
+  return report(problems.length === 0, problems.join("；"), {
+    drag: {
+      layer: layerId,
+      from: accepted.from,
+      boundary: scene.boundary,
+      candidate: scene.candidate,
+      preview: accepted.preview,
+      landed: accepted.landed,
+      snapFrames: accepted.snapFrames,
+      end: end,
+      trackWidth: accepted.trackWidth,
+      pixels: accepted.pixels,
+      geometry: geometry,
+      attempts: attempts,
+    },
+    hints: { drag: accepted.dragHint, undo: undoHint, redo: redoHint },
+    before: before,
+    dragged: accepted.dragged,
+    undone: undoneDoc,
+    redone: redoneDoc,
+  });
+}
+
 /** 判定按**名字**选路。表在这里，规则在各判定函数里。 */
 const VERDICTS = {
   "trim-parity": runTrimParity,
   subtitle: runSubtitleVerdict,
+  "undo-drag": runUndoDragVerdict,
 };
 
 /** 状态栏：写一条最新的进展/结果。 */
@@ -443,13 +725,42 @@ async function runEdit(op, label) {
     return;
   }
   state.doc = state.engine.doc();
+  await refreshAfterEdit();
+  log((label || "编辑") + "：" + result.summary);
+}
+
+/**
+ * 撤销 / 重做一步。
+ *
+ * **栈在 Rust**（timeline::history），这里只把新工程取回来画一遍 ——
+ * 与 CLI 的 `edit --undo` 调的是同一份规则。退不动时 `ok:false` + 一条
+ * `nothing_to_undo` / `nothing_to_redo`，宿主里那份**一个字节都没动**。
+ */
+async function runHistoryStep(which) {
+  const verb = which === "undo" ? "撤销" : "重做";
+  const result = which === "undo" ? state.engine.undo() : state.engine.redo();
+  if (result.ok !== true) {
+    state.issues = result.issues || [];
+    renderIssues();
+    log(verb + " 没生效：" + state.issues.map((issue) => issue.code).join(", "));
+    return;
+  }
+  state.doc = state.engine.doc();
+  await refreshAfterEdit();
+  log(result.summary);
+}
+
+/** 一次成功改动之后把三个面板与当前帧重新画一遍。
+ *
+ * 撤销/重做与普通编辑**走的是同一条**——分成两份的话，
+ * 「撤销之后画面不刷新」这类漂只有肉眼能发现。 */
+async function refreshAfterEdit() {
   state.issues = [];
   state.warnings = [];
   renderTimeline();
   renderInspector();
   renderIssues();
   await seekTo(state.frame);
-  log((label || "编辑") + "：" + result.summary);
   await loadLibrary();
   renderLibrary();
 }
@@ -498,11 +809,83 @@ function renderTimeline() {
         renderTimeline();
         renderInspector();
       });
+      attachLayerDrag(bar, row, layer, end);
       row.appendChild(bar);
     });
     host.appendChild(row);
   });
   renderMarkers(model, end);
+}
+
+/**
+ * 让一层可以被**拖到别的时间位置**。
+ *
+ * 一次拖拽只生成**已有的** `{op:"move", layer, to}`，交给 `runEdit` ——
+ * 拖拽没有自己的编辑语义，「能不能挪到那儿」永远由 Rust 的 `move` 给结论。
+ * 拖动过程中只改这一条 bar 的 `left`（纯视觉预览，`state.doc` 一个字都不动），
+ * 落点在 **pointerup** 时才向 Rust 提**一次**：
+ * 于是「拖一下」在历史里就是**一步**，撤销正好回到拖动之前。
+ */
+function attachLayerDrag(bar, row, layer, end) {
+  bar.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    // 时间线宽度 ↔ 帧数的换算只用**轨道**的宽度：bar 自己有最小宽度（1.5%），
+    // 拿它去换算会在短元素上算歪。
+    const trackWidth = row.clientWidth;
+    if (!(trackWidth > 0) || !(end > 0)) return;
+    const framesPerPixel = end / trackWidth;
+    const snapFrames = Math.max(0, Math.round(6 * framesPerPixel));
+    const startX = event.clientX;
+    const originalStart = layer.start;
+    const originalLeft = bar.style.left;
+    let pending = originalStart;
+    const boundaries = [];
+    for (const track of (timeline() || { tracks: [] }).tracks) {
+      for (const other of track.layers) {
+        if (other === layer) continue;
+        boundaries.push(other.start, other.end);
+      }
+    }
+    // 指针捕获：不捕获的话，指针一旦离开这条 bar，pointermove / pointerup 就收不到了。
+    // **合成事件（验收驱动造的）没有真实指针会抛 NotFoundError**，所以这里要兜住 ——
+    // 验收通道不该因为缺少真实指针就把页面打崩。
+    try { bar.setPointerCapture(event.pointerId); } catch (error) { /* 合成事件 */ }
+    const onMove = (moveEvent) => {
+      const delta = Math.round((moveEvent.clientX - startX) * framesPerPixel);
+      pending = Math.max(0, originalStart + delta);
+      bar.style.left = (pending / end * 100) + "%";
+    };
+    const finish = () => {
+      bar.removeEventListener("pointermove", onMove);
+      bar.removeEventListener("pointerup", finish);
+      bar.removeEventListener("pointercancel", finish);
+      // 先还原成模型里的位置：编辑万一被拒，宿主与界面就还是一致的（不能只在成功时才对）。
+      bar.style.left = originalLeft;
+      const to = snapFrame(pending, boundaries, snapFrames);
+      if (to === originalStart) return;
+      runEdit({ op: "move", layer: layer.id, to: to }, "移动").catch((error) => log(String(error)));
+    };
+    bar.addEventListener("pointermove", onMove);
+    bar.addEventListener("pointerup", finish);
+    bar.addEventListener("pointercancel", finish);
+  });
+}
+
+/** 落点的**吸附**：候选帧附近有别的元素边界（阈值内）就吸上去。
+ *
+ * 这不算业务规则 —— 它不改「能不能移动」，只是把落点对齐；动手的还是 Rust 的 move。 */
+function snapFrame(candidate, boundaries, threshold) {
+  if (!(threshold > 0)) return candidate;
+  let best = candidate;
+  let bestDistance = threshold + 1;
+  for (const boundary of boundaries) {
+    const distance = Math.abs(boundary - candidate);
+    if (distance <= threshold && distance < bestDistance) {
+      best = boundary;
+      bestDistance = distance;
+    }
+  }
+  return best;
 }
 
 /** 工程级标记：画在轨道上方的一条细线上。 */
@@ -897,6 +1280,8 @@ async function main() {
   $("last").addEventListener("click", () => seekTo(end - 1));
   $("frame").addEventListener("input", (event) => seekTo(Number(event.target.value)));
   $("export").addEventListener("click", runExport);
+  $("undoBtn").addEventListener("click", () => { runHistoryStep("undo").catch((error) => log(String(error))); });
+  $("redoBtn").addEventListener("click", () => { runHistoryStep("redo").catch((error) => log(String(error))); });
   $("splitBtn").addEventListener("click", () => {
     const layer = selectedLayer();
     if (layer === null) { log("先选中一个元素再剃刀"); return; }
@@ -969,6 +1354,8 @@ window.dhampir = {
   runExport: runExport,
   // 编辑操作也挂出来：验收驱动靠它把"点一次剃刀"变成可复算的一步。
   runEdit: runEdit,
+  // 撤销/重做同理：驱动点不了按钮，但可以让页面自己走一遍同一条路。
+  runHistoryStep: runHistoryStep,
   // 判定回传：页面自己把结果送出去，而不是让驱动钻进来取。
   reportVerdict: reportVerdict,
   runTrimParity: runTrimParity,

@@ -1,6 +1,6 @@
 # 宿主 API
 
-Version: 3
+Version: 4
 
 下游宿主读这一份就够：**形状在 `crates/dhampir-timeline/src/host_api.rs`，
 版本问 `dhampir_host_api_version`，导出名单在文末**。
@@ -15,7 +15,7 @@ Version: 3
 而这里的形状是钉死的（每条都有键集断言）—— 启动时问一次，记住就够了。
 
 * 对端要判断对面是哪个版本，调 `dhampir_host_api_version`：返回整数，与
-  `host_api::HOST_API_VERSION` 是同一个数（现在等于 3）。
+  `host_api::HOST_API_VERSION` 是同一个数（现在等于 4）。
 * 版本的真值在 Rust 源码那一行常量里；这个函数的返回值、这份文档的 `Version:` 行
   与文末名单，都由守卫跟源码比对 —— **「升了常量忘了改文档」不会静默通过**。
 
@@ -59,6 +59,21 @@ Version: 3
 `DanmakuSpec` 自己没有颜色字段 —— 所以 `color` / `outline` 这两个键对字幕与弹幕
 是同一份值，不能按弹幕单独调色。
 
+## v3 -> v4 变了什么
+
+**形状一个都没动**，多的是**一对导出**：`dhampir_project_undo` 与
+`dhampir_project_redo`。
+
+* 两个都是**无参**的：历史本身在宿主里（`dhampir-timeline::history`），
+  与 CLI `edit --undo/--redo --history <文件>` 走的是**同一份规则**。
+* 返回体沿用编辑那一套 `{ ok, summary, issues }` —— 所以这一版升的是
+  **对端能看到的导出面**，不是任何形状。`summary` 形如 `撤销：<被退掉的那一步>`；
+  退不动时 `ok:false` 且 `issues[0].code` 是 `nothing_to_undo` / `nothing_to_redo`，
+  **宿主里的工程与历史一个字节都不动**。
+* `dhampir_project_open` 成功时历史会**清空**（换一份工程就是换一条历史）；
+  编辑失败**不占一步**（失败的那一步没有可退的东西）。
+* 没有载入工程时给 `no_project`。
+
 ## 那几行字是谁画的
 
 **宿主画**。`overlay` 只说「画哪几行字（字幕与弹幕）、各占哪个矩形」：栅格化（字体、字号、
@@ -87,6 +102,7 @@ Version: 3
 - `dhampir_project_frame`
 - `dhampir_project_open`
 - `dhampir_project_precheck`
+- `dhampir_project_redo`
 - `dhampir_project_render_probe`
 - `dhampir_project_resize`
 - `dhampir_project_set_bitmap`
@@ -97,4 +113,5 @@ Version: 3
 - `dhampir_project_sources_for`
 - `dhampir_project_text_frame`
 - `dhampir_project_text_probe`
+- `dhampir_project_undo`
 - `dhampir_sample_project_render_png`

@@ -265,6 +265,7 @@ if (verdictName !== null && backendMode === null) {
 const PROJECT_FOR_VERDICT = {
   'trim-parity': 'sample-project.doc',
   subtitle: 'sample-subtitle.doc',
+  'undo-drag': 'sample-project.doc',
 };
 const projectId = valueOf('--project', null)
   || (verdictName !== null && PROJECT_FOR_VERDICT[verdictName] !== undefined
@@ -866,6 +867,144 @@ function runCliParity(value) {
 }
 
 // ---------------------------------------------------------------------------
+// 拖拽 / 撤销 / 重做判定（T4.3）：页面回传四份工程，这里把它们钉在 fixture 与 CLI 上
+// ---------------------------------------------------------------------------
+
+/** 在工程里按 id 找一个元素。**不能按下标**：`move` 会把那条轨道按起点重排。 */
+function findLayerById(doc, id) {
+  const tracks = doc !== null && typeof doc === 'object' && doc.timeline !== undefined
+    ? doc.timeline.tracks : [];
+  for (const track of Array.isArray(tracks) ? tracks : []) {
+    for (const layer of Array.isArray(track.layers) ? track.layers : []) {
+      if (layer.id === id) return { track: track.id, layer: layer };
+    }
+  }
+  return null;
+}
+
+/**
+ * 判据（T4.3）：**落点吸到别人的边界上、撤销逐字段回到拖动前、重做原样放回来。**
+ *
+ * 页面回传的是四份工程（拖动前/拖动后/撤销后/重做后）与拖拽现场的九个事实。这里：
+ *   1. 起点对一次：页面那份必须**覆盖** fixture 写下的每个字段（否则比的是另一份工程）；
+ *   2. 吸附**真的发生了**：原始落点不是任何边界、落地必须是**别人的**一条边界、两者相差
+ *      不超过吸附半径 —— 半径按页面给的总帧数/量宽**重算**，不是采信页面报的那个数；
+ *   3. 用 CLI 拿同一条 `move` 复算一遍：改出来的工程与页面「拖动后」逐字段相同 ——
+ *      这一条把「拖拽只生成已有的 move」从口头承诺变成可复算的事实；
+ *   4. 撤销 == 拖动前、重做 == 拖动后（都是逐字段）。
+ */
+function runUndoDragParity(value) {
+  const found = findCli();
+  if (found.cli === null) return { ok: false, detail: found.error + ' —— 没法对照' };
+  const drag = value.drag;
+  if (drag === null || typeof drag !== 'object') {
+    return { ok: false, detail: '页面没回传拖拽的现场（drag）' };
+  }
+  for (const field of ['layer', 'from', 'boundary', 'candidate', 'preview', 'landed',
+    'snapFrames', 'end', 'trackWidth']) {
+    if (typeof drag[field] !== 'number' && typeof drag[field] !== 'string') {
+      return { ok: false, detail: '拖拽现场缺一项：' + field };
+    }
+  }
+  const fixturePath = join(REPO_ROOT, 'fixtures', projectId + '.json');
+  if (!existsSync(fixturePath)) return { ok: false, detail: '对照用的工程不在：' + fixturePath };
+  const original = readFileSync(fixturePath, 'utf8');
+  let fixture = null;
+  try { fixture = JSON.parse(original); } catch (error) {
+    return { ok: false, detail: 'fixture 不是 JSON：' + String(error && error.message ? error.message : error) };
+  }
+  const baseDifference = firstSubsetDifference(fixture, value.before, '$');
+  if (baseDifference !== null) {
+    return { ok: false, detail: '页面那份工程与 fixture 对不上：' + baseDifference };
+  }
+  const picked = findLayerById(fixture, drag.layer);
+  if (picked === null) return { ok: false, detail: 'fixture 里没有这个元素：' + drag.layer };
+  if (picked.layer.start !== drag.from) {
+    return { ok: false, detail: '拖动前它在第 ' + picked.layer.start + ' 帧，页面说第 ' + drag.from + ' 帧' };
+  }
+  const boundaries = [];
+  for (const track of fixture.timeline.tracks) {
+    for (const layer of track.layers) {
+      if (layer.id === drag.layer) continue;
+      boundaries.push(layer.start, layer.end);
+    }
+  }
+  const radius = Math.max(0, Math.round(6 * Number(drag.end) / Number(drag.trackWidth)));
+  if (radius <= 0) {
+    return { ok: false, detail: '按 总帧数 ' + drag.end + ' / 量宽 ' + drag.trackWidth
+      + ' 重算出来的吸附半径是 0 帧 —— 这一趟没验到吸附' };
+  }
+  if (radius !== Number(drag.snapFrames)) {
+    return { ok: false, detail: '吸附半径：页面报 ' + drag.snapFrames + ' 帧、按 总帧数/量宽 重算是 ' + radius + ' 帧' };
+  }
+  if (boundaries.includes(Number(drag.preview))) {
+    return { ok: false, detail: '原始落点第 ' + drag.preview + ' 帧本身就是一条边界 —— 那样看不出吸附有没有生效' };
+  }
+  if (!boundaries.includes(Number(drag.landed))) {
+    return { ok: false, detail: '落地第 ' + drag.landed + ' 帧不是别人的任何一条边界' };
+  }
+  if (Number(drag.landed) === Number(drag.preview)) {
+    return { ok: false, detail: '落地与原始落点都是第 ' + drag.preview + ' 帧 —— 没吸附' };
+  }
+  if (Math.abs(Number(drag.landed) - Number(drag.preview)) > radius) {
+    return { ok: false, detail: '落地离原始落点 ' + Math.abs(Number(drag.landed) - Number(drag.preview))
+      + ' 帧，超过半径 ' + radius + ' 帧' };
+  }
+  if (Number(drag.landed) !== Number(drag.boundary)) {
+    return { ok: false, detail: '页面说落地是第 ' + drag.landed + ' 帧、场景里挑的边界是第 ' + drag.boundary + ' 帧' };
+  }
+  if (Number(drag.landed) === Number(drag.from)) {
+    return { ok: false, detail: '拖动之后起点没变（都是第 ' + drag.from + ' 帧）—— 这一拖什么也没验到' };
+  }
+  const after = findLayerById(value.dragged, drag.layer);
+  if (after === null) return { ok: false, detail: '「拖动后」那份工程里没有 ' + drag.layer + ' 了' };
+  if (after.layer.start !== Number(drag.landed)) {
+    return { ok: false, detail: '拖动之后它在第 ' + after.layer.start + ' 帧，不是落地第 ' + drag.landed + ' 帧' };
+  }
+  if (after.layer.end - after.layer.start !== picked.layer.end - picked.layer.start) {
+    return { ok: false, detail: '这一拖把长度改了：' + (picked.layer.end - picked.layer.start) + ' 帧 → '
+      + (after.layer.end - after.layer.start) + ' 帧' };
+  }
+  // CLI 复算：同一条 move 打在同一份 fixture 上，两边必须逐字段相同。
+  const dir = join(REPO_ROOT, 'target', 'verdict');
+  mkdirSync(dir, { recursive: true });
+  const projectFile = join(dir, 'undo-drag.json');
+  writeFileSync(projectFile, original);
+  const op = { op: 'move', layer: drag.layer, to: Number(drag.landed) };
+  const result = spawnSync(found.cli, ['edit', '--project', projectFile, '--write', '--op', JSON.stringify(op)], {
+    cwd: REPO_ROOT, encoding: 'utf8',
+  });
+  const stderrText = String(result.stderr || '').trim();
+  if (result.status !== 0) {
+    return { ok: false, detail: 'CLI 用同一条 move 复算退出 ' + result.status + '：'
+      + (stderrText || String(result.stdout || '').trim()) };
+  }
+  let cliAfter = null;
+  try { cliAfter = JSON.parse(readFileSync(projectFile, 'utf8')); } catch (error) {
+    return { ok: false, detail: 'CLI 写出来的工程不是 JSON：' + String(error && error.message ? error.message : error) };
+  }
+  const mirror = firstDifference(cliAfter, value.dragged, '$');
+  if (mirror !== null) {
+    return { ok: false, detail: '同一条 move：CLI 改出来的工程与页面「拖动后」不同：' + mirror };
+  }
+  const undone = firstDifference(value.before, value.undone, '$');
+  if (undone !== null) return { ok: false, detail: '撤销之后与拖动前不同：' + undone };
+  const redone = firstDifference(value.dragged, value.redone, '$');
+  if (redone !== null) return { ok: false, detail: '重做之后与拖动后不同：' + redone };
+  const hints = value.hints !== null && typeof value.hints === 'object' ? value.hints : {};
+  const said = ['drag', 'undo', 'redo'].every((key) => typeof hints[key] === 'string' && hints[key].length > 0)
+    ? '；引擎自己给的说明：' + [hints.drag, hints.undo, hints.redo].join(' → ')
+    : '';
+  return {
+    ok: true,
+    detail: '拖 ' + drag.layer + '：原始落点第 ' + drag.preview + ' 帧（不是任何边界）→ 吸到第 '
+      + drag.landed + ' 帧（别人的边界；半径 round(6 × ' + drag.end + ' / ' + drag.trackWidth + ') = '
+      + radius + ' 帧）；同一条 move 由 CLI 复算后与「拖动后」逐字段相同；'
+      + '撤销逐字段回到拖动前、重做原样放回来' + said,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 字幕判定（T2.5）：两端结构一致 + 页内墨迹自洽
 // ---------------------------------------------------------------------------
 
@@ -1236,6 +1375,12 @@ async function reportVerdict(name) {
     // 成功时把每帧的实测事实一并打出来：**结论之外要有事实**，
     // 不然「✓」这一行既看不出墨迹是多少，也看不出画布是不是与契约同尺寸。
     for (const note of parity.notes || []) console.log('  · ' + note);
+    if (!parity.ok) process.exitCode = 1;
+    return;
+  }
+  if (value.kind === 'undo-drag') {
+    const parity = runUndoDragParity(value);
+    console.log((parity.ok ? '  ✓ ' : '  - ') + parity.detail);
     if (!parity.ok) process.exitCode = 1;
     return;
   }

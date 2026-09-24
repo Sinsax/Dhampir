@@ -31,11 +31,11 @@
   验收: core 单元测试「位移的归一化落点与目标尺寸无关」（640x360/320x180/1280x720/960x540 四种目标，容差 1e-5）加一条反向用例；接线由 scripts/check-preview-parity.mjs 钉（自检 12 条断言，10 条是反向用例）；真机端到端由 crates/dhampir-worker/tests/preview_parity.rs 钉（三种目标尺寸量包围盒落点，含一条反向用例）
   证据: plan/t1-evidence.md
 
-- [D2] status=todo phase=T4
+- [D2] status=done phase=T4
   症状: 带关键帧的元素不能剃刀（split 直接拒绝，不是悄悄切歪）
   根因: crates/dhampir-timeline/src/edit.rs:577
   验收: 切点两侧的端点值 == 原曲线在切点的值（两侧各插一个当时的值）
-  证据: -
+  证据: plan/t4-evidence.md
 
 - [D3] status=todo phase=T5
   症状: 素材在时间线上前后颠倒时整次出片失败（source_rewind）
@@ -55,11 +55,11 @@
   验收: 带字工程两端结构（项数/文本/归一化矩形）一致且容差写死；无文字工程逐字节不变
   证据: plan/t2-evidence.md plan/t3-evidence.md
 
-- [D6] status=todo phase=T4
+- [D6] status=done phase=T4
   症状: 不能撤销/重做，编辑不可逆
   根因: crates/dhampir-timeline/src/edit.rs:577
   验收: 执行一个 op 再 undo，得到与执行前逐字节相同的 doc；CLI 与预览共用同一条历史
-  证据: -
+  证据: plan/t4-evidence.md
 
 - [D7] status=todo phase=T6
   症状: 产物没有声音（编码器只吃 rawvideo stdin，没有任何音频输入）
@@ -129,11 +129,11 @@
   验收: core 新增 RenderSpace{sequence,target}（必填形参，8 个调用点都要说清坐标系）；target != sequence 时换算像素量。**台账原先写「gaussian_blur.radius 也要换」是错的**：每层那个半径是源纹理像素、不换，只有调整图层的模糊半径是文档像素、要换。默认路径逐字节不变：里程碑 33287 字节未变、G5 SSIM 1.000000
   证据: plan/t1-evidence.md
 
-- [A2] status=todo phase=T4
+- [A2] status=done phase=T4
   症状: 没有文档历史层，edit::apply 已经是纯函数却没有安放"前后 doc"的地方
   根因: crates/dhampir-timeline/src/edit.rs:577
   验收: dhampir-timeline::history（零依赖）提供 push/undo/redo 与上限，CLI 与预览共用
-  证据: -
+  证据: plan/t4-evidence.md
 
 - [A3] status=done phase=T2
   症状: 没有共享文本布局层（换行/对齐/行高需要字形度量，两端各做必然结构分叉）

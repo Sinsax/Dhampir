@@ -42,11 +42,15 @@ pub struct History {
 
 impl History {
     /// `cap` 是**条数**上限。给 0 当 1 处理：上限为零的历史层不是一个有用的东西。
-    pub fn new(cap: usize) -> Self {
+    ///
+    /// `const` 不是好看：wasm 宿主把一份历史放进 `thread_local!` 的静态初值里，
+    /// 那里只认常量表达式。
+    pub const fn new(cap: usize) -> Self {
         Self {
             past: Vec::new(),
             future: Vec::new(),
-            cap: cap.max(1),
+            // 不写 `cap.max(1)`：`Ord::max` 不是 const。
+            cap: if cap == 0 { 1 } else { cap },
             last_key: None,
         }
     }

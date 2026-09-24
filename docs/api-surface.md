@@ -42,6 +42,7 @@
 - `dhampir_project_frame`
 - `dhampir_project_open`
 - `dhampir_project_precheck`
+- `dhampir_project_redo`
 - `dhampir_project_render_probe`
 - `dhampir_project_resize`
 - `dhampir_project_set_bitmap`
@@ -52,6 +53,7 @@
 - `dhampir_project_sources_for`
 - `dhampir_project_text_frame`
 - `dhampir_project_text_probe`
+- `dhampir_project_undo`
 - `dhampir_sample_project_render_png`
 
 ## 宿主内部

@@ -31,6 +31,7 @@ use dhampir_core::render::{
     OverlayItem, RenderSpace, SourceResolver, compose_overlay, ink_report,
 };
 // 宿主 API 的返回体形状：**有名字、有测试钉住**，不再用宏手写。
+use dhampir_core::timeline::history::History;
 use dhampir_core::timeline::host_api;
 use dhampir_core::wgpu;
 use dhampir_core::timeline::project::{
@@ -59,6 +60,18 @@ thread_local! {
     /// 而 v1 -> v2 的迁移只发生在 load_doc 一处。
     static PROJECT: RefCell<Option<ProjectDoc>> = const { RefCell::new(None) };
 }
+
+thread_local! {
+    /// 当前的**撤销/重做历史**。与 `PROJECT` 分开是因为它的寿命跟着 `PROJECT` 走：
+    /// `dhampir_project_open` 成功就 `reset()`（换一份工程就是换一条历史）。
+    ///
+    /// 存的**规则**与 CLI 是同一份（`dhampir_core::timeline::history::History`）——
+    /// 在宿主里另写一套「差不多的撤销」，就会出现「CLI 退得回去、预览退不回去」。
+    static HISTORY: RefCell<History> = const { RefCell::new(History::new(HISTORY_CAP)) };
+}
+
+/// 历史层的上限（**条**）。一条是一份整份快照，所以这个数与 CLI 的那个同量级即可。
+const HISTORY_CAP: usize = 64;
 
 thread_local! {
     /// 已登记的字幕表：素材 id -> 字幕条。
@@ -814,6 +827,9 @@ pub fn dhampir_project_open(json: &str) -> String {
     PROJECT.with(|slot| {
         if ok {
             *slot.borrow_mut() = Some(doc);
+            // **换一份工程就是换一条历史**：不然撤销会退到上一份工程的某一帧上去，
+            // 而那种状态既不是"新工程"也不是"旧工程"，只能靠猜。
+            HISTORY.with(|h| h.borrow_mut().reset());
         }
         // **校验不过时保留上一份可用工程。**
         // 旧实现这里写的是 None，而 engine.js 的注释一直写着"失败时保留上一份"——
@@ -856,6 +872,18 @@ pub fn dhampir_project_edit(op_json: &str) -> String {
     let outcome = dhampir_core::timeline::edit::apply(&doc, dhampir_core::effects::REGISTRY, &op);
     if outcome.is_ok() {
         // **成了才写回。** 没成就让宿主里那份保持原样 —— 半改状态比失败更难查。
+        //
+        // 历史也在这里压：`doc` 是**改动前**那一份，压的正是「退一步能回到哪」。
+        // 顺序与 CLI 一致（先记历史、再改工程）：反过来的话，记历史失败会留下
+        // 「改了却退不回去」的窗口。
+        HISTORY.with(|h| {
+            let label = if outcome.summary.is_empty() {
+                "编辑".to_string()
+            } else {
+                outcome.summary.clone()
+            };
+            h.borrow_mut().push(label, doc.clone());
+        });
         PROJECT.with(|slot| *slot.borrow_mut() = Some(outcome.doc.clone()));
     }
     host_api::to_json(&serde_json::json!({
@@ -863,6 +891,61 @@ pub fn dhampir_project_edit(op_json: &str) -> String {
         "summary": outcome.summary,
         "issues": outcome.issues,
     }))
+}
+
+/// 撤销一步 / 重做一步。**规则与 CLI 的 `edit --undo` 是同一份**（`timeline::history`）。
+///
+/// 返回体沿用编辑那一套 `{ok, summary, issues}` —— 不新增形状，所以版本只按
+/// 「导出面多了一个函数」这一条升。
+///
+/// 没得退**不静默**：`ok:false` + `nothing_to_undo` / `nothing_to_redo`，
+/// 前端照既有 issues 通道显示就行。宿主的工程与历史都**一个字节都不动**。
+fn project_history_step(undo: bool) -> String {
+    use dhampir_core::timeline::schema::Issue;
+    let current = PROJECT.with(|slot| slot.borrow().clone());
+    let Some(doc) = current else {
+        return host_api::to_json(&serde_json::json!({
+            "ok": false,
+            "summary": "",
+            "issues": [Issue::new("no_project", "project", "还没有载入通过校验的工程".to_string())],
+        }));
+    };
+    let restored = HISTORY.with(|h| {
+        let mut history = h.borrow_mut();
+        if undo { history.undo(doc) } else { history.redo(doc) }
+    });
+    let Some(snapshot) = restored else {
+        let (code, message) = if undo {
+            ("nothing_to_undo", "没有可撤销的步骤")
+        } else {
+            ("nothing_to_redo", "没有可重做的步骤")
+        };
+        return host_api::to_json(&serde_json::json!({
+            "ok": false,
+            "summary": "",
+            "issues": [Issue::new(code, "history", message.to_string())],
+        }));
+    };
+    PROJECT.with(|slot| *slot.borrow_mut() = Some(snapshot.doc));
+    host_api::to_json(&serde_json::json!({
+        "ok": true,
+        "summary": if undo {
+            format!("撤销：{}", snapshot.label)
+        } else {
+            format!("重做：{}", snapshot.label)
+        },
+        "issues": [],
+    }))
+}
+
+#[wasm_bindgen]
+pub fn dhampir_project_undo() -> String {
+    project_history_step(true)
+}
+
+#[wasm_bindgen]
+pub fn dhampir_project_redo() -> String {
+    project_history_step(false)
 }
 
 /// 当前工程的**工程文件本体**（壳 + 契约）。
@@ -2075,4 +2158,163 @@ pub fn dhampir_project_precheck(capabilities_json: &str) -> String {
         // 「预检说能做、渲染却做不了」这类事就只能靠人盯。
         host_api::to_json(&host_api::precheck(&doc.timeline, &capabilities))
     })
+}
+
+// ---------------------------------------------------------------------------
+// 撤销 / 重做的**宿主侧**验证
+//
+// 规则本身（`timeline::history`）在 timeline 那侧有自己的用例；这里要钉的是
+// **这一层独有的东西**：thread_local 里那份历史什么时候被压、什么时候被清、
+// 退不动的时候宿主里那份工程是不是真的一个字节都没动。
+//
+// **必须是 `#[wasm_bindgen_test]`**：这一整个模块在 native 下是 `#[cfg]` 掉的
+// （见 lib.rs），而 wasm32 下只有 `#[wasm_bindgen_test]` 注册的测试才会被执行
+// ——普通 `#[test]` 编得进去却永不运行。`scripts/run-wasm-tests.mjs` 按属性条数
+// 与运行清单对账，正是为了拦住"看起来有测试"。
+//
+// 工程用 `include_str!` 编进来：Node 里的 wasm 没有文件系统，`std::fs` 读不到
+// 任何东西。这也顺带保证了跑的就是仓库里那一份 fixtures。
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    /// 与 `target/t4/e2e-undo.cjs` **同一个工程文件、同一串操作**：
+    /// CLI 那条腿比的是磁盘上的字节，这里比的是宿主里的字节。
+    /// 两条腿都绿，才说明"CLI 退得回去、预览也退得回去"不是各写了一套。
+    const FIXTURE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/sample-project.doc.json"
+    ));
+
+    /// 载入 fixture 并断言它**通过校验**（不然下面的每一条都会因为别的原因失败）。
+    ///
+    /// 每条用例都从它开始：同一个实例里的 thread_local 是**共享**的，
+    /// 前一条用例留下的工程与历史会让后一条的前提不成立。`open` 会重置历史。
+    fn open_fixture() {
+        let text = dhampir_project_open(FIXTURE);
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("open 返回的是 JSON");
+        assert_eq!(
+            parsed["ok"],
+            serde_json::Value::Bool(true),
+            "fixture 必须是通过校验的：{text}"
+        );
+    }
+
+    fn doc() -> String {
+        dhampir_project_doc()
+    }
+
+    fn edit(op: &str) -> serde_json::Value {
+        serde_json::from_str(&dhampir_project_edit(op)).expect("edit 返回的是 JSON")
+    }
+
+    fn step(undo: bool) -> serde_json::Value {
+        let text = if undo {
+            dhampir_project_undo()
+        } else {
+            dhampir_project_redo()
+        };
+        serde_json::from_str(&text).expect("undo / redo 返回的是 JSON")
+    }
+
+    fn ok(value: &serde_json::Value) -> bool {
+        value["ok"] == serde_json::Value::Bool(true)
+    }
+
+    #[wasm_bindgen_test]
+    fn 撤销一步逐字节回到编辑前() {
+        open_fixture();
+        let before = doc();
+        let split = edit(r#"{"op":"split","layer":"a","at":15}"#);
+        assert!(ok(&split), "{split}");
+        let after_split = doc();
+        assert_ne!(after_split, before, "split 之后宿主里的工程必须真的变了");
+
+        let trimmed = edit(r#"{"op":"trim","layer":"a-b","edge":"out","to":22}"#);
+        assert!(ok(&trimmed), "{trimmed}");
+        let after_trim = doc();
+        assert_ne!(after_trim, after_split);
+
+        // 退回去要**逐字节**相同 —— 快照栈的就该是这个性质。
+        let back = step(true);
+        assert!(ok(&back), "{back}");
+        assert_eq!(doc(), after_split, "撤销一步要逐字节回到上一步之后");
+        // 说明说的是**被退掉的那一步**做过什么，不是"将要做"。
+        assert_eq!(
+            back["summary"].as_str().unwrap_or_default(),
+            format!("撤销：{}", trimmed["summary"].as_str().unwrap_or_default()),
+            "{back}"
+        );
+
+        assert!(ok(&step(true)));
+        assert_eq!(doc(), before, "再撤一步要逐字节回到最初");
+    }
+
+    #[wasm_bindgen_test]
+    fn 重做把上一步原样放回来() {
+        open_fixture();
+        let before = doc();
+        assert!(ok(&edit(r#"{"op":"split","layer":"a","at":15}"#)));
+        let after = doc();
+
+        assert!(ok(&step(true)));
+        assert_eq!(doc(), before);
+        let again = step(false);
+        assert!(ok(&again), "{again}");
+        assert_eq!(doc(), after, "重做要原样放回来（不是第二份近似的东西）");
+        assert!(
+            again["summary"].as_str().unwrap_or_default().starts_with("重做："),
+            "{again}"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn 退不动时给码且一个字节都不动() {
+        open_fixture();
+        assert!(ok(&edit(r#"{"op":"split","layer":"a","at":15}"#)));
+        let after = doc();
+
+        // 退到边界之外：**不是"成功但没变"** —— 要 ok:false 加一个码。
+        assert!(ok(&step(true)));
+        let nothing = step(true);
+        assert!(!ok(&nothing), "{nothing}");
+        assert_eq!(nothing["issues"][0]["code"], "nothing_to_undo", "{nothing}");
+
+        // 进到边界之外同理。
+        assert!(ok(&step(false)));
+        assert_eq!(doc(), after);
+        let end = step(false);
+        assert!(!ok(&end), "{end}");
+        assert_eq!(end["issues"][0]["code"], "nothing_to_redo", "{end}");
+        assert_eq!(doc(), after, "退不动 / 进不动的那一次不许碰宿主里的工程");
+    }
+
+    #[wasm_bindgen_test]
+    fn 换一份工程就换一条历史() {
+        open_fixture();
+        assert!(ok(&edit(r#"{"op":"split","layer":"a","at":15}"#)));
+        assert!(ok(&step(true)), "换工程之前应当退得回去");
+
+        // 重新载入同一份工程：历史**清空**（不然会退到上一份工程的某一帧上去）。
+        open_fixture();
+        let stale = step(true);
+        assert!(!ok(&stale), "换工程之后不该还能退：{stale}");
+        assert_eq!(stale["issues"][0]["code"], "nothing_to_undo", "{stale}");
+    }
+
+    #[wasm_bindgen_test]
+    fn 失败的那一步不进历史() {
+        open_fixture();
+        let before = doc();
+        let bad = edit(r#"{"op":"move","layer":"没有这一层","to":10}"#);
+        assert!(!ok(&bad), "{bad}");
+        assert_eq!(doc(), before, "失败的编辑不许改宿主里的工程");
+
+        // 失败**不占一步**：现在应当依然没得退。
+        let nothing = step(true);
+        assert!(!ok(&nothing), "{nothing}");
+        assert_eq!(nothing["issues"][0]["code"], "nothing_to_undo", "{nothing}");
+    }
 }
