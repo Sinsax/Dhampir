@@ -3,7 +3,8 @@
 写于 T2 进行中（HEAD 1e3a4ff，工作区干净）；T2.4 收口时更新（HEAD dc517fe）；T2.5 收口时更新（HEAD 59b8219）；
 T2.6 收口时更新（HEAD 158e615）；T2.7 收口时更新（HEAD 5520185）；T2 收口时更新（HEAD 51b7056，T2 整段完成）；
 **T3 收口时更新（HEAD 68aca8b，T3 整段完成）；T4 收口时更新（HEAD 6475c11，T4 整段完成）；
-T4 收口后进度复核（HEAD 9c64b06，工作区干净，2026-09-24）—— 逐条重跑的原始结论在第五节**。
+T4 收口后进度复核（HEAD 9c64b06，工作区干净，2026-09-24）—— 逐条重跑的原始结论在第五节；
+T5 收口时更新（T5 整段完成，2026-09-24）—— 数字在 measurements.md 第七项、证据在 t5-evidence.md**。
 
 **这份文件是给「下一个接手的人」的一页纸**：现在在哪、下一步做什么、什么还没做。
 它不替代另外两份，而是把它们的「未来」部分抽出来放在一处：
@@ -12,7 +13,7 @@ T4 收口后进度复核（HEAD 9c64b06，工作区干净，2026-09-24）—— 
 |---|---|
 | 每条缺陷与缺失的**状态与验收** | defects.md（台账，机器核对） |
 | 每段的**范围与依赖** | roadmap.md（阶段计划） |
-| 已经做完的**证据**（原样输出） | t0-evidence.md、t1-evidence.md、t2-evidence.md、t3-evidence.md |
+| 已经做完的**证据**（原样输出） | t0-evidence.md、t1-evidence.md、t2-evidence.md、t3-evidence.md、t4-evidence.md、t5-evidence.md |
 | **接下来做什么、什么还没做** | 本文件 |
 
 ---
@@ -21,15 +22,16 @@ T4 收口后进度复核（HEAD 9c64b06，工作区干净，2026-09-24）—— 
 
 | 项 | 状态 |
 |---|---|
-| 已完成并带证据的阶段 | T0（台账 + 判定回传通道）、T1（文档坐标系）、T2（文字与字幕上屏）、T3（弹幕）、T4（编辑模型补完） |
-| 进行中 | 无 —— **T4 已收口**；下一步是 T5 解码通路（见 roadmap.md 的 T5 段） |
-| 未开始 | T5 解码通路、T6 音频、T7 交付面收口 |
-| 台账统计（26 条） | 已完成 10 条：D1 **D2** **D5** **D6** D8 A1 **A2** A3 A4 A8；待办 11 条；明确不做 4 条；架构性不可测 1 条 |
-| 全仓状态 | `cargo test --workspace` 502 passed / 0 failed / 21 ignored（含 dhampir-timeline 199 条）、`cargo check --all-targets` 0 warning、17 个守卫里 **14 个全绿** —— 另 3 个（check-cli / check-local-backend / check-dual-end）在**本机 agent 会话**里因「起不了子进程」假红，判据与绕过见第五节 |
+| 已完成并带证据的阶段 | T0（台账 + 判定回传通道）、T1（文档坐标系）、T2（文字与字幕上屏）、T3（弹幕）、T4（编辑模型补完）、**T5（解码与素材通路：倒放 / 同源多帧 / 并发数）** |
+| 进行中 | 无 —— **T5 已收口**；下一步是 T6 音频（见 roadmap.md 的 T6 段） |
+| 未开始 | T6 音频、T7 交付面收口 |
+| 台账统计（26 条） | 已完成 16 条：D1 **D2** **D3** **D4** **D5** **D6** D8 **D11** A1 **A2** A3 A4 A8 **A6** **A7** **A10**；待办 5 条（都是 T6/T7 的）；明确不做 4 条；架构性不可测 1 条 |
+| 全仓状态 | `cargo test --workspace` **510 passed / 0 failed / 23 ignored**（含 dhampir-timeline 199 条；比 T4 收口多的 8 条是 T5 的池子用例、多的 2 条 ignored 是 T5 的 `tests/rewind.rs`）、`cargo check --all-targets` **0 warning**、17 个守卫里 **14 个全绿** —— 另 3 个（check-cli / check-local-backend / check-dual-end）在**本机 agent 会话**里因「起不了子进程」假红，判据与绕过见第五节 |
 
 **一句实话**：现在最接近「能用」的那条路是 **CLI 单机出片**；预览能编辑、能拖拽、能撤销重做、能出片，
-字幕与弹幕两个宿主都画得出来了（两端结构一致、墨迹可判），所以「能剪片子给人看」里的「字」与「改」
-两块不缺了；缺的是音轨（T6）与规模（T5）。
+字幕与弹幕两个宿主都画得出来了（两端结构一致、墨迹可判），素材通路也不再怕倒放与同源多帧
+（T5：一路源一张纹理 -> 按 (源, 源内帧) 键的池子）——
+所以「能剪片子给人看」里的「字」「改」「素材」三块不缺了；**只剩音轨（T6）与交付面收口（T7）**。
 
 ---
 
@@ -275,3 +277,26 @@ shim 留在 `target/pipe-shim.cjs`，跑法 `NODE_OPTIONS="--require=<仓库>/ta
 
 **顺带修掉一处文档漂移**：坑 11 里「文末那 23 行」是 T2 时代的数，实际已是 26 个导出（T3 的弹幕位图 +1、
 T4 的 undo/redo +2）；已在坑 11 就地改正，并写明**这个数不许写死**。
+
+---
+
+## 六、T5 收口时的复核（T5 整段完成，2026-09-24）
+
+T5 的三条（T5.1 先量化 / T5.2 按 (源, 源内帧) 键的池子 / T5.3 并发数与代价）全部落地，
+D3 / D4 / A6 / A7 / A10 / D11 六条已转 `done`。逐条重跑的原始结论：
+
+| 跑什么 | 结果 |
+|---|---|
+| `cargo test --workspace` | **510 passed / 0 failed / 23 ignored**（比 T4 收口 +8 passed 是 T5 的池子用例，+2 ignored 是 `tests/rewind.rs`） |
+| `cargo check --workspace --all-targets` | **0 条代码 warning**（本机会话里另有一批 `error deleting lock file ... (os error 5)`，那是沙箱不让清增量目录，不是代码警告） |
+| `node scripts/run-wasm-tests.mjs` | **15 / 15**，且与源码 `#[wasm_bindgen_test]` 条数对账一致 |
+| `node target/t2/run-guards.cjs` | **14 / 17**（与第五节同一组三个红，原因同坑 19） |
+| 同上，套上坑 19 的 shim | **15 / 17**（`check-dual-end` 转绿；剩下两个仍卡在编码器起不来） |
+| 全部 17 个守卫的 `--self-test` | **全绿**（这一项与会话无关，是纯函数自检） |
+| 真机像素判据 | `cargo test -p dhampir-worker --test rewind -- --ignored` → **2 passed**（90 帧 / 30 帧逐帧摘要相等，回退被断言到） |
+| 台账 | `check-defects` 绿：26 条、路线图引用齐全、证据路径都存在（16 done / 5 todo / 4 wontfix / 1 unmeasurable） |
+
+**T5 留下的一条明确待办**（写在 measurements.md 7.4 与 t5-evidence.md）：
+解码代价那张表与第五项的 14.56 ms/帧 **对不上账**（40.90 对 14.56），
+要在一个**能起编码器的普通终端**里重跑 `node scripts/measure-export.mjs` 才说得清。
+在有人重跑之前，**两边的数都别当结论用**。

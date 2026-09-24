@@ -1,0 +1,89 @@
+{
+  "project_schema": 1,
+  "generator": {
+    "app": "dhampir",
+    "version": "0.0.1"
+  },
+  "view": {
+    "playhead": 0,
+    "selection": "c",
+    "zoom": 1
+  },
+  "render_hints": {
+    "width": 640,
+    "height": 360,
+    "format": "mp4"
+  },
+  "extensions": {},
+  "meta": {
+    "title": "样本工程（同一素材画中画）",
+    "created_at": null,
+    "modified_at": null
+  },
+  "assets": [
+    {
+      "id": "a.mp4",
+      "kind": "video",
+      "name": "唯一素材",
+      "uri": "proxy1080p.mp4",
+      "frame_count": 480,
+      "timebase": {
+        "num": 60,
+        "den": 1
+      },
+      "width": 1920,
+      "height": 1080,
+      "content_hash": null,
+      "tags": {},
+      "note": "两个轨道引用同一份素材、相距很远的两个位置：这是 D4（source_frame_conflict）的夹具。"
+    }
+  ],
+  "timeline": {
+    "schema": 3,
+    "timebase": {
+      "num": 30,
+      "den": 1
+    },
+    "markers": [],
+    "tracks": [
+      {
+        "id": "v1",
+        "kind": "video",
+        "layers": [
+          {
+            "id": "full",
+            "start": 0,
+            "end": 30,
+            "source": {
+              "asset_id": "a.mp4",
+              "source_in": 0
+            },
+            "note": "铺满画面的底"
+          }
+        ]
+      },
+      {
+        "id": "v2",
+        "kind": "video",
+        "layers": [
+          {
+            "id": "pip",
+            "start": 0,
+            "end": 30,
+            "source": {
+              "asset_id": "a.mp4",
+              "source_in": 100
+            },
+            "transform": {
+              "x": 160.0,
+              "y": 90.0,
+              "scale": 0.3,
+              "rotation": 0.0
+            },
+            "note": "右下角的小窗，取的是同一份素材的另一个位置"
+          }
+        ]
+      }
+    ]
+  }
+}

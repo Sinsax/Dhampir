@@ -1,0 +1,105 @@
+{
+  "project_schema": 1,
+  "generator": {
+    "app": "dhampir",
+    "version": "0.0.1"
+  },
+  "view": {
+    "playhead": 0,
+    "selection": "c",
+    "zoom": 1
+  },
+  "render_hints": {
+    "width": 640,
+    "height": 360,
+    "format": "mp4"
+  },
+  "extensions": {},
+  "meta": {
+    "title": "样本工程（同一素材画中画 —— pip-project 的对照版本）",
+    "created_at": null,
+    "modified_at": null
+  },
+  "assets": [
+    {
+      "id": "a.mp4",
+      "kind": "video",
+      "name": "底色那一路",
+      "uri": "proxy1080p.mp4",
+      "frame_count": 480,
+      "timebase": {
+        "num": 60,
+        "den": 1
+      },
+      "width": 1920,
+      "height": 1080,
+      "content_hash": null,
+      "tags": {},
+      "note": "与 b.mp4 同一文件。"
+    },
+    {
+      "id": "b.mp4",
+      "kind": "video",
+      "name": "小窗那一路",
+      "uri": "proxy1080p.mp4",
+      "frame_count": 480,
+      "timebase": {
+        "num": 60,
+        "den": 1
+      },
+      "width": 1920,
+      "height": 1080,
+      "content_hash": null,
+      "tags": {},
+      "note": "内容与 a.mp4 一样，但**走自己那一路**解码器，于是两路都在向前读。"
+    }
+  ],
+  "timeline": {
+    "schema": 3,
+    "timebase": {
+      "num": 30,
+      "den": 1
+    },
+    "markers": [],
+    "tracks": [
+      {
+        "id": "v1",
+        "kind": "video",
+        "layers": [
+          {
+            "id": "full",
+            "start": 0,
+            "end": 30,
+            "source": {
+              "asset_id": "a.mp4",
+              "source_in": 0
+            },
+            "note": "铺满画面的底 —— 与 pip-project 同区间、同源内位置。"
+          }
+        ]
+      },
+      {
+        "id": "v2",
+        "kind": "video",
+        "layers": [
+          {
+            "id": "pip",
+            "start": 0,
+            "end": 30,
+            "source": {
+              "asset_id": "b.mp4",
+              "source_in": 100
+            },
+            "transform": {
+              "x": 160.0,
+              "y": 90.0,
+              "scale": 0.3,
+              "rotation": 0.0
+            },
+            "note": "右下角的小窗，取同一份素材的另一个位置，但走另一路源。"
+          }
+        ]
+      }
+    ]
+  }
+}

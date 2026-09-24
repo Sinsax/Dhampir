@@ -1,0 +1,119 @@
+{
+  "project_schema": 1,
+  "generator": {
+    "app": "dhampir",
+    "version": "0.0.1"
+  },
+  "view": {
+    "playhead": 0,
+    "selection": "c",
+    "zoom": 1
+  },
+  "render_hints": {
+    "width": 640,
+    "height": 360,
+    "format": "mp4"
+  },
+  "extensions": {},
+  "meta": {
+    "title": "样本工程（同一素材顺序引用 —— rewind-project 的对照版本）",
+    "created_at": null,
+    "modified_at": null
+  },
+  "assets": [
+    {
+      "id": "a.mp4",
+      "kind": "video",
+      "name": "同一份素材，登记成三个 id",
+      "uri": "proxy1080p.mp4",
+      "frame_count": 480,
+      "timebase": {
+        "num": 60,
+        "den": 1
+      },
+      "width": 1920,
+      "height": 1080,
+      "content_hash": null,
+      "tags": {},
+      "note": "三个 id 指向**同一个文件**：内容一模一样，区别只在「每一路要不要回退」。"
+    },
+    {
+      "id": "b.mp4",
+      "kind": "video",
+      "name": "同一份素材（第二路）",
+      "uri": "proxy1080p.mp4",
+      "frame_count": 480,
+      "timebase": {
+        "num": 60,
+        "den": 1
+      },
+      "width": 1920,
+      "height": 1080,
+      "content_hash": null,
+      "tags": {},
+      "note": "与 a.mp4 同一文件。"
+    },
+    {
+      "id": "c.mp4",
+      "kind": "video",
+      "name": "同一份素材（第三路）",
+      "uri": "proxy1080p.mp4",
+      "frame_count": 480,
+      "timebase": {
+        "num": 60,
+        "den": 1
+      },
+      "width": 1920,
+      "height": 1080,
+      "content_hash": null,
+      "tags": {},
+      "note": "与 a.mp4 同一文件。"
+    }
+  ],
+  "timeline": {
+    "schema": 3,
+    "timebase": {
+      "num": 30,
+      "den": 1
+    },
+    "markers": [],
+    "tracks": [
+      {
+        "id": "v1",
+        "kind": "video",
+        "layers": [
+          {
+            "id": "late",
+            "start": 0,
+            "end": 30,
+            "source": {
+              "asset_id": "a.mp4",
+              "source_in": 120
+            },
+            "note": "与 rewind-project 同区间、同源内位置，但走**自己那一路**解码器，只向前。"
+          },
+          {
+            "id": "mid",
+            "start": 30,
+            "end": 60,
+            "source": {
+              "asset_id": "b.mp4",
+              "source_in": 60
+            },
+            "note": "换一路源 = 不必回退。"
+          },
+          {
+            "id": "early",
+            "start": 60,
+            "end": 90,
+            "source": {
+              "asset_id": "c.mp4",
+              "source_in": 0
+            },
+            "note": "同上。"
+          }
+        ]
+      }
+    ]
+  }
+}

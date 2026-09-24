@@ -1,0 +1,87 @@
+{
+  "project_schema": 1,
+  "generator": {
+    "app": "dhampir",
+    "version": "0.0.1"
+  },
+  "view": {
+    "playhead": 0,
+    "selection": "c",
+    "zoom": 1
+  },
+  "render_hints": {
+    "width": 640,
+    "height": 360,
+    "format": "mp4"
+  },
+  "extensions": {},
+  "meta": {
+    "title": "样本工程（同一素材前后颠倒）",
+    "created_at": null,
+    "modified_at": null
+  },
+  "assets": [
+    {
+      "id": "a.mp4",
+      "kind": "video",
+      "name": "唯一素材",
+      "uri": "proxy1080p.mp4",
+      "frame_count": 480,
+      "timebase": {
+        "num": 60,
+        "den": 1
+      },
+      "width": 1920,
+      "height": 1080,
+      "content_hash": null,
+      "tags": {},
+      "note": "三个片段引用同一份素材，时间线上是**倒着**排的：这是 D3（source_rewind）的夹具。"
+    }
+  ],
+  "timeline": {
+    "schema": 3,
+    "timebase": {
+      "num": 30,
+      "den": 1
+    },
+    "markers": [],
+    "tracks": [
+      {
+        "id": "v1",
+        "kind": "video",
+        "layers": [
+          {
+            "id": "late",
+            "start": 0,
+            "end": 30,
+            "source": {
+              "asset_id": "a.mp4",
+              "source_in": 120
+            },
+            "note": "素材的后段先出现"
+          },
+          {
+            "id": "mid",
+            "start": 30,
+            "end": 60,
+            "source": {
+              "asset_id": "a.mp4",
+              "source_in": 60
+            },
+            "note": "回到素材中段 —— 解码器要回退"
+          },
+          {
+            "id": "early",
+            "start": 60,
+            "end": 90,
+            "source": {
+              "asset_id": "a.mp4",
+              "source_in": 0
+            },
+            "note": "再回到素材开头 —— 回退得更远"
+          }
+        ]
+      }
+    ]
+  }
+}

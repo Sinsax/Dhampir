@@ -928,6 +928,7 @@ fn cmd_render(args: &Args) -> Result<ExitCode, String> {
             "opened_streams": report.opened_streams,
             "empty_frames": report.empty_frames,
             "overlay": report.overlay,
+            "decode": report.decode,
             "subtitle_out": sidecar_written.as_ref().map(|(path, _)| path.display().to_string()),
             "subtitle_entries": sidecar_written.as_ref().map(|(_, count)| *count),
             "issues": report.issues,
@@ -953,6 +954,18 @@ fn cmd_render(args: &Args) -> Result<ExitCode, String> {
             report.overlay.danmaku_failed,
             report.overlay.cache_hits,
             report.overlay.cache_misses,
+        );
+    }
+    if report.decode.replays > 0 {
+        // **回退是事实，不是错**：工程要求过已经读过去的源内帧，代价是那一路从头再读一遍。
+        // 说出来是因为它是"这一趟为什么比那趟慢"的第一个可查的数。
+        eprintln!(
+            "解码：命中池子 {} 次、向前读 {} 次、**回退重启 {} 次**（共读 {} 帧）。\
+             回退多说明片子里有倒着引用同一素材的地方 —— 它不是错，代价是重读。",
+            report.decode.hits,
+            report.decode.forward,
+            report.decode.replays,
+            report.decode.frames_read,
         );
     }
     if failed {

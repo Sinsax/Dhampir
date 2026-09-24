@@ -18,26 +18,33 @@
 //! 比顺序解码慢一个量级。守卫 scripts/check-sequential-decode.mjs 按文件检查
 //! ffmpeg 调用附近**必须**同时出现 rawvideo 与 out_color_matrix。
 //!
-//! 这条约束有一个**必然的代价**，必须写清楚而不是藏着：
+//! 而"只许向前"是这条约束的**直接推论**，它不是一条独立的限制：
 //!
-//! > **每一路源只能向前推进。** 工程如果要求某个 source 回退到一个已经读过去的帧
-//! > （例如同一素材的两个片段在时间线上前后颠倒），这一路**给不出那一帧**。
+//! > 每一路源只能向前推进。工程如果要求某个 source 回退到一个已经读过去的帧
+//! > （例如同一素材的两个片段在时间线上前后颠倒），这一路**给不出那一帧** ——
+//! > 除非把解码器**从头再来一遍**。
 //!
-//! 遇到回退时本模块**报错并让整次出片失败**，而不是悄悄少画一层或者画错一层。
-//! 静默降级正是这个项目最要避免的失效模式。
+//! 所以回退给得出来，只是**要再读一遍**。这里不是"报错让整次出片失败"，
+//! 而是：池子里有就直接给；没有就重启这一路解码器，从头读到目标帧（沿途把
+//! 「这一趟还会再被要」的帧留在池子里，于是下一次回退多半能命中）。
+//! 代价随目标帧号线性增长，所以**先量化回退有多常见**（T5.1，见 plan/measurements.md），
+//! 再据实定池子多大。
 //!
-//! # 另一条限制：一路源一张纹理
+//! # 池子：键是 (source, 源内帧)
 //!
-//! SourceResolver 给出的是「这一帧上这个 source 用哪张纹理」。所以同一输出帧里
-//! 同一个 source 只能有**一个**源内帧。两个片段引用同一素材的不同帧、又同时可见时，
-//! 记为 source_frame_conflict 并失败。真要做需要多张纹理 + 多路解码器，
-//! 那是另一个数量级的改动，这里如实不做。
+//! 池子按 **(source, 源内帧)** 键复用纹理。于是同一输出帧里同一个 source 要
+//! **两个不同源内帧**（同素材画中画、同素材转场）也能出片 —— 此前那是
+//! source_frame_conflict，因为"一路源一张纹理"。
+//!
+//! 池子的容量按字节封顶（见 [`pool_slots`]），**只留这一趟真的还会被要的帧**
+//! （[`demand_of`]）：顺序出片时中间帧永远不会被要第二次，传上去就是白传。
 //!
 //! # 音轨
 //!
 //! **不渲染。** 本模块只出视频。有音轨就在 stderr 明说，不给一份「看起来很成功」的哑片。
 
-use std::collections::{BTreeSet, HashMap};
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
@@ -66,47 +73,291 @@ pub const WORK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 // 纯逻辑：先写这些，因为它们能被自检与真跑同时走到
 // ---------------------------------------------------------------------------
 
-/// 一次 texture_for 该做什么。
+/// 一趟出片会按什么顺序要哪些 (源, 源内帧)。
 ///
-/// 抽成纯函数是有意的：自检与真跑走**同一段判定**，否则自检验的是另一套规则。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Advance {
-    /// 纹理里已经是这一帧了，直接用。
-    Cached,
-    /// 向前读到目标帧。
-    Forward,
-    /// 目标帧在已经读过去的位置 —— **顺序解码给不出来**。
-    Rewind,
-    /// 同一帧上这个源已经被要求过另一个源内帧。
-    Conflict,
+/// **它是纯的**，因为三件事都要它：
+///
+/// * 池子靠它知道「读到的这一帧以后还会不会被要」（不在需求里的帧直接丢掉，省一次上传）；
+/// * 量化脚本靠它数「回退有多常见、退多远」（T5.1 的闸门：没有数字就不许定池子多大）；
+/// * 判定靠它把「要过哪些帧」变成可复算的事实，而不是从渲染过程中去猜。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceRequest {
+    /// 第几个**输出帧**要的。
+    pub frame: Frame,
+    pub source: String,
+    pub source_frame: Frame,
 }
 
-/// 判定「这一路源该做什么」。
+/// 走一遍求值层，把这一段的取帧顺序摊平。
 ///
-/// * next_frame：解码器**下一段字节**对应的帧号（读过的帧都小于它）；
-/// * uploaded：纹理里当前是哪一帧（从没上传过是 None）；
-/// * served：本次输出帧上这个源已经被服务过的帧号。
-pub fn plan_advance(
-    next_frame: Frame,
-    uploaded: Option<Frame>,
-    target: Frame,
-    served: Option<Frame>,
-) -> Advance {
-    if let Some(already) = served {
-        // 同一帧里重复要同一个源内帧是合法的（同一素材的多个片段各占一层）。
-        if already == target {
-            return Advance::Cached;
+/// 顺序**就是渲染器真会请求的顺序**（轨道序即层序，层序即 texture_for 的调用序）——
+/// 这一点很重要：如果这里换一个顺序，量化出来的回退次数就不是产品跑出来的那个数。
+pub fn request_schedule(
+    timeline: &TimelineV2,
+    assets: &AssetTimebases,
+    from: Frame,
+    to: Frame,
+) -> Vec<SourceRequest> {
+    let mut rows = Vec::new();
+    for frame in from..=to {
+        let composite = compose::evaluate_v2_with_assets(timeline, frame, Some(assets));
+        for layer in &composite.layers {
+            // 调整图层没有素材（空串是如实的表达，不是占位符）。
+            if layer.source.is_empty() {
+                continue;
+            }
+            rows.push(SourceRequest {
+                frame,
+                source: layer.source.clone(),
+                source_frame: layer.source_frame,
+            });
         }
-        return Advance::Conflict;
     }
-    if uploaded == Some(target) {
-        return Advance::Cached;
-    }
-    if target < next_frame {
-        return Advance::Rewind;
-    }
-    Advance::Forward
+    rows
 }
+
+/// 每个源这一趟会要哪些源内帧、**各要几次**。
+///
+/// 池子只留"还有下一次"的帧（见 [`plan_fetch`]），所以这里要的是**次数**不是集合：
+/// 顺序出片时每一帧都只被要一次，用完就该扔 —— 把它留着既不给谁用，又白占内存。
+/// 这一条是"顺序出片的内存开销与改之前一样"的保证。
+pub fn demand_of(schedule: &[SourceRequest]) -> HashMap<String, BTreeMap<Frame, usize>> {
+    let mut demand: HashMap<String, BTreeMap<Frame, usize>> = HashMap::new();
+    for row in schedule {
+        *demand
+            .entry(row.source.clone())
+            .or_default()
+            .entry(row.source_frame)
+            .or_insert(0) += 1;
+    }
+    demand
+}
+
+/// 池子一次取帧要做什么。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchAction {
+    /// 池里已经有这一帧。
+    Hit,
+    /// 顺着游标往前读。
+    Forward,
+    /// 要的帧在游标**后面**（已经读过去了）—— 重启这一路解码器再往前读。
+    ///
+    /// 这是「不许 seek」那条硬约束下唯一能给出旧帧的方式：代价是**再读一遍**，
+    /// 随目标帧号线性增长。它是一次**取了旧帧**的事实，不是错误。
+    Replay,
+}
+
+/// 一次取帧的计划。**纯的** —— 真池子与量化模拟走的是同一段规则。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchPlan {
+    pub action: FetchAction,
+    pub target: Frame,
+    /// 要真读的帧号（游标到目标，含两端）。Hit 时为空。
+    pub reads: Vec<Frame>,
+    /// reads 里要**留进池子**的（等一下还会被要的那些）。
+    pub keep: Vec<Frame>,
+    /// 留完之后被挤出去的（先来先走）。
+    pub evict: Vec<Frame>,
+}
+
+/// 定一次取帧计划。
+///
+/// * `cursor`：解码器**下一段字节**对应的帧号（读过的帧都小于它）；
+/// * `kept`：池子里现在有哪些帧（插入顺序）；
+/// * `slots`：池子容量（帧数）；
+/// * `remaining`：这个源**还没被服务过**的请求次数（来源是 [`demand_of`] 的计数表）。
+///
+/// **留什么**是这段规则里唯一有讲究的地方：只留「等一下还会再被要」的帧 ——
+/// 包括路上经过的，但不包括**目标帧自己**（马上就用掉了），除非它还要被要第二次。
+pub fn plan_fetch(
+    cursor: Frame,
+    kept: &[Frame],
+    target: Frame,
+    slots: usize,
+    remaining: &BTreeMap<Frame, usize>,
+) -> FetchPlan {
+    if kept.contains(&target) {
+        return FetchPlan {
+            action: FetchAction::Hit,
+            target,
+            reads: Vec::new(),
+            keep: Vec::new(),
+            evict: Vec::new(),
+        };
+    }
+    let action = if target < cursor {
+        FetchAction::Replay
+    } else {
+        FetchAction::Forward
+    };
+    // 回退只能从头再读一遍；向前就从游标接着读。
+    let start = if action == FetchAction::Replay {
+        0
+    } else {
+        cursor
+    };
+    let reads: Vec<Frame> = (start..=target).collect();
+    let left = |frame: Frame| remaining.get(&frame).copied().unwrap_or(0);
+    let keep: Vec<Frame> = reads
+        .iter()
+        .copied()
+        .filter(|frame| {
+            // 目标帧这一次马上用掉，所以它要"还剩 ≥ 2 次"才值得留。
+            let threshold = if *frame == target { 1 } else { 0 };
+            left(*frame) > threshold && !kept.contains(frame)
+        })
+        .collect();
+    let mut order: Vec<Frame> = kept.to_vec();
+    order.extend(keep.iter().copied());
+    let evict = if order.len() > slots {
+        order[..order.len() - slots].to_vec()
+    } else {
+        Vec::new()
+    };
+    FetchPlan {
+        action,
+        target,
+        reads,
+        keep,
+        evict,
+    }
+}
+
+/// 池子这一趟的账。**事实**，不是判据：回退多说明工程这么排的，不说明出了错。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct PoolStats {
+    pub hits: usize,
+    pub forward: usize,
+    pub replays: usize,
+    /// 真的从解码器读了多少帧（回退会让它大于不同帧数）。
+    pub frames_read: usize,
+}
+
+/// 池子的纯状态机：谁在里面、游标到哪、花了多少。
+///
+/// 抽出来的理由与 plan_advance 当时一样：**量化脚本与真池子必须是同一段规则**，
+/// 否则量化出来的数不描述产品。
+#[derive(Debug, Clone)]
+pub struct PoolCursor {
+    cursor: Frame,
+    kept: Vec<Frame>,
+    slots: usize,
+    remaining: BTreeMap<Frame, usize>,
+    stats: PoolStats,
+}
+
+impl PoolCursor {
+    pub fn new(slots: usize, remaining: BTreeMap<Frame, usize>) -> Self {
+        Self {
+            cursor: 0,
+            kept: Vec::new(),
+            // 容量至少 1：0 槽的池子不是"不缓存"，是"永远给不出旧帧"。
+            slots: slots.max(1),
+            remaining,
+            stats: PoolStats::default(),
+        }
+    }
+
+    pub fn cursor(&self) -> Frame {
+        self.cursor
+    }
+
+    pub fn kept(&self) -> &[Frame] {
+        &self.kept
+    }
+
+    /// 池子里现在占了几帧 —— 量化脚本用它算"这个工程至少要几槽"。**内存就是这个数乘帧字节**。
+    pub fn held(&self) -> usize {
+        self.kept.len()
+    }
+
+    pub fn stats(&self) -> PoolStats {
+        self.stats
+    }
+
+    pub fn plan(&self, target: Frame) -> FetchPlan {
+        plan_fetch(self.cursor, &self.kept, target, self.slots, &self.remaining)
+    }
+
+    /// 照计划推进状态。**调用方必须先真的做完 I/O**（否则游标与解码器会脱节）。
+    pub fn commit(&mut self, plan: &FetchPlan) {
+        match plan.action {
+            FetchAction::Hit => self.stats.hits += 1,
+            FetchAction::Forward => {
+                self.stats.forward += 1;
+                self.stats.frames_read += plan.reads.len();
+            }
+            FetchAction::Replay => {
+                self.stats.replays += 1;
+                self.stats.frames_read += plan.reads.len();
+            }
+        }
+        if let Some(last) = plan.reads.last() {
+            self.cursor = last + 1;
+        }
+        // 这一次请求把"还要被要几次"用掉一次。
+        if let Some(count) = self.remaining.get_mut(&plan.target) {
+            *count -= 1;
+        }
+        // **用完了就扔**：留着它也没人再来要（顺序出片时每一帧都走这条路，
+        // 于是池子的占用与"一路源一张纹理"时一样）。
+        let dead: Vec<Frame> = self
+            .kept
+            .iter()
+            .copied()
+            .filter(|frame| self.remaining.get(frame).copied().unwrap_or(0) == 0)
+            .collect();
+        if !dead.is_empty() {
+            self.kept.retain(|frame| !dead.contains(frame));
+        }
+        // 先挤旧的、再放新的，**两边都要过一遍淘汰名单**：
+        // 挤出去的可能是刚才读进来的那一批（读得比容量多时必然如此）。
+        if !plan.evict.is_empty() {
+            self.kept.retain(|frame| !plan.evict.contains(frame));
+        }
+        for frame in &plan.keep {
+            if !plan.evict.contains(frame) {
+                self.kept.push(*frame);
+            }
+        }
+    }
+}
+
+/// 一个源的池子能放几帧。
+///
+/// 按**字节**封顶而不是按帧数：1080p 一帧 8 MB、640x360 一帧 0.9 MB，
+/// 同一个帧数在两种尺寸下差九倍内存。上限写在 [`POOL_BYTES_PER_SOURCE`]，
+/// 边际帧数封在 [`POOL_SLOTS_MAX`]。
+pub fn pool_slots(width: u32, height: u32) -> usize {
+    let bytes = frame_bytes(width, height);
+    if bytes == 0 {
+        return 1;
+    }
+    (POOL_BYTES_PER_SOURCE / bytes).clamp(2, POOL_SLOTS_MAX)
+}
+
+/// 每个源的池子字节上限。**这是 T5.1 量化之后反推出来的数**，不是拍的
+/// （实测表在 plan/measurements.md）。
+///
+/// 要**同时留住**几帧，取决于「这个源上还有几个没轮到它的请求」——
+/// **不是回退的距离**。实测两种常见形态：
+///
+/// * 同一素材画中画（两处相距 98 帧）：最多要留住 **29** 帧；
+/// * 同一素材三段倒放（距离 p50 120）：最多要留住 **60** 帧。
+///
+/// 默认导出尺寸是 1080p（`render_hints`），一帧 8.29 MB，所以「覆盖画中画那一种」
+/// 要 `29 x 8.29 MB = 240 MB` —— 留一点余量取 **256 MiB**，1080p 下正好 32 槽
+/// （实测：32 槽那一刻重启归零，读帧量从 371 掉到 159，也就是 6.18x -> 2.65x）。
+///
+/// 为什么不去覆盖 60 帧那一种：`60 x 8.29 MB = 498 MB/源`，四个源就是 2 GB 的**天花板**；
+/// 而那笔钱买到的只是把倒放那种工程的读帧量从 2.60x 降到 1.99x。
+/// 注意这**是一条上限、不是一次分配**（池子只留"还有下一次请求"的帧，见 [`plan_fetch`]，
+/// 顺序出片时每个源只占 1 帧），但天花板本身在小显存机器上就是风险。
+pub const POOL_BYTES_PER_SOURCE: usize = 256 * 1024 * 1024;
+
+/// 单个源的池子最多几帧。按字节算在小尺寸下会给出很大的数（360p 能放 291 帧），
+/// 所以封一下；这个封顶取**实测要留住的最多帧数**（倒放那种形态的 60 帧）上的整数。
+pub const POOL_SLOTS_MAX: usize = 64;
 
 /// 一帧裸像素的字节数。
 pub fn frame_bytes(width: u32, height: u32) -> usize {
@@ -250,24 +501,26 @@ impl SourceTable {
 // 一路源的顺序解码器
 // ---------------------------------------------------------------------------
 
-/// 一路素材的解码器 + 它那一张复用纹理。
+/// 一路素材的解码器 + 它那一池纹理。
 ///
 /// **纹理必须复用**：1080p 每帧 8 MB，90 帧里每帧新建一次就是 720 MB 的分配抖动，
 /// 而且会把「两端的差异」混进分配顺序的差异里。
-struct SourceStream {
+struct SourcePool {
     source: String,
     file: PathBuf,
     child: Child,
     stdout: ChildStdout,
     width: u32,
     height: u32,
-    frame_bytes: usize,
-    /// 下一段字节对应的帧号。
-    next_frame: Frame,
-    /// 纹理里当前是哪一帧。
-    uploaded_frame: Option<Frame>,
-    texture: wgpu::Texture,
-    view: wgpu::TextureView,
+    /// 取帧策略与它的账（纯状态机，见 [`PoolCursor`]）。
+    cursor: PoolCursor,
+    /// 池子里的纹理，键是**源内帧号**。与 `cursor.kept()` 同步 ——
+    /// 谁进谁出只由 [`PoolCursor::commit`] 决定，这里只是把像素放上去。
+    slots: HashMap<Frame, wgpu::TextureView>,
+    /// 读帧用的缓冲。**不每帧新分配**：8 MB 一次的分配抖动会混进测量。
+    buffer: Vec<u8>,
+    /// 这一路重启过几次（回退的代价，作为事实上报）。
+    restarts: usize,
 }
 
 /// 问一次媒体尺寸。
@@ -319,42 +572,127 @@ fn probe_size(file: &Path) -> Result<(u32, u32), String> {
     Ok((width, height))
 }
 
-impl SourceStream {
-    fn open(device: &wgpu::Device, source: &str, file: &Path) -> Result<Self, String> {
-        if !file.exists() {
-            return Err(format!("素材文件不在：{}", file.display()));
-        }
+/// 起一路解码器：吐裸 RGBA 到 stdout。
+///
+/// **色彩矩阵必须显式。** 不写的话 FFmpeg 从容器元数据里猜，而浏览器
+/// （WebCodecs）也有一套自己的猜法，两边默认值不一定相同（BT.601 vs 709），
+/// 同一帧看起来就偏色 —— 而那不是渲染 bug。
+/// 这条也被 check-sequential-decode 守卫盯着，别删。
+///
+/// **不回退、不 seek**：起点永远是流的开头（这条同样是硬约束，见模块头）。
+fn spawn_decoder(file: &Path) -> Result<(Child, ChildStdout), String> {
+    if !file.exists() {
+        return Err(format!("素材文件不在：{}", file.display()));
+    }
+    let mut child = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(file)
+        .args([
+            "-vf",
+            "scale=out_color_matrix=bt709",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            DECODE_PIXEL_FORMAT,
+            "-",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|error| format!("起不了 ffmpeg：{error}（PATH 里有 ffmpeg 吗？）"))?;
+    let stdout = child.stdout.take().ok_or("拿不到解码器的 stdout")?;
+    Ok((child, stdout))
+}
+
+impl SourcePool {
+    fn open(source: &str, file: &Path, demand: BTreeMap<Frame, usize>) -> Result<Self, String> {
         let (width, height) = probe_size(file)?;
+        let (child, stdout) = spawn_decoder(file)?;
+        let frame_bytes = frame_bytes(width, height);
+        Ok(Self {
+            source: source.to_string(),
+            file: file.to_path_buf(),
+            child,
+            stdout,
+            width,
+            height,
+            cursor: PoolCursor::new(pool_slots(width, height), demand),
+            slots: HashMap::new(),
+            buffer: vec![0u8; frame_bytes],
+            restarts: 0,
+        })
+    }
 
-        // 解码器：吐裸 RGBA。
-        //
-        // **色彩矩阵必须显式。** 不写的话 FFmpeg 从容器元数据里猜，而浏览器
-        // （WebCodecs）也有一套自己的猜法，两边默认值不一定相同（BT.601 vs 709），
-        // 同一帧看起来就偏色 —— 而那不是渲染 bug。
-        // 这条也被 check-sequential-decode 守卫盯着，别删。
-        let mut child = Command::new("ffmpeg")
-            .args(["-v", "error", "-i"])
-            .arg(file)
-            .args([
-                "-vf",
-                "scale=out_color_matrix=bt709",
-                "-f",
-                "rawvideo",
-                "-pix_fmt",
-                DECODE_PIXEL_FORMAT,
-                "-",
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|error| format!("起不了 ffmpeg：{error}（PATH 里有 ffmpeg 吗？）"))?;
-        let stdout = child.stdout.take().ok_or("拿不到解码器的 stdout")?;
+    /// **重启这一路解码器**（回退的唯一做法：不许 seek，那只能从头再来）。
+    ///
+    /// 池子里的纹理**不受影响** —— 它们已经解出来了，重启只是让游标回到 0。
+    fn restart(&mut self) -> Result<(), String> {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let (child, stdout) = spawn_decoder(&self.file)?;
+        self.child = child;
+        self.stdout = stdout;
+        self.restarts += 1;
+        Ok(())
+    }
 
+    /// 把一帧读进来并按计划处理（留 / 不留 / 挤掉谁）。返回**目标帧**那张纹理。
+    fn read_frame(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target: Frame,
+        plan: &FetchPlan,
+    ) -> Result<wgpu::TextureView, String> {
+        let mut wanted: Option<wgpu::TextureView> = None;
+        for frame in plan.reads.iter().copied() {
+            match self.stdout.read_exact(&mut self.buffer) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    return Err(format!(
+                        "源 {}（{}）在第 {} 帧就结束了，而工程要第 {target} 帧",
+                        self.source,
+                        self.file.display(),
+                        frame
+                    ));
+                }
+                Err(error) => {
+                    return Err(format!("读源 {} 的第 {frame} 帧失败：{error}", self.source));
+                }
+            }
+            // 不在需求里的中间帧**只读不传**：省一次 8 MB 的 PCIe 往返，而像素本来就要丢掉。
+            let keep = plan.keep.contains(&frame);
+            if !keep && frame != target {
+                continue;
+            }
+            let view = self.upload(device, queue);
+            if frame == target {
+                wanted = Some(view.clone());
+            }
+            // 目标帧**这一趟一定要有**（它马上要被绑上去画），
+            // 但只在"还有下一次"的时候才留在池子里。
+            if keep {
+                self.slots.insert(frame, view);
+            }
+        }
+        for frame in &plan.evict {
+            self.slots.remove(frame);
+        }
+        wanted.ok_or_else(|| {
+            format!(
+                "读完第 {target} 帧却没拿到它的纹理（{}）—— 计划与读循环对不上",
+                self.source
+            )
+        })
+    }
+
+    /// 把 buffer 里那一帧传成一张纹理。
+    fn upload(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("dhampir pipeline source"),
             size: wgpu::Extent3d {
-                width,
-                height,
+                width: self.width,
+                height: self.height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -364,79 +702,51 @@ impl SourceStream {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        Ok(Self {
-            source: source.to_string(),
-            file: file.to_path_buf(),
-            child,
-            stdout,
-            width,
-            height,
-            frame_bytes: frame_bytes(width, height),
-            next_frame: 0,
-            uploaded_frame: None,
-            texture,
-            view,
-        })
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &self.buffer,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(self.width * 4),
+                rows_per_image: Some(self.height),
+            },
+            wgpu::Extent3d {
+                width: self.width,
+                height: self.height,
+                depth_or_array_layers: 1,
+            },
+        );
+        texture.create_view(&wgpu::TextureViewDescriptor::default())
     }
 
-    /// 向前推进到 target。**只许向前** —— 调用方已经用 plan_advance 判过。
-    fn advance_to(&mut self, queue: &wgpu::Queue, target: Frame) -> Result<(), String> {
-        if self.uploaded_frame == Some(target) {
-            return Ok(());
+    /// 取某一帧的纹理。池里有就给，没有就（必要时重启再）读到它。
+    fn frame_for(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target: Frame,
+    ) -> Result<wgpu::TextureView, String> {
+        let plan = self.cursor.plan(target);
+        if plan.action == FetchAction::Hit {
+            let view = self
+                .slots
+                .get(&target)
+                .ok_or_else(|| format!("池子里说第 {target} 帧在，实际不在（{}）", self.source))?;
+            let view = view.clone();
+            self.cursor.commit(&plan);
+            return Ok(view);
         }
-        if target < self.next_frame {
-            return Err(format!(
-                "源 {} 要回退到第 {target} 帧，而解码器已经在第 {} 帧之后（顺序解码给不出来）",
-                self.source, self.next_frame
-            ));
+        if plan.action == FetchAction::Replay {
+            self.restart()?;
         }
-        let mut buffer = vec![0u8; self.frame_bytes];
-        while self.next_frame <= target {
-            match self.stdout.read_exact(&mut buffer) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    return Err(format!(
-                        "源 {}（{}）在第 {} 帧就结束了，而工程要第 {target} 帧",
-                        self.source,
-                        self.file.display(),
-                        self.next_frame
-                    ));
-                }
-                Err(error) => {
-                    return Err(format!(
-                        "读源 {} 的第 {} 帧失败：{error}",
-                        self.source, self.next_frame
-                    ));
-                }
-            }
-            // 中间的帧**只读不传**：省一次 8 MB 的 PCIe 往返，而像素本来就要丢掉。
-            if self.next_frame == target {
-                queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &self.texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    &buffer,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(self.width * 4),
-                        rows_per_image: Some(self.height),
-                    },
-                    wgpu::Extent3d {
-                        width: self.width,
-                        height: self.height,
-                        depth_or_array_layers: 1,
-                    },
-                );
-                self.uploaded_frame = Some(target);
-            }
-            self.next_frame += 1;
-        }
-        Ok(())
+        let view = self.read_frame(device, queue, target, &plan)?;
+        self.cursor.commit(&plan);
+        Ok(view)
     }
 
     /// 收工。解码器还没读到 EOF，直接杀掉而不是等它跑完整条流。
@@ -444,49 +754,72 @@ impl SourceStream {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+
+    fn stats(&self) -> PoolStats {
+        self.cursor.stats()
+    }
 }
 
 // ---------------------------------------------------------------------------
 // 按工程解析源的 resolver
 // ---------------------------------------------------------------------------
 
-/// 把「asset_id -> 文件」变成「这一帧上这个 source 用哪张纹理」。
+/// 把「asset_id -> 文件」变成「这一帧上这个 source 的哪一帧用哪张纹理」。
 pub struct DecodingSources<'a> {
     device: &'a wgpu::Device,
     queue: &'a wgpu::Queue,
     table: &'a SourceTable,
-    streams: HashMap<String, SourceStream>,
+    /// 每个源这一趟会要的全部帧号（见 [`demand_of`]）——
+    /// 池子靠它决定"读到的这一帧要不要留下"。
+    demand: HashMap<String, BTreeMap<Frame, usize>>,
+    streams: HashMap<String, SourcePool>,
     /// 开失败过的源。记下来是为了**不要每帧重试一次并刷屏**。
     failed: BTreeSet<String>,
     log: IssueLog,
     current_frame: Frame,
-    /// 本次输出帧上已经服务过的 (source, 源内帧)。
-    served: Vec<(String, Frame)>,
 }
 
 impl<'a> DecodingSources<'a> {
-    pub fn new(device: &'a wgpu::Device, queue: &'a wgpu::Queue, table: &'a SourceTable) -> Self {
+    pub fn new(
+        device: &'a wgpu::Device,
+        queue: &'a wgpu::Queue,
+        table: &'a SourceTable,
+        demand: HashMap<String, BTreeMap<Frame, usize>>,
+    ) -> Self {
         Self {
             device,
             queue,
             table,
+            demand,
             streams: HashMap::new(),
             failed: BTreeSet::new(),
             log: IssueLog::new(),
             current_frame: 0,
-            served: Vec::new(),
         }
     }
 
-    /// 进入下一个输出帧。同一帧内重复的 (source, frame) 会被当作缓存命中。
+    /// 进入下一个输出帧。**只是把帧号记进诊断路径** ——
+    /// 同一帧里同一个源要几个源内帧由池子自己回答，不需要这里记账了。
     pub fn begin_frame(&mut self, frame: Frame) {
         self.current_frame = frame;
-        self.served.clear();
     }
 
     /// 已经开起来的解码器路数。给报告用。
     pub fn opened_streams(&self) -> usize {
         self.streams.len()
+    }
+
+    /// 这一趟解码侧的账（命中 / 向前 / 重启 / 读了多少帧）。**事实，不是判据。**
+    pub fn stats(&self) -> PoolStats {
+        let mut total = PoolStats::default();
+        for stream in self.streams.values() {
+            let one = stream.stats();
+            total.hits += one.hits;
+            total.forward += one.forward;
+            total.replays += one.replays;
+            total.frames_read += one.frames_read;
+        }
+        total
     }
 
     /// 收工：杀掉所有解码器。
@@ -500,13 +833,6 @@ impl<'a> DecodingSources<'a> {
     /// 取走问题清单。
     pub fn issues(self) -> Vec<Issue> {
         self.log.into_vec()
-    }
-
-    fn served_frame(&self, source: &str) -> Option<Frame> {
-        self.served
-            .iter()
-            .find(|(name, _)| name == source)
-            .map(|(_, frame)| *frame)
     }
 
     fn path_of(&self, source: &str) -> String {
@@ -532,7 +858,8 @@ impl<'a> DecodingSources<'a> {
             return false;
         };
         let file = file.to_path_buf();
-        match SourceStream::open(self.device, source, &file) {
+        let demand = self.demand.get(source).cloned().unwrap_or_default();
+        match SourcePool::open(source, &file, demand) {
             Ok(stream) => {
                 self.streams.insert(source.to_string(), stream);
                 true
@@ -553,75 +880,21 @@ impl SourceResolver for DecodingSources<'_> {
         source: &str,
         source_frame: Frame,
     ) -> Option<(wgpu::TextureView, (u32, u32))> {
-        let served = self.served_frame(source);
-        let (next_frame, uploaded) = match self.streams.get(source) {
-            Some(stream) => (stream.next_frame, stream.uploaded_frame),
-            None => (0, None),
-        };
-
-        // 判定先做完，再动状态 —— 借用与改动的边界摆在这儿，别混在一起。
-        match plan_advance(next_frame, uploaded, source_frame, served) {
-            Advance::Cached => {
-                let stream = self.streams.get(source)?;
-                return Some((stream.view.clone(), (stream.width, stream.height)));
-            }
-            Advance::Conflict => {
-                let path = self.path_of(source);
-                let already = served.unwrap_or_default();
-                self.log.record(
-                    "source_frame_conflict",
-                    &path,
-                    format!(
-                        "第 {} 帧上素材 {source} 同时被要求第 {already} 帧与第 {source_frame} 帧；\
-                         一路源只有一张纹理，后端不做回退解码",
-                        self.current_frame
-                    ),
-                );
-                return None;
-            }
-            Advance::Rewind => {
-                let path = self.path_of(source);
-                self.log.record(
-                    "source_rewind",
-                    &path,
-                    format!(
-                        "第 {} 帧要素材 {source} 的源内第 {source_frame} 帧，而解码器已经在第 {next_frame} 帧之后。\
-                         顺序解码只能向前 —— 请把引用同一素材的片段按时间顺序排列",
-                        self.current_frame
-                    ),
-                );
-                return None;
-            }
-            Advance::Forward => {}
-        }
-
         if !self.ensure_stream(source) {
             return None;
         }
-        // 开了解码器之后判定可能变了（原本没流时 next_frame 是 0）。
-        let next_frame = self.streams.get(source)?.next_frame;
-        if source_frame < next_frame {
-            let path = self.path_of(source);
-            self.log.record(
-                "source_rewind",
-                &path,
-                format!(
-                    "第 {} 帧要素材 {source} 的第 {source_frame} 帧，而它已经读过去了",
-                    self.current_frame
-                ),
-            );
-            return None;
-        }
-
+        let device = self.device;
+        let queue = self.queue;
         let stream = self.streams.get_mut(source)?;
-        if let Err(error) = stream.advance_to(self.queue, source_frame) {
-            let path = self.path_of(source);
-            self.log.record("source_decode_failed", &path, error);
-            return None;
+        let size = (stream.width, stream.height);
+        match stream.frame_for(device, queue, source_frame) {
+            Ok(view) => Some((view, size)),
+            Err(error) => {
+                let path = self.path_of(source);
+                self.log.record("source_decode_failed", &path, error);
+                None
+            }
         }
-        self.served.push((source.to_string(), source_frame));
-        let stream = self.streams.get(source)?;
-        Some((stream.view.clone(), (stream.width, stream.height)))
     }
 }
 
@@ -686,6 +959,11 @@ pub struct RenderReport {
     /// **它是事实，不是判据** —— 画不出来与画被切都进了 `issues`，
     /// 于是 `failed()` 只看问题清单就能判；而"超过 max_lines 丢了几行"不会把出片判失败。
     pub overlay: OverlayStats,
+    /// 解码侧池子这一趟干了什么（命中 / 向前 / **重启** / 读了多少帧）。
+    ///
+    /// **同样是事实，不是判据**：重启多说明工程里回退多（代价随目标帧号线性增长），
+    /// 不说明这一趟出了错。它是"这一趟为什么慢"的第一个可查的数。
+    pub decode: PoolStats,
     pub issues: Vec<Issue>,
 }
 
@@ -823,7 +1101,17 @@ pub fn render_plan(
     });
     let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
 
-    let mut sources = DecodingSources::new(&ctx.device, &ctx.queue, plan.sources);
+    // **先把这一趟要哪些 (源, 源内帧) 算出来**：池子靠它决定"读到的帧要不要留下"。
+    // 这一步是纯的、不碰 GPU 也不碰解码器，所以它失败不了，也不会让出片慢多少。
+    let schedule = request_schedule(
+        plan.timeline,
+        plan.asset_timebases,
+        plan.from,
+        plan.to,
+    );
+    let demand = demand_of(&schedule);
+    let mut sources =
+        DecodingSources::new(&ctx.device, &ctx.queue, plan.sources, demand);
     let mut encoder = spawn_encoder(plan, fps)?;
     // 字幕的账走**自己一份** IssueLog：源那边的那份在 sources 里（按 (code,path) 去重），
     // 两份在收尾时合并 —— 于是"同一行字画不下"按行内容去重，不会按帧号刷满清单。
@@ -909,8 +1197,9 @@ pub fn render_plan(
     // 无论成功还是中途退出，都要收干净：**不关编码器的 stdin，它会一直等**。
     let _ = encoder.stdin.take();
     let _ = encoder.wait();
-    // 路数要在 close() **之前**读 —— close 会清掉 streams，读晚了就永远是 0。
+    // 路数与账要在 close() **之前**读 —— close 会清掉 streams，读晚了就永远是 0。
     let opened_streams = sources.opened_streams();
+    let decode = sources.stats();
     sources.close();
 
     if let Err(error) = result {
@@ -937,6 +1226,7 @@ pub fn render_plan(
         opened_streams,
         empty_frames,
         overlay,
+        decode,
         issues,
     })
 }
@@ -955,6 +1245,21 @@ pub struct FramePng {
     pub issues: Vec<Issue>,
 }
 
+/// 只出几帧 PNG 这一趟的全部产物：帧 + **解码侧的账**。
+///
+/// 与出片那条路报的是**同一组事实**（[`PoolStats`] 与 `opened_streams`）——
+/// 这不是"给测试用的脚手架"：两条路走的是同一个 [`DecodingSources`]，
+/// 一条报得出解码账、另一条报不出，就会让人以为"PNG 那条不解码"，
+/// 而"看不见的东西不会有人去量"（T5.3 要的并发数与读写代价正是从这里来的）。
+#[derive(Debug, Clone)]
+pub struct PngRun {
+    pub frames: Vec<FramePng>,
+    /// 命中 / 向前 / **重启** / 一共读了多少源帧。
+    pub decode: PoolStats,
+    /// 这一趟开了几路解码器（= 工程里引用到的源数）。
+    pub opened_streams: usize,
+}
+
 /// 只出几帧 PNG（给 CLI 的 frame 子命令与调试用）。
 ///
 /// 走**同一条**求值/合成/读回路径，只是 sink 换成 PNG 文件 ——
@@ -963,6 +1268,14 @@ pub struct FramePng {
 ///
 /// 输出目录取计划里 output 的父目录；文件名是 frame-<帧号>.png。
 pub fn render_frames_png(plan: &RenderPlan, frames: &[Frame]) -> Result<Vec<FramePng>, String> {
+    render_frames_png_run(plan, frames).map(|run| run.frames)
+}
+
+/// 与 [`render_frames_png`] 同一条路，只是把**解码侧的账**也交出来。
+pub fn render_frames_png_run(
+    plan: &RenderPlan,
+    frames: &[Frame],
+) -> Result<PngRun, String> {
     if plan.width == 0 || plan.height == 0 {
         return Err(format!("输出尺寸不合法：{}x{}", plan.width, plan.height));
     }
@@ -984,7 +1297,23 @@ pub fn render_frames_png(plan: &RenderPlan, frames: &[Frame]) -> Result<Vec<Fram
         view_formats: &[],
     });
     let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
-    let mut sources = DecodingSources::new(&ctx.device, &ctx.queue, plan.sources);
+    // 与出片那条路**同一条**规矩：需求先算出来，再交给池子。
+    // 一次只要一帧时需求就是那一帧，池子于是退化成"直接读过去、只留那一帧"。
+    // 取 min/max 而不是 first/last：调用方给的帧号不保证有序，
+    // 而 `from..=to` 反着给会**悄悄变成空集**（于是池子不留任何帧）。
+    let demand = match (
+        frames.iter().copied().min(),
+        frames.iter().copied().max(),
+    ) {
+        (Some(first), Some(last)) => demand_of(&request_schedule(
+            plan.timeline,
+            plan.asset_timebases,
+            first,
+            last,
+        )),
+        _ => HashMap::new(),
+    };
+    let mut sources = DecodingSources::new(&ctx.device, &ctx.queue, plan.sources, demand);
 
     let dir = plan
         .output
@@ -1048,8 +1377,15 @@ pub fn render_frames_png(plan: &RenderPlan, frames: &[Frame]) -> Result<Vec<Fram
             issues: overlay_log.into_vec(),
         });
     }
+    // 账要在 close 之前取：close 会把 streams 清掉。
+    let decode = sources.stats();
+    let opened_streams = sources.opened_streams();
     sources.close();
-    Ok(written)
+    Ok(PngRun {
+        frames: written,
+        decode,
+        opened_streams,
+    })
 }
 
 #[cfg(test)]
@@ -1060,20 +1396,228 @@ mod tests {
         TimebaseDto { num, den }
     }
 
+    /// 需求计数表：测试里"每一帧只要一次"的那种工程。
+    fn once(frames: &[Frame]) -> BTreeMap<Frame, usize> {
+        frames.iter().map(|frame| (*frame, 1usize)).collect()
+    }
+
+    /// 用 JSON 造时间线：`Layer` 有十几个字段，逐字段写结构字面量会让测试
+    /// 因为**无关字段**变红。走契约自己的反序列化，形状与工程文件一致。
+    fn timeline_of(text: &str) -> TimelineV2 {
+        serde_json::from_str(text).expect("测试用的时间线 JSON 必须载得进来")
+    }
+
     #[test]
-    fn 顺序解码只许向前_回退要被判出来() {
-        // 纹理里是第 9 帧，解码器已经读到第 10 帧之后；要第 5 帧 —— 给不出来。
-        assert_eq!(plan_advance(10, Some(9), 5, None), Advance::Rewind);
-        // 要的正是纹理里那一帧：缓存命中，不算回退。
-        assert_eq!(plan_advance(10, Some(9), 9, None), Advance::Cached);
-        // 向前。
-        assert_eq!(plan_advance(10, Some(9), 20, None), Advance::Forward);
-        // 同一帧内重样的 (source, frame) 合法。
-        assert_eq!(plan_advance(10, Some(9), 9, Some(9)), Advance::Cached);
-        // 同一帧内同一个源的另一个源内帧：一个源一张纹理，做不到。
-        assert_eq!(plan_advance(10, Some(9), 20, Some(9)), Advance::Conflict);
-        // 还没开流（next_frame=0, uploaded=None）：第 0 帧是向前的第一步。
-        assert_eq!(plan_advance(0, None, 0, None), Advance::Forward);
+    fn 池子里的帧直接命中_向前就从游标接着读() {
+        // 帧 0 要被要**两次**（同一个输出帧里两层用同一帧）——留得住的前提就是这个：
+        // 需求表说它等一下还会被要。
+        let mut demand = once(&[0, 1, 2, 3, 4]);
+        demand.insert(0, 2);
+        let mut pool = PoolCursor::new(4, demand);
+        // 第一帧：从 0 读到 0。它还要被要一次，所以留进池子。
+        let plan = pool.plan(0);
+        assert_eq!(plan.action, FetchAction::Forward);
+        assert_eq!(plan.reads, vec![0]);
+        pool.commit(&plan);
+        assert_eq!(pool.cursor(), 1);
+        assert_eq!(pool.kept(), &[0]);
+        // 再要同一帧：命中，游标不动。
+        let plan = pool.plan(0);
+        assert_eq!(plan.action, FetchAction::Hit);
+        assert!(plan.reads.is_empty());
+        pool.commit(&plan);
+        assert_eq!(pool.cursor(), 1);
+        // 这一次要完，需求用尽 -> 出池子。**"用完了就扔"是顺序出片不涨内存的原因。**
+        assert!(pool.kept().is_empty());
+        // 向前两帧：路上那帧（1）等一下还要被要，就留；目标帧（2）这一次马上用掉，不留。
+        let plan = pool.plan(2);
+        assert_eq!(plan.action, FetchAction::Forward);
+        assert_eq!(plan.reads, vec![1, 2]);
+        assert_eq!(plan.keep, vec![1]);
+        pool.commit(&plan);
+        assert_eq!(pool.cursor(), 3);
+        assert_eq!(pool.kept(), &[1]);
+        assert_eq!(pool.stats().hits, 1);
+        assert_eq!(pool.stats().forward, 2);
+        assert_eq!(pool.stats().frames_read, 3);
+    }
+
+    #[test]
+    fn 回退是重启从头再读而不是报错() {
+        // 帧 1 要被要两次（后面那一层回头用它）；其余各一次。
+        let mut demand = once(&[0, 1, 2, 3, 4, 5, 6, 7]);
+        demand.insert(1, 2);
+        let mut pool = PoolCursor::new(3, demand);
+        let plan = pool.plan(7);
+        pool.commit(&plan);
+        assert_eq!(pool.stats().frames_read, 8);
+        // 池子只有 3 槽：先来先走，留下的是最后读到的那三帧。
+        assert_eq!(pool.kept(), &[4, 5, 6]);
+        // 要一个被挤掉的旧帧 —— **不是错误**，是从头再读一遍。
+        let plan = pool.plan(1);
+        assert_eq!(plan.action, FetchAction::Replay);
+        assert_eq!(plan.reads, vec![0, 1]);
+        pool.commit(&plan);
+        assert_eq!(pool.stats().replays, 1);
+        // 游标回到刚读到的位置后面，不是留在 8。
+        assert_eq!(pool.cursor(), 2);
+        assert_eq!(pool.stats().frames_read, 8 + 2);
+        // 而且**要的那一帧真的给出来了**：它还在池子里（还欠一次请求）。
+        assert!(pool.kept().contains(&1));
+    }
+
+    #[test]
+    fn 同一输出帧里同一个源要两帧也给得出来() {
+        // 这一条正是原来 source_frame_conflict 挡掉的东西（同素材画中画、同素材转场）：
+        // 一层要 58、另一层要 10，**同一个源、同一个输出帧**。
+        let demand = once(&[58, 10]);
+
+        // 池子装得下：读向 58 的路上顺手把 10 留下（需求表说它等一下要被要），
+        // 于是第二次是命中 —— 一帧都不用多读。
+        let mut pool = PoolCursor::new(8, demand.clone());
+        let plan = pool.plan(58);
+        assert_eq!(plan.action, FetchAction::Forward);
+        pool.commit(&plan);
+        assert_eq!(pool.plan(10).action, FetchAction::Hit);
+        assert_eq!(pool.stats().replays, 0);
+        assert_eq!(pool.stats().frames_read, 59);
+
+        // 一槽池子也一样给得出来：路上要留的**只有 10 这一帧**，一槽就够。
+        let mut tight = PoolCursor::new(1, demand);
+        let plan = tight.plan(58);
+        tight.commit(&plan);
+        assert_eq!(tight.plan(10).action, FetchAction::Hit);
+        assert_eq!(tight.stats().replays, 0);
+
+        // 但**来回要很多次**时一槽就露怯了：留得住这一对里的一个，
+        // 就留不住下一个，于是每次都得从头再读。
+        let mut churn = PoolCursor::new(1, {
+            let mut counts = once(&[58, 10]);
+            counts.insert(58, 2);
+            counts.insert(10, 2);
+            counts
+        });
+        let plan = churn.plan(58);
+        churn.commit(&plan);
+        let plan = churn.plan(10);
+        assert_eq!(plan.action, FetchAction::Replay);
+        assert_eq!(plan.reads, (0..=10).collect::<Vec<Frame>>());
+        churn.commit(&plan);
+        assert_eq!(churn.stats().replays, 1);
+        assert_eq!(churn.stats().frames_read, 59 + 11);
+    }
+
+    #[test]
+    fn 不在需求里的帧不留进池子() {
+        // 源 60fps、时间线 30fps：中间那些奇数帧永远不会被要第二次。
+        let demand = once(&[0, 2, 4]);
+        let mut pool = PoolCursor::new(16, demand);
+        let plan = pool.plan(4);
+        assert_eq!(plan.reads, vec![0, 1, 2, 3, 4]);
+        // 两条规则一起看：**不在需求里的**（1、3）不留，
+        // **这一趟用掉的**（目标 4，只欠一次）也不留。
+        assert_eq!(plan.keep, vec![0, 2]);
+        pool.commit(&plan);
+        assert_eq!(pool.kept(), &[0, 2]);
+    }
+
+    #[test]
+    fn 池子容量至少一帧() {
+        // 「容量为零」不是"不缓存"，是"永远给不出旧帧" —— 那是另一回事，不许悄悄发生。
+        // 给 0 槽会被夹到 1 槽，而 1 槽确实留得住一帧：留的是**还欠一次请求**的那帧。
+        let mut demand = once(&[0, 1]);
+        demand.insert(0, 2);
+        let mut pool = PoolCursor::new(0, demand);
+        let plan = pool.plan(1);
+        pool.commit(&plan);
+        assert_eq!(pool.kept(), &[0]);
+        assert_eq!(pool.plan(0).action, FetchAction::Hit);
+    }
+
+    #[test]
+    fn 池子大小按字节封顶而不是按帧数() {
+        // 640x360（0.92 MB/帧）与 1920x1080（8.29 MB/帧）装得下的帧数差一个量级。
+        let small = pool_slots(640, 360);
+        let big = pool_slots(1920, 1080);
+        assert!(small > big, "{small} 应该大于 {big}");
+        assert!(big >= 2);
+        assert!(small <= POOL_SLOTS_MAX);
+        // 尺寸为零时不是 panic，也不是 0 槽。
+        assert_eq!(pool_slots(0, 0), 1);
+    }
+
+    #[test]
+    fn 取帧顺序与渲染器真会请求的顺序一致() {
+        // 层序即 texture_for 的调用序：轨道序 -> 层序。这条断言是为了让量化脚本
+        // 数出来的回退次数**就是产品跑出来的那个数**。
+        let timeline = timeline_of(
+            r#"{
+              "schema": 3,
+              "timebase": { "num": 30, "den": 1 },
+              "tracks": [
+                { "id": "v1", "kind": "video", "layers": [
+                    { "id": "a", "start": 0, "end": 30,
+                      "source": { "asset_id": "a.mp4", "source_in": 0 } } ] },
+                { "id": "v2", "kind": "video", "layers": [
+                    { "id": "b", "start": 0, "end": 30,
+                      "source": { "asset_id": "b.mp4", "source_in": 100 } } ] }
+              ]
+            }"#,
+        );
+        let rows = request_schedule(&timeline, &AssetTimebases::new(), 0, 1);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].source, "a.mp4");
+        assert_eq!(rows[1].source, "b.mp4");
+        assert_eq!(rows[2].frame, 1);
+        assert_eq!(rows[3].source_frame, 101);
+    }
+
+    #[test]
+    fn 调整图层不出现在取帧计划里() {
+        // 调整图层没有素材（source 是空串），它不该被当成"要读第 0 帧"。
+        let timeline = timeline_of(
+            r#"{
+              "schema": 3,
+              "timebase": { "num": 30, "den": 1 },
+              "tracks": [
+                { "id": "v1", "kind": "video", "layers": [
+                    { "id": "a", "start": 0, "end": 10,
+                      "source": { "asset_id": "a.mp4", "source_in": 3 } } ] },
+                { "id": "v2", "kind": "video", "layers": [
+                    { "id": "f", "start": 0, "end": 10,
+                      "effects": [ { "kind": "gaussian_blur", "params": { "radius": 4 } } ] } ] }
+              ]
+            }"#,
+        );
+        let rows = request_schedule(&timeline, &AssetTimebases::new(), 0, 9);
+        assert_eq!(rows.len(), 10);
+        assert!(rows.iter().all(|row| row.source == "a.mp4"));
+    }
+
+    #[test]
+    fn 需求表按源分开且去重() {
+        let rows = vec![
+            SourceRequest {
+                frame: 0,
+                source: "a".to_string(),
+                source_frame: 10,
+            },
+            SourceRequest {
+                frame: 1,
+                source: "a".to_string(),
+                source_frame: 10,
+            },
+            SourceRequest {
+                frame: 1,
+                source: "b".to_string(),
+                source_frame: 3,
+            },
+        ];
+        let demand = demand_of(&rows);
+        assert_eq!(demand["a"].len(), 1);
+        // 要了两次就是两次 —— 池子靠这个数决定"用完了没有"。
+        assert_eq!(demand["a"][&10], 2);
+        assert_eq!(demand["b"].keys().copied().collect::<Vec<Frame>>(), vec![3]);
     }
 
     #[test]
@@ -1106,18 +1650,20 @@ mod tests {
 
     #[test]
     fn 问题按代码与路径去重并封顶() {
+        // 用一条**产品真的会发**的码：拿已经不再产生的码（比如从前的 source_rewind）
+        // 当例子，会让人以为那个缺陷还在。
         let mut log = IssueLog::new();
         for _ in 0..90 {
             log.record(
-                "source_rewind",
+                "unknown_asset",
                 "frame[3].source[a.mp4]",
-                "回退".to_string(),
+                "素材表里没有它".to_string(),
             );
         }
         // 90 次同一个缺陷 -> 只留一条。
         let issues = log.into_vec();
         assert_eq!(issues.len(), 1);
-        assert_eq!(issues[0].code, "source_rewind");
+        assert_eq!(issues[0].code, "unknown_asset");
     }
 
     #[test]
@@ -1157,6 +1703,7 @@ mod tests {
             opened_streams: 4,
             empty_frames: Vec::new(),
             overlay: OverlayStats::default(),
+            decode: PoolStats::default(),
             issues: Vec::new(),
         };
         assert!(!base.failed());
@@ -1180,7 +1727,7 @@ mod tests {
         assert!(empty.failed());
         // 有问题清单 -> 失败。
         let dirty = RenderReport {
-            issues: vec![Issue::new("source_rewind", "p", "m".to_string())],
+            issues: vec![Issue::new("unknown_asset", "p", "m".to_string())],
             ..base.clone()
         };
         assert!(dirty.failed());

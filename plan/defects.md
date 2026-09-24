@@ -37,17 +37,17 @@
   验收: 切点两侧的端点值 == 原曲线在切点的值（两侧各插一个当时的值）
   证据: plan/t4-evidence.md
 
-- [D3] status=todo phase=T5
+- [D3] status=done phase=T5
   症状: 素材在时间线上前后颠倒时整次出片失败（source_rewind）
-  根因: crates/dhampir-worker/src/pipeline.rs:557
+  根因: crates/dhampir-worker/src/pipeline.rs:172 crates/dhampir-worker/src/pipeline.rs:629
   验收: 倒序引用同一素材的工程能出片，且与顺序引用版本逐像素一致
-  证据: -
+  证据: plan/t5-evidence.md
 
-- [D4] status=todo phase=T5
+- [D4] status=done phase=T5
   症状: 同一输出帧里同一素材需要两个不同源内帧时失败（source_frame_conflict）
-  根因: crates/dhampir-worker/src/pipeline.rs:544
+  根因: crates/dhampir-worker/src/pipeline.rs:241
   验收: 同素材画中画的工程能出片；纹理池按 (source, frame) 键复用
-  证据: -
+  证据: plan/t5-evidence.md
 
 - [D5] status=done phase=T3
   症状: 字幕与弹幕存得下、查得出、画不出（解析器与契约校验都在，渲染阶段不存在）
@@ -85,11 +85,11 @@
   验收: 文档写明未验，不假装；--remote 只证明代码路径跨源
   证据: -
 
-- [D11] status=todo phase=T5
+- [D11] status=done phase=T5
   症状: 出片吞吐是下界（四个 asset 指向同一文件）；并发数没有落进测量
-  根因: plan/measurements.md:1 scripts/measure-concurrency.mjs:1
+  根因: plan/measurements.md:1 scripts/measure-export.mjs:1 crates/dhampir-worker/examples/decode_cost.rs:1
   验收: 补测并把口径与边界写进 measurements.md（拿带边界的数当结论用比没有更危险）
-  证据: -
+  证据: plan/t5-evidence.md
 
 - [D12] status=todo phase=T7
   症状: 改完 Rust 后守卫变红（陈旧 wasm pkg），需要手工重建
@@ -153,17 +153,17 @@
   验收: AudioPlan 与视频 RenderPlan 同源求值；帧号与采样数用有理数换算（复用 timebase），口径写进 consistency-criteria.md
   证据: -
 
-- [A6] status=todo phase=T5
+- [A6] status=done phase=T5
   症状: 解码器是单向游标，没有有界回退/随机访问窗口（这是结构选择，不是遗漏）
-  根因: crates/dhampir-worker/src/pipeline.rs:557
+  根因: crates/dhampir-worker/src/pipeline.rs:172 crates/dhampir-worker/examples/rewind_census.rs:1
   验收: 先量化真实工程里回退有多常见，再决定做有界回退窗口还是按源内顺序重排渲染
-  证据: -
+  证据: plan/t5-evidence.md
 
-- [A7] status=todo phase=T5
+- [A7] status=done phase=T5
   症状: 一路源一张纹理（结构选择）
-  根因: crates/dhampir-worker/src/pipeline.rs:544
+  根因: crates/dhampir-worker/src/pipeline.rs:241
   验收: SourceTexturePool（N 槽，键 (source, frame)）
-  证据: -
+  证据: plan/t5-evidence.md
 
 - [A8] status=done phase=T0
   症状: 没有页面到驱动的确定性判定通道；唯一通道是 CDP 求值，而它在本机 Chrome 上坏了
@@ -177,8 +177,8 @@
   验收: 出片能留下可恢复的中间态，或明确记为不做并说明理由
   证据: -
 
-- [A10] status=todo phase=T5
+- [A10] status=done phase=T5
   症状: 单线程顺序解码，吞吐上限写死
-  根因: crates/dhampir-worker/src/pipeline.rs:1
+  根因: crates/dhampir-worker/src/pipeline.rs:649 plan/measurements.md:1
   验收: 给出并发数并说明代价；没有数字就不许写进结论
-  证据: -
+  证据: plan/t5-evidence.md
