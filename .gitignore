@@ -21,3 +21,6 @@ node_modules/
 .idea/
 .DS_Store
 Thumbs.db
+
+# WorkBuddy 的工作区数据（记忆、技能），不是源码。
+/.workbuddy/
