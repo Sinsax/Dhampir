@@ -32,8 +32,50 @@ pub const GAUSSIAN_BLUR: EffectSpec = EffectSpec {
     pipeline: EffectPipeline::SeparableBlur,
 };
 
+/// 四个逐像素色彩调整。**同一条管线**，所以这里登记四次、渲染只写一次。
+///
+/// 为什么四个 kind 而不是一个带 mode 参数：
+/// UI 上它们是四个独立控件、有各自的取值范围与默认值；
+/// 合成一个的话，"亮度"的取值范围会跟着"饱和度"一起校验，报错也说不清是哪一项。
+/// 管线相同这个事实由 pipeline 字段表达，不需要靠合并 kind 来表达。
+///
+/// 范围都是 [0, ...] 或 [-1, 1]：亮度/对比度/饱和度都用**归一化**量，
+/// 不用百分比 —— 百分比要除以 100，多一次除就多一次舍入差异。
+pub const BRIGHTNESS: EffectSpec = EffectSpec {
+    kind: "brightness",
+    params: &[("amount", -1.0, 1.0)],
+    // 逐像素算子，与坐标系无关；声明 Source 是因为它读的是**输入纹理本身**，
+    // 不涉及"文档像素"这个概念（ColorAdjust 管线根本不调半径换算）。
+    space: EffectSpace::Source,
+    pipeline: EffectPipeline::ColorAdjust,
+};
+/// 对比度：绕 0.5 中灰缩放。1.0 = 不变。
+pub const CONTRAST: EffectSpec = EffectSpec {
+    kind: "contrast",
+    params: &[("amount", 0.0, 4.0)],
+    space: EffectSpace::Source,
+    pipeline: EffectPipeline::ColorAdjust,
+};
+/// 饱和度：向亮度插值。1.0 = 不变，0.0 = 完全灰度。
+pub const SATURATION: EffectSpec = EffectSpec {
+    kind: "saturation",
+    params: &[("amount", 0.0, 4.0)],
+    space: EffectSpace::Source,
+    pipeline: EffectPipeline::ColorAdjust,
+};
+/// 色调：色相旋转，单位**度**（不是弧度）。
+///
+/// 用户填的是度：说"转 90 度"比说"转 1.5708"自然，而 UI 上填 1.5708 没法看。
+/// 度转弧度在 Rust 侧做一次（见 render::color_adjust），着色器只收弧度 ——
+/// 转换只发生在一处，两端不会各转一遍。
+pub const HUE: EffectSpec = EffectSpec {
+    kind: "hue",
+    params: &[("degrees", -180.0, 180.0)],
+    space: EffectSpace::Source,
+    pipeline: EffectPipeline::ColorAdjust,
+};
 /// 全部已登记的特效。
-pub const REGISTRY: &[EffectSpec] = &[GAUSSIAN_BLUR];
+pub const REGISTRY: &[EffectSpec] = &[GAUSSIAN_BLUR, BRIGHTNESS, CONTRAST, SATURATION, HUE];
 
 /// 按类型串查登记项。
 pub fn spec_of(kind: &str) -> Option<&'static EffectSpec> {
@@ -70,7 +112,7 @@ mod tests {
     fn 登记表能查到也能列出来() {
         assert!(spec_of("gaussian_blur").is_some());
         assert!(spec_of("不存在的特效").is_none());
-        assert_eq!(kinds(), vec!["gaussian_blur"]);
+        assert_eq!(kinds(), vec!["brightness", "contrast", "gaussian_blur", "hue", "saturation"]);
     }
 
     #[test]
@@ -94,6 +136,21 @@ mod tests {
                     assert!(
                         spec.param_max("radius").is_some(),
                         "{} 走 SeparableBlur 却没有 radius 参数",
+                        spec.kind
+                    );
+                }
+                EffectPipeline::ColorAdjust => {
+                    // 逐像素调整**必须**有 amount 类参数，否则这一趟什么都不改。
+                    // 有参数但不给范围也不行 —— 那样 UI 无从生成控件。
+                    let has_param = spec.params.iter().any(|(name, _, _)| {
+                        *name == "amount" || *name == "degrees"
+                    });
+                    assert!(!spec.params.is_empty(), "{} 走 ColorAdjust 却没有参数", spec.kind);
+                    assert!(has_param, "{} 的参数名既不是 amount 也不是 degrees", spec.kind);
+                    // 逐像素算子与坐标系无关，声明 Document 会造成"多做一次换算"的误读。
+                    assert!(
+                        matches!(spec.space, EffectSpace::Source),
+                        "{} 是逐像素算子，空间应当声明为 Source",
                         spec.kind
                     );
                 }

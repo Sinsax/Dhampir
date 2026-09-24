@@ -32,7 +32,8 @@
 
 ## 2. 允许的构造（穷尽）
 
-表里「M2 现值」是 `probe.wgsl` + `scene.wgsl` 的合计出现次数（`node scripts/dhampir-wgsl-census.mjs` 的输出）。
+表里「M2 现值」是**全部着色器**的合计出现次数（`node scripts/dhampir-wgsl-census.mjs` 的输出）：
+`probe.wgsl` + `scene.wgsl` + `blur.wgsl` + `color_adjust.wgsl`。
 **这列会随代码变，它不是判据**；判据是"这个名字有没有在这一列的最左边出现"。刷新这张表用 `--md` 参数（它会直接打印可贴的表格行）。
 
 <!-- wgsl-allow-table -->
@@ -68,6 +69,11 @@
 | `textureLoad(` | 按整型坐标 + 显式 mip 层取纹素（**不涉及导数、不涉及滤波精度**） | 1 |
 | `texture_2d<` | 2D 纹理类型 | 1 |
 | `var<uniform>` | uniform 地址空间 | 1 |
+| `cos(` | 色相旋转矩阵（余弦项） | 1 |
+| `sin(` | 色相旋转矩阵（正弦项） | 1 |
+| `dot(` | 亮度权重点积（Rec.709，与 core 同一组系数） | 1 |
+| `mix(` | 向亮度插值（饱和度的定义式；mix 两端都求值，无分支） | 1 |
+| `mat3x3<` | 色相旋转矩阵 | 1 |
 
 ### 容易被问到的三个"为什么不在表里"
 

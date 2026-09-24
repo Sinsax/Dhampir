@@ -31,7 +31,7 @@ const EFFECTS_RS = join(REPO_ROOT, 'crates', 'dhampir-core', 'src', 'effects.rs'
 const TIMELINE_RS = join(REPO_ROOT, 'crates', 'dhampir-core', 'src', 'render', 'timeline.rs');
 
 /** 渲染器真的实现了的管线变体（写在这里，因为它是"渲染侧的事实"）。 */
-export const IMPLEMENTED_PIPELINES = ['SeparableBlur'];
+export const IMPLEMENTED_PIPELINES = ['SeparableBlur', 'ColorAdjust'];
 /** 合法的像素空间。 */
 export const VALID_SPACES = ['Source', 'Document'];
 /**
@@ -114,6 +114,14 @@ function runSelfTest() {
   const ok = [{ kind: 'gaussian_blur', pipeline: 'SeparableBlur', space: 'Document', hasRadius: true }];
 
   expect('正常登记 -> 通过', judge({ entries: ok, renderText: '' }), true);
+  expect(
+    'ColorAdjust 管线通过（它不需要 radius）',
+    judge({
+      entries: [{ kind: 'brightness', pipeline: 'ColorAdjust', space: 'Source', hasRadius: false }],
+      renderText: '',
+    }),
+    true
+  );
   expect('空登记表 -> 必须红（否则守卫永远通过）', judge({ entries: [], renderText: '' }), false);
   expect(
     '没声明 pipeline -> 必须红',
