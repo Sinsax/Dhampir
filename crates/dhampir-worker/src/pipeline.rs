@@ -45,7 +45,8 @@
 
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::{Read, Write};
+use std::ffi::OsString;
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::time::Instant;
@@ -59,6 +60,7 @@ use dhampir_core::timeline::layer::{AssetTimebases, TimelineV2};
 use dhampir_core::timeline::schema::{Frame, Issue, TimebaseDto};
 use dhampir_core::wgpu;
 
+use crate::audio::{AUDIO_CHANNELS, AUDIO_PCM_FORMAT, AUDIO_SAMPLE_RATE, AudioPlan, AudioSegment};
 use crate::baseline::open_leg;
 use crate::text_overlay::{OverlayPainter, OverlayStats};
 
@@ -902,6 +904,21 @@ impl SourceResolver for DecodingSources<'_> {
 // 出片
 // ---------------------------------------------------------------------------
 
+/// 音频这一趟怎么办。
+///
+/// 为什么是**模式**而不是"要不要音频"的布尔：这两条的差别不只是声音，
+/// 而是**走哪条代码路径** —— `Silent` 保证与引入音频之前逐字节相同的那条路。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AudioMode {
+    /// 工程里有音轨就出声音。**没有音轨时与 `Silent` 走的是同一条路** ——
+    /// 于是"没有音频的工程"这次改动前后产物逐字节相同。
+    #[default]
+    Auto,
+    /// 明确不要声音（`--no-audio`）。它是一道**可以主动选的**逃生门，
+    /// 而不是"还没实现所以静音"。
+    Silent,
+}
+
 /// 一次出片的入参。
 pub struct RenderPlan<'a> {
     pub timeline: &'a TimelineV2,
@@ -910,7 +927,7 @@ pub struct RenderPlan<'a> {
     /// 传空的不是错 —— 那是"假设素材帧率与时间线一致"的旧语义，
     /// 但素材帧率真的不同时画面会变速，所以调用方应当把工程文件的资产表带上。
     pub asset_timebases: &'a AssetTimebases,
-    /// 闭区间 [from, to]，单位整数帧。
+    /// 帧区间 [from, to]，单位整数帧。
     pub from: Frame,
     pub to: Frame,
     pub width: u32,
@@ -933,7 +950,33 @@ pub struct RenderPlan<'a> {
     /// 为什么不给一个默认字体：本仓不内嵌字体、也不去猜系统字体在哪。
     /// 猜错的后果是**产出一份字全是方框的片子**，而"看起来成功、其实不对"正是要消灭的。
     pub font_file: Option<&'a Path>,
+    /// 音轨怎么办。AudioPlan 由本函数从 `timeline`/`sources`/`asset_timebases` 摊出来 ——
+    /// **同源求值**要的就是"同一份入参"，让调用方另传一份计划进来反而会分叉。
+    pub audio: AudioMode,
     pub output: &'a Path,
+}
+
+/// 音频这一趟干了什么。**是事实，不是判据** —— 判据仍然是问题清单。
+///
+/// 报出来的理由与解码侧的 [`PoolStats`] 一样：出片慢或声音不对的时候，
+/// "这一趟读了几路素材、从哪儿重新开始读、补了多少静音"是第一个该看的数。
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct AudioStats {
+    pub sample_rate: u32,
+    pub channels: u16,
+    /// 摊出来的音频段数（0 = 这一趟没有声音）。
+    pub segments: usize,
+    /// 这一趟音轨应当有的采样点数（由帧区间有理数算出）。
+    pub expected_samples: i64,
+    /// 段与段之间补的静音（时间线上本来就没声音的地方）。
+    pub gap_samples: i64,
+    /// 素材不够长而补的静音 —— **这个数不为零就说明有东西被截断了**。
+    pub padded_samples: i64,
+    /// 从素材里**真读出来**的采样点总数（不含补的静音）。
+    ///
+    /// 它是"这一段到底用了多少素材"的数：拿它与 `expected_samples - gap_samples`
+    /// 比一比，就知道有没有素材白读了或者读漏了。
+    pub source_samples_read: i64,
 }
 
 /// 一次出片的结果。**问题清单不在这里判** —— 本模块只出事实，
@@ -959,6 +1002,8 @@ pub struct RenderReport {
     /// **它是事实，不是判据** —— 画不出来与画被切都进了 `issues`，
     /// 于是 `failed()` 只看问题清单就能判；而"超过 max_lines 丢了几行"不会把出片判失败。
     pub overlay: OverlayStats,
+    /// 音轨那一路的账。无声的那一趟这份是 `Default`（全 0 / 0 段）。
+    pub audio: AudioStats,
     /// 解码侧池子这一趟干了什么（命中 / 向前 / **重启** / 读了多少帧）。
     ///
     /// **同样是事实，不是判据**：重启多说明工程里回退多（代价随目标帧号线性增长），
@@ -981,39 +1026,54 @@ impl RenderReport {
     }
 }
 
+/// 视频编码器的命令行。**抽成纯函数是为了能被冻住**：
+/// "无声那条路逐字节不变"这句话需要一个可执行的判据，而这个判据就是
+/// "这段 argv 与引入音频之前的那一刻逐项相等"（见单元测试 `无声路径的命令行没有变`）。
+///
+/// 返回 `OsString` 而不是 `String`：输出路径**原样**传给子进程，不经 `display()`
+/// 那道有损转换 —— 路径里有什么字节，进命令行的就是什么字节。
+pub fn encoder_args(width: u32, height: u32, fps: f64, output: &Path) -> Vec<OsString> {
+    vec![
+        "-v".into(),
+        "error".into(),
+        "-f".into(),
+        "rawvideo".into(),
+        "-pix_fmt".into(),
+        DECODE_PIXEL_FORMAT.into(),
+        "-s".into(),
+        format!("{width}x{height}").into(),
+        "-r".into(),
+        format!("{fps}").into(),
+        "-i".into(),
+        "-".into(),
+        "-c:v".into(),
+        "libx264".into(),
+        "-preset".into(),
+        "veryfast".into(),
+        "-crf".into(),
+        "20".into(),
+        "-pix_fmt".into(),
+        "yuv420p".into(),
+        "-movflags".into(),
+        "+faststart".into(),
+        "-y".into(),
+        output.as_os_str().to_os_string(),
+    ]
+}
+
 /// 起编码器。裸流没有尺寸与帧率信息，必须显式告诉它。
-fn spawn_encoder(plan: &RenderPlan, fps: f64) -> Result<Child, String> {
-    if let Some(parent) = plan.output.parent() {
+///
+/// `target` 与 `plan.output` 是**分开的两个参数**：有音轨时视频先落到临时文件，
+/// 随后与音轨复用写成真正的产物。没有音轨时两者是同一个路径 ——
+/// 于是那条路上连参数都不用变（这一点由上面的 argv 冻结测试钉住）。
+fn spawn_encoder(target: &Path, width: u32, height: u32, fps: f64) -> Result<Child, String> {
+    if let Some(parent) = target.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|e| format!("建不了输出目录：{e}"))?;
         }
     }
     Command::new("ffmpeg")
-        .args([
-            "-v",
-            "error",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            DECODE_PIXEL_FORMAT,
-        ])
-        .arg("-s")
-        .arg(format!("{}x{}", plan.width, plan.height))
-        .args(["-r", &format!("{fps}"), "-i", "-"])
-        .args([
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "20",
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-        ])
-        .arg("-y")
-        .arg(plan.output)
+        .args(encoder_args(width, height, fps, target))
         .stdin(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
@@ -1067,6 +1127,216 @@ fn probe_output_frames(path: &Path) -> Result<(u32, u32, usize), String> {
     Ok((width, height, frames))
 }
 
+// ---------------------------------------------------------------------------
+// 音频那一路（T6）
+//
+// 与视频那一路**同一个原则**：素材只能向前读。区别只有一处 ——
+// 视频读的是帧、走的是纹理池；音频读的是采样点、直接落进临时 PCM。
+// ---------------------------------------------------------------------------
+
+/// 一次从解码器读多少个采样点。够大摊薄系统调用，够小不至于占内存。
+const AUDIO_CHUNK_SAMPLES: usize = 4096;
+
+/// 一个采样点在 PCM 里占多少字节（`f32` × 声道数）。
+fn audio_bytes_per_sample(channels: u16) -> usize {
+    4 * usize::from(channels.max(1))
+}
+
+fn write_silence(
+    out: &mut impl Write,
+    samples: i64,
+    bytes_per_sample: usize,
+) -> Result<(), String> {
+    if samples <= 0 {
+        return Ok(());
+    }
+    let zeros = vec![0u8; AUDIO_CHUNK_SAMPLES * bytes_per_sample];
+    let mut left = samples;
+    while left > 0 {
+        let take = left.min(AUDIO_CHUNK_SAMPLES as i64) as usize;
+        out.write_all(&zeros[..take * bytes_per_sample])
+            .map_err(|error| format!("写静音失败：{error}"))?;
+        left -= take as i64;
+    }
+    Ok(())
+}
+
+/// 从素材里把**一段**拉出来（`f32le` / 48 kHz / 立体声），写进 `out`。返回真读到的采样点数。
+///
+/// # 为什么用 `atrim` 而不是 `-ss`
+///
+/// 两件都能"从中间开始"，但 `atrim` 的 `start_sample` / `end_sample` 是**整数采样点**，
+/// 于是"从第几个采样点开始"这件事不必经过浮点秒 —— 而 `-ss` 只认时间，
+/// 还会破「后端不许逐帧 seek」那条硬约束（`scripts/check-sequential-decode.mjs` 盯着它）。
+///
+/// # 为什么不是"开一路、往后丢"的游标
+///
+/// 那条路更省：同一份素材连着用几段，只解一遍。但它有个不好收的尾巴 ——
+/// 每段读够了就得**提前掐掉**解码器，而 ffmpeg 会因此往 stderr 吐一句
+/// `Error submitting a packet to the muxer`。**一次成功的出片不该有那句话**：
+/// 它会让人以为出了错，然后去查一个并不存在的问题。
+///
+/// 所以这里选了更笨、但更干净的一条：**每段起一路**，解码到这段末尾自然结束。
+/// 每段的代价是"从素材头解到这段末尾"（而不是只解这一段），
+/// 这个代价量在 `plan/t6-evidence.md` 里 —— 别把它当成"不要钱"。
+fn extract_segment(segment: &AudioSegment, out: &mut impl Write) -> Result<i64, String> {
+    let bytes_per_sample = audio_bytes_per_sample(AUDIO_CHANNELS);
+    let start = segment.source_start_sample.max(0);
+    let end = start.saturating_add(segment.output_samples);
+    let mut child = Command::new("ffmpeg")
+        .args(["-v", "error"])
+        .arg("-i")
+        .arg(&segment.file)
+        .args([
+            // 只要声音。**不加 -ss**（守卫不许 seek）。
+            "-vn",
+            "-filter_complex",
+            &format!("atrim=start_sample={start}:end_sample={end},asetpts=PTS-STARTPTS"),
+            "-f",
+            AUDIO_PCM_FORMAT,
+            "-ac",
+            &AUDIO_CHANNELS.to_string(),
+            "-ar",
+            &AUDIO_SAMPLE_RATE.to_string(),
+            // 输出到 stdout：**读的那一端**在本机会话里是通的
+            //（不通的是 stdin 管道，见 plan/next-steps.md 坑 19）。
+            "-",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|error| {
+            format!(
+                "起不了音频解码器 ffmpeg（{}）：{error}（PATH 里有 ffmpeg 吗？）",
+                segment.file.display()
+            )
+        })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "拿不到音频解码器的 stdout".to_string())?;
+    let mut reader = BufReader::new(stdout);
+    let mut buffer = vec![0u8; AUDIO_CHUNK_SAMPLES * bytes_per_sample];
+    let mut written = 0i64;
+    while written < segment.output_samples {
+        let want = (segment.output_samples - written).min(AUDIO_CHUNK_SAMPLES as i64) as usize;
+        let slice = &mut buffer[..want * bytes_per_sample];
+        let mut filled = 0usize;
+        while filled < slice.len() {
+            match reader.read(&mut slice[filled..]) {
+                Ok(0) => break,
+                Ok(read) => filled += read,
+                Err(error) => return Err(format!("读音频解码器失败：{error}")),
+            }
+        }
+        let got = filled / bytes_per_sample;
+        if got == 0 {
+            break; // 素材到此为止 —— 调用方负责补静音。
+        }
+        out.write_all(&buffer[..got * bytes_per_sample])
+            .map_err(|error| format!("写音频临时文件失败：{error}"))?;
+        written += got as i64;
+    }
+    let _ = child.wait();
+    Ok(written)
+}
+
+/// 把 AudioPlan 摊成一整条 PCM 轨（临时文件）。
+///
+/// **总长严格等于 `audio.total_samples`**：段与段之间补静音、素材不够长也补静音。
+/// 于是"音轨时长 == 视频时长"是**写出来的**，不是事后对齐出来的。
+pub fn build_audio_track(audio: &AudioPlan, pcm: &Path) -> Result<AudioStats, String> {
+    let bytes_per_sample = audio_bytes_per_sample(audio.info.channels);
+    let mut stats = AudioStats {
+        sample_rate: audio.info.sample_rate,
+        channels: audio.info.channels,
+        segments: audio.segments.len(),
+        expected_samples: audio.total_samples,
+        ..Default::default()
+    };
+    let mut file = std::fs::File::create(pcm)
+        .map_err(|error| format!("建不了音频临时文件（{}）：{error}", pcm.display()))?;
+    let mut cursor = 0i64;
+
+    for segment in &audio.segments {
+        // 段之前的位置：时间线上本来就没声音，补静音。
+        if segment.output_start_sample > cursor {
+            let gap = segment.output_start_sample - cursor;
+            write_silence(&mut file, gap, bytes_per_sample)?;
+            stats.gap_samples += gap;
+            cursor = segment.output_start_sample;
+        }
+        let written = extract_segment(segment, &mut file)?;
+        stats.source_samples_read += written;
+        // 素材不够长 -> 这一段的后半是补的静音。**这个数不为零必须看得见。**
+        stats.padded_samples += segment.output_samples - written;
+        cursor += segment.output_samples;
+    }
+    // 尾巴上的空档。
+    if cursor < audio.total_samples {
+        let tail = audio.total_samples - cursor;
+        write_silence(&mut file, tail, bytes_per_sample)?;
+        stats.gap_samples += tail;
+    }
+    file.flush()
+        .map_err(|error| format!("收尾音频临时文件失败：{error}"))?;
+    Ok(stats)
+}
+
+/// 把已经编好的视频与一条 PCM 轨复用成产物。
+///
+/// **视频是 `-c:v copy`**：它在上一跳已经编完了，这里一个字节都不该再动 ——
+/// 重编一次等于给"视频那一半没变"这句话白加一层风险（还要多花一遍编码时间）。
+///
+/// `pub` 是有意的：音频这一跳**不经过 GPU、也不需要 stdin 管道**
+/// （它读素材文件、写临时文件），所以它可以被脱离出片那条路地整段验。
+/// 那条路上的视频编码器要 rawvideo stdin，本机会话里起不来（见 plan/next-steps.md 坑 19）。
+pub fn mux_audio(video: &Path, pcm: &Path, audio: &AudioPlan, out: &Path) -> Result<(), String> {
+    let status = Command::new("ffmpeg")
+        .args(["-v", "error"])
+        .arg("-i")
+        .arg(video)
+        .args([
+            "-f",
+            AUDIO_PCM_FORMAT,
+            "-ar",
+            &audio.info.sample_rate.to_string(),
+            "-ac",
+            &audio.info.channels.to_string(),
+        ])
+        .arg("-i")
+        .arg(pcm)
+        .args([
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+        ])
+        .arg("-y")
+        .arg(out)
+        // **不给 stdin 开管道**：这条命令本来就不需要喂东西，而"给子进程开 stdin 管道"
+        // 在本机会话里会 ERROR_PIPE_BUSY（见 plan/next-steps.md 坑 19）。
+        // 显式写 null 是为了让"凭什么这里能跑"这个问题在代码里就有答案。
+        .stdin(Stdio::null())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|error| format!("起不了复用器 ffmpeg：{error}（PATH 里有 ffmpeg 吗？）"))?;
+    if !status.success() {
+        return Err(format!("音视频复用失败：ffmpeg 退出码 {:?}", status.code()));
+    }
+    Ok(())
+}
+
+/// 有音轨时，视频先落到产物**旁边**的临时文件；复用完再删掉。
+///
+/// 用 `.` 前缀：一眼能看出是中间产物；放在产物同目录而不是系统临时目录 ——
+/// 跨盘搬 90 帧的 1080p 是把时间花在最不值的地方。
+fn sidecar_path(output: &Path, suffix: &str) -> PathBuf {
+    let name = output
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "out".to_string());
+    output.with_file_name(format!(".{name}.{suffix}"))
+}
+
 /// 出片。on_progress(已出帧数, 总帧数)。
 pub fn render_plan(
     plan: &RenderPlan,
@@ -1080,6 +1350,27 @@ pub fn render_plan(
     }
     let fps = encoder_fps(&plan.timeline.timebase)?;
     let total = (plan.to - plan.from + 1) as usize;
+
+    // 音轨的计划在**碰 GPU 之前**就摊出来：它是纯的，因此"工程里有没有声音"
+    // 这件事不该等到出片跑到一半才知道。
+    let audio_plan = match plan.audio {
+        AudioMode::Silent => AudioPlan::silent(plan.from, plan.to, &plan.timeline.timebase)?,
+        AudioMode::Auto => crate::audio::plan_audio(
+            plan.timeline,
+            plan.sources,
+            plan.asset_timebases,
+            plan.from,
+            plan.to,
+        )?,
+    };
+    let wants_audio = !audio_plan.is_silent();
+    // **没有音轨时 video_target 就是 plan.output** —— 于是无声那条路
+    // 连"写到哪儿"都没变，产物与引入音频之前逐字节相同。
+    let video_target = if wants_audio {
+        sidecar_path(plan.output, "video.mp4")
+    } else {
+        plan.output.to_path_buf()
+    };
 
     let (ctx, _init) =
         open_leg(NATIVE_BACKENDS).map_err(|error| format!("拿不到 GPU 上下文：{error}"))?;
@@ -1112,7 +1403,7 @@ pub fn render_plan(
     let demand = demand_of(&schedule);
     let mut sources =
         DecodingSources::new(&ctx.device, &ctx.queue, plan.sources, demand);
-    let mut encoder = spawn_encoder(plan, fps)?;
+    let mut encoder = spawn_encoder(&video_target, plan.width, plan.height, fps)?;
     // 字幕的账走**自己一份** IssueLog：源那边的那份在 sources 里（按 (code,path) 去重），
     // 两份在收尾时合并 —— 于是"同一行字画不下"按行内容去重，不会按帧号刷满清单。
     let mut overlay_log = IssueLog::new();
@@ -1202,16 +1493,39 @@ pub fn render_plan(
     let decode = sources.stats();
     sources.close();
 
+    // 有音轨时，视频只是**中间产物**：真正的产物要等复用之后才有。
+    // 所以从这里往下，凡是提前返回的路径都要把那个临时文件带走。
+    let mut audio = AudioStats::default();
     if let Err(error) = result {
+        if wants_audio {
+            remove_quietly(&video_target);
+        }
         return Err(error);
     }
     if frames == 0 {
+        if wants_audio {
+            remove_quietly(&video_target);
+        }
         return Err("一帧都没处理".to_string());
+    }
+
+    if wants_audio {
+        let pcm = sidecar_path(plan.output, "audio.f32");
+        let muxed = build_audio_track(&audio_plan, &pcm).and_then(|stats| {
+            audio = stats;
+            mux_audio(&video_target, &pcm, &audio_plan, plan.output)
+        });
+        remove_quietly(&pcm);
+        remove_quietly(&video_target);
+        muxed?;
     }
 
     let elapsed_ms = started.elapsed().as_millis();
     let mut issues = sources.issues();
     issues.extend(overlay_log.into_vec());
+    // 音轨装载阶段的问题（缺素材 / 音轨上没有素材的图层 / 多轨重叠）
+    // 与其它问题走同一条路：非空就是这次出片失败。
+    issues.extend(audio_plan.issues.iter().cloned());
     let overlay = painter.stats();
     let (width, height, encoded_frames) = probe_output_frames(plan.output)?;
     Ok(RenderReport {
@@ -1226,9 +1540,16 @@ pub fn render_plan(
         opened_streams,
         empty_frames,
         overlay,
+        audio,
         decode,
         issues,
     })
+}
+
+/// 删中间产物。**失败不报错** —— 它只是个临时文件，为它把一次已经成功的出片
+/// 判失败是本末倒置（真正该看的是产物本身）。
+fn remove_quietly(path: &Path) {
+    let _ = std::fs::remove_file(path);
 }
 
 /// 一张 PNG 的出图结果。
@@ -1690,6 +2011,87 @@ mod tests {
     }
 
     #[test]
+    fn 无声路径的命令行没有变() {
+        // **这是一条冻结测试。** T6 引入音频之后，"没有音轨的工程产物逐字节不变"
+        // 这句话就靠它成立：argv 一样、输入一样、编码器一样，产物就一样。
+        // 它红了的唯一合理原因是**你故意改了视频编码参数** ——
+        // 那时请连同这条一起改，并想清楚"已经出过的片子要不要重出"。
+        let args = encoder_args(1920, 1080, 30.0, Path::new("out.mp4"));
+        let text: Vec<String> = args
+            .iter()
+            .map(|value| value.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            text,
+            vec![
+                "-v",
+                "error",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgba",
+                "-s",
+                "1920x1080",
+                "-r",
+                "30",
+                "-i",
+                "-",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "20",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                "-y",
+                "out.mp4",
+            ]
+        );
+    }
+
+    #[test]
+    fn 有音轨时视频那一跳只换了落点() {
+        // 音频那一跳**不许动视频的编码参数**：它只是把已经编好的东西换个地方放。
+        let silent = encoder_args(640, 360, 30.0, Path::new("out.mp4"));
+        let with_audio = encoder_args(640, 360, 30.0, Path::new(".out.mp4.video.mp4"));
+        assert_eq!(silent.len(), with_audio.len());
+        assert_eq!(
+            silent[..silent.len() - 1],
+            with_audio[..with_audio.len() - 1],
+            "除了落点，参数必须逐项相同"
+        );
+        assert_ne!(silent[silent.len() - 1], with_audio[with_audio.len() - 1]);
+    }
+
+    #[test]
+    fn 中间产物落在产物旁边而且带点前缀() {
+        assert_eq!(
+            sidecar_path(Path::new("target/t6/film.mp4"), "video.mp4"),
+            PathBuf::from("target/t6/.film.mp4.video.mp4")
+        );
+        assert_eq!(
+            sidecar_path(Path::new("film.mp4"), "audio.f32"),
+            PathBuf::from(".film.mp4.audio.f32")
+        );
+        // 不带扩展名的产物也不能把路径拼坏。
+        assert_eq!(
+            sidecar_path(Path::new("out"), "audio.f32"),
+            PathBuf::from(".out.audio.f32")
+        );
+    }
+
+    #[test]
+    fn 音频每采样点的字节数按声道算() {
+        assert_eq!(audio_bytes_per_sample(1), 4);
+        assert_eq!(audio_bytes_per_sample(2), 8);
+        // 零声道是坏输入，但不许除零 —— 当单声道处理，让错误在别处浮出来。
+        assert_eq!(audio_bytes_per_sample(0), 4);
+    }
+
+    #[test]
     fn 报告判据把空帧与问题都算作失败() {
         let base = RenderReport {
             output: PathBuf::from("x.mp4"),
@@ -1703,6 +2105,7 @@ mod tests {
             opened_streams: 4,
             empty_frames: Vec::new(),
             overlay: OverlayStats::default(),
+            audio: AudioStats::default(),
             decode: PoolStats::default(),
             issues: Vec::new(),
         };

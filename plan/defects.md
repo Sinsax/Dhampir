@@ -61,11 +61,11 @@
   验收: 执行一个 op 再 undo，得到与执行前逐字节相同的 doc；CLI 与预览共用同一条历史
   证据: plan/t4-evidence.md
 
-- [D7] status=todo phase=T6
+- [D7] status=done phase=T6
   症状: 产物没有声音（编码器只吃 rawvideo stdin，没有任何音频输入）
-  根因: crates/dhampir-worker/src/pipeline.rs:661 crates/dhampir-media/src/lib.rs:271
+  根因: crates/dhampir-worker/src/pipeline.rs:1226 crates/dhampir-worker/src/audio.rs:1
   验收: 产物带音轨，时长与视频一致（正负 1 帧）；原有无声路径仍可选且逐字节不变
-  证据: -
+  证据: plan/t6-evidence.md
 
 - [D8] status=done phase=T0
   症状: 预览里跑的 JS 拿不到结果（awaitPromise 与 returnByValue 同用时本机 Chrome 回空对象），预览侧的断言无法自证
@@ -147,11 +147,11 @@
   验收: overlay 追加在单趟与分段两条路径上（各留用例）；FrameResult 加字段时 HOST_API_VERSION 升到 2
   证据: plan/t2-evidence.md crates/dhampir-worker/tests/overlay.rs docs/host-api.md
 
-- [A5] status=todo phase=T6
+- [A5] status=done phase=T6
   症状: 没有音频通路：无 AudioPlan，也没有 A/V 同步口径（帧号与采样数之间没有换算基准）
-  根因: crates/dhampir-worker/src/pipeline.rs:661
+  根因: crates/dhampir-worker/src/audio.rs:1
   验收: AudioPlan 与视频 RenderPlan 同源求值；帧号与采样数用有理数换算（复用 timebase），口径写进 consistency-criteria.md
-  证据: -
+  证据: plan/t6-evidence.md plan/consistency-criteria.md
 
 - [A6] status=done phase=T5
   症状: 解码器是单向游标，没有有界回退/随机访问窗口（这是结构选择，不是遗漏）

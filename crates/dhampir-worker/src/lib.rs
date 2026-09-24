@@ -41,6 +41,7 @@ compile_error!(
      ——注意加 `-p`，不要用 `--workspace`。"
 );
 
+pub mod audio;
 pub mod baseline;
 pub mod offscreen;
 pub mod pipeline;

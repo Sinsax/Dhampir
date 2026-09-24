@@ -1,0 +1,110 @@
+{
+  "project_schema": 1,
+  "generator": {
+    "app": "dhampir",
+    "version": "0.0.1"
+  },
+  "meta": {
+    "title": "样本工程（带音轨）",
+    "created_at": null,
+    "modified_at": null,
+    "note": "T6 的音频夹具。时间线 30fps、90 帧（3 秒）；一条视频轨铺满，一条音轨分两段，中间**故意留一段空档** —— 空档要补静音，而\"补得对不对\"只有靠一段真空档才验得出来。第二段的 source_in 不为零，用来验\"素材坐标与时间线坐标不是一回事\"。"
+  },
+  "assets": [
+    {
+      "id": "a.mp4",
+      "kind": "video",
+      "name": "1080p 代理",
+      "uri": "proxy1080p.mp4",
+      "frame_count": 480,
+      "timebase": {
+        "num": 60,
+        "den": 1
+      },
+      "width": 1920,
+      "height": 1080,
+      "content_hash": null,
+      "tags": {},
+      "note": "与 sample-project 同一份视频素材（60fps）。"
+    },
+    {
+      "id": "tone.m4a",
+      "kind": "audio",
+      "name": "440Hz 正弦（6 秒，48kHz 立体声）",
+      "uri": "tone.m4a",
+      "frame_count": 180,
+      "timebase": {
+        "num": 30,
+        "den": 1
+      },
+      "width": null,
+      "height": null,
+      "content_hash": null,
+      "tags": {},
+      "note": "纯音不是\"随便找个 mp3\"：它的**波形是确定的**，所以\"音轨有没有真的接上\"可以靠听/靠数采样点判，而不是靠\"文件变大了\"猜。生成命令写在 plan/t6-evidence.md 里。"
+    }
+  ],
+  "timeline": {
+    "schema": 3,
+    "timebase": {
+      "num": 30,
+      "den": 1
+    },
+    "markers": [],
+    "tracks": [
+      {
+        "id": "v1",
+        "kind": "video",
+        "layers": [
+          {
+            "id": "main",
+            "start": 0,
+            "end": 90,
+            "source": {
+              "asset_id": "a.mp4",
+              "source_in": 0
+            },
+            "note": "铺满整段：出片时画面一直有内容，于是\"空帧\"不会误报。"
+          }
+        ]
+      },
+      {
+        "id": "a1",
+        "kind": "audio",
+        "layers": [
+          {
+            "id": "bed",
+            "start": 0,
+            "end": 30,
+            "source": {
+              "asset_id": "tone.m4a",
+              "source_in": 0
+            },
+            "note": "第一段：素材第 0 秒起，铺前 1 秒。"
+          },
+          {
+            "id": "tag",
+            "start": 45,
+            "end": 90,
+            "source": {
+              "asset_id": "tone.m4a",
+              "source_in": 30
+            },
+            "note": "第二段：素材第 1 秒起。**与第一段之间空 15 帧（0.5 秒）**，那一段必须是静音；而 45 -> 90 是 45 帧（1.5 秒），素材从第 1 秒起还有 5 秒，够用（于是 padded_samples 应当是 0）。"
+          }
+        ]
+      }
+    ]
+  },
+  "view": {
+    "playhead": 0,
+    "selection": "bed",
+    "zoom": 1
+  },
+  "render_hints": {
+    "width": 640,
+    "height": 360,
+    "format": "mp4"
+  },
+  "extensions": {}
+}

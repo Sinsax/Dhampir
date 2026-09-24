@@ -234,14 +234,36 @@ A10、D11 六条已转 done**。数字与边界在 [measurements.md](./measureme
 
 ## T6 音频（功能） → 独立
 
+**状态：已完成（T6 收口）**。证据在 [t6-evidence.md](./t6-evidence.md)；**A5、D7 两条已转 done**。
+数字与边界在 [measurements.md](./measurements.md) 第八项，口径在
+[consistency-criteria.md](./consistency-criteria.md) 的「音视频同步口径」一节。
+三处与开工设想不同，都是做出来才看清的，记在下面：
+
+1. **"每段起一路解码器、按采样点裁"比"开一路往后丢"更好** —— 后者每段读够就得
+   提前掐掉解码器，而 ffmpeg 会因此往 stderr 吐 `Error submitting a packet to the muxer`；
+   一次成功的出片不该有那句话（它会让人去查一个并不存在的问题）。
+   代价量过了：主要是进程启动（每段约 150 ms），**与这段在第几秒关系很弱**（60 秒整段也才 194 ms）。
+2. **"逐字节不变"这句验收要求必须变成可执行的判据**，否则它只是一句承诺 ——
+   所以编码器的命令行抽成了纯函数 `encoder_args`，并配一条与**冻结的黄金 argv** 逐项比的测试。
+3. **`AudioPlan` 由 `render_plan` 从同一份入参摊出来，不接受调用方另传一份** ——
+   "同源求值"要的就是同一份入参；让调用方传一份计划进来，两边迟早分叉。
+
 - T6.1（A5、D7）AudioPlan：与视频 RenderPlan **同源求值**；
   帧号与采样数用**有理数**换算（复用 timebase），不许用浮点秒。
 - T6.2 消费媒体层**已经声明**的 audio_info / add_audio_packet
-  （trait 在，零调用：这是接线缺口，不是从零造）。编码侧从"只喂 rawvideo stdin"
+  （trait 在，零调用：这是接线缺口，不是从零造）。编码侧从"只喂裸帧 stdin"
   变成视频加音频两路。
 - T6.3 A/V 同步口径写进 plan/consistency-criteria.md。
 
-**验收**：产物带音轨，时长与视频一致（正负 1 帧）；原有无声路径仍可选且逐字节不变。
+**验收（已达成）**：产物带音轨，时长与视频一致（正负 1 帧）；原有无声路径仍可选且逐字节不变 ——
+由 `crates/dhampir-worker/tests/audio.rs` 在真机上钉住（音轨与视频**差 0.000000 秒**、
+视频码流 SHA256 与复用前逐字符相同、PCM 与独立解出的参考逐字节相同）。
+**"GPU 那 90 帧 + 音轨整条出片"在 agent 会话里验不了**（视频编码器要 stdin 管道，坑 19），
+那一半要普通终端里跑 `check-cli`；边界写在 t6-evidence.md。
+
+**一处对照**：媒体层那 5 个 trait 仍然是**零实现**（`check-media-status` 盯着），
+本段用的是它的**词表**（`AudioInfo` / `SampleFormat`），不是替它写实现 ——
+那个 crate 描述的是"in-process 的一条腿"，而 worker 与 ffmpeg 说话走的是子进程。
 
 ---
 

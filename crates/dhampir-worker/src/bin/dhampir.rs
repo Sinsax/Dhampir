@@ -43,7 +43,7 @@ use dhampir_core::timeline::schema::{Frame, TimebaseDto, TrackKind};
 use dhampir_core::timeline::subtitle::{
     AssStyle, Cue, CueStyle, ms_at_frame, parse_ass, parse_srt, to_ass, to_srt,
 };
-use dhampir_worker::pipeline::{RenderPlan, SourceTable, render_frames_png, render_plan};
+use dhampir_worker::pipeline::{AudioMode, RenderPlan, SourceTable, render_frames_png, render_plan};
 
 const USAGE: &str = "\
 用法：dhampir <子命令> [选项]
@@ -60,6 +60,11 @@ const USAGE: &str = "\
                                                   把这一段里的字幕另存一份**侧挂文件**。
                                                   --format 不给就看扩展名（.ass/.ssa -> ASS，
                                                   其余 -> SRT）；看不出来**不猜**，直接报错
+          [--no-audio]                            出片**不要声音**。
+                                                  默认是「工程里有音轨就出声音」；
+                                                  明确给出来才走无声那条路 ——
+                                                  它与引入音频之前**逐字节相同**，
+                                                  也是排查声音问题时该拿来对照的那一份
 
 公共选项：
   import  --project <文件> --file <素材> [--id <id>] [--replace] [--write]
@@ -131,6 +136,9 @@ struct Args {
     font_file: Option<String>,
     subtitle_out: Option<String>,
     format: Option<SidecarFormat>,
+    /// `--no-audio`：明确不要声音。**明确**是要点 —— 它让"这次是故意静音的"
+    /// 与"这次本该有声却没出"在日志里能分开。
+    no_audio: bool,
     help: bool,
 }
 
@@ -192,7 +200,16 @@ const KNOWN_VALUE_FLAGS: [&str; 14] = [
     "--font-file",
 ];
 /// 认得的**不带值**选项。
-const KNOWN_FLAGS: [&str; 7] = ["--frame", "--write", "--replace", "--undo", "--redo", "-h", "--help"];
+const KNOWN_FLAGS: [&str; 8] = [
+    "--frame",
+    "--write",
+    "--replace",
+    "--undo",
+    "--redo",
+    "--no-audio",
+    "-h",
+    "--help",
+];
 /// 侧挂导出的两个带值选项。
 ///
 /// **它们不跟 `KNOWN_VALUE_FLAGS` 混在一起**，因为它们比别的选项多两条规矩：
@@ -215,11 +232,17 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             index += 1;
             continue;
         }
-        if token == "--write" || token == "--replace" || token == "--undo" || token == "--redo" {
+        if token == "--write"
+            || token == "--replace"
+            || token == "--undo"
+            || token == "--redo"
+            || token == "--no-audio"
+        {
             match token {
                 "--write" => args.write = true,
                 "--replace" => args.replace = true,
                 "--undo" => args.undo = true,
+                "--no-audio" => args.no_audio = true,
                 _ => args.redo = true,
             }
             index += 1;
@@ -760,6 +783,8 @@ fn cmd_frame(args: &Args) -> Result<ExitCode, String> {
         sequence: doc.sequence_size(),
         subtitles: &subtitles,
         font_file,
+        // frame 出的是 PNG：没有容器可放音轨。
+        audio: AudioMode::Silent,
         output: &output,
     };
     let written = render_frames_png(&plan, &[frame])?;
@@ -795,11 +820,18 @@ fn cmd_render(args: &Args) -> Result<ExitCode, String> {
     if let Some(code) = gate(&doc) {
         return Ok(code);
     }
-    // **音轨不渲染**：明说，不给一份「看起来很成功」的哑片。
+    // 音轨：默认出声音（T6 起），`--no-audio` 可以明确不要。
+    // 两种情况下**都要在 stderr 上说一句** —— 无声的片子看起来和有声的一样"成功"，
+    // 所以"这一次有没有声音、为什么"必须是打出来的，不能靠人猜。
+    let audio_mode = if args.no_audio {
+        AudioMode::Silent
+    } else {
+        AudioMode::Auto
+    };
     let audio_tracks = audio_track_ids(&doc.timeline);
-    if !audio_tracks.is_empty() {
+    if args.no_audio && !audio_tracks.is_empty() {
         eprintln!(
-            "注意：本次出片**不渲染音频**（音轨：{}）。产物是无声的，这是当前实现的边界。",
+            "注意：你给了 --no-audio，本次出片**是无声的**（工程里有音轨：{}）。",
             audio_tracks.join(", ")
         );
     }
@@ -902,6 +934,7 @@ fn cmd_render(args: &Args) -> Result<ExitCode, String> {
         sequence: doc.sequence_size(),
         subtitles: &subtitles,
         font_file,
+        audio: audio_mode,
         output: &output,
     };
     let report = render_plan(&plan, |done, total| {
@@ -929,6 +962,7 @@ fn cmd_render(args: &Args) -> Result<ExitCode, String> {
             "empty_frames": report.empty_frames,
             "overlay": report.overlay,
             "decode": report.decode,
+            "audio": report.audio,
             "subtitle_out": sidecar_written.as_ref().map(|(path, _)| path.display().to_string()),
             "subtitle_entries": sidecar_written.as_ref().map(|(_, count)| *count),
             "issues": report.issues,
@@ -954,6 +988,21 @@ fn cmd_render(args: &Args) -> Result<ExitCode, String> {
             report.overlay.danmaku_failed,
             report.overlay.cache_hits,
             report.overlay.cache_misses,
+        );
+    }
+    // 音轨那一路同样：**事实报出来，判据仍是问题清单**。
+    // `padded_samples` 单独报 —— 它不为零就说明有素材比它那段短，有内容被截断了。
+    if report.audio.segments > 0 {
+        eprintln!(
+            "音轨：{} 段、{} Hz / {} 声道、共 {} 个采样点（空档补静音 {}、\
+             素材不够长补静音 {}）；从素材读了 {} 个采样点",
+            report.audio.segments,
+            report.audio.sample_rate,
+            report.audio.channels,
+            report.audio.expected_samples,
+            report.audio.gap_samples,
+            report.audio.padded_samples,
+            report.audio.source_samples_read,
         );
     }
     if report.decode.replays > 0 {
@@ -1583,6 +1632,39 @@ mod tests {
         // 这条正是「参数打错字被静默忽略」的防线。
         let error = parse(&argv(&["render", "--wdith", "640"])).expect_err("应当报错");
         assert!(error.contains("--wdith"), "{error}");
+    }
+
+    #[test]
+    fn 音频默认出声音_除非明确说不要() {
+        // 默认（不给标志）= Auto：**不能**默认成静音 ——
+        // 默认静音会让"工程里有音轨"这件事静默地不起作用。
+        let args = parse(&argv(&[
+            "render", "--project", "p.json", "--to", "9", "--out", "o.mp4",
+        ]))
+        .expect("合法");
+        assert!(!args.no_audio);
+        // `--no-audio` 要认，而且要认成"不要声音"，不是"没给"。
+        let muted = parse(&argv(&[
+            "render", "--project", "p.json", "--to", "9", "--out", "o.mp4", "--no-audio",
+        ]))
+        .expect("合法");
+        assert!(muted.no_audio);
+        // 顺序无关。
+        let front = parse(&argv(&[
+            "--no-audio", "render", "--project", "p.json", "--to", "9", "--out", "o.mp4",
+        ]))
+        .expect("合法");
+        assert!(front.no_audio);
+        assert_eq!(front.command, "render");
+    }
+
+    #[test]
+    fn 音频标志的近亲拼法不许被当成同一个() {
+        // 拼错一个字母必须报错：静默接受会让人以为"已经静音了"，而片子照旧有声。
+        for wrong in ["--noaudio", "--no_audio", "--noaudio-mode"] {
+            let error = parse(&argv(&["render", wrong])).expect_err("应当报错");
+            assert!(error.contains(wrong), "{error}");
+        }
     }
 
     #[test]

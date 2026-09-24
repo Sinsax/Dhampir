@@ -44,7 +44,9 @@ use std::time::Instant;
 use dhampir_core::compose;
 use dhampir_core::overlay::SubtitleTable;
 use dhampir_core::timeline::project::{load_doc, ProjectDoc};
-use dhampir_worker::pipeline::{RenderPlan, SourceTable, frame_bytes, render_frames_png_run};
+use dhampir_worker::pipeline::{
+    AudioMode, RenderPlan, SourceTable, frame_bytes, render_frames_png_run,
+};
 
 fn repo_root() -> PathBuf {
     // examples/ 与 crate 根的关系是编译期定的，运行期不变。
@@ -151,6 +153,8 @@ fn measure(project: &str, limit: Option<i64>, png_sample: usize) -> Result<serde
         sequence: doc.sequence_size(),
         subtitles: &subtitles,
         font_file: None,
+        // 这条尺子量的是**解码**，不是音频：音轨一律不走。
+        audio: AudioMode::Silent,
         output: &output,
     };
 

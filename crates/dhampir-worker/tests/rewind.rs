@@ -43,7 +43,9 @@ use std::path::{Path, PathBuf};
 use dhampir_core::compose;
 use dhampir_core::overlay::SubtitleTable;
 use dhampir_core::timeline::project::{load_doc, ProjectDoc};
-use dhampir_worker::pipeline::{FramePng, PoolStats, RenderPlan, SourceTable, render_frames_png_run};
+use dhampir_worker::pipeline::{
+    AudioMode, FramePng, PoolStats, RenderPlan, SourceTable, render_frames_png_run,
+};
 
 const RUNNER: &str = "需要真 GPU、PATH 上的 ffmpeg 与 target/s3/proxy1080p.mp4；跑：cargo test -p dhampir-worker --test rewind -- --ignored";
 
@@ -124,6 +126,8 @@ fn render_all(name: &str, out: &str) -> Rendered {
         subtitles: &subtitles,
         // 这一条与字体无关：夹具里没有字幕轨，给了字体也不会画字。
         font_file: None,
+        // 这一条与声音无关：量的是解码池子。
+        audio: AudioMode::Silent,
         output: &output,
     };
     let run = render_frames_png_run(&plan, &frames).unwrap_or_else(|error| {

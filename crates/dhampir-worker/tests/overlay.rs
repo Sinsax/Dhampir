@@ -43,7 +43,7 @@ use dhampir_core::timeline::layer::{AssetTimebases, SubtitleStyle, TimelineV2};
 use dhampir_core::timeline::schema::{Frame, TimebaseDto};
 use dhampir_core::timeline::subtitle::parse_srt;
 use dhampir_core::timeline::text_layout;
-use dhampir_worker::pipeline::{FramePng, RenderPlan, SourceTable, render_frames_png};
+use dhampir_worker::pipeline::{AudioMode, FramePng, RenderPlan, SourceTable, render_frames_png};
 use serde_json::json;
 
 /// 渲染目标与**文档坐标系**（工程的 render_hints）。两者一致是默认路径 ——
@@ -188,6 +188,8 @@ impl Fixture {
             sequence: TARGET,
             subtitles,
             font_file: font,
+            // 这条路出的是 PNG：没有容器可放音轨。
+            audio: AudioMode::Silent,
             output: &output,
         };
         let mut written = render_frames_png(&plan, &[FRAME]).expect("渲染一帧必须成功");
