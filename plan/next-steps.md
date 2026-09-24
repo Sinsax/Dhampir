@@ -25,10 +25,10 @@ T5 收口时更新（T5 整段完成，2026-09-24）—— 数字在 measurement
 | 项 | 状态 |
 |---|---|
 | 已完成并带证据的阶段 | T0（台账 + 判定回传通道）、T1（文档坐标系）、T2（文字与字幕上屏）、T3（弹幕）、T4（编辑模型补完）、T5（解码与素材通路：倒放 / 同源多帧 / 并发数）、**T6（音频：AudioPlan + 音轨接通 + 同步口径）** |
-| 进行中 | 无 —— **T6 已收口**；下一步是 T7 交付面收口（见 roadmap.md 的 T7 段） |
-| 未开始 | T7 交付面收口 |
-| 台账统计（26 条） | 已完成 18 条：D1 **D2** **D3** **D4** **D5** **D6** **D7** D8 **D11** A1 **A2** A3 A4 **A5** **A6** **A7** A8 **A10**；待办 3 条（D12 / D16 / A9，都是 T7 的）；明确不做 4 条；架构性不可测 1 条 |
-| 全仓状态 | `cargo test --workspace` **536 passed / 0 failed / 24 ignored**（含 dhampir-timeline 199 条；比 T5 收口多的 26 条是 T6 的音频用例、多的 1 条 ignored 是 T6 的真机音频用例）、`cargo check --all-targets` **0 warning**、17 个守卫里 **14 个全绿**（**与 T5 收口同一个数**；T6 中途曾因一条按子串扫的守卫假红掉到 13，已修掉：见第七节）—— 另 3 个（check-cli / check-local-backend / check-dual-end）在**本机 agent 会话**里因「起不了子进程」假红，判据与绕过见第五节 |
+| 进行中 | 无 —— **T7 已收口**（T7.1 到 T7.5 全部落地，见 roadmap.md 的 T7 段与 t7-evidence.md） |
+| 未开始 | 无 —— **T0..T7 八段全部收口，台账零待办** |
+| 台账统计（26 条） | **done 20 / todo 0 / wontfix 5 / unmeasurable 1** —— 零待办。T7 把 D12 / D16 转 done、A9（续渲）转 **wontfix**。注意：**A9 是「决策为不做」，不是「做完了」**，理由与重审触发条件见 t7-evidence.md 的 T7.3。计数以 `plan/defects.md` 为准（`check-defects` 每条都核对过） |
+| 全仓状态 | `cargo test --workspace` **547 passed / 0 failed / 24 ignored**（含 dhampir-timeline 199 条；比 T6 收口的 536 多 11 条，是 T7 的子命令与契约用例）、`cargo check --all-targets` **0 warning**、**18 / 18 个守卫全绿**（`node scripts/run-guards.mjs`，含全部 `--self-test`）。见第八节：T7.5 把以前那三条假红的**根因**修掉了（`scripts/spawn-tool.mjs` 如实声明「不喂 stdin」、`scripts/safe-remove.mjs` 让清理不动退出码），**不是套垫片** —— 所以 18/18 是**仓库的读数**，不再需要「普通终端才拿得到」那句注解 |
 
 **一句实话**：现在最接近「能用」的那条路是 **CLI 单机出片**；预览能编辑、能拖拽、能撤销重做、能出片，
 字幕与弹幕两个宿主都画得出来了（两端结构一致、墨迹可判），素材通路不再怕倒放与同源多帧
@@ -272,13 +272,16 @@ T5 收口时更新（T5 整段完成，2026-09-24）—— 数字在 measurement
    （删不掉只打一行警告、**不动退出码**）。但要记住它的边界：清不掉时上一轮残留可能还在，
    所以**别拿"文件在不在"当判据**，要判就判内容/摘要或"这一轮刚写出来的字节"。
 
-   两类合并后的实测基线（2026-09-24，T7 收口，18 条守卫）：**本会话 16 / 18**；
-   把环境限制拿掉之后（沙箱豁免获批的那一次）是 **18 / 18 全绿** ——
-   所以那是**环境的读数，不是仓库的读数**。逐条判据见 `plan/t7-evidence.md` 的 T7.5。
+   **⚠️ 上面这两类都已经在 T7.5 把根因修掉了，所以下一条注解已经作废。**
+   甲类走 `scripts/spawn-tool.mjs`、乙类走 `scripts/safe-remove.mjs`，都在仓库里，
+   不需要任何会话外的动作。收口后的实测基线（2026-09-24，T7 收口，18 条守卫）：
+   **18 / 18 全绿**（`node scripts/run-guards.mjs`，本会话直接跑出来的数）。
+   历史上那句「本会话 16 / 18、拿掉环境限制才 18 / 18」是**修根因之前**的读数，按原样留在下面当历史。
+   逐条判据见 `plan/t7-evidence.md` 的 T7.5。
 
 ---
 
-## 五、最近一次进度复核（2026-09-24，HEAD 9c64b06，工作区干净）
+## 五、进度复核（2026-09-24，HEAD 9c64b06，工作区干净）—— **已被第八节取代，留作历史**
 
 复核只回答一个问题：**「全仓是绿的」这个结论还成不成立**。逐条重跑，原始结论如下。
 
@@ -289,7 +292,7 @@ T5 收口时更新（T5 整段完成，2026-09-24）—— 数字在 measurement
 | `node scripts/run-wasm-tests.mjs` | **15 / 15**，且与源码 `#[wasm_bindgen_test]` 属性条数对账一致 |
 | `node scripts/api-surface.mjs` | 绿：6 个模块 / 62 个导出，版本 4，`docs/host-api.md` 列了 26 个导出 |
 | `node scripts/timeline-contract.mjs` | 绿：schema 与 TS 类型无漂移 |
-| `node target/t2/run-guards.cjs` | **14 / 17** —— 三个红的不是回归，理由见下 |
+| `node target/t2/run-guards.cjs` | **14 / 17** —— 三个红的不是回归，理由见下（**这一节的读数已被第八节的 18 / 18 取代**） |
 | 台账 | `check-defects` 绿：26 条、路线图引用齐全、证据路径都存在 |
 
 **三个红的是环境问题，不是代码问题**（根因见坑 19）：本机这个会话里，node 拿不到子进程，
@@ -326,9 +329,9 @@ D3 / D4 / A6 / A7 / A10 / D11 六条已转 `done`。逐条重跑的原始结论�
 | `cargo test --workspace` | **510 passed / 0 failed / 23 ignored**（比 T4 收口 +8 passed 是 T5 的池子用例，+2 ignored 是 `tests/rewind.rs`） |
 | `cargo check --workspace --all-targets` | **0 条代码 warning**（本机会话里另有一批 `error deleting lock file ... (os error 5)`，那是沙箱不让清增量目录，不是代码警告） |
 | `node scripts/run-wasm-tests.mjs` | **15 / 15**，且与源码 `#[wasm_bindgen_test]` 条数对账一致 |
-| `node target/t2/run-guards.cjs` | **14 / 17**（与第五节同一组三个红，原因同坑 19） |
-| 同上，套上坑 19 的 shim | **15 / 17**（`check-dual-end` 转绿；剩下两个仍卡在编码器起不来） |
-| 全部 17 个守卫的 `--self-test` | **全绿**（这一项与会话无关，是纯函数自检） |
+| `node target/t2/run-guards.cjs` | **14 / 17**（与第五节同一组三个红，原因同坑 19；那时 17 条守卫，T7.5 后是 18 条） |
+| 同上，套上坑 19 的 shim | **15 / 17**（`check-dual-end` 转绿；剩下两个仍卡在编码器起不来）—— **套 shim 的做法已被第八节推翻** |
+| 全部守卫的 `--self-test` | **全绿**（这一项与会话无关，是纯函数自检） |
 | 真机像素判据 | `cargo test -p dhampir-worker --test rewind -- --ignored` → **2 passed**（90 帧 / 30 帧逐帧摘要相等，回退被断言到） |
 | 台账 | `check-defects` 绿：26 条、路线图引用齐全、证据路径都存在（16 done / 5 todo / 4 wontfix / 1 unmeasurable） |
 
@@ -339,7 +342,7 @@ D3 / D4 / A6 / A7 / A10 / D11 六条已转 `done`。逐条重跑的原始结论�
 
 ---
 
-## 七、T6 收口时的复核（T6 整段完成，2026-09-24）
+## 七、T6 收口时的复核（T6 整段完成，2026-09-24）—— **已被第八节取代，留作历史**
 
 T6 的三条（T6.1 AudioPlan 与视频**同源求值** / T6.2 音轨接通且**无声路径逐字节不变** /
 T6.3 A/V 同步口径**写进文件**）全部落地，A5 / D7 两条已转 `done`。逐条重跑的原始结论：
@@ -348,9 +351,9 @@ T6.3 A/V 同步口径**写进文件**）全部落地，A5 / D7 两条已转 `don
 |---|---|
 | `cargo test --workspace` | **536 passed / 0 failed / 24 ignored**（比 T5 收口 +26 passed 是 T6 的音频用例与改夹具的连带，+1 ignored 是 `tests/audio.rs` 的真机用例；`dhampir-timeline` 仍是 199 条） |
 | `cargo check --workspace --all-targets` | **0 条代码 warning** —— 这一轮把增量编译关掉（`CARGO_INCREMENTAL=0`）又跑了一遍，warning / error 行数**正好 0**；于是「那批 `error deleting lock file … (os error 5)` 不是代码告警」这句话不再需要人去逐行分辨（开着增量时它会以「`dhampir-worker` (xxx) generated 1 warning」的形式出现在每个目标上，看着像 20 多条真告警） |
-| `node target/t2/run-guards.cjs` | **14 / 17**（与第五节同一组三个红，原因同坑 19） |
-| 同上，套上坑 19 的 shim | **15 / 17**（`check-dual-end` 转绿：四个帧 SSIM 全 1.000000；剩下两个仍卡在「编码器起不来」这同一个原因上） |
-| 全部 17 个守卫的 `--self-test` | **全绿**（两趟日志里 17 行全是 `自检=0`） |
+| `node target/t2/run-guards.cjs` | **14 / 17**（与第五节同一组三个红，原因同坑 19；那时 17 条守卫） |
+| 同上，套上坑 19 的 shim | **15 / 17**（`check-dual-end` 转绿：四个帧 SSIM 全 1.000000；剩下两个仍卡在「编码器起不来」这同一个原因上）—— **套 shim 的做法已被第八节推翻** |
+| 全部守卫的 `--self-test` | **全绿**（两趟日志里每一行全是 `自检=0`） |
 | 真机音频判据 | `cargo test -p dhampir-worker --test audio -- --ignored` → **1 passed**：`视频 3.000000 秒 / 音轨 3.000000 秒 / 差 0.000000 秒（一帧 = 0.033333 秒）` |
 | 台账 | `check-defects` 绿：26 条、路线图引用齐全、证据路径都存在（**18 done / 3 todo / 4 wontfix / 1 unmeasurable**） |
 
@@ -371,3 +374,54 @@ T6.3 A/V 同步口径**写进文件**）全部落地，A5 / D7 两条已转 `don
 「GPU 渲染的那 90 帧 + 音轨**整条出片**」在本机 agent 会话里**验不了**（视频编码器吃 stdin 管道，坑 19），
 所以「音频给一次出片加了多少时间」**没有数字**；那一半要在**普通终端**里跑 `node scripts/check-cli.mjs` 才算数。
 **拿"音轨拼出来了、时长对得上"冒充"整条腿出片成功"，正是那种"看起来成功、其实没验"。**
+
+---
+
+## 八、T7 收口时的复核（T0..T7 八段全部收口，2026-09-24，HEAD bbcb662）—— **这一节是当前读数**
+
+T7 的五条（T7.1 具名子命令 / T7.2 陈旧 pkg 自动重建 / T7.3 续渲**决定不做** /
+T7.4 Linux 守卫 / T7.5 派生面同步 + 守卫清单落仓库）全部落地，D12 / D16 转 `done`、A9 转 `wontfix`。
+逐条重跑的原始结论（在**本会话**里直接跑出来的，没有套任何垫片）：
+
+| 跑什么 | 结果 |
+|---|---|
+| `cargo test --workspace` | **547 passed / 0 failed / 24 ignored**；其中 `dhampir-timeline` 199 条（比 T6 收口 +11 passed，是 T7 的子命令与契约用例） |
+| `cargo check --workspace --all-targets` | **0 warning** |
+| `node scripts/run-guards.mjs` | **18 / 18 全绿**（含每一条的 `--self-test`）—— 清单本身也**落仓库**了 |
+| `node scripts/run-wasm-tests.mjs` | **15 / 15**，与源码 `#[wasm_bindgen_test]` 属性条数对账一致 |
+| `node scripts/api-surface.mjs` | 绿：6 个模块 / 62 个导出，版本 4，`docs/host-api.md` 列了 26 个导出 |
+| `node scripts/check-cli.mjs` | **30 / 30 条判据**（14 个子命令） |
+| `node scripts/check-local-backend.mjs` | **22 / 22 条判据** |
+| `node scripts/check-dual-end.mjs` | 绿：**最差 SSIM = 1.000000** |
+| 文本卫生 | 绿：194 个文本文件全 LF、无 BOM、合法 UTF-8 |
+| 台账 | `check-defects` 绿：26 条、路线图引用齐全、证据路径都存在（**20 done / 0 todo / 5 wontfix / 1 unmeasurable**） |
+
+**为什么这一节和前几节不一样。** 第五、六、七节都带着同一句注解：「本会话拿到的是 16 / 18，
+18 / 18 要拿掉环境限制才拿得到」。T7.5 把那两个根因**修在了仓库里**——
+甲类（环境不给子进程开 stdin 管道）走 `scripts/spawn-tool.mjs` 如实声明「这次调用不喂 stdin」，
+乙类（本机 `fs.rmSync` 的按 turn 安全删除把守卫的清理绊倒）走 `scripts/safe-remove.mjs`，
+删不掉只警告、**不动退出码**。所以 18 / 18 **不再需要任何会话外的动作**，
+它现在就是仓库的读数。**"套 `--require` 垫片"那一套不要再用了**——它会把"真的起不了子进程"也糊成绿的。
+
+**仍然要诚实的三条边界**（不是待办，是已知的"没证到"）：
+
+1. **"GPU 那 90 帧 + 音轨整条出片"在 agent 会话里仍验不了**：渲染必须往编码器 stdin 写帧，
+   而那个管道在本会话起不来。`check-cli` 的 30 条判据能过是因为它走的是**不喂 stdin** 的路径；
+   整条出片腿要在**普通终端**里跑才算数。**拿"音轨拼出来了、时长对得上"冒充"整条腿出片成功"，
+   正是那种"看起来成功、其实没验"。**
+2. **Linux "能跑"仍未验证**：交叉 `cargo check --target x86_64-unknown-linux-gnu` **真跑了**（退出码 0），
+   但 Linux 依赖图里**没有** ffmpeg / sherpa / onnx（116 个 crate 对 Windows 的 134 个），
+   所以它只证明「我们自己的代码在 Linux cfg 下类型正确」，**不等于"Linux 上能跑"**。
+   D16 的守卫只兜住静态那三类，且"禁盘符"那半条量完后按"会造假红"驳回（理由见 t7-evidence.md）。
+3. **`decoding` 代价表与第五项的 14.56 ms/帧 仍未对账**（T5 留下的那条待办，40.90 对 14.56），
+   也要在能起编码器的终端里重跑 `node scripts/measure-export.mjs` 才说得清。
+   **在有人重跑之前，两边的数都别当结论用。**
+
+**台账"零待办"里有一件事要说清楚**：A9（渲染任务持久化与续渲）是**决策为不做**，
+不是**修完了**。理由是量出来的（检查点 8.29 MB/帧、1080p30 一分钟 14.93 GB，
+裸 RGBA 落盘 2.81 ms/帧 对渲染 14.56~56.96 ms/帧），重审触发条件写在 t7-evidence.md 的 T7.3。
+**把它读成"做完了"是错的。**
+
+**给下一个接手的人**：八段都收口了，下一步不是"继续修缺陷"，而是**在上面三条边界里挑一条去真验**
+（最省事的一条是在普通终端跑一遍 `node scripts/check-cli.mjs` + `node scripts/measure-export.mjs`，
+把边界 1 与 3 一次性收掉）。
