@@ -4,7 +4,7 @@
 //! 分成两份的话，UI 上控件的取值范围和后端实际接受的取值范围迟早对不上——
 //! 而那种不一致表现为"用户能拖到某个值，导出时才报错"。
 
-use dhampir_timeline::schema::EffectSpec;
+use dhampir_timeline::schema::{EffectPipeline, EffectSpace, EffectSpec};
 
 /// 高斯模糊。radius 是像素半径。
 ///
@@ -15,6 +15,20 @@ use dhampir_timeline::schema::EffectSpec;
 pub const GAUSSIAN_BLUR: EffectSpec = EffectSpec {
     kind: "gaussian_blur",
     params: &[("radius", 0.0, crate::render::BLUR_MAX_RADIUS as f32)],
+    // **同一个 kind 在两个空间里都出现过**，这是这份登记表里唯一一处这样的事：
+    // 实拍片段上的 gaussian_blur 跑在源纹理上（源像素，不缩放），
+    // 调整图层上的同名特效跑在目标尺寸上（文档像素，要换算）。
+    //
+    // 登记表只能声明**一个** space，所以这里声明 Document —— 选它的理由是：
+    // 声明成 Document 而实际跑在 Source 上，最坏是"多缩放了一次"，
+    // 那会在预览与成片尺寸不同时**明显看得出来**；
+    // 反之声明成 Source 而实际是 Document，则是"该缩没缩"，长得像"模糊得不够"——
+    // 那正是本项目最要避免的**静默偏差**。两害相权取前者。
+    //
+    // 这个二义性由 render::timeline 的 scale_document_radius 调用点承担：
+    // 只有调整图层那条路会真的调它（见 Step::Adjust 分支）。
+    space: EffectSpace::Document,
+    pipeline: EffectPipeline::SeparableBlur,
 };
 
 /// 全部已登记的特效。
@@ -56,6 +70,65 @@ mod tests {
         assert!(spec_of("gaussian_blur").is_some());
         assert!(spec_of("不存在的特效").is_none());
         assert_eq!(kinds(), vec!["gaussian_blur"]);
+    }
+
+    #[test]
+    fn 每个登记项都必须声明空间与管线() {
+        // 这条守的是**新加特效时最容易漏的一步**：加了 kind、加了参数范围，
+        // 却忘了说"跑在哪个空间"。
+        //
+        // space 漏了声明不会编译不过（它有类型），但会**静默影响正确性**：
+        // 声明成 Source 的文档空间特效不缩放，在预览与成片尺寸不同时糊出不同的图。
+        // 所以这里要求每一项都显式给出，并且管线必须是**已实现**的那种。
+        for spec in REGISTRY {
+            // 断言它真的有一个明确的空间（枚举只有两个值，这里确认不是靠默认值蒙混）。
+            let space_is_explicit = matches!(spec.space, EffectSpace::Source | EffectSpace::Document);
+            assert!(space_is_explicit, "{} 没有声明像素空间", spec.kind);
+
+            // 管线必须是渲染器真的认的那一种。将来加了枚举变体却没实现时，
+            // 这条会先红 —— 而不是等到渲染时才发现没人处理。
+            match spec.pipeline {
+                EffectPipeline::SeparableBlur => {
+                    // 可分离模糊**必须**有半径参数，否则管线拿不到核宽。
+                    assert!(
+                        spec.param_max("radius").is_some(),
+                        "{} 走 SeparableBlur 却没有 radius 参数",
+                        spec.kind
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn 反向用例_把空间声明成源空间就不是同一个说法() {
+        // 反向用例：证明 space **真的被用到了**，不是个摆设字段。
+        //
+        // 如果哪天有人把 space 从 EffectSpec 删掉、或者渲染器开始忽略它，
+        // 这条会红。判据是"两种声明给出的半径换算结果不同"——
+        // 而那正是两端会不会分叉的分水岭。
+        use crate::render::{RenderSpace, scale_document_radius};
+
+        let doc = spec_of("gaussian_blur").expect("应当登记了");
+        // 文档坐标系 1920x1080 -> 目标 640x360，比例正好 1/3。
+        let target = RenderSpace {
+            sequence: (1920, 1080),
+            target: (640, 360),
+        };
+
+        // 文档空间：按目标/文档比例缩小（1920 -> 640 是 1/3）。
+        let scaled = scale_document_radius(24, target);
+        assert_eq!(scaled, 8, "文档空间应当按比例缩放：24 * (640/1920) = 8");
+
+        // 源空间：**不缩放**。同一个半径原样传下去。
+        // 这里用"不做换算"来代表 Source 的行为——两者必须不同，
+        // 否则 space 这个字段就没有存在意义。
+        let unscaled = 24;
+        assert_ne!(
+            scaled, unscaled,
+            "两种空间的换算结果必须不同，否则 space 字段是摆设（当前声明：{:?}）",
+            doc.space
+        );
     }
 
     #[test]

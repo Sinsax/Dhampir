@@ -237,6 +237,41 @@ impl Issue {
     }
 }
 
+/// 特效跑在**哪个像素空间**上。
+///
+/// # 为什么这件事必须是数据，不能只写在注释里
+///
+/// 它直接决定**要不要按目标尺寸缩放参数**：
+/// - [`EffectSpace::Source`]：跑在**源纹理**上，半径是源像素，与文档坐标系无关 -> **不缩放**；
+/// - [`EffectSpace::Document`]：跑在**目标尺寸**的中间纹理上，同一数值在不同输出尺寸下
+///   看起来不一样 -> **必须缩放**。
+///
+/// 在这条成为字段之前，这个区别只活在 render/timeline.rs 的两段注释里。
+/// 而声明错的后果是**两端静默分叉**：预览与成片的输出尺寸通常不同，
+/// 于是同一个半径在两边糊出不同的图，且没有任何一处会报错。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectSpace {
+    /// 源纹理像素。与目标尺寸无关。
+    Source,
+    /// 文档像素（= render_hints 坐标系）。要按目标/文档比例换算。
+    Document,
+}
+
+/// 这个特效**怎么渲染**。
+///
+/// 注册表提供它，渲染器按它派发 —— 这样加一个特效不必再改渲染主路径里的
+/// kind 分支。
+///
+/// 目前只有一种：可分离高斯模糊。留成枚举而不是直接写死，是因为下一个
+/// 逐像素查表类特效（亮度/对比度/饱和度）会需要第二种。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectPipeline {
+    /// 横竖两趟的可分离模糊，核是定长展开的。
+    SeparableBlur,
+}
+
 /// 一个特效的参数规格，由 core 的注册表提供。
 ///
 /// 放在参数里而不是写死在 timeline 里，是为了让"登记表"只有一份（在 core），
@@ -247,6 +282,17 @@ pub struct EffectSpec {
     pub kind: &'static str,
     /// 参数名 -> (最小值, 最大值)
     pub params: &'static [(&'static str, f32, f32)],
+    /// 跑在哪个像素空间。决定要不要按目标尺寸缩放。
+    pub space: EffectSpace,
+    /// 怎么渲染。渲染器按它派发。
+    pub pipeline: EffectPipeline,
+}
+
+impl EffectSpec {
+    /// 某个参数的上界。找不到就是 None（调用方不该猜一个默认上界）。
+    pub fn param_max(&self, name: &str) -> Option<f32> {
+        self.params.iter().find(|(n, _, _)| *n == name).map(|(_, _, max)| *max)
+    }
 }
 
 /// 只校验结构与时间，不校验特效种类。
@@ -496,6 +542,8 @@ mod tests {
     const BLUR: EffectSpec = EffectSpec {
         kind: "gaussian_blur",
         params: &[("radius", 0.0, 64.0)],
+        space: EffectSpace::Document,
+        pipeline: EffectPipeline::SeparableBlur,
     };
 
     #[test]
