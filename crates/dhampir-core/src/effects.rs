@@ -15,18 +15,19 @@ use dhampir_timeline::schema::{EffectPipeline, EffectSpace, EffectSpec};
 pub const GAUSSIAN_BLUR: EffectSpec = EffectSpec {
     kind: "gaussian_blur",
     params: &[("radius", 0.0, crate::render::BLUR_MAX_RADIUS as f32)],
-    // **同一个 kind 在两个空间里都出现过**，这是这份登记表里唯一一处这样的事：
-    // 实拍片段上的 gaussian_blur 跑在源纹理上（源像素，不缩放），
-    // 调整图层上的同名特效跑在目标尺寸上（文档像素，要换算）。
+    // **这个 space 是「默认空间」，不是唯一真相。**
     //
-    // 登记表只能声明**一个** space，所以这里声明 Document —— 选它的理由是：
-    // 声明成 Document 而实际跑在 Source 上，最坏是"多缩放了一次"，
-    // 那会在预览与成片尺寸不同时**明显看得出来**；
-    // 反之声明成 Source 而实际是 Document，则是"该缩没缩"，长得像"模糊得不够"——
-    // 那正是本项目最要避免的**静默偏差**。两害相权取前者。
+    // 同一个 kind 在两个空间里都会出现：实拍片段上的 gaussian_blur 跑在源纹理上
+    // （源像素，不换算），调整图层上的同名特效跑在目标尺寸上（文档像素，要换算）。
+    // 登记表只能给一个值，所以它表达不了这个二义性。
     //
-    // 这个二义性由 render::timeline 的 scale_document_radius 调用点承担：
-    // 只有调整图层那条路会真的调它（见 Step::Adjust 分支）。
+    // S6 的处理是**把判据移到调用点**：render::timeline 的两个调用点各自显式传
+    // Source 或 Document（见 radius_in_space 的文档）。那两处才是真正的判据，
+    // 而它们各自都有测试钉着。
+    //
+    // 这里声明 Document 只是**默认值**，用于 UI 提示与"调用点没指定时的兜底"。
+    // 选 Document 的理由：兜底时"多缩放一次"在预览与成片尺寸不同时看得出来，
+    // 而"该缩没缩"长得像"模糊得不够"—— 后者正是本项目最要避免的**静默偏差**。
     space: EffectSpace::Document,
     pipeline: EffectPipeline::SeparableBlur,
 };

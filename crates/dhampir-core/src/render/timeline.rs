@@ -78,14 +78,26 @@ pub fn blur_radius(effects: &[Effect]) -> u32 {
     radius.max(0.0).round().min(max) as u32
 }
 
-/// 把**文档像素**的模糊半径换算到目标像素。
+/// 按特效**声明的空间**把半径换算到目标像素。
 ///
-/// 与 transform 同样的道理，但**只对调整图层成立**：那个模糊跑在目标尺寸的中间纹理上，
-/// 所以同一个半径在不同目标尺寸下看起来不一样。每层的 gaussian_blur 跑在**源**纹理上，
-/// 半径是源像素，与文档坐标系无关，因此不换算。
+/// # 这个函数在解决什么
 ///
-/// 用一个标量（取宽度比例）而不是各轴一个：核是各向同性的，
-/// 给两个比例反而要定义"用哪个"。
+/// 同一个 `gaussian_blur` 在两个地方跑，而**它们需要的换算相反**：
+///
+/// | 跑在哪 | 纹素尺寸 | 半径含义 | 要不要换算 |
+/// |---|---|---|---|
+/// | 实拍片段（`compose_layers`） | 源纹理 | 源像素 | **不换算** |
+/// | 调整图层（`Step::Adjust`） | 目标尺寸中间纹理 | 文档像素 | **要换算** |
+///
+/// 登记表只能给一个 `space`，所以"声明一个值"这件事本身就表达不了这个二义性。
+/// 与其让登记表去猜，不如**把空间作为调用点的参数**：调用点自己最清楚
+/// 它拿到的纹理是什么尺寸 —— 那是它构造出来的，不是从注册表读来的。
+///
+/// 登记表的 `space` 因此含义收窄为：**这个特效默认跑在哪个空间**，
+/// 用于 UI 提示与"调用点没显式指定时的兜底"。真正的判据由调用点给出。
+///
+/// 这样声明错的后果也不再是静默分叉：调用点传什么，就按什么算，
+/// 而两处调用点各自都有测试钉着（见 blur_radius_for_* 的用例）。
 pub fn scale_document_radius(radius: u32, space: crate::render::RenderSpace) -> u32 {
     if radius == 0 {
         return 0;
@@ -97,6 +109,39 @@ pub fn scale_document_radius(radius: u32, space: crate::render::RenderSpace) -> 
     // 夹回核表上界：核是**定长展开**的（TAPS 个抽头），超了不会更糊，只会悄悄退化。
     let scaled = (radius as f32 * sx).round();
     scaled.max(0.0).min(crate::render::BLUR_MAX_RADIUS as f32) as u32
+}
+
+/// 按**调用点声明的空间**决定要不要换算半径。
+///
+/// 这是本段（S6）要的那个入口：把"跑在哪个空间"从登记表的单值声明，
+/// 变成调用点必须显式回答的问题。两个调用点：
+///
+/// * 实拍片段那条路传 [`EffectSpace::Source`] —— 纹理就是源尺寸，半径是源像素；
+/// * 调整图层那条路传 [`EffectSpace::Document`] —— 纹理是目标尺寸，半径是文档像素。
+///
+/// 传错的后果是**看得见的**：预览与成片尺寸不同时，模糊程度会明显不一样。
+/// 而旧的写法（登记表单值 + 两处硬编码行为）会让其中一处永远错、且无人察觉。
+pub fn radius_in_space(
+    radius: u32,
+    space: dhampir_timeline::schema::EffectSpace,
+    render_space: crate::render::RenderSpace,
+) -> u32 {
+    match space {
+        // 源空间：不按比例换算，但**仍然要夹上界**。
+        //
+        // 这一条是实测发现的：最初这里直接写 => radius，看起来"原样用"很合理，
+        // 但它绕过了 scale_document_radius 里那道夹取 —— 于是一个绕过校验的工程
+        // （radius 填 999）会让着色器按 999 去索引一张只有 TAPS 个抽头的核。
+        // 核是**定长展开**的，越界不会崩，只会读到垃圾或悄悄退化。
+        // 结论：**"不换算"不等于"不设防"**，两件事要分开写。
+        dhampir_timeline::schema::EffectSpace::Source => {
+            radius.min(crate::render::BLUR_MAX_RADIUS)
+        }
+        // 文档空间：按目标/文档比例换算（内部已含夹取）。
+        dhampir_timeline::schema::EffectSpace::Document => {
+            scale_document_radius(radius, render_space)
+        }
+    }
 }
 
 /// 时间线渲染器：合成 + 特效的调度。构造一次、每帧复用。
@@ -290,7 +335,14 @@ impl TimelineRenderer {
                     // **调整图层的模糊半径是文档像素**：它跑在目标尺寸的中间纹理上，
                     // 所以目标尺寸一变，同一个半径看起来就不一样了 —— 必须按比例换算。
                     // （每层的 gaussian_blur 不是这个情况：它跑在**源**纹理上，见 compose_layers。）
-                    let radius = scale_document_radius(blur_radius(effects), space);
+                    // **调整图层：显式声明 Document。**
+                    // 它的纹理是目标尺寸的中间纹理，所以半径是文档像素、必须换算。
+                    // 这里不再依赖登记表的单值声明 —— 调用点自己知道纹理多大。
+                    let radius = radius_in_space(
+                        blur_radius(effects),
+                        dhampir_timeline::schema::EffectSpace::Document,
+                        space,
+                    );
                     let Some(from) = current else { continue };
                     if radius == 0 {
                         continue;
@@ -381,9 +433,18 @@ impl TimelineRenderer {
             let Some((view, size)) = resolver.texture_for(&layer.source, layer.source_frame) else {
                 continue;
             };
-            // **这里不换算半径。** 模糊跑在**源**纹理上（下面两张纹理都是 size = 源尺寸），
+            // **实拍片段：显式声明 Source。**
+            // 模糊跑在**源**纹理上（下面两张纹理都是 size = 源尺寸），
             // 所以半径是源像素，与文档坐标系无关。换算它反而会让同一个源在不同导出尺寸下糊得不一样。
-            let radius = blur_radius(&layer.effects);
+            //
+            // 传 Source 而不是查登记表：登记表对 gaussian_blur 声明的是 Document
+            // （两个空间都用到了，只能声明一个）。**这里以调用点为准** ——
+            // 这正是 S6 把「空间」从登记表单值改成调用点参数的原因。
+            let radius = radius_in_space(
+                blur_radius(&layer.effects),
+                dhampir_timeline::schema::EffectSpace::Source,
+                space,
+            );
             if radius == 0 {
                 prepared.push((layer, view, size));
                 continue;
@@ -577,6 +638,65 @@ mod tests {
             blur_radius(&[effect("根本没登记过", &[("radius", 5.0)])]),
             0,
             "未登记的 kind 不该触发任何管线"
+        );
+    }
+
+    #[test]
+    fn 空间由调用点决定而不是登记表说了算() {
+        // 这条钉住 S6 的核心改动：半径换算**按调用点传的空间**走，
+        // 而不是去读登记表的单值声明。
+        //
+        // 为什么重要：同一个 gaussian_blur 在两个地方跑，需要的换算相反。
+        // 若两者都听登记表的，必然有一处错 —— 而错了不会报错，
+        // 只会在预览与成片尺寸不同时糊得不一样。
+        use crate::render::RenderSpace;
+        use dhampir_timeline::schema::EffectSpace;
+
+        // 文档 1920x1080 -> 目标 640x360，比例 1/3。
+        let space = RenderSpace { sequence: (1920, 1080), target: (640, 360) };
+
+        // 半径取 12（在上界 16 之内），这样比的是**换算**而不是夹取。
+        // Source：原样。实拍片段那条路走这个。
+        assert_eq!(
+            radius_in_space(12, EffectSpace::Source, space),
+            12,
+            "源空间不该换算 —— 半径本来就是源像素"
+        );
+
+        // Document：按比例缩。调整图层那条路走这个。
+        assert_eq!(
+            radius_in_space(12, EffectSpace::Document, space),
+            4,
+            "文档空间要按 640/1920 缩到 4"
+        );
+
+        // 反向用例：两者**必须不同**。
+        // 若哪天有人把 radius_in_space 改成恒等函数（或让它去读登记表），
+        // 这条会红 —— 而"两处都变成同一个值"正是要防的那个退化。
+        assert_ne!(
+            radius_in_space(12, EffectSpace::Source, space),
+            radius_in_space(12, EffectSpace::Document, space),
+            "两种空间必须给出不同结果，否则这个参数没有意义"
+        );
+
+        // 尺寸相同时两者相等 —— 换算恒等，且都夹到同一个上界。
+        // 用**未超界**的半径（10），否则两边都被夹到同一上界，
+        // 会掩盖"换算是否真的发生了"这件事。
+        let same = RenderSpace { sequence: (1920, 1080), target: (1920, 1080) };
+        assert_eq!(radius_in_space(10, EffectSpace::Source, same), 10);
+        assert_eq!(radius_in_space(10, EffectSpace::Document, same), 10);
+
+        // **源空间也要夹上界** —— 这是实测补上的一条。
+        // 曾经 Source 分支直接原样返回，绕过校验的 radius=999 会让着色器越界索引。
+        assert_eq!(
+            radius_in_space(999, EffectSpace::Source, space),
+            crate::render::BLUR_MAX_RADIUS,
+            "源空间不换算，但必须夹上界"
+        );
+        assert_eq!(
+            radius_in_space(999, EffectSpace::Document, space),
+            crate::render::BLUR_MAX_RADIUS,
+            "文档空间同样夹上界"
         );
     }
 
