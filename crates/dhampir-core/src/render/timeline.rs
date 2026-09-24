@@ -21,6 +21,7 @@ use dhampir_timeline::schema::{Effect, EffectPipeline};
 
 use crate::compose::Composite;
 use crate::render::blur::BlurRenderer;
+use crate::render::color_adjust::ColorAdjustRenderer;
 use crate::render::compose::{Compositor, LayerDraw};
 use crate::wgpu;
 
@@ -144,10 +145,65 @@ pub fn radius_in_space(
     }
 }
 
+/// 从特效表里折出逐像素色彩调整的系数。
+///
+/// # 为什么是「折叠」而不是「取第一个」
+///
+/// 用户可能同时挂亮度和饱和度。取第一个会让后一个被静默丢掉 ——
+/// 而"我明明挂了饱和度"这种问题很难查。这里选择**相乘/相加累积**：
+/// 亮度相加、对比度与饱和度相乘、色调相加，语义上都是可交换的，
+/// 所以多个同类特效叠加的结果与顺序无关（这点很重要：顺序无关才不会被
+/// 两端各自的遍历顺序影响）。
+///
+/// 没挂任何色彩特效时返回 [`ColorAdjustParams::IDENTITY`]，调用方据此整条跳过。
+pub fn color_params(effects: &[Effect]) -> crate::render::ColorAdjustParams {
+    let mut out = crate::render::ColorAdjustParams::IDENTITY;
+    for effect in effects {
+        // 认管线，不认名字 —— 与 blur_radius 同一套判据。
+        let Some(spec) = crate::effects::spec_of(&effect.kind) else {
+            continue;
+        };
+        if spec.pipeline != dhampir_timeline::schema::EffectPipeline::ColorAdjust {
+            continue;
+        }
+        let param = |name: &str| effect.params.get(name).copied().filter(|v| v.is_finite());
+        match spec.kind {
+            "brightness" => {
+                if let Some(v) = param("amount") {
+                    out.brightness += v;
+                }
+            }
+            "contrast" => {
+                if let Some(v) = param("amount") {
+                    out.contrast *= v;
+                }
+            }
+            "saturation" => {
+                if let Some(v) = param("amount") {
+                    out.saturation *= v;
+                }
+            }
+            "hue" => {
+                if let Some(v) = param("degrees") {
+                    // **度转弧度只在这一处发生。**
+                    // 着色器收的是弧度；两边各转一遍会让 90 度变成 90 弧度再转一次。
+                    out.hue += v.to_radians();
+                }
+            }
+            // 走了 ColorAdjust 管线却不在这里 -> 登记表加了新特效但忘了接上。
+            // **不静默忽略**：那正是最坏的情形（用户能选中它，画面却不变）。
+            other => {
+                debug_assert!(false, "ColorAdjust 管线里的 {other} 没有在 color_params 里接上");
+            }
+        }
+    }
+    out
+}
 /// 时间线渲染器：合成 + 特效的调度。构造一次、每帧复用。
 pub struct TimelineRenderer {
     compositor: Compositor,
     blur: BlurRenderer,
+    color_adjust: ColorAdjustRenderer,
     format: wgpu::TextureFormat,
 }
 
@@ -190,6 +246,7 @@ impl TimelineRenderer {
         Self {
             compositor: Compositor::new(device, format),
             blur: BlurRenderer::new(device, format),
+            color_adjust: ColorAdjustRenderer::new(device, format),
             format,
         }
     }
@@ -332,18 +389,37 @@ impl TimelineRenderer {
                     current = Some(dest);
                 }
                 Step::Adjust { effects, .. } => {
+                    let Some(from) = current else { continue };
+
+                    // ---- 1) 逐像素色彩调整，先做。 ----
+                    //
+                    // 顺序有讲究：色彩调整是**逐像素**的，模糊是**邻域**的。
+                    // 先调整再模糊 = 糊一张调过色的图；先模糊再调整 = 给糊过的图调色。
+                    // 两者**不一样**（亮度是加性的，模糊会把边缘的加性偏移摊开）。
+                    // 定成先调整，是因为它更符合直觉：先决定这张图长什么样，再去糊它。
+                    // 这个顺序必须两端一致，所以它只写在这里这一处。
+                    let params = color_params(effects);
+                    if !params.is_identity() {
+                        let out = allocate(
+                            device, self.format, extent, "dhampir adjust color out",
+                            &mut textures, &mut views,
+                        );
+                        let source = views[from].clone();
+                        let to = views[out].clone();
+                        self.color_adjust.apply(device, queue, encoder, &source, &to, params);
+                        current = Some(out);
+                    }
+                    let Some(from) = current else { continue };
+
+                    // ---- 2) 邻域模糊，后做。 ----
                     // **调整图层的模糊半径是文档像素**：它跑在目标尺寸的中间纹理上，
                     // 所以目标尺寸一变，同一个半径看起来就不一样了 —— 必须按比例换算。
                     // （每层的 gaussian_blur 不是这个情况：它跑在**源**纹理上，见 compose_layers。）
-                    // **调整图层：显式声明 Document。**
-                    // 它的纹理是目标尺寸的中间纹理，所以半径是文档像素、必须换算。
-                    // 这里不再依赖登记表的单值声明 —— 调用点自己知道纹理多大。
                     let radius = radius_in_space(
                         blur_radius(effects),
                         dhampir_timeline::schema::EffectSpace::Document,
                         space,
                     );
-                    let Some(from) = current else { continue };
                     if radius == 0 {
                         continue;
                     }
@@ -639,6 +715,54 @@ mod tests {
             0,
             "未登记的 kind 不该触发任何管线"
         );
+    }
+
+    #[test]
+    fn 四个恒等特效折出来仍然是恒等() {
+        // 这条是**实测出来的**：挂上四个色彩特效、参数全填恒等值，
+        // 出片必须与完全不挂时逐字节相同（已用 digest 验过）。
+        // 这里把那个事实钉进单测，免得以后改折叠逻辑时悄悄破坏它。
+        let identity = [
+            effect("brightness", &[("amount", 0.0)]),
+            effect("contrast", &[("amount", 1.0)]),
+            effect("saturation", &[("amount", 1.0)]),
+            effect("hue", &[("degrees", 0.0)]),
+        ];
+        assert!(
+            color_params(&identity).is_identity(),
+            "四个恒等参数折起来必须还是恒等，否则会白跑一趟甚至改错画面"
+        );
+    }
+
+    #[test]
+    fn 同类色彩特效叠加是可交换的() {
+        // 顺序无关很重要：两端各自的遍历顺序若不同，顺序相关就会变成两端不一致。
+        // 亮度可加、其余可乘，所以两种顺序必须给出同一个结果。
+        let a = [effect("brightness", &[("amount", 0.1)]), effect("brightness", &[("amount", 0.2)])];
+        let b = [effect("brightness", &[("amount", 0.2)]), effect("brightness", &[("amount", 0.1)])];
+        let pa = color_params(&a);
+        let pb = color_params(&b);
+        assert!((pa.brightness - pb.brightness).abs() < 1e-6, "亮度叠加必须可交换");
+
+        let c = [effect("saturation", &[("amount", 0.5)]), effect("saturation", &[("amount", 2.0)])];
+        let d = [effect("saturation", &[("amount", 2.0)]), effect("saturation", &[("amount", 0.5)])];
+        let pc = color_params(&c);
+        let pd = color_params(&d);
+        assert!((pc.saturation - pd.saturation).abs() < 1e-6, "饱和度叠加必须可交换");
+    }
+
+    #[test]
+    fn 度转弧度在折叠时发生且只发生一次() {
+        // 用户填度、着色器收弧度。转两次会让 90 度变成 90 弧度再转一次。
+        let p = color_params(&[effect("hue", &[("degrees", 90.0)])]);
+        assert!((p.hue - std::f32::consts::FRAC_PI_2).abs() < 1e-6, "90 度应当是 pi/2 弧度");
+    }
+
+    #[test]
+    fn 没挂色彩特效时是恒等_调用方据此跳过() {
+        assert!(color_params(&[]).is_identity());
+        // 只挂模糊时也应当是恒等：模糊不是 ColorAdjust 管线，不该混进来。
+        assert!(color_params(&[effect("gaussian_blur", &[("radius", 8.0)])]).is_identity());
     }
 
     #[test]
