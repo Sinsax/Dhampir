@@ -2,7 +2,8 @@
 
 写于 T2 进行中（HEAD 1e3a4ff，工作区干净）；T2.4 收口时更新（HEAD dc517fe）；T2.5 收口时更新（HEAD 59b8219）；
 T2.6 收口时更新（HEAD 158e615）；T2.7 收口时更新（HEAD 5520185）；T2 收口时更新（HEAD 51b7056，T2 整段完成）；
-**T3 收口时更新（HEAD 68aca8b，T3 整段完成）；T4 收口时更新（HEAD 6475c11，T4 整段完成）**。
+**T3 收口时更新（HEAD 68aca8b，T3 整段完成）；T4 收口时更新（HEAD 6475c11，T4 整段完成）；
+T4 收口后进度复核（HEAD 9c64b06，工作区干净，2026-09-24）—— 逐条重跑的原始结论在第五节**。
 
 **这份文件是给「下一个接手的人」的一页纸**：现在在哪、下一步做什么、什么还没做。
 它不替代另外两份，而是把它们的「未来」部分抽出来放在一处：
@@ -24,7 +25,7 @@ T2.6 收口时更新（HEAD 158e615）；T2.7 收口时更新（HEAD 5520185）�
 | 进行中 | 无 —— **T4 已收口**；下一步是 T5 解码通路（见 roadmap.md 的 T5 段） |
 | 未开始 | T5 解码通路、T6 音频、T7 交付面收口 |
 | 台账统计（26 条） | 已完成 10 条：D1 **D2** **D5** **D6** D8 A1 **A2** A3 A4 A8；待办 11 条；明确不做 4 条；架构性不可测 1 条 |
-| 全仓状态 | cargo test 全绿（含 dhampir-timeline 199 条）、17 个守卫加各自自检全绿、0 warning |
+| 全仓状态 | `cargo test --workspace` 502 passed / 0 failed / 21 ignored（含 dhampir-timeline 199 条）、`cargo check --all-targets` 0 warning、17 个守卫里 **14 个全绿** —— 另 3 个（check-cli / check-local-backend / check-dual-end）在**本机 agent 会话**里因「起不了子进程」假红，判据与绕过见第五节 |
 
 **一句实话**：现在最接近「能用」的那条路是 **CLI 单机出片**；预览能编辑、能拖拽、能撤销重做、能出片，
 字幕与弹幕两个宿主都画得出来了（两端结构一致、墨迹可判），所以「能剪片子给人看」里的「字」与「改」
@@ -200,7 +201,9 @@ T2.6 收口时更新（HEAD 158e615）；T2.7 收口时更新（HEAD 5520185）�
    把这两个调用拆远会让它假红，那时改窗口而不是删判据。
    它**只判接线**，不判墨迹；墨迹在 T2.4 / T2.5 的判定通道里。
 11. **`docs/host-api.md` 的名单是手写的**：改 wasm 导出（新增/删除/改名 `dhampir_*`）之后要
-   手工同步文末那 23 行，`--write` 只补掉过时的**版本行**与调用面清单表，名单一个字节都不碰。
+   手工同步文末那份名单（**当前 26 行** —— 这里原写「23 行」，是 T2 时代的数，T3 的弹幕位图 +1、
+   T4 的 undo/redo +2 之后没人跟着改），`--write` 只补掉过时的**版本行**与调用面清单表，
+   名单一个字节都不碰。**别把行数写死**，以 `api-surface.mjs` 打印的「列了 N 个导出」为准。
    漏同步的失败形状是 `api-surface` 正跑红并逐条列出缺了谁 —— 这一步是故意的。
 12. **反向验证脚本整份回写文件会刷新 mtime**：内容与还原前逐字节一致（脚本自己比 SHA256），
    但 `check-web-invariants` 只看 mtime，于是报「wasm pkg 比它的源码旧」。**重建一次 pkg 即转绿**，
@@ -228,3 +231,47 @@ T2.6 收口时更新（HEAD 158e615）；T2.7 收口时更新（HEAD 5520185）�
    `include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/..."))` 编进去；
    而且那个文件的 `#[wasm_bindgen_test]` **属性条数**要与 `scripts/run-wasm-tests.mjs` 对账
    （写成 `#[test]` 不会被数到，跑了也白跑）。
+19. **在 WorkBuddy 的 agent 会话里跑守卫，先看这一条**：那个会话里**别人给子进程开 stdin 管道**
+   会失败 —— node 侧是 `spawnSync` 报 `EBUSY`（`status` 是 `null`，守卫把它显示成 `exit=-1`），
+   Rust 侧是 CLI 出片起不了编码器（`所有的管道范例都在使用中。 (os error 231)`，即
+   `ERROR_PIPE_BUSY`）。于是 `check-cli` / `check-local-backend` / `check-dual-end` 这三个
+   必然**假红**，CLI 的 `render` 必然起不来。
+   **别去改守卫、也别去改出片代码** —— 判据、绕过方法与本次复核的原始结论见第五节。
+
+---
+
+## 五、最近一次进度复核（2026-09-24，HEAD 9c64b06，工作区干净）
+
+复核只回答一个问题：**「全仓是绿的」这个结论还成不成立**。逐条重跑，原始结论如下。
+
+| 跑什么 | 结果 |
+|---|---|
+| `cargo test --workspace` | **502 passed / 0 failed / 21 ignored**；其中 `dhampir-timeline` 199 条 |
+| `cargo check --workspace --all-targets` | **0 warning**（`cargo test` 里那 2 行 warning 是 link.exe 的进度行，见坑 3） |
+| `node scripts/run-wasm-tests.mjs` | **15 / 15**，且与源码 `#[wasm_bindgen_test]` 属性条数对账一致 |
+| `node scripts/api-surface.mjs` | 绿：6 个模块 / 62 个导出，版本 4，`docs/host-api.md` 列了 26 个导出 |
+| `node scripts/timeline-contract.mjs` | 绿：schema 与 TS 类型无漂移 |
+| `node target/t2/run-guards.cjs` | **14 / 17** —— 三个红的不是回归，理由见下 |
+| 台账 | `check-defects` 绿：26 条、路线图引用齐全、证据路径都存在 |
+
+**三个红的是环境问题，不是代码问题**（根因见坑 19）：本机这个会话里，node 拿不到子进程，
+所以 `check-cli.mjs` 的每一次调用都是 `exit=-1`、`check-local-backend.mjs` 连后端进程都拉不起来、
+`check-dual-end.mjs` 的浏览器导出直接 `退出码 null`。一行判据即可自证：
+
+    node -e "const r=require('child_process').spawnSync(process.execPath,['-v']);console.log(r.status,r.error&&r.error.code)"
+    // 本机会话：null EBUSY    普通终端：0 undefined
+
+只在**外面**把 stdin 改成 `ignore`（本次是套一层 `--require` 的 shim，**仓库里的守卫一个字节没动**；
+shim 留在 `target/pipe-shim.cjs`，跑法 `NODE_OPTIONS="--require=<仓库>/target/pipe-shim.cjs" node scripts/xxx.mjs`），
+再跑一遍，结论变成：
+
+* `check-dual-end.mjs` —— **绿**：四个帧 0/30/60/89 的 SSIM 全是 1.000000、最差 SSIM 1.000000；
+* `check-cli.mjs` —— **19 / 22**：剩的三条（`render` / `render-subtitle-out` /
+  `render-subtitle-out-empty`）全卡在「编码器起不来」这同一个原因上；
+* `check-local-backend.mjs` —— 后端起来了、HTTP 判据都过了，**停在导出下载那一步**（同一个原因）。
+
+也就是说：**三条红里没有一条指向代码变化** —— 同一 HEAD 的提交（9c64b06）里记的是 17 / 17，
+且工作区干净、重跑前后没有改动。要拿到真正的 17 / 17，在**普通终端**（不经过 agent 的进程包装）里跑。
+
+**顺带修掉一处文档漂移**：坑 11 里「文末那 23 行」是 T2 时代的数，实际已是 26 个导出（T3 的弹幕位图 +1、
+T4 的 undo/redo +2）；已在坑 11 就地改正，并写明**这个数不许写死**。
