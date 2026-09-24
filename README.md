@@ -37,7 +37,7 @@
 
 ```bash
 cargo test --workspace                     # native 全量，547 条
-node scripts/run-guards.mjs                # 18 条守卫全绿
+node scripts/run-guards.mjs                # 19 条守卫全绿
 cargo run -q -p dhampir-worker --bin dhampir -- --help
 ```
 
@@ -125,7 +125,7 @@ cargo run -q -p dhampir-worker --bin dhampir -- --help
 
 ### 守卫脚本
 
-一共 **18 条**（`scripts/` 下，各带自己的 `--self-test`），用 `node scripts/run-guards.mjs` 全跑。
+一共 **19 条**（`scripts/` 下，各带自己的 `--self-test`），用 `node scripts/run-guards.mjs` 全跑。
 每个守卫都被**反向验证**过（临时植入违例，确认它真的会红）。**守卫若不会红，就不是守卫。**
 
 CI 里跑的是其中**不依赖本机资产**的三条：
@@ -139,10 +139,10 @@ node scripts/check-text-hygiene.mjs   # 全仓 LF + 无 BOM + 合法 UTF-8
 三者的共同纪律：**不在空文件集上通过**。没有文件可查时退出码是 2，不是 0——
 "没扫到"和"扫过了没问题"是两件事。
 
-另外 **15 条**要本机上的东西（ffmpeg、GPU、真实浏览器、`records/` 里的取证存档），
+另外 **16 条**要本机上的东西（ffmpeg、GPU、真实浏览器、`records/` 里的取证存档），
 所以只在开发机上跑，不进 CI —— 它们是：
 `check-defects`、`check-sequential-decode`、`check-web-invariants`、`check-backend-seam`、
-`check-preview-parity`、`check-overlay-plumbing`、`check-linux-portability`、
+`check-preview-parity`、`check-overlay-plumbing`、`check-linux-portability`、`check-effect-registry`、
 `check-m1-record`、`check-m2-record`、`check-media-status`、`check-local-backend`、
 `api-surface`、`timeline-contract`、`check-cli`、`check-dual-end`。
 **清单以 `scripts/run-guards.mjs --list` 为准**，不从这份文档抄。

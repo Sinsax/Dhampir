@@ -116,6 +116,7 @@ export const GUARDS = [
   { script: 'check-m1-record.mjs', args: ['--record', 'records/m1'] },
   { script: 'check-m2-record.mjs', args: ['--record', 'records/m2'] },
   { script: 'check-media-status.mjs', args: [] },
+  { script: 'check-effect-registry.mjs', args: [] },
   { script: 'check-local-backend.mjs', args: [] },
   { script: 'api-surface.mjs', args: [] },
   { script: 'timeline-contract.mjs', args: [] },

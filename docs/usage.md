@@ -214,12 +214,12 @@ node scripts/dhampir-local.mjs --port 8787
 ### 5.1 跑全部守卫
 
 ```bash
-node scripts/run-guards.mjs              # 跑全部 18 条
+node scripts/run-guards.mjs              # 跑全部 19 条
 node scripts/run-guards.mjs --list       # 只列清单
 node scripts/run-guards.mjs --self-test  # 只跑各自的 --self-test
 ```
 
-**一共 18 条**，每条都带自己的 `--self-test`，且每条都被**反向验证**过
+**一共 19 条**，每条都带自己的 `--self-test`，且每条都被**反向验证**过
 （临时植入违例，确认它真的会红）。**守卫若不会红，就不是守卫。**
 
 ### 5.2 CI 里只跑 3 条
@@ -230,7 +230,7 @@ node scripts/check-dep-graph.mjs      # 依赖方向单向无环
 node scripts/check-text-hygiene.mjs   # 全仓 LF + 无 BOM + 合法 UTF-8
 ```
 
-另外 15 条要 ffmpeg / GPU / 真浏览器 / `records/` 里的取证存档，只在开发机上跑。
+另外 16 条要 ffmpeg / GPU / 真浏览器 / `records/` 里的取证存档，只在开发机上跑。
 **这不是"少验一点"**——放进 CI 只会让"环境没装好"长得像"代码回归"。
 
 三条的共同纪律：**不在空文件集上通过**。没有文件可查时退出码是 `2` 不是 `0`——
