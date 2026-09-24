@@ -17,7 +17,7 @@
 //! 纹理池是宿主的资源策略（显存预算、LRU），不该埋在这一层里。
 //! 等两端都跑通了再把它提到宿主去，那时换的是宿主，不是这里的语义。
 
-use dhampir_timeline::schema::Effect;
+use dhampir_timeline::schema::{Effect, EffectPipeline};
 
 use crate::compose::Composite;
 use crate::render::blur::BlurRenderer;
@@ -43,10 +43,24 @@ pub trait SourceResolver {
 ///
 /// 半径会被夹到 [`crate::render::BLUR_MAX_RADIUS`]：登记表已经限制了取值范围，
 /// 这里再兜一次，免得一个绕过校验的工程让着色器索引越界。
+///
+/// # 为什么这里查注册表而不是比较字符串
+///
+/// 原先写的是 `effect.kind != "gaussian_blur"` —— 一个字符串字面量。
+/// 那意味着**再加一个走 SeparableBlur 管线的特效时，这里会被静默跳过**：
+/// 用户填了半径、校验也过了（登记表里有它），但渲染当没看见。
+///
+/// 改成按 `spec.pipeline` 认，加特效就只需要在登记表里声明管线，
+/// 不必回到渲染主路径里补一个分支 —— 而"忘了补"正是这类硬编码最容易出的错。
 pub fn blur_radius(effects: &[Effect]) -> u32 {
     let mut radius = 0.0_f32;
     for effect in effects {
-        if effect.kind != "gaussian_blur" {
+        // 认管线，不认名字。名字认不出来的（没登记的）直接跳过 ——
+        // 校验层已经会为"未登记的特效"报错，这里不重复报，只保证不崩。
+        let Some(spec) = crate::effects::spec_of(&effect.kind) else {
+            continue;
+        };
+        if spec.pipeline != EffectPipeline::SeparableBlur {
             continue;
         }
         if let Some(value) = effect.params.get("radius") {
@@ -55,8 +69,13 @@ pub fn blur_radius(effects: &[Effect]) -> u32 {
             }
         }
     }
+    // 上界**从登记表推**，不写死：写死的话改一次上界就要改这里。
+    // 登记表里查不到 radius 时退回着色器的硬上界（有测试盯着登记表必须有它）。
+    let max = crate::effects::spec_of("gaussian_blur")
+        .and_then(|spec| spec.param_max("radius"))
+        .unwrap_or(crate::render::BLUR_MAX_RADIUS as f32);
     // u32 -> f32 没有 From 实现，只能 as；这里范围远小于 2^24，转换是精确的。
-    radius.max(0.0).round().min(crate::render::BLUR_MAX_RADIUS as f32) as u32
+    radius.max(0.0).round().min(max) as u32
 }
 
 /// 把**文档像素**的模糊半径换算到目标像素。
@@ -526,6 +545,57 @@ mod tests {
             effect("gaussian_blur", &[("radius", 6.0)]),
         ];
         assert_eq!(blur_radius(&effects), 6);
+    }
+
+    #[test]
+    fn 派发认的是登记表的管线而不是名字() {
+        // 这一条是本段（S3）的**结构性判据**：证明 blur_radius 认的是
+        // 登记表里的 pipeline，而不是某个写死的字符串。
+        //
+        // 判法：把所有已登记、且管线是 SeparableBlur 的 kind **从登记表里推出来**，
+        // 逐个喂给 blur_radius，都必须识别。这样将来加一个走同一管线的新特效时，
+        // 这条测试**自动**覆盖它 —— 不需要有人记得回来加一行。
+        let blur_kinds: Vec<&str> = crate::effects::REGISTRY
+            .iter()
+            .filter(|spec| spec.pipeline == EffectPipeline::SeparableBlur)
+            .map(|spec| spec.kind)
+            .collect();
+        assert!(!blur_kinds.is_empty(), "至少该有一个走 SeparableBlur 的特效");
+
+        for kind in &blur_kinds {
+            assert_eq!(
+                blur_radius(&[effect(kind, &[("radius", 5.0)])]),
+                5,
+                "{kind} 声明了 SeparableBlur 管线，blur_radius 就必须认它"
+            );
+        }
+
+        // 反向：登记表里的特效若**不是** SeparableBlur，就不该触发模糊。
+        // 现在还没有这种特效，所以这里用"没登记的 kind"代表这一类 ——
+        // 它同样必须被跳过，而不是被当成模糊。
+        assert_eq!(
+            blur_radius(&[effect("根本没登记过", &[("radius", 5.0)])]),
+            0,
+            "未登记的 kind 不该触发任何管线"
+        );
+    }
+
+    #[test]
+    fn 半径上界跟着登记表走() {
+        // 上界原先写死成 BLUR_MAX_RADIUS。现在从登记表推 ——
+        // 这条钉住"两者当下相等"，改登记表时若忘了同步着色器上界，它会红。
+        let from_registry = crate::effects::spec_of("gaussian_blur")
+            .and_then(|spec| spec.param_max("radius"))
+            .expect("登记表必须有 radius 上界");
+        assert_eq!(
+            from_registry, crate::render::BLUR_MAX_RADIUS as f32,
+            "登记表上界与着色器硬上界必须一致"
+        );
+        // 而且真的被用上了：超界值夹到登记表上界，不是别的数。
+        assert_eq!(
+            blur_radius(&[effect("gaussian_blur", &[("radius", 1.0e9)])]),
+            from_registry as u32
+        );
     }
 
     #[test]
