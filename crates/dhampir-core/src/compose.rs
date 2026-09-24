@@ -343,7 +343,7 @@ pub fn end_frame_v2(timeline: &TimelineV2) -> Option<Frame> {
 mod tests {
     use super::*;
     use dhampir_timeline::schema::{
-        Easing, Keyframe, Project, SCHEMA_VERSION, TimebaseDto, Track, TrackKind, TransitionKind,
+        transition_kind, Easing, Keyframe, Project, SCHEMA_VERSION, TimebaseDto, Track, TrackKind,
         TransitionSpec,
     };
 
@@ -460,7 +460,7 @@ mod tests {
     fn 转场把前一片段冻在末帧并各占一半() {
         let a = clip("a", 0, 10);
         let mut b = clip("b", 10, 10);
-        b.transition_in = Some(TransitionSpec { kind: TransitionKind::CrossDissolve, duration: 4 });
+        b.transition_in = Some(TransitionSpec { kind: transition_kind::CROSS_DISSOLVE.to_string(), duration: 4 });
         let p = project(vec![video(vec![a, b])]);
 
         let composite = evaluate(&p, 10);
@@ -484,7 +484,7 @@ mod tests {
     #[test]
     fn 没有前驱时转场只把自己淡入() {
         let mut a = clip("a", 0, 10);
-        a.transition_in = Some(TransitionSpec { kind: TransitionKind::CrossDissolve, duration: 4 });
+        a.transition_in = Some(TransitionSpec { kind: transition_kind::CROSS_DISSOLVE.to_string(), duration: 4 });
         let p = project(vec![video(vec![a])]);
         let composite = evaluate(&p, 0);
         assert_eq!(composite.layers.len(), 1, "没有前驱就不该造层");
@@ -498,7 +498,7 @@ mod tests {
             Keyframe { frame: 0, value: 0.0, easing: Easing::Linear },
             Keyframe { frame: 9, value: 1.0, easing: Easing::Linear },
         ];
-        b.transition_in = Some(TransitionSpec { kind: TransitionKind::CrossDissolve, duration: 2 });
+        b.transition_in = Some(TransitionSpec { kind: transition_kind::CROSS_DISSOLVE.to_string(), duration: 2 });
         let p = project(vec![video(vec![clip("a", 0, 10), b])]);
         let composite = evaluate(&p, 11);
         let top = composite.layers.iter().find(|l| l.clip_id == "b").unwrap();
@@ -544,7 +544,7 @@ mod tests {
     }
 
     fn v1_fixture() -> Project {
-        use dhampir_timeline::schema::{Clip, Project, TimebaseDto, Track, TrackKind, Transform, TransitionSpec, TransitionKind};
+        use dhampir_timeline::schema::{transition_kind, Clip, Project, TimebaseDto, Track, TrackKind, Transform, TransitionSpec};
         let clip = |id: &str, at: Frame, duration: Frame, transition: Option<TransitionSpec>| Clip {
             id: id.to_string(),
             source: format!("{id}.mp4"),
@@ -569,7 +569,7 @@ mod tests {
                         "b",
                         10,
                         10,
-                        Some(TransitionSpec { kind: TransitionKind::CrossDissolve, duration: 4 }),
+                        Some(TransitionSpec { kind: transition_kind::CROSS_DISSOLVE.to_string(), duration: 4 }),
                     ),
                 ],
             }],

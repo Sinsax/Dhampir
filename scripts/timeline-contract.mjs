@@ -30,7 +30,7 @@ export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
  */
 export const FORMS = [
   { form: '--doc', stem: 'doc-v1' },
-  { form: '--timeline', stem: 'timeline-v3' },
+  { form: '--timeline', stem: 'timeline-v4' },
   { form: '--project-v1', stem: 'timeline-v1' },
 ];
 

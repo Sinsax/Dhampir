@@ -33,7 +33,10 @@ use crate::schema::{
 };
 
 /// 当前契约版本。
-pub const LAYER_SCHEMA_VERSION: u32 = 3;
+pub const LAYER_SCHEMA_VERSION: u32 = 4;
+
+/// v3 的版本号。**留着是因为迁移梯子要它** —— 与 V2 同理。
+pub const LAYER_SCHEMA_VERSION_V3: u32 = 3;
 
 /// v2 的版本号。**留着是因为迁移梯子要它**：v1 → v2 → v3 是一级一级走的，
 /// 每一步都必须产出一个"当时那个版本"的中间物，否则中间那一级没有名字。
@@ -367,7 +370,8 @@ pub fn migrate_v1_to_v2(project: &Project) -> Result<TimelineV2, MigrateError> {
                     source_in: clip.source_in,
                 }),
                 effects: clip.effects.clone(),
-                transition_in: clip.transition_in,
+                // v4 起 TransitionSpec 含 String，不再是 Copy —— 必须 clone。
+                transition_in: clip.transition_in.clone(),
                 keyframes: clip.keyframes.clone(),
             });
         }
@@ -403,6 +407,23 @@ pub fn migrate_v1_to_v2(project: &Project) -> Result<TimelineV2, MigrateError> {
 /// 素材帧率与时间线一致时两者完全相同，不一致时画面节奏会变。
 /// 这正是"该升版本"的定义。
 pub fn migrate_v2_to_v3(timeline: &TimelineV2) -> TimelineV2 {
+    let mut next = timeline.clone();
+    next.schema = LAYER_SCHEMA_VERSION_V3;
+    next
+}
+
+/// v3 契约 → v4。**只改转场类型的表示，不改渲染语义。**
+///
+/// v3 的 transition_in.kind 是一个 Rust enum，序列化出来是字符串 cross_dissolve；
+/// v4 把它改成**同名的字符串字段**，所以**字节完全不变** —— 旧文件能被 v4 直接读。
+///
+/// 那为什么还要升版本？因为变的是**类型**而不是字段：
+/// v3 的实现只认那一个变体，v4 接受任意串（由校验层判是否登记）。
+/// 一个 v4 写的、带新转场的文件若被 v3 读，会**静默降级**成"未知转场"——
+/// 而按仓库的规矩，静默降级比报错更坏，所以要让旧实现明确拒绝它。
+///
+/// 判据：同一份工程在 v3 与 v4 下**出片逐字节相同**（由测试钉住）。
+pub fn migrate_v3_to_v4(timeline: &TimelineV2) -> TimelineV2 {
     let mut next = timeline.clone();
     next.schema = LAYER_SCHEMA_VERSION;
     next
@@ -493,7 +514,7 @@ impl AssetTimebases {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{Clip, Track, Transform};
+    use crate::schema::{transition_kind, Clip, Track, Transform};
 
     fn v1_project() -> Project {
         Project {
@@ -541,13 +562,41 @@ mod tests {
 
     #[test]
     fn 迁移梯子的末端是当前版本() {
+        // 梯子现在是三级：v1 -> v2 -> v3 -> v4。
+        // **每一级都要验** —— 否则中间某级被跳过时这条测试照样绿，
+        // 而"跳过中间那一级"正是迁移梯子最容易出的错。
         let v2 = migrate_v1_to_v2(&v1_project()).expect("v1 应当能迁移");
         assert_eq!(v2.schema, LAYER_SCHEMA_VERSION_V2);
+
         let v3 = migrate_v2_to_v3(&v2);
-        assert_eq!(v3.schema, LAYER_SCHEMA_VERSION, "梯子末端必须是当前版本");
+        assert_eq!(v3.schema, LAYER_SCHEMA_VERSION_V3, "第二级应当落在 v3");
         // **字段一个都不动**：v3 改的是单位，不是形状。
         assert_eq!(v3.timebase, v2.timebase);
         assert_eq!(v3.tracks, v2.tracks);
+
+        let v4 = migrate_v3_to_v4(&v3);
+        assert_eq!(v4.schema, LAYER_SCHEMA_VERSION, "梯子末端必须是当前版本");
+        // v4 只改转场的**类型表示**，不改任何值 —— 所以除 version 外必须逐字段相同。
+        assert_eq!(v4.timebase, v3.timebase);
+        assert_eq!(v4.tracks, v3.tracks, "v4 只动 version，不动任何元素");
+    }
+
+    #[test]
+    fn 转场类型的字符串在迁移前后不变() {
+        // v4 把 transition_in.kind 从 enum 改成 String。
+        // 序列化出来的**必须还是同一个串** —— 否则旧文件读进来会变成另一个转场，
+        // 而那正是"静默改语义"，是本仓库最不能接受的一类变化。
+        let mut timeline = migrate_v2_to_v3(&migrate_v1_to_v2(&v1_project()).expect("迁移"));
+        timeline.tracks[0].layers[0].transition_in = Some(TransitionSpec {
+            kind: transition_kind::CROSS_DISSOLVE.to_string(),
+            duration: 4,
+        });
+        let v4 = migrate_v3_to_v4(&timeline);
+        assert_eq!(
+            v4.tracks[0].layers[0].transition_in.as_ref().map(|t| t.kind.as_str()),
+            Some("cross_dissolve"),
+            "迁移不该改类型串"
+        );
     }
 
     #[test]

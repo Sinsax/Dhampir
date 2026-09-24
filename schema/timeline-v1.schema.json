@@ -246,12 +246,6 @@
         "rotation_deg"
       ]
     },
-    "TransitionKind": {
-      "type": "string",
-      "enum": [
-        "cross_dissolve"
-      ]
-    },
     "TransitionSpec": {
       "description": "转场：把前一个相邻片段淡出的同时把自己淡入。\n\n用「挂在片段上」而不是「在轨道上单列一条」，是为了让**重叠规则保持简单**：\n轨道内片段仍然不许重叠——转场不破坏这条不变量，也就不需要为它开特例。",
       "type": "object",
@@ -262,7 +256,8 @@
           "format": "int64"
         },
         "kind": {
-          "$ref": "#/$defs/TransitionKind"
+          "description": "类型串，对应 core 的转场注册表。\n\nv3 及以前这里是一个 Rust enum（只有 CrossDissolve 一个变体）。\nv4 起改成字符串，与 Effect 同形 —— 加一个转场不再需要动契约版本。",
+          "type": "string"
         }
       },
       "required": [

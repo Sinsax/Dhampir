@@ -23,8 +23,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::layer::{
-    AssetTimebases, LAYER_SCHEMA_VERSION, LAYER_SCHEMA_VERSION_V2, TimelineV2, migrate_v1_to_v2,
-    migrate_v2_to_v3, source_frame_at, validate_timeline_v2,
+    AssetTimebases, LAYER_SCHEMA_VERSION, LAYER_SCHEMA_VERSION_V2, LAYER_SCHEMA_VERSION_V3, TimelineV2,
+    migrate_v1_to_v2, migrate_v2_to_v3, migrate_v3_to_v4, source_frame_at, validate_timeline_v2,
 };
 use crate::schema::{EffectSpec, Frame, Issue, Project, TimebaseDto, TrackKind};
 
@@ -309,12 +309,17 @@ pub fn load_doc(text: &str) -> Result<ProjectDoc, String> {
         let mut doc: ProjectDoc =
             serde_json::from_value(value).map_err(|e| format!("工程文件字段不符：{e}"))?;
         let from = doc.timeline.schema;
+        // 迁移梯子：v2 -> v3 -> v4，一级一级走。
+        // 不能从 v2 直接跳到 v4 —— 中间那级的语义变化会被跳过。
         if from == LAYER_SCHEMA_VERSION_V2 {
             doc.timeline = migrate_v2_to_v3(&doc.timeline);
+        }
+        if from == LAYER_SCHEMA_VERSION_V2 || from == LAYER_SCHEMA_VERSION_V3 {
+            doc.timeline = migrate_v3_to_v4(&doc.timeline);
             doc.migrated_from = Some(from);
         } else if from != LAYER_SCHEMA_VERSION {
             return Err(format!(
-                "工程文件里的时间线是 v{from}，本实现只认 v{LAYER_SCHEMA_VERSION_V2} 与 v{LAYER_SCHEMA_VERSION}"
+                "工程文件里的时间线是 v{from}，本实现只认 v{LAYER_SCHEMA_VERSION_V2}、v{LAYER_SCHEMA_VERSION_V3} 与 v{LAYER_SCHEMA_VERSION}"
             ));
         }
         return Ok(doc);
@@ -326,7 +331,7 @@ pub fn load_doc(text: &str) -> Result<ProjectDoc, String> {
         let project: Project =
             serde_json::from_value(value).map_err(|e| format!("v1 契约字段不符：{e}"))?;
         let v2 = migrate_v1_to_v2(&project).map_err(|e| e.to_string())?;
-        let mut doc = shell_from_timeline(migrate_v2_to_v3(&v2));
+        let mut doc = shell_from_timeline(migrate_v3_to_v4(&migrate_v2_to_v3(&v2)));
         doc.migrated_from = Some(1);
         return Ok(doc);
     }
@@ -335,12 +340,15 @@ pub fn load_doc(text: &str) -> Result<ProjectDoc, String> {
     let timeline: TimelineV2 =
         serde_json::from_value(value).map_err(|e| format!("v2/v3 契约字段不符：{e}"))?;
     let from = timeline.schema;
+    let needs_migration = from == LAYER_SCHEMA_VERSION_V2 || from == LAYER_SCHEMA_VERSION_V3;
     let mut doc = if from == LAYER_SCHEMA_VERSION_V2 {
-        shell_from_timeline(migrate_v2_to_v3(&timeline))
+        shell_from_timeline(migrate_v3_to_v4(&migrate_v2_to_v3(&timeline)))
+    } else if from == LAYER_SCHEMA_VERSION_V3 {
+        shell_from_timeline(migrate_v3_to_v4(&timeline))
     } else {
         shell_from_timeline(timeline)
     };
-    if from == LAYER_SCHEMA_VERSION_V2 {
+    if needs_migration {
         doc.migrated_from = Some(from);
     }
     Ok(doc)

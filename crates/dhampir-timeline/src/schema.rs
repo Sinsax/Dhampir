@@ -123,18 +123,34 @@ pub struct Clip {
 /// 用「挂在片段上」而不是「在轨道上单列一条」，是为了让**重叠规则保持简单**：
 /// 轨道内片段仍然不许重叠——转场不破坏这条不变量，也就不需要为它开特例。
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TransitionSpec {
-    pub kind: TransitionKind,
+    /// 类型串，对应 core 的转场注册表。
+    ///
+    /// v3 及以前这里是一个 Rust enum（只有 CrossDissolve 一个变体）。
+    /// v4 起改成字符串，与 Effect 同形 —— 加一个转场不再需要动契约版本。
+    pub kind: String,
     /// 占多少帧。必须为正，且不超过本片段的时长。
     pub duration: Frame,
 }
 
-#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TransitionKind {
-    CrossDissolve,
+/// 已知的转场类型串。
+///
+/// 用常量而不是 enum：**加一个转场不该升契约版本**。
+/// 这与 Effect 的处理保持一致 —— 两条路同形，读代码的人只需要理解一套。
+pub mod transition_kind {
+    /// 交叉溶解：把前一个相邻片段淡出的同时把自己淡入。
+    pub const CROSS_DISSOLVE: &str = "cross_dissolve";
+}
+
+/// 转场类型串是否已被登记。校验层用它判 `unknown_transition`。
+pub fn known_transition_kind(kind: &str) -> bool {
+    kind == transition_kind::CROSS_DISSOLVE
+}
+
+/// 全部已登记的转场类型串，已排序。UI 生成下拉框用。
+pub fn transition_kinds() -> Vec<&'static str> {
+    vec![transition_kind::CROSS_DISSOLVE]
 }
 
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
@@ -437,6 +453,20 @@ pub fn validate_project_with_effects(project: &Project, effects: &[EffectSpec]) 
             }
 
             if let Some(transition) = &clip.transition_in {
+                // 去枚举化之后，类型串是**开放**的，所以这里必须校验它。
+                // 不校验的话，一个拼错的 kind 会被静静接受 —— 而渲染只读 duration，
+                // 于是它**看起来完全正常**，只是行为可能不是用户要的那个转场。
+                if !known_transition_kind(&transition.kind) {
+                    issues.push(Issue::new(
+                        "unknown_transition",
+                        &format!("{}.transition_in.kind", clip_path),
+                        format!(
+                            "没有登记叫 {} 的转场；可用的是 {}",
+                            transition.kind,
+                            transition_kinds().join(" / ")
+                        ),
+                    ));
+                }
                 if transition.duration <= 0 {
                     issues.push(Issue::new(
                         "transition_duration_invalid",
@@ -691,7 +721,7 @@ mod tests {
         second.track_at = 60;
         second.duration = 30;
         second.transition_in = Some(TransitionSpec {
-            kind: TransitionKind::CrossDissolve,
+            kind: transition_kind::CROSS_DISSOLVE.to_string(),
             duration: 15,
         });
         project.tracks[0].clips.push(second);
@@ -708,7 +738,7 @@ mod tests {
     fn 轨道首片段不能有入场转场() {
         let mut project = minimal();
         project.tracks[0].clips[0].transition_in = Some(TransitionSpec {
-            kind: TransitionKind::CrossDissolve,
+            kind: transition_kind::CROSS_DISSOLVE.to_string(),
             duration: 10,
         });
         assert_eq!(
@@ -727,19 +757,19 @@ mod tests {
         project.tracks[0].clips.push(second);
 
         project.tracks[0].clips[1].transition_in = Some(TransitionSpec {
-            kind: TransitionKind::CrossDissolve,
+            kind: transition_kind::CROSS_DISSOLVE.to_string(),
             duration: 0,
         });
         assert_eq!(codes(&validate_project(&project)), vec!["transition_duration_invalid"]);
 
         project.tracks[0].clips[1].transition_in = Some(TransitionSpec {
-            kind: TransitionKind::CrossDissolve,
+            kind: transition_kind::CROSS_DISSOLVE.to_string(),
             duration: 31,
         });
         assert_eq!(codes(&validate_project(&project)), vec!["transition_longer_than_clip"]);
 
         project.tracks[0].clips[1].transition_in = Some(TransitionSpec {
-            kind: TransitionKind::CrossDissolve,
+            kind: transition_kind::CROSS_DISSOLVE.to_string(),
             duration: 30,
         });
         assert!(validate_project(&project).is_empty());
@@ -752,7 +782,7 @@ mod tests {
         second.id = "c2".to_string();
         second.track_at = 60;
         second.transition_in = Some(TransitionSpec {
-            kind: TransitionKind::CrossDissolve,
+            kind: transition_kind::CROSS_DISSOLVE.to_string(),
             duration: 20,
         });
         project.tracks[0].clips.push(second);

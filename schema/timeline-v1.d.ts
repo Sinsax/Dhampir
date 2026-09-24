@@ -57,10 +57,9 @@ export interface Transform {
   y: number;
 }
 
-export type TransitionKind = "cross_dissolve";
-
 export interface TransitionSpec {
   /** 占多少帧。必须为正，且不超过本片段的时长。 */
   duration: number;
-  kind: TransitionKind;
+  /** 类型串，对应 core 的转场注册表。 */
+  kind: string;
 }
