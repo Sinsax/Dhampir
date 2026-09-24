@@ -15,19 +15,48 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-export const SCHEMA_PATH = join(REPO_ROOT, 'schema', 'timeline-v1.schema.json');
-export const DTS_PATH = join(REPO_ROOT, 'schema', 'timeline-v1.d.ts');
+
+/**
+ * 契约的**三种形态**，各生成一份派生物。
+ *
+ * 为什么是三份而不是一份：`emit_schema` 一直能出三种，但这里原先只生成了
+ * `--project-v1`（默认值），于是 `schema/` 里唯一那份描述的是**已冻结的 v1 兼容形态**，
+ * 而运行时实际认的是 v3 契约。那是"派生物没跟上运行时"，不是"生成器不行"。
+ *
+ * 三份都要，因为它们的用途不同：
+ *   - `doc-v1`      写入形态（工程文件），前端存盘/读盘看它；
+ *   - `timeline-v3` **运行时契约本体**，两端渲染一致性看它；
+ *   - `timeline-v1` v1 兼容形态，**迁移梯子依赖它**，不能删。
+ */
+export const FORMS = [
+  { form: '--doc', stem: 'doc-v1' },
+  { form: '--timeline', stem: 'timeline-v3' },
+  { form: '--project-v1', stem: 'timeline-v1' },
+];
+
+/** 某个形态的派生物路径。 */
+export function pathsFor(stem) {
+  return {
+    schema: join(REPO_ROOT, 'schema', stem + '.schema.json'),
+    dts: join(REPO_ROOT, 'schema', stem + '.d.ts'),
+  };
+}
+
+/** 旧的单份常量，保留给既有调用方（守卫与自检都用它）。 */
+export const SCHEMA_PATH = pathsFor('timeline-v1').schema;
+export const DTS_PATH = pathsFor('timeline-v1').dts;
 
 /** 去掉 BOM。仓库约定是全仓无 BOM，而 PowerShell 的 Out-File 爱加一个。 */
 export function stripBom(text) {
   return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
 }
 
-/** 跑 Rust 侧的导例程，拿回 JSON Schema 文本。 */
-export function schemaFromRust() {
+/** 跑 Rust 侧的导例程，拿回 JSON Schema 文本。`form` 见 {@link FORMS}。 */
+export function schemaFromRust(form = '--project-v1') {
   const out = execFileSync(
     'cargo',
-    ['run', '-q', '-p', 'dhampir-timeline', '--features', 'json-schema', '--example', 'emit_schema'],
+    // `--` 不能省：没有它，cargo 会把 `--doc` 当成自己的参数并报 unexpected argument。
+    ['run', '-q', '-p', 'dhampir-timeline', '--features', 'json-schema', '--example', 'emit_schema', '--', form],
     { cwd: REPO_ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
   );
   return stripBom(out).trim() + '\n';
@@ -216,28 +245,41 @@ function main() {
   }
 
   const write = argv.includes('--write');
-  const fresh = schemaFromRust();
+  const problems = [];
+
+  for (const { form, stem } of FORMS) {
+    const { schema: schemaPath, dts: dtsPath } = pathsFor(stem);
+    const fresh = schemaFromRust(form);
+
+    if (write) {
+      writeFileSync(schemaPath, fresh);
+      writeFileSync(dtsPath, emitDts(JSON.parse(fresh)));
+      continue;
+    }
+
+    if (!existsSync(schemaPath)) {
+      problems.push('缺少 ' + stem + '.schema.json（跑 --write 生成）');
+      continue; // 没有 schema 就无从比对 d.ts，别报两条同因的错
+    }
+    if (stripBom(readFileSync(schemaPath, 'utf8')) !== fresh) {
+      problems.push(stem + '.schema.json 与当前 Rust 类型不一致——跑 --write');
+    }
+    if (!existsSync(dtsPath)) {
+      problems.push('缺少 ' + stem + '.d.ts（跑 --write 生成）');
+      continue;
+    }
+    // 有一个刻意的细节：.d.ts 是**从仓库里那份 schema** 推的，不是从刚拿到的 fresh 推的。
+    // 这样"schema 落后了"与"d.ts 落后了"是两个独立的结论，而不是一条错盖两张嘴。
+    const fromCommitted = emitDts(JSON.parse(stripBom(readFileSync(schemaPath, 'utf8'))));
+    if (stripBom(readFileSync(dtsPath, 'utf8')) !== fromCommitted) {
+      problems.push(stem + '.d.ts 与 schema 不一致——跑 --write');
+    }
+  }
 
   if (write) {
-    writeFileSync(SCHEMA_PATH, fresh);
-    writeFileSync(DTS_PATH, emitDts(JSON.parse(fresh)));
-    console.log('✓ 已重新生成 schema/timeline-v1.schema.json 与 schema/timeline-v1.d.ts');
+    const names = FORMS.map(({ stem }) => stem).join(' / ');
+    console.log('✓ 已重新生成 schema/ 下的派生物：' + names + '（各含 .schema.json 与 .d.ts）');
     return;
-  }
-
-  const problems = [];
-  if (!existsSync(SCHEMA_PATH)) {
-    problems.push('缺少 schema/timeline-v1.schema.json（跑 --write 生成）');
-  } else if (stripBom(readFileSync(SCHEMA_PATH, 'utf8')) !== fresh) {
-    problems.push('schema/timeline-v1.schema.json 与当前 Rust 类型不一致——跑 --write');
-  }
-  if (!existsSync(DTS_PATH)) {
-    problems.push('缺少 schema/timeline-v1.d.ts（跑 --write 生成）');
-  } else {
-    const fromCommitted = emitDts(JSON.parse(stripBom(readFileSync(SCHEMA_PATH, 'utf8'))));
-    if (stripBom(readFileSync(DTS_PATH, 'utf8')) !== fromCommitted) {
-      problems.push('schema/timeline-v1.d.ts 与 schema 不一致——跑 --write');
-    }
   }
 
   if (problems.length > 0) {
@@ -246,7 +288,10 @@ function main() {
     process.exitCode = 1;
     return;
   }
-  console.log('✓ 时间线契约与派生物一致（schema + TS 类型）');
+  console.log(
+    '✓ 时间线契约与派生物一致（' + FORMS.length + ' 种形态 × schema + TS 类型）：' +
+      FORMS.map(({ stem }) => stem).join(' / '),
+  );
 }
 
 main();

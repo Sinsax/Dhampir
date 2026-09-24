@@ -1,0 +1,475 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TimelineV2",
+  "description": "v2 契约：与 v1 同形，但 `tracks` 用 v2 轨道，并多了工程级标记。",
+  "type": "object",
+  "properties": {
+    "markers": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Marker"
+      }
+    },
+    "schema": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "timebase": {
+      "$ref": "#/$defs/TimebaseDto"
+    },
+    "tracks": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/TrackV2"
+      }
+    }
+  },
+  "required": [
+    "schema",
+    "timebase"
+  ],
+  "$defs": {
+    "BlendMode": {
+      "description": "混合模式。\n\n**枚举留全，但不都实现**：能用固定混合方程表达的只有前四种（见 render::compose 的说明）。\n后面的需要读目标像素，得走 ping-pong —— 那是另一个数量级的改动。\n渲染遇到未实现的模式**必须报错**，不许静默按 normal 画：静默降级正是这个项目最要避免的。",
+      "type": "string",
+      "enum": [
+        "normal",
+        "add",
+        "multiply",
+        "screen",
+        "darken",
+        "lighten",
+        "overlay",
+        "soft_light",
+        "difference"
+      ]
+    },
+    "DanmakuSpec": {
+      "description": "弹幕参数。**放在轨道级**：一条弹幕轨 = 一份弹幕素材 + 一套泳道参数。",
+      "type": "object",
+      "properties": {
+        "asset_id": {
+          "description": "指向弹幕素材（AssetKind::Subtitle，内容是 ASS）。",
+          "type": "string"
+        },
+        "duration_ms": {
+          "description": "一条弹幕从右滚到左要多久（毫秒）。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 8000,
+          "minimum": 0
+        },
+        "font_ratio": {
+          "description": "字号 = 目标高度 * 这个比例。",
+          "type": "number",
+          "format": "float",
+          "default": 0.03999999910593033
+        },
+        "lanes": {
+          "description": "泳道数。排不下就**丢该条并计数**，不叠在一起。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 8,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "asset_id"
+      ]
+    },
+    "Easing": {
+      "description": "缓动曲线。公式**写死在这里**，两端调同一个函数——\n各写一遍迟早在某个控制点上差一个像素，而那种差异最难归因。",
+      "type": "string",
+      "enum": [
+        "linear",
+        "ease_in",
+        "ease_out",
+        "ease_in_out"
+      ]
+    },
+    "Effect": {
+      "description": "特效：类型 + 参数。**不接受可上传的 shader**——那等于把两端一致性交给用户。",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "类型串，对应 core 的特效注册表。",
+          "type": "string"
+        },
+        "params": {
+          "description": "参数用 BTreeMap：同一份工程序列化出来必须**逐字节相同**，HashMap 做不到这点。",
+          "type": "object",
+          "additionalProperties": {
+            "type": "number",
+            "format": "float"
+          },
+          "default": {}
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    },
+    "Keyframe": {
+      "description": "关键帧。frame 是**相对片段起点**的偏移，不是绝对帧号——\n这样片段一挪，关键帧跟着走，不会静默错位。",
+      "type": "object",
+      "properties": {
+        "easing": {
+          "$ref": "#/$defs/Easing",
+          "default": "linear"
+        },
+        "frame": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "value": {
+          "type": "number",
+          "format": "float"
+        }
+      },
+      "required": [
+        "frame",
+        "value"
+      ]
+    },
+    "Layer": {
+      "description": "基础元素 + 拓展。\n\n判定规则（三行，不需要额外字段）：\n- 有 `source` → 实拍片段；\n- **没有** `source`、**有** `effects` → **调整图层**（影响下面已画上去的全部内容）；\n- 都没有 → 占位。",
+      "type": "object",
+      "properties": {
+        "blend": {
+          "$ref": "#/$defs/BlendMode",
+          "default": "normal"
+        },
+        "effects": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Effect"
+          }
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "end": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "id": {
+          "description": "全局唯一。v1 里只保证轨内唯一，v2 提到全局 —— 否则跨轨引用无从谈起。",
+          "type": "string"
+        },
+        "keyframes": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Keyframe"
+          }
+        },
+        "markers": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Marker"
+          }
+        },
+        "note": {
+          "type": "string",
+          "default": ""
+        },
+        "opacity": {
+          "type": "number",
+          "format": "float",
+          "default": 1.0
+        },
+        "source": {
+          "description": "没有它就不是实拍片段 —— 这正是调整图层能存在的原因。",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "start": {
+          "description": "帧区间**左闭右开**：`[start, end)`。",
+          "type": "integer",
+          "format": "int64"
+        },
+        "tags": {
+          "description": "键值分类维度。用 BTreeMap 保证序列化逐字节稳定。",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "transform": {
+          "$ref": "#/$defs/TransformV2",
+          "default": {
+            "rotation": 0.0,
+            "scale": 1.0,
+            "x": 0.0,
+            "y": 0.0
+          }
+        },
+        "transition_in": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TransitionSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "start",
+        "end"
+      ]
+    },
+    "Marker": {
+      "description": "挂在元素上的标记。",
+      "type": "object",
+      "properties": {
+        "color": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "frame": {
+          "description": "**相对该元素 start 的偏移**。用绝对帧号的话，元素一挪标记就错位了。",
+          "type": "integer",
+          "format": "int64"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string",
+          "default": ""
+        }
+      },
+      "required": [
+        "id",
+        "frame"
+      ]
+    },
+    "SourceRef": {
+      "description": "素材引用。**有它才是实拍片段。**",
+      "type": "object",
+      "properties": {
+        "asset_id": {
+          "description": "指向工程文件里资产登记表的 id。**契约里只有它，没有位置信息** ——\n位置由宿主解释，这正是前后端分离能成立的前提。",
+          "type": "string"
+        },
+        "source_in": {
+          "description": "素材内起点（帧）。",
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "required": [
+        "asset_id",
+        "source_in"
+      ]
+    },
+    "SubtitleStyle": {
+      "description": "字幕样式。**放在轨道级，不是元素级。**\n\n理由：一条字幕轨 = 一个字幕素材 + 一套样式。想要两套样式就开两条轨 ——\n这正是 PR 里字幕轨的做法。放元素级会让每个 Layer 字面量都多一个字段，\n而换来的只是\"同一条轨上两种样式\"，那件事本来就该用两条轨表达。\n\n字号与边距用**比例**（相对目标高度），不用像素：像素在预览（640x360）与\n成片（1920x1080）里含义不同，两端就不一致了。",
+      "type": "object",
+      "properties": {
+        "bottom_margin": {
+          "description": "底边距 = 目标高度 * 这个比例。",
+          "type": "number",
+          "format": "float",
+          "default": 0.05999999865889549
+        },
+        "color": {
+          "description": "文字颜色，RGBA。",
+          "type": "array",
+          "default": [
+            255,
+            255,
+            255,
+            255
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0
+          },
+          "maxItems": 4,
+          "minItems": 4
+        },
+        "font_ratio": {
+          "description": "字号 = 目标高度 * 这个比例。",
+          "type": "number",
+          "format": "float",
+          "default": 0.054999999701976776
+        },
+        "max_lines": {
+          "description": "最多几行（超出的行丢掉 —— 字幕不该盖住半屏）。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 2,
+          "minimum": 0
+        },
+        "outline": {
+          "description": "是否加描边（压住亮背景）。",
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "TimebaseDto": {
+      "description": "Timebase 的传输形态。用 num/den 而不是浮点 29.97。",
+      "type": "object",
+      "properties": {
+        "den": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "num": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "num",
+        "den"
+      ]
+    },
+    "TrackKind": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "video",
+            "audio"
+          ]
+        },
+        {
+          "description": "字幕轨：轨上的元素引用 .srt / .ass 素材，样式在**轨道级**。",
+          "type": "string",
+          "const": "subtitle"
+        },
+        {
+          "description": "弹幕轨：轨上带一个 DanmakuSpec，指向 .ass 弹幕素材。",
+          "type": "string",
+          "const": "danmaku"
+        }
+      ]
+    },
+    "TrackV2": {
+      "description": "v2 的轨道：v1 是 clips，v2 是 layers。",
+      "type": "object",
+      "properties": {
+        "danmaku": {
+          "description": "弹幕轨的参数。非弹幕轨忽略它。",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DanmakuSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/TrackKind"
+        },
+        "layers": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Layer"
+          }
+        },
+        "subtitle": {
+          "description": "字幕轨的样式。非字幕轨忽略它。",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SubtitleStyle"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "kind"
+      ]
+    },
+    "TransformV2": {
+      "description": "v2 的变换。\n\n与 v1 的 Transform 差别只有一个：rotation_deg 改名成 rotation。\n看起来是小事，但「度数」写进字段名等于把单位焊进契约 —— 而单位本来就该由契约规定，\n不该靠名字暗示。改名属于 v2 的破坏性改动之一。",
+      "type": "object",
+      "properties": {
+        "rotation": {
+          "description": "**角度制**（契约规定，不由字段名暗示）。",
+          "type": "number",
+          "format": "float"
+        },
+        "scale": {
+          "type": "number",
+          "format": "float"
+        },
+        "x": {
+          "type": "number",
+          "format": "float"
+        },
+        "y": {
+          "type": "number",
+          "format": "float"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "scale",
+        "rotation"
+      ]
+    },
+    "TransitionKind": {
+      "type": "string",
+      "enum": [
+        "cross_dissolve"
+      ]
+    },
+    "TransitionSpec": {
+      "description": "转场：把前一个相邻片段淡出的同时把自己淡入。\n\n用「挂在片段上」而不是「在轨道上单列一条」，是为了让**重叠规则保持简单**：\n轨道内片段仍然不许重叠——转场不破坏这条不变量，也就不需要为它开特例。",
+      "type": "object",
+      "properties": {
+        "duration": {
+          "description": "占多少帧。必须为正，且不超过本片段的时长。",
+          "type": "integer",
+          "format": "int64"
+        },
+        "kind": {
+          "$ref": "#/$defs/TransitionKind"
+        }
+      },
+      "required": [
+        "kind",
+        "duration"
+      ]
+    }
+  }
+}
