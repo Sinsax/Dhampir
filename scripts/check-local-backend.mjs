@@ -20,8 +20,10 @@
 //   node scripts/check-local-backend.mjs --self-test
 //   node scripts/check-local-backend.mjs --port 8799 --cli target/debug/dhampir.exe
 
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import { runToolSync } from './spawn-tool.mjs';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { tryRemove } from './safe-remove.mjs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -225,18 +227,31 @@ async function collect(port) {
     record('export-succeeded', status !== null && status.state === 'succeeded', JSON.stringify(status));
     record('export-progress-unknown-or-one', status !== null && status.progress === 1, status && status.progress);
 
-    const download = await fetch(base + String(status && status.download_url));
-    const bytes = download.ok ? Buffer.from(await download.arrayBuffer()) : Buffer.alloc(0);
-    record('download-ok', download.ok && bytes.length > 0, download.status + ' ' + bytes.length + 'B');
+    // **导出没成功时不许在这里崩。** 这里原本直接拼 `base + status.download_url`，
+    // 拿不到地址就拼出 `http://127.0.0.1:8799undefined` 然后抛 TypeError ——
+    // 守卫崩掉会把"到底哪条判据没过"一起吞掉，**那是守卫自己的缺陷**：
+    // 报告不出来的检查等于没有检查。
+    const downloadUrl = status !== null && typeof status.download_url === 'string'
+      ? status.download_url : null;
+    const download = downloadUrl === null ? null : await fetch(base + downloadUrl);
+    const bytes = download !== null && download.ok
+      ? Buffer.from(await download.arrayBuffer()) : Buffer.alloc(0);
+    record('download-ok', download !== null && download.ok && bytes.length > 0,
+      download === null
+        ? '导出没有给出下载地址：' + JSON.stringify(status).slice(0, 200)
+        : download.status + ' ' + bytes.length + 'B');
 
     const outDir = join(REPO_ROOT, 'target', 'p6');
     mkdirSync(outDir, { recursive: true });
     const outPath = join(outDir, 'local-download.mp4');
-    if (bytes.length > 0) writeFileSync(outPath, bytes);
-    const probe = existsSync(outPath)
-      ? spawnSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-count_frames',
-          '-show_entries', 'stream=nb_read_frames,width,height,avg_frame_rate,duration', '-of', 'json', outPath],
-          { encoding: 'utf8' })
+    // **先删掉上一轮的产物。** 留着的话，这一轮明明没下载成功，ffprobe 也会去读旧文件，
+    // 于是"产物形状对不对"这条判据替上一轮的自己背了书 —— 一个假绿。
+    tryRemove(outPath);
+    const wrote = bytes.length > 0;
+    if (wrote) writeFileSync(outPath, bytes);
+    const probe = wrote
+      ? runToolSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-count_frames',
+          '-show_entries', 'stream=nb_read_frames,width,height,avg_frame_rate,duration', '-of', 'json', outPath])
       : { stdout: '' };
     let stream = null;
     try { stream = JSON.parse(probe.stdout).streams[0]; } catch (error) { stream = null; }

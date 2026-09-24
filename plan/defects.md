@@ -91,11 +91,11 @@
   验收: 补测并把口径与边界写进 measurements.md（拿带边界的数当结论用比没有更危险）
   证据: plan/t5-evidence.md
 
-- [D12] status=todo phase=T7
+- [D12] status=done phase=T7
   症状: 改完 Rust 后守卫变红（陈旧 wasm pkg），需要手工重建
   根因: scripts/check-web-invariants.mjs:1
   验收: 驱动检测到陈旧时自动重建一次，并保持"真的坏了仍然红"
-  证据: -
+  证据: plan/t7-evidence.md
 
 - [D13] status=wontfix phase=-
   症状: M1 的环境矩阵缺 Linux 两条腿（本机无 docker、WSL 无发行版）
@@ -115,11 +115,11 @@
   验收: 记为架构性不可测（两端解码路径不同），不是待办
   证据: -
 
-- [D16] status=todo phase=T7
+- [D16] status=done phase=T7
   症状: Linux 可移植性没有守卫保护（既然不跑 Linux 腿，就更只能靠静态检查）
   根因: scripts/check-text-hygiene.mjs:1
   验收: 新增检查覆盖写死 Windows 语义的做法（路径分隔符、行尾、大小写假设）；若本机装有 x86_64-unknown-linux-gnu target 就补一次 cargo check，装不上则如实记为不可测
-  证据: -
+  证据: plan/t7-evidence.md
 
 ## 架构缺失（A）
 
@@ -171,11 +171,11 @@
   验收: 本地后端提供 POST /verdict 与 GET /verdict；页面用 window.dhampir.reportVerdict 主动回传；驱动据此给出明确结论
   证据: plan/t0-evidence.md
 
-- [A9] status=todo phase=T7
+- [A9] status=wontfix phase=T7
   症状: 渲染任务没有持久化与续渲，一次失败全丢
   根因: crates/dhampir-worker/src/pipeline.rs:1
-  验收: 出片能留下可恢复的中间态，或明确记为不做并说明理由
-  证据: -
+  验收: 出片能留下可恢复的中间态，或明确记为不做并说明理由 —— **选了后者**。出片那条路是流式的（GPU 合成 -> 读回像素 -> 写进 ffmpeg 的 stdin），而 MP4 基本流不能从第二个进程接着写，所以"续渲"最多只能是"别把合成过的帧再合成一遍"，即逐帧检查点；检查点在磁盘上是 8.29 MB/帧（1920x1080x4，1080p30 一分钟 14.93 GB），对照实测渲染成本 14.56~56.96 ms/帧 —— 代价与收益不在一个量级。唯一磁盘上可接受的形态（存 PNG）每帧要一次 PNG 编码，与它想省下的渲染在同一量级（**这一句是估计，不是量测**：PNG 编码的每帧成本本仓没量过；量过的是裸 RGBA 落盘 2.81 ms/帧与 2957 MB/s，见 plan/measurements.md 第九项）；而"每 N 帧一个检查点 + 分片 MP4 追加"会改产物字节，撞上 T6 冻结的 argv 与"无声路径逐字节不变"。理由、数字与重审触发条件写在 plan/t7-evidence.md 的 T7.3
+  证据: plan/t7-evidence.md
 
 - [A10] status=done phase=T5
   症状: 单线程顺序解码，吞吐上限写死

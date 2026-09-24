@@ -21,8 +21,9 @@
 //   node scripts/check-dual-end.mjs --frames 0,30,89
 //   node scripts/check-dual-end.mjs --self-test
 
-import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { runToolSync } from './spawn-tool.mjs';
+import { existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
+import { tryRemove } from './safe-remove.mjs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -62,7 +63,9 @@ export function pngSize(file) {
 
 /** 跑一条命令并把输出原样带回来。**不吞输出**：失败时它就是现场。 */
 export function run(command, args) {
-  const result = spawnSync(command, args, { cwd: REPO_ROOT, encoding: 'utf8', env: process.env });
+  // **不喂 stdin**（见 scripts/spawn-tool.mjs）：默认的 stdin 管道在限制管道的环境里
+  // 会创建失败（EBUSY），于是所有子进程一起变成"退出码 null"，看着像代码坏了。
+  const result = runToolSync(command, args, { cwd: REPO_ROOT, env: process.env });
   return { status: result.status, stdout: result.stdout || '', stderr: result.stderr || '' };
 }
 
@@ -125,8 +128,8 @@ function main() {
 
 
   // 浏览器侧：**空目录不能算通过**，所以先清掉旧帧。
-  rmSync(BROWSER_DIR, { recursive: true, force: true });
-  rmSync(NATIVE_DIR, { recursive: true, force: true });
+  // 清不掉不算失败（见 scripts/safe-remove.mjs）。
+  tryRemove([BROWSER_DIR, NATIVE_DIR]);
   mkdirSync(NATIVE_DIR, { recursive: true });
 
   console.log('\n[1/3] 浏览器逐帧导出 …');

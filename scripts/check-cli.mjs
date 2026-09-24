@@ -19,8 +19,9 @@
 //   node scripts/check-cli.mjs --self-test
 //   node scripts/check-cli.mjs --cli target/debug/dhampir.exe
 
-import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { runToolSync } from './spawn-tool.mjs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { tryRemove } from './safe-remove.mjs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -120,11 +121,16 @@ function runSelfTest() {
 
 /** 跑一次 CLI 并收全输出。 */
 function run(cli, args) {
-  const result = spawnSync(cli, args, { cwd: REPO_ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  // **不喂 stdin**（见 scripts/spawn-tool.mjs）：CLI 从不读 stdin，
+  // 而默认的 stdin 管道在限制管道的环境里会直接创建失败（EBUSY）。
+  const result = runToolSync(cli, args, { cwd: REPO_ROOT, maxBuffer: 64 * 1024 * 1024 });
   return {
     code: result.status === null ? -1 : result.status,
     stdout: result.stdout || '',
     stderr: result.stderr || '',
+    // **把"起不来"与"退出码就是 -1"分开。** 混在一起的话，30 条判据会在环境
+    // 起不了子进程时一起变红，看起来像"CLI 全坏了"—— 那是误导。
+    spawnError: result.error === undefined || result.error === null ? null : result.error.code,
   };
 }
 
@@ -146,7 +152,8 @@ function collect(cli) {
   const record = (name, ok, detail) => {
     observed.push({ name: name, ok: !!ok, detail: detail === undefined ? '' : String(detail) });
   };
-  rmSync(TMP, { recursive: true, force: true });
+  // 清不掉不算失败（见 scripts/safe-remove.mjs）：清理失败不该决定守卫的结论。
+  tryRemove(TMP);
   mkdirSync(TMP, { recursive: true });
 
   // ---- 帮助与用法错 ----
@@ -507,6 +514,19 @@ function main() {
     process.exitCode = 2;
     return;
   }
+  // **先探一次"起不起得来"。**
+  // 环境起不了子进程时（status=null），下面 30 条判据会一起变红，看上去像"CLI 全坏了"——
+  // 那是误导，会把人送去读根本没坏的 CLI 代码。分开报，并且**照样红**（fail-closed）。
+  const probe = run(cli, ['--help']);
+  if (probe.code === -1) {
+    console.error('起不了 dhampir：' + cli);
+    console.error('  spawnError=' + probe.spawnError + '  stderr=' + probe.stderr.trim());
+    console.error('这不是"CLI 不满足契约"，是**这个环境起不了子进程**。');
+    console.error('实测签名：给子进程开 stdin 管道会 EBUSY（node 侧）/ os error 231（Rust 侧）。');
+    console.error('本守卫已经把 stdin 关掉了（scripts/spawn-tool.mjs）；这里仍 -1 就请换普通终端复跑。');
+    process.exitCode = 2;
+    return;
+  }
   const observed = collect(cli);
   const problems = judge(observed);
   console.log('CLI 契约：' + observed.filter((row) => row.ok).length + ' / ' + EXPECTED.length + ' 条判据通过');
@@ -518,7 +538,7 @@ function main() {
   }
   console.log('✓ dhampir CLI 契约成立（' + SUBCOMMANDS.length
     + ' 个子命令 / stdout 是 NDJSON / 退出码 0-2-1）');
-  rmSync(TMP, { recursive: true, force: true });
+  tryRemove(TMP);
 }
 
 main();

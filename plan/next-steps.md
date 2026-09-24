@@ -236,12 +236,45 @@ T5 收口时更新（T5 整段完成，2026-09-24）—— 数字在 measurement
    `include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/..."))` 编进去；
    而且那个文件的 `#[wasm_bindgen_test]` **属性条数**要与 `scripts/run-wasm-tests.mjs` 对账
    （写成 `#[test]` 不会被数到，跑了也白跑）。
-19. **在 WorkBuddy 的 agent 会话里跑守卫，先看这一条**：那个会话里**别人给子进程开 stdin 管道**
-   会失败 —— node 侧是 `spawnSync` 报 `EBUSY`（`status` 是 `null`，守卫把它显示成 `exit=-1`），
-   Rust 侧是 CLI 出片起不了编码器（`所有的管道范例都在使用中。 (os error 231)`，即
-   `ERROR_PIPE_BUSY`）。于是 `check-cli` / `check-local-backend` / `check-dual-end` 这三个
-   必然**假红**，CLI 的 `render` 必然起不来。
-   **别去改守卫、也别去改出片代码** —— 判据、绕过方法与本次复核的原始结论见第五节。
+19. **在 WorkBuddy 的 agent 会话里跑守卫，先看这一条 —— 有**两类**假红，都不是坏代码。**
+   （2026-09-24 T7 收口时重写过：原来只写了甲类，并且给了"套垫片"的做法 —— 那一条已被**推翻**。）
+
+   **甲类：这个会话不给子进程开 stdin 管道。** 实测**只有 stdin 不行**，stdout/stderr 一切正常。
+   最小复现（纯标准库、无依赖、与本仓代码无关；子进程只要一条立刻退出的命令就够）：
+
+       stdin=null   -> OK
+       stdin=piped  -> ERR os error 231（ERROR_PIPE_BUSY，"所有的管道范例都在使用中"）
+       stdout=pipe  -> OK
+
+   node 侧对应的是 `spawnSync` 报 `EBUSY`（`status` 是 `null`，守卫把它显示成 `exit=-1`）。
+
+   * **可以修的**：不喂 stdin 的调用本来就不该要那条管道 —— 统一走 `scripts/spawn-tool.mjs`
+     （`stdin: 'ignore'`）。这是"**如实声明这次调用不喂 stdin**"，**不是垫片**：起不来照样
+     `status=null`、照样红。效果可数：`check-cli` 从 **0 / 30**（每次 spawn 都 EBUSY）回到 **27 / 30**。
+   * **修不了的**：渲染必须往编码器 stdin 里写帧（`pipeline.rs`），那条管道在 JS 这层够不着。
+     于是 `check-cli` 的 `render` / `render-subtitle-out` / `render-subtitle-out-empty` 三条，
+     与 `check-local-backend` 的 `export-succeeded` 及其 5 条下游，必然红 ——
+     而且它们**只应为这一个原因红**（换任何一条红都该停下来查）。
+
+   **⚠️ 推翻以前的做法：不要再套 `--require` 的垫片**（`target/pipe-shim.cjs` 那一套，第四节
+   与第七节里那些"套上 shim 后 15 / 17"的记录按原样留着当历史）。垫片把"stdin 起不来"整个糊过去，
+   副作用是**真的起不了子进程也会跟着变绿** —— 那是比假红更坏的错。
+   要拿真实数字就去**普通终端**跑，别在守卫的默认路径上做手脚。
+
+   **乙类：本机 CLI 给 `fs.rmSync` 套了按 turn 计数的安全删除。** 计数超过阈值就直接抛：
+
+       Error: [safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]
+              {"count":549,"threshold":50,"scope":"turn","targets":[...]}
+
+   跑一遍守卫套件本身就要删掉几百个临时路径，于是**越靠后的守卫越容易被"清理"绊倒**，
+   而报告上它长得像一条契约不成立（T7 收口时 `check-cli` 一度直接崩在 `collect` 的第一行，
+   白跑了两趟）。**可以修的**：与判据无关的清理走 `scripts/safe-remove.mjs`
+   （删不掉只打一行警告、**不动退出码**）。但要记住它的边界：清不掉时上一轮残留可能还在，
+   所以**别拿"文件在不在"当判据**，要判就判内容/摘要或"这一轮刚写出来的字节"。
+
+   两类合并后的实测基线（2026-09-24，T7 收口，18 条守卫）：**本会话 16 / 18**；
+   把环境限制拿掉之后（沙箱豁免获批的那一次）是 **18 / 18 全绿** ——
+   所以那是**环境的读数，不是仓库的读数**。逐条判据见 `plan/t7-evidence.md` 的 T7.5。
 
 ---
 

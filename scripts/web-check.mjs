@@ -33,11 +33,13 @@
 // 直接把页面里的 window.__dhampirMarks 读出来。卡住比失败难查，观测要先做对。
 
 import { createServer } from 'node:http';
-import { copyFileSync, createReadStream, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { tryRemove } from './safe-remove.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import { dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { firstDifference, firstSubsetDifference } from './verdict-compare.mjs';
+import { ensureFreshPkg } from './stale-pkg.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, '..');
@@ -102,9 +104,34 @@ function findChrome() {
   throw new Error('找不到 Chrome');
 }
 
-rmSync(OUT_DIR, { recursive: true, force: true });
+tryRemove(OUT_DIR);
 mkdirSync(FRAMES_DIR, { recursive: true });
 mkdirSync(dirname(VIDEO_PATH), { recursive: true });
+
+// ---- 陈旧的 wasm pkg：**自动重建一次**（D12）--------------------------------
+//
+// 起页面的这一侧是"重建"该发生的地方：它本来就是在演一次真实的运行 ——
+// 构建产物旧了就重建，与真的跑一次开发流程没有区别。
+// 守卫那一侧（check-web-invariants）**只判不修**：跑一次守卫顺手写一堆文件，
+// 之后就说不清"现在这棵树是什么"了。两处用**同一份判据**（scripts/stale-pkg.mjs）。
+//
+// 「**一次**」是要点，也是这一条的全部意义：
+//
+// * 陈旧就重建，重建成功 -> 继续跑。这是省掉一次"改了 Rust 忘了重建 -> 页面报
+//   一个与原因毫无关系的错"的往返；
+// * 重建失败（wasm-pack 不在 / 源码编不过 / 重建完仍然旧）-> **带真实原因退 2**。
+//   这一段绝不"再试几次"：重试会把一次编译错误变成一个转不完的循环，
+//   而继续跑则会拿旧 wasm 演出一场假绿 —— 那正是 D12 说的"真的坏了仍然红"。
+const pkgFresh = ensureFreshPkg({ log: (line) => console.log(line) });
+if (!pkgFresh.ok) {
+  console.error('✗ ' + pkgFresh.reason);
+  if (pkgFresh.output) {
+    console.error('--- 重建输出尾部 ---');
+    console.error(pkgFresh.output.split('\n').slice(-20).join('\n'));
+  }
+  process.exit(2);
+}
+if (pkgFresh.attempted) console.log('  ' + pkgFresh.reason);
 
 const state = {
   frames: 0, done: false, doneBody: null, failed: null,
@@ -314,7 +341,7 @@ if (mode === 'serve') {
   // 超时可调：诊断时用短超时让它**自己超时并打印现场**，而不是干等五分钟什么也看不到。
   const timeoutMs = Number(valueOf('--timeout-ms', mode === 'app' ? '300000' : '90000'));
   const profile = join(REPO_ROOT, 'target', 'web-check-profile');
-  rmSync(profile, { recursive: true, force: true });
+  tryRemove(profile);
   // **换浏览器要换一整套启动参数。** --browser 让"这段代码在别的浏览器里行不行"
   // 变成一条命令，而不是把 URL 拷出去手工试 —— 后者正是这次踩坑的方式。
   const browser = valueOf('--browser', null) || findChrome();

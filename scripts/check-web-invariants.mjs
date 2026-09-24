@@ -15,6 +15,14 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, w
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+// 「什么算陈旧」只有一份实现（scripts/stale-pkg.mjs）：
+// 守卫与驱动（web-check.mjs）必须**对同一件事给出同一个答案**，
+// 否则会出现「守卫说陈旧、驱动说不用重建」这种谁也说不清的状态。
+import { newestMtime, newestSourceMtime, pkgState } from './stale-pkg.mjs';
+
+// 这两个原来定义在本文件里，现在搬到 stale-pkg.mjs。**保留导出**：
+// 搬家的同时把公共面缩掉，是那种"改了没人发现、直到有人用它"的改动。
+export { newestMtime, newestSourceMtime };
 
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -55,19 +63,7 @@ export function scanApp(text) {
   return problems;
 }
 
-/** 一个目录（或文件）里最新的 mtime。目录递归。 */
-export function newestMtime(path) {
-  if (!existsSync(path)) return null;
-  const stats = statSync(path);
-  if (stats.isFile()) return stats.mtimeMs;
-  let newest = stats.mtimeMs;
-  for (const entry of readdirSync(path, { withFileTypes: true })) {
-    const child = join(path, entry.name);
-    const childNewest = newestMtime(child);
-    if (childNewest !== null && childNewest > newest) newest = childNewest;
-  }
-  return newest;
-}
+/** 一个目录（或文件）里最新的 mtime。目录递归。**实现在 scripts/stale-pkg.mjs**。 */
 
 /**
  * wasm pkg 比它的源码旧吗？
@@ -82,6 +78,10 @@ export function newestMtime(path) {
  *     页面上只有一句 "启动失败：unreachable executed"。
  *
  * 两种情况报的错**都与真正的原因（没重建）毫无关系**。这条把它变成一句能照做的话。
+ *
+ * **守卫只判、不修**。自动重建在驱动那一侧（`scripts/stale-pkg.mjs` 的
+ * `ensureFreshPkg`，由 `scripts/web-check.mjs` 调用）—— 跑一次守卫顺手写一堆文件
+ * 是坏味道：之后就说不清"现在这棵树是什么"了。
  */
 export function scanStaleWasmPkg(pkgMtimeMs, newestSourceMs, pkgPath) {
   const problems = [];
@@ -174,16 +174,11 @@ function main() {
   // ---- wasm pkg 是不是旧的 ----
   // 这一条**在这轮之前不存在**，而它正是让"启动失败：unreachable executed"
   // 这种错看起来毫无头绪的原因之一：拿旧 wasm 跑新前端。
-  const pkgWasm = join(REPO_ROOT, 'crates', 'dhampir-wasm', 'www', 'pkg', 'dhampir_wasm_bg.wasm');
-  let pkgMtime = null;
-  try { pkgMtime = statSync(pkgWasm).mtimeMs; } catch (error) { pkgMtime = null; }
-  const newestSource = [
-    join(REPO_ROOT, 'crates', 'dhampir-wasm', 'src'),
-    join(REPO_ROOT, 'crates', 'dhampir-core', 'src'),
-    join(REPO_ROOT, 'crates', 'dhampir-timeline', 'src'),
-    join(REPO_ROOT, 'Cargo.toml'),
-  ].map(newestMtime).filter((value) => value !== null).reduce((a, b) => Math.max(a, b), 0);
-  problems.push(...scanStaleWasmPkg(pkgMtime, newestSource === 0 ? null : newestSource, pkgWasm));
+  //
+  // 判据（拿哪些文件当"源码"、pkg 的 mtime 取哪个文件）**搬去了 stale-pkg.mjs**：
+  // 驱动那一侧要用同一份判据去决定"要不要自动重建"，两处各写一份迟早会分叉。
+  const fresh = pkgState();
+  problems.push(...scanStaleWasmPkg(fresh.pkgMtime, fresh.sourceMtime, fresh.pkgPath));
 
   if (existsSync(join(REPO_ROOT, 'web', 'node_modules'))) {
     problems.push('web/node_modules 存在——说明引了 npm 依赖，与「零构建」的约定冲突');
