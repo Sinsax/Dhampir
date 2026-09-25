@@ -19,6 +19,97 @@
 //! 后端（dhampir CLI）按 asset 开一路 ffmpeg 顺序解码器。浏览器这侧没有解码器，
 //! 用的是 video 元素的 seek。所以两端能对齐的是**形状与图层清单**，
 //! 逐像素对齐要两端吃同一份像素 —— 那件事的边界写在 plan/consistency-criteria.md。
+//!
+//! # 调用顺序契约（**先调什么、后调什么**）
+//!
+//! 这里的"顺序"不是风格问题：下面每一条错了，症状都是**画面看起来完全正常**，
+//! 只是慢了半拍、或贴错了内容。所以它们被收在这一处，而不是散在调用方的注释里
+//! —— 之前它们散在 `web/engine.js` 的六处注释里，读的人得先全部读完才知道有约束。
+//!
+//! ## 1. 启动：先 open，再 attach
+//!
+//! ```text
+//! dhampir_project_open(json)      -> 解析 + 校验；只有通过的工程才会被记住
+//! dhampir_project_attach(canvas)  -> 起 GPU、把 canvas 接上
+//! ```
+//!
+//! `open` 失败时**上一份可用工程被保留**（见该函数的注释），所以"编辑到一半出错"
+//! 不会让预览整体失效。`open` **换一份工程就是换一条历史**（历史 reset）。
+//! `attach` 之前可以 open：工程校验不需要 canvas。
+//!
+//! ## 2. 有 canvas 之后：resize 先于 draw
+//!
+//! `dhampir_project_resize(w, h)` 定的是**上屏目标尺寸**。在它之前 draw，
+//! 用的是旧尺寸——图能出来，但比例不对。
+//!
+//! ## 3. 每帧：sources_for -> seek -> clear_bitmaps -> set_bitmap -> draw
+//!
+//! ```text
+//! dhampir_project_sources_for(frame)   -> 这一帧要哪些源、各停在第几秒
+//!   （JS 逐个 seek <video> 并等 seeked —— seek 是异步的，Rust 侧保持同步）
+//! dhampir_project_clear_bitmaps()      -> 位图模式：先清
+//! dhampir_project_set_bitmap(src, bmp) -> 必须在 seek **完成之后**
+//! dhampir_project_draw(frame)          -> 最后画
+//! ```
+//!
+//! * **`sources_for` 必须在 `draw` 之前**：它回答的就是"这一帧该把哪些 video
+//!   seek 到哪里"，不先问就画，画的是上一帧的源位置。
+//! * **`clear_bitmaps` 必须在这一帧的 `set_bitmap` 之前**：不清的话，
+//!   这一帧不再出现的 source 会**拿着上一帧的位图**被画出来。症状是"慢了半拍"，
+//!   而画面本身完全正常。
+//! * **`set_bitmap` 必须在 seek 完成之后**：早了拿到的是上一帧的画面。
+//!   同样地，画面看起来是对的，只是内容是旧的。
+//! * `clear_bitmaps` / `set_bitmap` 只在位图模式（`set_bitmap_mode(true)`）
+//!   下需要；video 模式直接走 `<video>` 元素，没有这一步。
+//!
+//! ## 4. 字幕/弹幕：text_frame -> 栅格化 -> set_*_bitmap -> draw
+//!
+//! ```text
+//! dhampir_project_text_frame(frame)      -> 换成本帧的清单，并**作废上一帧的行位图**
+//!   （JS 按清单逐条栅格化，每趟领一个号，过期的丢掉）
+//! dhampir_project_set_text_bitmap(i, bmp)
+//! dhampir_project_set_danmaku_bitmap(i, bmp)
+//! dhampir_project_draw(frame)
+//! ```
+//!
+//! * **`text_frame` 必须在 `draw` 之前、且就在这一帧上调一次**：行号是按位置编的，
+//!   留着旧位图就会拿**另一条字幕**的像素去贴。症状是"位置对、内容是上一条"。
+//! * `set_subtitles` 是**登记素材**（id -> 字幕表），与帧无关，载入工程后做一次即可；
+//!   它载入新工程时**不清**（见 SUBTITLES 的注释）。
+//! * 判定路径**不要碰 `text_frame`**：`text_probe` 要判的就是**当前那份**清单，
+//!   重算一份新的会作废刚提交的位图（见 `web/app.js` 的判定注释）。
+//!
+//! ## 5. 编辑与历史
+//!
+//! ```text
+//! dhampir_project_edit(op)  -> 成功才写回宿主；失败不占一步历史
+//! dhampir_project_undo() / dhampir_project_redo()
+//! dhampir_project_doc()     -> 拿规范化后的那一份
+//! ```
+//!
+//! `edit` 之后要看结果就调 `doc`，**不要自己改一份 JS 里的副本** ——
+//! 那样预览与 CLI 就会对同一次操作给出不同的工程。
+//!
+//! ## 不在契约里的（别按顺序依赖）
+//!
+//! `dhampir_project_render_probe` / `dhampir_sample_project_render_png` /
+//! `dhampir_project_precheck` 是**旁路**：前两个离屏出图（取证与双端比对），
+//! 后一个只读工程与能力声明。它们不参与上面这条渲染流水线。
+//!
+//! # 收口：这里删了什么（原 26 个导出，现 25 个）
+//!
+//! 全仓 grep 后删掉 `dhampir_project_clear_text_bitmaps` —— 它**一个调用方都没有**。
+//!
+//! 它原本的用途是"下掉上一帧的行位图"，但那条路**已经被 `text_frame` 覆盖**：
+//! `text_frame` 每次调用就 `drain()` 并 `close()` 掉两份位图集合
+//! （见该函数里 `text_bitmaps` / `danmaku_bitmaps` 的处理），
+//! 所以它是个**永远不会被用到第二次的清空口**。留着它的害处很具体：
+//! `docs/host-api.md` 的名单里它与 `text_frame` 并列，读的人会以为
+//! "换清单"与"清位图"是两件要各自记得做的事 —— 而实际上少做一件也不会错。
+//!
+//! `plan/t2-evidence.md` 第 311 行提到过它，但那一行是**当时验收时列过的导出清单**，
+//! 不是调用记录；T2 那条判据验的是"行位图按清单下标上、下"，
+//! 由 `set_text_bitmap`（留着）与 `text_frame` 的作废语义共同兑现。
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -1720,27 +1811,6 @@ pub fn dhampir_project_set_subtitles(asset_id: String, text: String, format: Str
         "skipped": skipped,
         "issues": [],
     }))
-}
-
-/// 清掉上一帧的行位图。
-///
-/// 与 `dhampir_project_clear_bitmaps` 同一个理由：不清的话，这一帧不再出现的行会拿着
-/// 上一帧的位图被画上去 —— 而画面看起来完全正常，只是"慢了半拍"。
-///
-/// **两份都清**（字幕与弹幕）：它们同属"这一帧的字"，JS 那侧也是一趟栅格化完
-/// 两张清单再一起交上来。只清一份的话，另一份的旧位图会在新清单短于旧清单时留下来。
-#[wasm_bindgen]
-pub fn dhampir_project_clear_text_bitmaps() {
-    PROJECT_HOST.with(|h| {
-        if let Some(host) = h.borrow_mut().as_mut() {
-            for (_, bitmap) in host.text_bitmaps.drain() {
-                bitmap.close();
-            }
-            for (_, bitmap) in host.danmaku_bitmaps.drain() {
-                bitmap.close();
-            }
-        }
-    });
 }
 
 /// JS 把某一行的位图交给宿主。`index` 是 `dhampir_project_text_frame` 给的清单下标。

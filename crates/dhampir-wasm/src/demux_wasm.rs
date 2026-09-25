@@ -8,6 +8,18 @@
 //! 为什么不把 VideoDecoder 也搬进 Rust：web-sys 的 VideoDecoder 在 `web_sys_unstable_apis` 之后，
 //! 要用它就得给整个构建加一个来路特殊的 cfg。现在这样分工，帧号这条契约仍然落在我们自己的类型上，
 //! 浏览器那一层只是执行者。真要收进 dhampir_media::VideoDecoder 时，改的是这一层，不是分离器。
+//!
+//! # 为什么这里只剩 5 个导出（原 6 个）
+//!
+//! 收口时全仓 grep 过：`dhampir_demux_gop_slices` **一个调用方都没有**。
+//! 唯一的消费者 `scripts/s3-preview-spike/index.html` 用的是 `open` / `description` /
+//! `samples` / `sync_start` / `frame_index` 五个。
+//!
+//! 删它不丢能力：它是一行直通（`host_api::to_json(&host_api::gop_slices(..))`），
+//! 而 `gop_slices` 在 `dhampir-timeline/src/host_api.rs` 有 6 条单测，
+//! 在 CLI 侧另有真调用（`dhampir.rs` 的 `cmd_gop`，即 `dhampir gop` 子命令）——
+//! **远端模式按段取这条路的契约在 CLI 那条腿上活着**，不靠这个没人调的导出撑。
+//! 留着的代价和 cache_wasm 那边一样：它看起来像一份兼容承诺，实际没有任何对端。
 
 use std::cell::RefCell;
 
@@ -76,8 +88,8 @@ pub fn dhampir_demux_description() -> Vec<u8> {
 
 /// 把分离器里的样本表转成跨边界形状。
 ///
-/// 抽成一个函数：dhampir_demux_samples 与 dhampir_demux_gop_slices 都要它，
-/// 各写一份迟早会漂。
+/// 抽成一个函数是为了与 CLI 那条腿共用同一份形状（`dhampir.rs` 的
+/// `cmd_gop` 从 `host_api::gop_slices` 取段），各写一份迟早会漂。
 fn sample_views(track: &crate::demux::VideoTrack) -> Vec<host_api::SampleView> {
     track
         .samples
@@ -101,25 +113,6 @@ pub fn dhampir_demux_samples() -> String {
             return String::from("[]");
         };
         host_api::to_json(&sample_views(track))
-    })
-}
-
-/// 把样本表切成 **GOP 段**，供远端模式按段取。
-///
-/// 形状见 host_api::GopSliceView：字节范围 + 样本表下标 ——
-/// **服务器零计算**，不解码、不转码、不重新封装。
-/// 前端拿这个加原始字节就能喂解码器。
-///
-/// 返回空数组表示**这份素材没有可起解的关键帧**（没法按帧定位）——
-/// 那是明确失败，不是「没有段」。
-#[wasm_bindgen]
-pub fn dhampir_demux_gop_slices() -> String {
-    TRACK.with(|t| {
-        let borrowed = t.borrow();
-        let Some(track) = borrowed.as_ref() else {
-            return String::from("[]");
-        };
-        host_api::to_json(&host_api::gop_slices(&sample_views(track)))
     })
 }
 

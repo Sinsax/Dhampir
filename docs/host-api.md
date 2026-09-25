@@ -93,7 +93,6 @@ Version: 4
 - `dhampir_project_attach`
 - `dhampir_project_bind_source`
 - `dhampir_project_clear_bitmaps`
-- `dhampir_project_clear_text_bitmaps`
 - `dhampir_project_doc`
 - `dhampir_project_draw`
 - `dhampir_project_edit`

@@ -28,6 +28,19 @@
 //!
 //! 记录里的 `backend_slug` 写的就是这个名字，于是"记录里的腿名 == 产物目录名"这条
 //! native 侧本来成立的不变量，在浏览器腿上仍然**可以被守卫逐条检查**，而不是靠约定。
+//!
+//! # 这是取证工具，不是底座 API
+//!
+//! 这一整个模块是 **M2 的验收证据**：`crates/dhampir-wasm/www/corpus.html` +
+//! `scripts/serve-corpus-harness.mjs` 是 M2 的两条浏览器腿（NVIDIA / AMD iGPU），
+//! 产物是 `records/m2/browser/` 与 `records/m2/browser-amd/` 各 80 张 PNG。
+//! 所以**「web/ 没调用」不是删它的理由** —— 调用方在验收链上，删了 M2 的记录不可复现。
+//!
+//! 收口时删掉的只有一个：`dhampir_corpus_scene_names`。它在全仓一个调用方都没有，
+//! 而且注释里写的那件事**根本没发生**（说"页面拿它建下拉框"，但 `corpus.html`
+//! 走的是 `scene=all`，场景名是从 `dhampir_corpus_run` 的返回里读的，
+//! 见该页第 277 行 `summary.scenes.map(..)`）。留着它等于在 API 面上谎报一个消费者。
+//! `scene_names()` 本身没删 —— 它还在 `select_specs` 的错误信息里用着。
 
 use std::cell::RefCell;
 
@@ -436,12 +449,6 @@ struct CorpusHost {
 // ---------------------------------------------------------------------------
 // 导出给页面
 // ---------------------------------------------------------------------------
-
-/// 可选场景名，JSON 数组。页面拿它建下拉框，免得把场景清单抄进 HTML。
-#[wasm_bindgen]
-pub fn dhampir_corpus_scene_names() -> String {
-    Value::from(scene_names()).to_string()
-}
 
 /// 建（或复用）corpus host，返回这个 **adapter.json 的文本**（已带结尾换行）。
 ///

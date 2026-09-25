@@ -6,6 +6,25 @@
 //! 而**被缓存的东西**在浏览器里是 JS 对象（VideoFrame）与 wgpu 纹理——前者只有 JS 拿得到，
 //! 后者归这个宿主管。所以这里只开一道账口子：页面告诉它"我要放这一帧、多少字节"，
 //! 它回答"该淘汰谁"，页面照单去 close。淘汰决策只有一份实现，不会两边各写一套。
+//!
+//! # 为什么这里只剩 6 个导出（原 11 个）
+//!
+//! 收口时全仓 grep 过：删掉的 5 个（`touch_ram` / `touch_vram` / `remove_ram` /
+//! `vram_budget` / `ram_budget`）**一个调用方都没有** —— 唯一的消费者
+//! `scripts/s3-preview-spike/index.html` 只用了 `open` / `note_ram` / `note_vram` /
+//! `remove_vram` / `stats` / `texture_capacity` 六个。
+//!
+//! 删它们是安全的，理由是**能力没有被删掉**：这 5 个都是
+//! `dhampir_core::cache::FrameCache` 上同名方法的**直通包装**（一行 `i64::from`），
+//! 而那份策略在 native 侧有 13 条单测钉着（`dhampir-core/src/cache.rs` 的
+//! `touch_改变淘汰顺序` / `移除后账目归零` / `预算为零时不保留` …）。
+//! 删掉的是**没有被调用的接缝**，不是任何一条规则 —— 页面上真要 `touch`，
+//! 加回一个包装是一行的事，而留着一个没人调、却看起来像兼容承诺的导出，
+//! 代价是下游读不出哪些才是真接口（见 `scripts/api-surface.mjs` 文件头的口径）。
+//!
+//! `remove_vram` 留着是因为 spike 真的在调它（销毁纹理时同步销账）；
+//! `texture_capacity` 留着是因为 `vram_budget` 被删后它就是页面唯一能
+//! "按预算换算张数"的口子 —— 它内部仍然读 `vram_budget()`。
 
 use std::cell::RefCell;
 
@@ -67,24 +86,6 @@ pub fn dhampir_cache_note_vram(frame: i32, bytes: usize) -> String {
     json_i64_array(&evicted)
 }
 
-/// 这一帧刚被用到（渲染、拖动预览都算），把它的位置挪到最近使用端。
-#[wasm_bindgen]
-pub fn dhampir_cache_touch_ram(frame: i32) {
-    CACHE.with(|c| c.borrow_mut().touch_ram(i64::from(frame)));
-}
-
-#[wasm_bindgen]
-pub fn dhampir_cache_touch_vram(frame: i32) {
-    CACHE.with(|c| c.borrow_mut().touch_vram(i64::from(frame)));
-}
-
-#[wasm_bindgen]
-pub fn dhampir_cache_remove_ram(frame: i32) {
-    CACHE.with(|c| {
-        c.borrow_mut().remove_ram(i64::from(frame));
-    });
-}
-
 #[wasm_bindgen]
 pub fn dhampir_cache_remove_vram(frame: i32) {
     CACHE.with(|c| {
@@ -96,18 +97,6 @@ pub fn dhampir_cache_remove_vram(frame: i32) {
 #[wasm_bindgen]
 pub fn dhampir_cache_stats() -> String {
     stats_json()
-}
-
-/// 显存预算是多少（页面用来换算"该留几张纹理"）。
-#[wasm_bindgen]
-pub fn dhampir_cache_vram_budget() -> usize {
-    CACHE.with(|c| c.borrow().vram_budget())
-}
-
-/// 内存预算是多少。
-#[wasm_bindgen]
-pub fn dhampir_cache_ram_budget() -> usize {
-    CACHE.with(|c| c.borrow().ram_budget())
 }
 
 /// 页面用它做一次"按预算换算"自检：给宽高，返回该预算下能放几张 RGBA8 纹理。

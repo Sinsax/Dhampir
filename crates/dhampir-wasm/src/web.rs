@@ -18,6 +18,22 @@
 //! 第二条是为 M2 准备的：canvas 纹理通常没有 `COPY_SRC` 用途，根本读不回来；
 //! 而且指导文档要求比对在"编码后的字节"上进行。现在就把它跑通，
 //! 是为了让 M2 的失败只剩下"两端渲染不同"这一个原因。
+//!
+//! # 为什么这里是取证工具，而不是底座 API
+//!
+//! 这一整个模块是 **M0–M2 的验收证据**，不是给下游用的接口：
+//! `crates/dhampir-wasm/www/index.html` 是 M0 的浏览器腿（`records/m0/README.md`
+//! 把它钉成 `harness: crates/dhampir-wasm/www/index.html`，产物是
+//! `records/m0/browser-harness.json` + 三张 PNG），M2 又复用同一条腿。
+//! 所以**「web/ 没调用」不是删它的理由** —— 调用方在仓库内部的验收链上。
+//!
+//! 收口时删掉的只有一个：`dhampir_probe_verify`。它是全仓唯一一个连
+//! 取证链都没接的导出（页面调的是 `dhampir_probe_golden_check`，比的是
+//! **编进 crate 的** golden，不需要先有另一端跑过一遍）。删它不丢能力：
+//! 它直通的 `ProbeSummary::verify_against` 在 `crate::probe` 里有单测
+//! （`verify_reports_which_side_differs`），而"与另一端对摘要"这条路
+//! 由 `crates/dhampir-wasm/tests/cross_runtime.rs` 在 Rust 侧真跑着
+//! （它拿 native 写的摘要去 `verify_golden`）。
 
 use std::cell::RefCell;
 
@@ -137,17 +153,6 @@ pub fn dhampir_probe_line_count() -> usize {
 #[wasm_bindgen]
 pub fn dhampir_fnv1a64_hex(bytes: &[u8]) -> String {
     format!("{:016x}", dhampir_core::timeline::fnv1a64(bytes))
-}
-
-/// 与 native 侧记录的摘要比对。
-///
-/// 返回空字符串表示一致，否则返回带两侧数值的说明。
-#[wasm_bindgen]
-pub fn dhampir_probe_verify(expected_digest_hex: &str) -> String {
-    match ProbeSummary::capture().verify_against(expected_digest_hex) {
-        Ok(()) => String::new(),
-        Err(e) => e,
-    }
 }
 
 /// 与**编译进本模块的** golden 报告逐字节比对。

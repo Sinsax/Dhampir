@@ -20,7 +20,6 @@
 
 - `dhampir_demux_description`
 - `dhampir_demux_frame_index`
-- `dhampir_demux_gop_slices`
 - `dhampir_demux_open`
 - `dhampir_demux_samples`
 - `dhampir_demux_sync_start`
@@ -33,7 +32,6 @@
 - `dhampir_project_attach`
 - `dhampir_project_bind_source`
 - `dhampir_project_clear_bitmaps`
-- `dhampir_project_clear_text_bitmaps`
 - `dhampir_project_doc`
 - `dhampir_project_draw`
 - `dhampir_project_edit`
@@ -65,14 +63,9 @@
 - `dhampir_cache_note_ram`
 - `dhampir_cache_note_vram`
 - `dhampir_cache_open`
-- `dhampir_cache_ram_budget`
-- `dhampir_cache_remove_ram`
 - `dhampir_cache_remove_vram`
 - `dhampir_cache_stats`
 - `dhampir_cache_texture_capacity`
-- `dhampir_cache_touch_ram`
-- `dhampir_cache_touch_vram`
-- `dhampir_cache_vram_budget`
 
 ## 取证工具
 
@@ -83,7 +76,6 @@ M2 的语料与记录。**不承诺兼容。**
 - `dhampir_corpus_frame_png`
 - `dhampir_corpus_open`
 - `dhampir_corpus_run`
-- `dhampir_corpus_scene_names`
 
 ### `web.rs`
 
@@ -100,7 +92,6 @@ M0–M2 的探针与 corpus。**不承诺兼容**，供本仓库验收用。
 - `dhampir_probe_offscreen_timing`
 - `dhampir_probe_render_canvas`
 - `dhampir_probe_report`
-- `dhampir_probe_verify`
 
 ## 弃用
 
