@@ -333,7 +333,20 @@ export class Engine {
   async seekVideo(video, seconds) {
     // **相同值直接返回**：浏览器不会重新解码，seeked 也未必派发。
     // 用严格相等：currentTime 是双精度，同一个算式重复算出的位模式相同。
-    if (video.currentTime === seconds && video.readyState >= 2) return null;
+    if (video.currentTime === seconds && video.readyState >= 2) {
+      if (this.timing) this.lastSeekVideo = { hit: true, deltaMs: 0 };
+      return null;
+    }
+    if (this.timing) {
+      this.lastSeekVideo = {
+        hit: false,
+        // 差值本身是关键事实：**只差一点点**说明短路判据太严，
+        // 于是每帧都在做一次完整的 seek，而画面看起来完全正常（只是慢）。
+        deltaMs: Math.abs(video.currentTime - seconds) * 1000,
+        from: video.currentTime,
+        to: seconds,
+      };
+    }
     return new Promise((resolve) => {
       let settled = false;
       let timer = 0;
@@ -358,21 +371,85 @@ export class Engine {
     });
   }
 
-  /** 把某一帧所需的源全部 seek 到位（位图模式下顺带把位图做好）。 */
+  /**
+   * 把某一帧所需的源全部 seek 到位（位图模式下顺带把位图做好）。
+   *
+   * # 多路 seek 为什么是**串行**的（这是一个试过并证伪的优化）
+   *
+   * 一眼看去串行 await 是浪费：每一路有自己的 `<video>` 元素、互不共享状态，
+   * 一帧要 n 路就要等 n 份解码时间之和，改成 `Promise.all` 就该只剩最慢那一路。
+   *
+   * **实测不是这样。** 受控对照（同一组 seek 位置、各自先回到同一起点）：
+   *
+   * | 场景 | 串行中位 | 并行中位 | 加速比 |
+   * |---|---|---|---|
+   * | 2 路（1080p + 4K） | 154.1ms | 152.2ms | **1.01** |
+   * | 3 路（+720p） | 148.7ms | 162.8ms | **0.91** |
+   * | 1 路（4K，无并行可言） | 95.7ms | 100.7ms | **0.95** |
+   *
+   * 第三行是关键对照：只有一路时根本无并行可谈，加速比却是 0.95 ——
+   * 说明这个量级的差异是**位置噪声**，不是并行度。三者都落在 1.0 附近，
+   * 结论是**浏览器把多路解码排在同一条队列上**，并行只是把排队挪了个位置。
+   *
+   * 第一版对照还犯过一个错：串行与并行用了不同的 seek 位置（差 0.35s），
+   * 于是量出来的是"距离"而不是"并行度"，两个方向都得出过相反的结论。
+   * 现在这份结论来自**控住了位置**的那一版，探针见 scripts/seek-parallel-probe.mjs。
+   *
+   * 所以这里保持串行：它是简单的那个写法，且**没有更慢**。
+   * 真正的瓶颈在解码量（见 docs/usage.md「预览性能」），不在这一点上。
+   */
   async prepare(frame) {
+    // 细粒度计时：**只在被要求时记**（app 侧打开开关），平时一个 performance.now 也不多花。
+    const timing = this.timing;
+    const t0 = timing ? performance.now() : 0;
     const sources = this.sourcesFor(frame);
+    const t1 = timing ? performance.now() : 0;
     // 位图模式**先清**：不清的话，这一帧不再出现的 source 会拿着上一帧的位图被画出来，
     // 而画面看起来完全正常，只是"慢了半拍"。
     if (this.sourceMode === "bitmap") this.mod.dhampir_project_clear_bitmaps();
+    const t2 = timing ? performance.now() : 0;
+    let seekMs = 0, bitmapMs = 0, setMs = 0;
+    // 短路命中率：**这个数决定"每帧都在真 seek"还是"大多数帧直接返回"**。
+    let hits = 0, misses = 0, maxDeltaMs = 0;
     for (const entry of sources) {
       const video = this.videos.get(entry.source);
       if (video === undefined) continue;
+      const a = timing ? performance.now() : 0;
+      const before = timing ? { t: video.currentTime, rs: video.readyState } : null;
       await this.seekVideo(video, entry.seconds);
+      const b = timing ? performance.now() : 0;
+      const spent = b - a;
+      seekMs += spent;
+      if (timing && this.lastSeekVideo) {
+        if (this.lastSeekVideo.hit) hits += 1;
+        else {
+          misses += 1;
+          if (this.lastSeekVideo.deltaMs > maxDeltaMs) maxDeltaMs = this.lastSeekVideo.deltaMs;
+        }
+      }
+      // **慢的那一路要能说出"它当时是什么状态"。** 只报"seek 45ms"无法归因：
+      // 是从很远的地方跳过来（真的解码多），还是就从旁边挪一点（那是别的东西在拖）。
+      if (timing && spent > 30) {
+        this.slowSeeks.push({
+          source: entry.source,
+          spentMs: Number(spent.toFixed(1)),
+          fromT: Number((before ? before.t : 0).toFixed(3)),
+          toT: Number(entry.seconds.toFixed(3)),
+          // 跳了多远（秒）。**这条是最能分辨原因的数。**
+          jumpedSec: Number(Math.abs(entry.seconds - (before ? before.t : 0)).toFixed(3)),
+          readyStateBefore: before ? before.rs : -1,
+          readyStateAfter: video.readyState,
+        });
+        if (this.slowSeeks.length > 60) this.slowSeeks.shift();
+      }
       if (this.sourceMode === "bitmap") {
         // **必须在 seek 之后**：早了拿到的是上一帧，而画面看起来完全正常。
         try {
           const bitmap = await createImageBitmap(video);
+          const c = timing ? performance.now() : 0;
+          bitmapMs += c - b;
           this.mod.dhampir_project_set_bitmap(entry.source, bitmap);
+          if (timing) setMs += performance.now() - c;
         } catch (error) {
           // 这一路这一帧没有画面 -> 那一层会被跳过（宿主侧 require_bitmap 会让它返回 None）。
           // **不许退回 video**：那正好会撞上这个浏览器不支持的那条路。
@@ -380,9 +457,27 @@ export class Engine {
         }
       }
     }
+    const t3 = timing ? performance.now() : 0;
     // 文字排在视频之后：上面的 seek 是这一步唯一的长等待，而画字是本地画布上的活。
     // 反过来（先画字再等 seek）只会让"字先到、画面还没到"多出一个中间态。
     await this.prepareText(frame);
+    const t4 = timing ? performance.now() : 0;
+    if (timing) {
+      this.lastPrepareBreakdown = {
+        sourcesForMs: Number((t1 - t0).toFixed(2)),
+        clearBitmapsMs: Number((t2 - t1).toFixed(2)),
+        seekMs: Number(seekMs.toFixed(2)),
+        createBitmapMs: Number(bitmapMs.toFixed(2)),
+        setBitmapMs: Number(setMs.toFixed(2)),
+        textMs: Number((t4 - t3).toFixed(2)),
+        prepareTotalMs: Number((t4 - t0).toFixed(2)),
+        sources: sources.length,
+        // 短路命中/未命中：未命中多说明"每帧都在真 seek"。
+        shortCircuitHits: hits,
+        shortCircuitMisses: misses,
+        maxMissDeltaMs: Number(maxDeltaMs.toFixed(3)),
+      };
+    }
     return sources;
   }
 
@@ -460,10 +555,26 @@ export class Engine {
     return true;
   }
 
-  /** seek 并渲染到 canvas。 */
+  /**
+   * seek 并渲染到 canvas。
+   *
+   * 顺带把两段耗时记在 `this.lastSeekCost` 上：**"这一帧慢在哪"是排性能问题
+   * 唯一有用的信息** —— 只知道"一帧要 200ms"的话，该改哪里只能靠猜。
+   *
+   * 记的是**上一次**的值（不累积、不统计）：引擎是底座，攒统计是调用方的事
+   * —— 底座一旦开始攒状态，多实例/多画布就会互相污染。
+   */
   async seek(frame) {
+    if (this.timing && !Array.isArray(this.slowSeeks)) this.slowSeeks = [];
+    const t0 = performance.now();
     const sources = await this.prepare(frame);
-    this.mod.dhampir_project_draw(frame);
+    const t1 = performance.now();
+    // **诊断开关**：关掉 draw 之后 seekMs 会不会掉下来 ——
+    // 这能判定"慢"是解码本身的，还是被上一帧的 GPU 上屏拖住的。
+    // 只在测量时用，正常路径恒为 true。
+    if (this.skipDraw !== true) this.mod.dhampir_project_draw(frame);
+    const t2 = performance.now();
+    this.lastSeekCost = { prepareMs: t1 - t0, drawMs: t2 - t1, totalMs: t2 - t0 };
     return sources;
   }
 

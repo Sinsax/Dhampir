@@ -178,7 +178,9 @@ const state = {
 };
 const finished = new Promise((resolveFinished) => { state.settle = resolveFinished; });
 
-const server = createServer((req, res) => {
+// **必须是 async**：素材代理那一条要 await fetch。同步回调里 await 会在
+// 转发之前就把响应结束掉，而表现是「视频加载不出来」而不是报错。
+const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1');
   const path = url.pathname;
 
@@ -237,12 +239,64 @@ const server = createServer((req, res) => {
     return;
   }
 
+  // **素材走同一源代理转发**（这是预览性能的关键，不是可有可无的转发）。
+  //
+  // 页面由本进程服务，而素材在后端（另一个端口）。浏览器把这种视频当**跨源媒体**：
+  // 实测同一个文件、同一段 seek 序列，同源 0.1ms、跨源 33.5ms —— **差 300 倍**。
+  // 这不是稍微慢一点：它足以让多路工程从跑得满变成丢一半帧。
+  //
+  // 真实部署里页面与素材本来就同源，所以这**既是给 --serve 提速，也是让测量回到真实**：
+  // 跨源是测试台自己造成的，量出来的数不代表用户。
+  //
+  // 转发时**必须把 Range 原样带过去**：video 元素一定会发 Range，
+  // 吞掉它会让浏览器拿不到读到哪一段的确认，表现是**卡住而不报错**。
+  // 走同源的那一条：**除了页面自己的静态文件，其余一律转给后端**。
+  // 只转 /assets 是不够的 —— 工程（/projects）、能力（/capabilities）、
+  // 预检与出片也都走后端，漏掉任一条页面就起不来，而症状是"判定没回传"。
+  // **按前缀分流，不按白名单**：白名单漏一条就静默 404，
+  // 而 404 在这里的表现是「判定没回传」，看不出是路由没转。
+  // 页面自己的东西（html/js/pkg/export/示例工程 json）留在本地，其余转后端。
+  const backendOwned = path.startsWith('/assets/') || path.startsWith('/projects/')
+    || path === '/capabilities' || path === '/validate' || path === '/precheck'
+    || path === '/precheck-result' || path === '/export' || path.startsWith('/render')
+    || path === '/verdict';
+  if (backendOwned) {
+    if (backendPort === 0) {
+      res.writeHead(503, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'no backend' }));
+      return;
+    }
+    const upstreamHeaders = {};
+    // Range 要原样带过去（video 一定会发）；content-type 也要，body 是 JSON。
+    if (typeof req.headers.range === 'string') upstreamHeaders.range = req.headers.range;
+    if (typeof req.headers['content-type'] === 'string') upstreamHeaders['content-type'] = req.headers['content-type'];
+    let body;
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      body = Buffer.concat(chunks);
+    }
+    const upstream = await fetch('http://127.0.0.1:' + backendPort + path, {
+      method: req.method, headers: upstreamHeaders, body: body,
+    });
+    const outHeaders = {};
+    for (const name of ['content-type', 'content-length', 'content-range', 'accept-ranges']) {
+      const value = upstream.headers.get(name);
+      if (value !== null) outHeaders[name] = value;
+    }
+    res.writeHead(upstream.status, outHeaders);
+    if (upstream.body === null) { res.end(); return; }
+    for await (const chunk of upstream.body) res.write(chunk);
+    res.end();
+    return;
+  }
+
   let file = null;
   if (path === '/' || path === '/index.html') file = join(WEB_DIR, 'index.html');
   else if (path === '/probe.html') file = join(WEB_DIR, 'probe.html');
   else if (path === '/synthetic.html') file = join(WEB_DIR, 'synthetic.html');
   // 一次性诊断页：用来在**真实浏览器里**做 A/B，而不是靠对规范的印象下结论。
-  else if (path === '/decode-probe.html') file = join(WEB_DIR, 'decode-probe.html');
+
   else if (path.startsWith('/pkg/')) file = join(PKG_DIR, path.slice('/pkg/'.length));
   else if (path === '/sample-project.json') file = join(REPO_ROOT, 'fixtures', 'sample-project.json');
   // 工程文件形态（带资产表、v2 元素）。**页面默认要的是这一份** ——
@@ -343,6 +397,9 @@ const PROJECT_FOR_VERDICT = {
   // perf 用**四份不同素材**那份：四路分辨率不同（1080p / 720p / 720p 稀疏 GOP / 4K），
   // "贵在哪一路"必须能分开看。拿只有一路的工程量，得出的均值会掩盖最坏的那路。
   perf: 'four-asset-project.doc',
+  // playthrough 用**四路不同素材**那份：最坏的那一帧是哪一路造成的，必须能指出来。
+  // 只有一路的工程量不出"最坏" —— 它的最坏就是它的平均。
+  playthrough: 'four-asset-project.doc',
 };
 const projectId = valueOf('--project', null)
   || (verdictName !== null && PROJECT_FOR_VERDICT[verdictName] !== undefined
@@ -352,6 +409,9 @@ const params = [];
 if (mode === 'app' && !argv.includes('--no-export') && verdictName === null) params.push('export=1');
 if (backendMode === 'local') {
   params.push('backend=local');
+  // **走同源**：本进程把 /assets 转发到后端。跨源视频的 seek 实测慢 300 倍，
+  // 而这个测试台自己制造了跨源 —— 量出来的数不代表用户环境。
+  params.push('sameOrigin=1');
   params.push('port=' + backendPort);
   params.push('project=' + projectId);
 } else if (backendMode === 'remote') {
@@ -1359,12 +1419,38 @@ function runPlaybackParity(value) {
   }
   if (problems.length > 0) return { ok: false, detail: problems.join('；') };
 
+  // **代价分解单独印出来**：判定只说"帧号对不对"，说不出"播得顺不顺"。
+  // 这两个问题要分开看 —— 一个坏掉的性能不会让任何判据变红，
+  // 所以它必须作为**事实**被打印出来，而不是藏在判定里。
+  const cost = value.stats && value.stats.cost ? value.stats.cost : null;
+  const notes = [];
+  if (cost !== null) {
+    const fmt = (label, s) => (s === null
+      ? label + '：没采到样本'
+      : label + '：中位 ' + s.medianMs + 'ms、均 ' + s.meanMs + 'ms、最坏 ' + s.maxMs
+        + 'ms（' + s.n + ' 个样本）');
+    notes.push(fmt('一帧总耗时', cost.seek));
+    notes.push(fmt('  其中 prepare（等解码 + 文字）', cost.prepare));
+    notes.push(fmt('  其中 draw（宿主合成上屏）', cost.draw));
+    // 预算：序列帧率给的每帧毫秒数。**这条是"能不能跑满"的唯一判据**。
+    const budget = 1000 / fps;
+    if (cost.seek !== null) {
+      const verdict = cost.seek.medianMs <= budget
+        ? '跑得满'
+        : '**跑不满**：中位是预算的 ' + (cost.seek.medianMs / budget).toFixed(1) + ' 倍';
+      notes.push('每帧预算 ' + budget.toFixed(2) + 'ms（' + fps + 'fps）-> ' + verdict);
+    }
+  }
+  const drops = value.stats ? value.stats.text : null;
+  if (typeof drops === 'string') notes.push('丢帧：' + drops);
+
   return {
     ok: true,
     detail: '播放把帧号从 0 推到第 ' + advancedTo + ' 帧（' + Math.round(elapsedMs) + 'ms、'
       + fps + 'fps，理论上限约 ' + expectedFrames.toFixed(1) + ' 帧，实测比值 '
       + ratio.toFixed(2) + '）—— 说明推进用的是**序列帧率**而不是素材自己在播；'
       + '拖滑块能接管（播放让位）；播到末帧第 ' + stoppedAt + ' 帧自己停住',
+    notes: notes,
   };
 }
 
@@ -1757,6 +1843,7 @@ async function reportVerdict(name) {
   if (value.kind === 'playback') {
     const parity = runPlaybackParity(value);
     console.log((parity.ok ? '  ✓ ' : '  - ') + parity.detail);
+    for (const note of parity.notes || []) console.log('  · ' + note);
     if (!parity.ok) process.exitCode = 1;
     return;
   }
@@ -1764,6 +1851,133 @@ async function reportVerdict(name) {
     const parity = runAudioTrackParity(value);
     console.log((parity.ok ? '  ✓ ' : '  - ') + parity.detail);
     if (!parity.ok) process.exitCode = 1;
+    return;
+  }
+  if (value.kind === 'playthrough') {
+    // **测量，不判定。** 与 perf 同理：设了通过线就会有人为了变绿去改预算。
+    const budget = Number(value.frameMs) || 0;
+    console.log('  整条时间线播一遍（' + value.end + ' 帧，预算 ' + budget.toFixed(2) + 'ms/帧）');
+    console.log('    播到第 ' + value.reachedFrame + ' 帧' + (value.finished ? '（播完）' : '（超时未播完）'));
+    console.log('    墙钟 ' + value.wallMs + 'ms，本该 ' + value.idealMs + 'ms -> 实时倍率 '
+      + value.realtimeRatio + (value.realtimeRatio <= 1.15 ? '（约等于实时）' : '（慢放，跟不上）'));
+    const st = value.stats || {};
+    const cost = st.cost || {};
+    const fmt = (label, s) => (s === null || s === undefined
+      ? label + '：没采到样本'
+      : label + '：中位 ' + s.medianMs + 'ms、均 ' + s.meanMs + 'ms、最坏 ' + s.maxMs
+        + 'ms（' + s.n + ' 个样本）');
+    console.log('  ' + fmt('一帧总耗时', cost.seek));
+    console.log('  ' + fmt('  其中 prepare（等解码 + 文字）', cost.prepare));
+    console.log('  ' + fmt('  其中 draw（宿主合成上屏）', cost.draw));
+    // **"中位达标"不等于"跑得满"。** 中位只统计**画出来的那些帧** ——
+    // 一个跑不动的片子会先把贵的帧丢掉，剩下的自然便宜，于是中位漂亮而实际全是跳帧。
+    // 真正的判据要**同时**看两个数：单帧代价，以及丢了多少。
+    const dropped = Number(st.droppedTotal) || 0;
+    if (cost.seek) {
+      const budgetOk = cost.seek.medianMs <= budget;
+      const lostAll = dropped === 0;
+      const verdict = budgetOk && lostAll
+        ? '跑得满（单帧达标且没丢帧）'
+        : !budgetOk
+          ? '**跑不满**：中位是预算的 ' + (cost.seek.medianMs / budget).toFixed(1) + ' 倍'
+          : '**跑不满**：单帧中位达标（' + cost.seek.medianMs + 'ms <= ' + budget.toFixed(2)
+            + 'ms），但丢了 ' + dropped + ' 帧 —— 中位只覆盖画出来的那些帧，'
+            + '贵的帧已经被丢掉了，所以它不代表这条片子播得动';
+      console.log('  每帧预算 ' + budget.toFixed(2) + 'ms -> ' + verdict);
+      // 均值与中位的差距本身就是症状：两者差得越远，说明越不均匀。
+      if (cost.seek.meanMs > cost.seek.medianMs * 2) {
+        console.log('  ⚠ 均值（' + cost.seek.meanMs + 'ms）是中位（' + cost.seek.medianMs
+          + 'ms）的 ' + (cost.seek.meanMs / cost.seek.medianMs).toFixed(1)
+          + ' 倍 —— 代价很不均匀，慢的那几帧拖垮了整体');
+      }
+    }
+    console.log('  丢帧：' + (st.text === undefined ? '（无）' : st.text));
+    // **页面状态**：后台/被遮挡的页面会被限制媒体解码，那与"代码慢"在数字上一样。
+    const ps = value.pageState;
+    if (ps) {
+      console.log('  页面状态：visibility=' + ps.visibilityState + ' hidden=' + ps.hidden
+        + ' focus=' + ps.hasFocus + ' dpr=' + ps.devicePixelRatio
+        + ' rAF 中位 ' + ps.rafMedianMs + 'ms（均 ' + ps.rafMeanMs + 'ms）');
+      if (ps.rafMedianMs > 25) {
+        console.log('    ⚠ rAF 被限制到 ' + ps.rafMedianMs + 'ms 一拍 —— 这不是 60Hz，'
+          + '**页面本身在被限速**，此时量到的 seek 代价不能代表真实用户环境');
+      }
+    }
+    // **慢 seek 现场**：跳了多远、当时 readyState 几。这是分辨原因的关键事实。
+    const ss = value.slowSeeks || [];
+    if (ss.length > 0) {
+      const byJump = new Map();
+      for (const s of ss) {
+        const key = s.jumpedSec < 0.1 ? '极小(<0.1s)' : s.jumpedSec < 0.5 ? '小(0.1-0.5s)' : '大(>=0.5s)';
+        const cur = byJump.get(key) || { n: 0, sumMs: 0 };
+        cur.n += 1; cur.sumMs += s.spentMs;
+        byJump.set(key, cur);
+      }
+      console.log('  慢 seek（>30ms）共 ' + ss.length + ' 次，按"跳了多远"分组：');
+      for (const [k, v] of [...byJump.entries()].sort()) {
+        console.log('    ' + k + '：' + v.n + ' 次，平均 ' + (v.sumMs / v.n).toFixed(1) + 'ms');
+      }
+      const small = ss.filter((s) => s.jumpedSec < 0.1);
+      if (small.length > 0) {
+        console.log('    ⚠ 其中 ' + small.length + ' 次只跳了不到 0.1s 却超过 30ms —— '
+          + '那说明慢**不是"跳得远"**，是别的东西在拖（解码器忙 / 上一帧还没完）');
+      }
+      for (const s of ss.slice(0, 6)) {
+        console.log('    ' + s.source + ' ' + s.fromT + 's -> ' + s.toT + 's（跳 '
+          + s.jumpedSec + 's）' + s.spentMs + 'ms，readyState ' + s.readyStateBefore
+          + '->' + s.readyStateAfter);
+      }
+    }
+    // **受控对照**：不画 vs 正常画。两轮帧号序列相同，唯一变量是上屏。
+    const nd = value.noDrawStats;
+    if (nd && nd.cost && nd.cost.seek) {
+      console.log('  对照（同一序列，只是不上屏）：一帧总耗时中位 ' + nd.cost.seek.medianMs
+        + 'ms、均 ' + nd.cost.seek.meanMs + 'ms、最坏 ' + nd.cost.seek.maxMs + 'ms');
+      const ndBd = nd.prepareBreakdown || [];
+      if (ndBd.length > 0) {
+        const avgS = (ndBd.reduce((a, x) => a + (x.seekMs || 0), 0) / ndBd.length).toFixed(2);
+        console.log('    不上屏时 prepare 里的 seek 平均 ' + avgS + 'ms');
+      }
+    }
+    // **prepare 内部拆解**：把"prepare 慢"这一句话变成一个可行动的结论。
+    const bd = st.prepareBreakdown || [];
+    if (bd.length > 0) {
+      const avg = (k) => (bd.reduce((a, x) => a + (x[k] || 0), 0) / bd.length).toFixed(2);
+      console.log('  慢帧的 prepare 内部拆解（' + bd.length + ' 个慢帧的平均）：');
+      console.log('    sourcesFor ' + avg('sourcesForMs') + 'ms  clearBitmaps ' + avg('clearBitmapsMs')
+        + 'ms  **seek ' + avg('seekMs') + 'ms**  **createImageBitmap ' + avg('createBitmapMs')
+        + 'ms**  **setBitmap ' + avg('setBitmapMs') + 'ms**  text ' + avg('textMs')
+        + 'ms  = 合计 ' + avg('prepareTotalMs') + 'ms');
+      // 短路命中率：**这是"每帧都在真 seek"还是"多数帧直接返回"的分界**。
+      const hits = bd.reduce((a, x) => a + (x.shortCircuitHits || 0), 0);
+      const misses = bd.reduce((a, x) => a + (x.shortCircuitMisses || 0), 0);
+      const maxDelta = Math.max(...bd.map((x) => x.maxMissDeltaMs || 0));
+      const rate = (hits + misses) > 0 ? (hits / (hits + misses) * 100).toFixed(1) : 'n/a';
+      console.log('    同值短路命中 ' + hits + ' / 未命中 ' + misses + '（命中率 ' + rate
+        + '%），未命中里最大差值 ' + maxDelta.toFixed(3) + 'ms');
+    }
+    // **归因**：哪些帧慢、慢在哪几路源。没有这一段，"最坏 346ms"这句话不可行动。
+    const slow = st.slowFrames || [];
+    if (slow.length > 0) {
+      const bySource = new Map();
+      for (const item of slow) {
+        for (const src of item.sources) {
+          const key = src.split('@')[0];
+          bySource.set(key, (bySource.get(key) || 0) + 1);
+        }
+      }
+      // 归因表里出现空名字就是在骗人 —— 那说明上游给了个说不清的标识。
+      if ([...bySource.keys()].some((k) => k === '')) {
+        console.log('  ⚠ 归因表里有空名字 —— 那一路没有可辨识的标识，这条归因不完整');
+      }
+      console.log('  超预算两倍的帧共 ' + slow.length + ' 个（只列前 12 个）：');
+      for (const item of slow.slice(0, 12)) {
+        console.log('    帧 ' + item.frame + '  ' + item.totalMs + 'ms  源 ' + item.sources.join(' + '));
+      }
+      const ranked = [...bySource.entries()].sort((a, b) => b[1] - a[1]);
+      console.log('  按素材归因（出现在慢帧里的次数）：'
+        + ranked.map(([src, n]) => src + ' x' + n).join('、'));
+    }
     return;
   }
   if (value.kind === 'perf') {
@@ -1774,7 +1988,7 @@ async function reportVerdict(name) {
     console.log('  每帧预算 ' + budget.toFixed(2) + 'ms（序列帧率给的）');
     console.log('  "解不动"的阈值 ' + (value.heavyPixels / 1e6).toFixed(1) + 'MP（只用于报告，不是开关）');
     // 只报**浏览器实际解了多少像素**。属性要求那一栏故意不印：
-    // 它已经不设了（设了也没用，见 decode-cap-probe.mjs），印出来只会让人以为有开关。
+    // 它已经不设了（设了也没用，见 docs/usage.md 6.5 的证伪记录），印出来只会让人以为有开关。
     console.log('  各素材实际解码尺寸：');
     for (const item of value.decodeSizes || []) {
       console.log('    ' + item.asset_id + '  ' + item.videoWidth + 'x' + item.videoHeight

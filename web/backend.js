@@ -92,6 +92,14 @@ export function activeBackendFrom(search) {
   const kind = params.get("backend");
   if (kind === "local") {
     const projectId = params.get("project") || undefined;
+    // **可以走同源**：宿主把 /assets 转发到后端时，页面用自己这个源就够。
+    // 这不是可有可无的优化 —— 浏览器把跨源视频当另一类媒体，
+    // 实测同一个文件同一段 seek：同源 0.1ms、跨源 33.5ms（差 300 倍）。
+    // 真实部署里页面与素材本来就同源，所以同源那一路才是**有代表性的**那一路。
+    const sameOrigin = params.get("sameOrigin");
+    if (sameOrigin === "1") {
+      return createLocalBackend(window.location.origin, projectId);
+    }
     const port = params.get("port") || "8791";
     return createLocalBackend("http://127.0.0.1:" + port, projectId);
   }

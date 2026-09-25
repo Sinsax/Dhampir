@@ -1,0 +1,82 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>seek parallelism probe</title></head>
+<body><div id="host"></div>
+<script type="module">
+const out = [];
+const host = document.getElementById("host");
+const FILES = { a: "/assets/a.mp4/media", b: "/assets/b.mp4/media", d: "/assets/d.mp4/media" };
+
+async function makeVideo(url) {
+  const v = document.createElement("video");
+  v.muted = true; v.playsInline = true; v.preload = "auto"; v.crossOrigin = "anonymous";
+  v.src = url; host.appendChild(v);
+  await new Promise((res, rej) => {
+    v.addEventListener("loadeddata", res, { once: true });
+    v.addEventListener("error", () => rej(new Error("load fail")), { once: true });
+  });
+  v.pause();
+  return v;
+}
+function seekOne(v, sec) {
+  return new Promise((res) => {
+    let done = false;
+    const fin = () => { if (done) return; done = true; v.removeEventListener("seeked", fin); res(); };
+    v.addEventListener("seeked", fin);
+    try { v.currentTime = sec; } catch (e) { fin(); return; }
+    setTimeout(fin, 3000);
+  });
+}
+function med(xs) { const s = xs.slice().sort((a,b)=>a-b); return s[Math.floor(s.length/2)]; }
+
+/**
+ * 一次受控对照：**同一组位置**，先串行后并行，各自先回到同一个起点。
+ * 关键：两次测量看到的"seek 距离"必须一样，否则量的是距离不是并行度。
+ */
+async function trial(videos, positions, homePositions) {
+  // 回到起点（不计时）——这是两次测量共同的初始状态
+  for (let i = 0; i < videos.length; i++) await seekOne(videos[i], homePositions[i]);
+  await new Promise((r) => setTimeout(r, 60));
+
+  const t1 = performance.now();
+  for (let i = 0; i < videos.length; i++) await seekOne(videos[i], positions[i]);
+  const serial = performance.now() - t1;
+
+  for (let i = 0; i < videos.length; i++) await seekOne(videos[i], homePositions[i]);
+  await new Promise((r) => setTimeout(r, 60));
+
+  const t2 = performance.now();
+  await Promise.all(videos.map((v, i) => seekOne(v, positions[i])));
+  const parallel = performance.now() - t2;
+
+  return { serial: Number(serial.toFixed(1)), parallel: Number(parallel.toFixed(1)) };
+}
+
+const sets = [
+  { name: "2 路: a(1080p) + d(4K)", keys: ["a","d"] },
+  { name: "3 路: a + b + d", keys: ["a","b","d"] },
+  { name: "1 路: d(4K)（对照，无并行可言）", keys: ["d"] },
+];
+
+for (const set of sets) {
+  const videos = [];
+  for (const k of set.keys) videos.push(await makeVideo(FILES[k]));
+  const serials = [], parallels = [];
+  const homes = videos.map(() => 0.05);
+  for (let round = 0; round < 6; round++) {
+    const target = 0.5 + round * 0.4;
+    const positions = videos.map((v) => Math.min(target, Math.max(0.1, v.duration - 0.2)));
+    const r = await trial(videos, positions, homes);
+    serials.push(r.serial); parallels.push(r.parallel);
+  }
+  out.push({
+    name: set.name,
+    serials: serials, parallels: parallels,
+    serialMedian: med(serials), parallelMedian: med(parallels),
+    speedup: Number((med(serials) / med(parallels)).toFixed(2)),
+  });
+  for (const v of videos) v.remove();
+}
+try { await fetch("/verdict", { method: "POST", headers: {"content-type":"application/json"},
+  body: JSON.stringify({ name: "seek-parallel-probe", value: { kind: "seek-probe", ok: true, cases: out } }) }); } catch(e){}
+document.title = "done";
+</script></body></html>

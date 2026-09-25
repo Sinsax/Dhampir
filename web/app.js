@@ -768,6 +768,9 @@ async function runPlaybackVerdict(name) {
     expectedFrames: Number(expectedNow.toFixed(2)),
     pausedByUser: pausedByUser,
     stoppedAt: finalFrame,
+    // **播放实测**：只报帧号对不对的话，性能好不好这件事在判定里完全看不见。
+    // 带上代价分解，"能播"与"播得顺"才是两件分别可查的事。
+    stats: playbackStats(),
   });
 }
 
@@ -1044,6 +1047,115 @@ async function runPerfVerdict(name) {
   });
 }
 
+/**
+ * 播放全程的**性能实测**（测量用，不是判定）：把整条时间线播一遍，报代价与丢帧。
+ *
+ * # 为什么与 playback 判定分开
+ *
+ * `playback` 验的是"帧号推进得对不对"，它只要 5 帧就够，**样本太少**，
+ * 拿它谈性能是拿两个点画曲线。性能要的是**整条时间线上的分布**：
+ * 中位、均值、最坏，以及"最坏那一帧是谁"。
+ *
+ * # 为什么必须走真实播放（而不是循环调 seek）
+ *
+ * 真实播放有节流（rAF 一拍一次）、有 carry 累积、有音频同步。
+ * 用一个自己写的高频循环测出来的数**不代表用户看到的速度** ——
+ * 那种测量只会得出"很快"，因为它在尽可能快地连着调。
+ */
+async function runPlaythroughVerdict(name) {
+  const engine = state.engine;
+  if (state.doc === null || state.doc === undefined) {
+    return reportVerdict(name, { kind: "playthrough", ok: false, reason: "页面里还没有工程" });
+  }
+  const end = Math.max(1, engine.endFrame());
+  if (end < 8) {
+    return reportVerdict(name, { kind: "playthrough", ok: false, reason: "工程只有 " + end + " 帧，播不出分布" });
+  }
+  const frameMs = 1000 / sequenceFps();
+
+  pause();
+  // **只在测量时打开细粒度计时** —— 它每帧多十几次 performance.now()，
+  // 平时不该付这个钱。
+  engine.timing = true;
+  engine.slowSeeks = [];
+
+  // **同页对照**：新建一个 <video>（引擎没碰过它）跑同样的 seek 序列。
+  // 如果它也是 45ms，"慢"就是这个浏览器/这台机器在此环境下的常态；
+  // 如果它是 0.1ms，那"慢"是被引擎那条路带出来的 —— 两者指向完全不同的修法。
+  // **页面本身的状态**：如果这个页面是后台/被遮挡的，Chrome 会限制它的媒体解码，
+  // 而那种限制在测量数字上与"代码慢"完全一样。
+  const pageState = {
+    visibilityState: typeof document.visibilityState === "string" ? document.visibilityState : "?",
+    hidden: document.hidden === true,
+    hasFocus: document.hasFocus(),
+    devicePixelRatio: window.devicePixelRatio,
+  };
+  // rAF 到底多久一拍（把"被限制"这件事量出来）
+  const rafGaps = [];
+  await new Promise((resolve) => {
+    let last = performance.now();
+    let n = 0;
+    const tick = () => {
+      const now = performance.now();
+      rafGaps.push(now - last);
+      last = now;
+      n += 1;
+      if (n >= 20) resolve();
+      else requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+  const sortedGaps = rafGaps.slice().sort((a, b) => a - b);
+  pageState.rafMedianMs = Number(sortedGaps[Math.floor(sortedGaps.length / 2)].toFixed(2));
+  pageState.rafMeanMs = Number((rafGaps.reduce((a, b) => a + b, 0) / rafGaps.length).toFixed(2));
+
+  // 给到"足够播完 + 宽裕"，慢机器也要能跑完。
+  const budgetMs = end / sequenceFps() * 1000 * 8 + 8000;
+  // **受控对照**：先播一轮**不画**（只 seek），再正常播一轮。
+  // 两轮的帧号序列与 seek 位置完全相同，唯一的变量是"要不要上屏"。
+  engine.skipDraw = true;
+  await seekTo(0);
+  await new Promise((r) => setTimeout(r, 150));
+  play();
+  await waitUntil(() => !isPlaying() || state.frame >= end - 1, budgetMs);
+  pause();
+  const noDraw = playbackStats();
+  engine.skipDraw = false;
+  resetPlaybackStats();
+  await seekTo(0);
+  const startedAt = performance.now();
+  const finished = await waitUntil(() => !isPlaying() || state.frame >= end - 1, budgetMs);
+  const wallMs = performance.now() - startedAt;
+  pause();
+
+  engine.timing = false;
+  const stats = playbackStats();
+  // **实时倍率**：播完这条时间线实际花了多久 vs 它本来该多久。
+  // >1 是慢放（跟不上），约等于 1 是实的。这是用户唯一直接感受到的数。
+  const idealMs = (end - 1) / sequenceFps() * 1000;
+  const realtimeRatio = idealMs > 0 ? wallMs / idealMs : 0;
+
+  return reportVerdict(name, {
+    kind: "playthrough",
+    ok: true,
+    reason: "",
+    frameMs: Number(frameMs.toFixed(2)),
+    end: end,
+    reachedFrame: state.frame,
+    finished: finished,
+    wallMs: Math.round(wallMs),
+    idealMs: Math.round(idealMs),
+    realtimeRatio: Number(realtimeRatio.toFixed(2)),
+    stats: stats,
+    // 对照：不画那一轮的代价（用来判定"慢"是解码本身的还是被上屏拖住的）。
+    noDrawStats: noDraw,
+    // 慢 seek 的现场记录（跳了多远、当时的 readyState）。
+    slowSeeks: Array.isArray(engine.slowSeeks) ? engine.slowSeeks.slice() : [],
+    // 页面自身状态：被限速的页面量出来的数不代表用户环境，这条要能看见。
+    pageState: pageState,
+  });
+}
+
 /** 判定按**名字**选路。表在这里，规则在各判定函数里。 */
 const VERDICTS = {
   "trim-parity": runTrimParity,
@@ -1053,6 +1165,7 @@ const VERDICTS = {
   playback: runPlaybackVerdict,
   "audio-track": runAudioTrackVerdict,
   perf: runPerfVerdict,
+  playthrough: runPlaythroughVerdict,
 };
 
 /** 状态栏：写一条最新的进展/结果。 */
@@ -1133,7 +1246,8 @@ function declaredAsset(assetId) {
  *
  * # 这是一个**报告用**的阈值，不是一个能生效的开关
  *
- * 实测（`node scripts/decode-cap-probe.mjs`，真实 Chrome，同一份 4K 素材四次）：
+ * 实测（真实 Chrome，同一份 4K 素材四次；那次对照的探针页已随结论一起删掉，
+ * 数据留在这一节与 docs/usage.md 6.5）：
  *
  * | 尝试的机制 | videoWidth | 单次 seek |
  * |---|---|---|
@@ -1982,6 +2096,17 @@ const playback = {
     rendered: 0,     // 真正 seek 并画出来的帧数
     ticks: 0,        // 跑了多少拍
   },
+  // **一帧到底花在哪**（播放中实测）。丢帧统计只说"丢了几帧",
+  // 说不出"为什么丢" —— 这两个数分开才指向能改的地方。
+  cost: {
+    seekMs: [],      // seekTo 的整体耗时（就是用户感到的那一段）
+    prepareMs: [],   // 其中 prepare（等 <video> 解码 + 文字栅格化）
+    drawMs: [],      // 其中 draw（宿主合成上屏）
+  },
+  // 明显超预算的那些帧（帧号 + 慢在哪几路源）。**用来归因，不只是用来抱怨。**
+  slowFrames: [],
+  // 慢帧的 prepare 内部拆解（只在明显慢的帧上采样，别把有用的淹掉）。
+  prepareBreakdown: [],
 };
 
 /** 序列帧率（帧/秒）。时间基是**有理数**，整数帧号 ↔ 秒只在渲染与这里换算。 */
@@ -2129,6 +2254,19 @@ function describeDrops(stats) {
 }
 
 /** 播放统计的快照（给状态栏与验收判定读）。**返回副本**，别把内部对象递出去。 */
+/** 一组耗时样本的汇总。空集返回 null —— **没有样本就说没有，不给 0 冒充**。 */
+function summarize(list) {
+  if (!Array.isArray(list) || list.length === 0) return null;
+  const sorted = list.slice().sort((a, b) => a - b);
+  const sum = sorted.reduce((a, b) => a + b, 0);
+  return {
+    n: sorted.length,
+    medianMs: Number(sorted[Math.floor(sorted.length / 2)].toFixed(2)),
+    meanMs: Number((sum / sorted.length).toFixed(2)),
+    maxMs: Number(sorted[sorted.length - 1].toFixed(2)),
+  };
+}
+
 function playbackStats() {
   const d = playback.dropped;
   return {
@@ -2143,12 +2281,25 @@ function playbackStats() {
       ? (d.skipped + d.stalledFrames) / (d.rendered + d.skipped + d.stalledFrames)
       : 0,
     text: describeDrops(d),
+    // **一帧花在哪**：seekMs 是用户感到的那一段，prepare/draw 是它的两半。
+    // 报 null 而不是 0，因为"没采到样"与"耗时为零"是两件事。
+    cost: {
+      seek: summarize(playback.cost.seekMs),
+      prepare: summarize(playback.cost.prepareMs),
+      draw: summarize(playback.cost.drawMs),
+    },
+    // 超预算的帧（归因用）：帧号 + 当时需要哪几路源。
+    slowFrames: playback.slowFrames.slice(),
+    prepareBreakdown: playback.prepareBreakdown.slice(),
   };
 }
 
 /** 清零统计。**开始播放时清** —— 统计是"这一次播放"的，不是历史累计。 */
 function resetPlaybackStats() {
   playback.dropped = { skipped: 0, stalledMs: 0, stalledFrames: 0, rendered: 0, ticks: 0 };
+  playback.cost = { seekMs: [], prepareMs: [], drawMs: [] };
+  playback.slowFrames = [];
+  playback.prepareBreakdown = [];
 }
 
 // --- 播放头 -----------------------------------------------------------------------
@@ -2161,7 +2312,54 @@ async function seekTo(frame) {
   // 不播时把音频**对齐但不播** —— 拖动播放头之后再按播放，声音要从那个位置起，
   // 而不是从上次停下的地方接着走。
   if (!isPlaying()) syncAudioToFrame(state.frame, false);
+  // **播放中才记代价**：拖动播放头时的单次耗时是另一件事
+  // （用户拖一下等 200ms 是可以接受的，播放中每帧等 200ms 就是幻灯片）。
+  // 混在一起统计，两个场景的数会互相污染，谁都不准。
+  if (isPlaying()) {
+    const t0 = performance.now();
+    await state.engine.seek(state.frame);
+    const total = performance.now() - t0;
+    pushCost("seekMs", total);
+    const cost = state.engine.lastSeekCost;
+    if (cost !== undefined) {
+      // prepare 里既有解码也有文字栅格化；draw 是宿主合成上屏。
+      // 两者差一个量级时，该改哪边是清楚的。
+      pushCost("prepareMs", cost.prepareMs);
+      pushCost("drawMs", cost.drawMs);
+    }
+    // prepare 内部再拆一层：**"prepare 慢"本身不是一个可行动的结论** ——
+    // 要能说出是 seek、createImageBitmap、set_bitmap（拷进 GPU 纹理）还是文字。
+    const bd = state.engine.lastPrepareBreakdown;
+    if (bd !== undefined && bd.prepareTotalMs > 5) {
+      playback.prepareBreakdown.push(bd);
+      if (playback.prepareBreakdown.length > 60) playback.prepareBreakdown.shift();
+    }
+    // **慢的那几帧是谁。** 只报分布的话，"最坏 346ms"这句话无法归因 ——
+    // 而"哪一路素材、哪个成帧区间慢"才是能动手的地方。
+    // 只留慢过预算两倍的：全记下来会把有用的那几条淹掉。
+    if (total > 2 * (1000 / sequenceFps())) {
+      const sources = state.engine.sourcesFor(state.frame);
+      playback.slowFrames.push({
+        frame: state.frame,
+        totalMs: Number(total.toFixed(1)),
+        // **空标识要起个名字，不能留白。** 调整图层没有素材，source 是空串 ——
+        // 原样印出来会变成一个说不清的 " x7"，看的人只会以为是统计坏了。
+        sources: sources.map((entry) => (entry.source === ""
+          ? "调整图层"
+          : entry.source + "@" + entry.source_frame)),
+      });
+      if (playback.slowFrames.length > 40) playback.slowFrames.shift();
+    }
+    return;
+  }
   await state.engine.seek(state.frame);
+}
+
+/** 记一个耗时样本。**只留最近 240 个** —— 统计是给人看的，不是给机器存档案的。 */
+function pushCost(bucket, ms) {
+  const list = playback.cost[bucket];
+  list.push(ms);
+  if (list.length > 240) list.shift();
 }
 
 // --- 导出 -------------------------------------------------------------------------
