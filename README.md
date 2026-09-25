@@ -22,21 +22,34 @@
 
 ## 从这里开始
 
+**第一次来，从 [docs/quickstart.md](docs/quickstart.md) 开始** —— 五分钟能看见画面、拿到 mp4。
+
 | 你想 | 去哪 |
 |---|---|
-| **怎么用它**（CLI、预览、后端、参数） | **[docs/usage.md](docs/usage.md)** |
+| **五分钟跑通**（装什么、出片、开预览） | **[docs/quickstart.md](docs/quickstart.md)** |
+| **怎么用它**（全部开关、每种用法、常见问题） | **[docs/usage.md](docs/usage.md)** |
+| **调用面**（承诺等级、CLI、wasm、HTTP） | **[docs/api.md](docs/api.md)** |
+| wasm 导出全名单（**生成的**） | [docs/api-surface.md](docs/api-surface.md) |
+| 宿主返回体的形状与版本 | [docs/host-api.md](docs/host-api.md) |
 | 现在做到哪了、还剩什么 | [plan/next-steps.md](plan/next-steps.md) |
 | 缺陷与架构缺失的台账 | [plan/defects.md](plan/defects.md) |
 | 阶段计划与依赖顺序 | [plan/roadmap.md](plan/roadmap.md) |
 | 为什么这样设计（决策真相） | [plan/video-editor-plan.md](plan/video-editor-plan.md)、[plan/video-editor-tech-guide.md](plan/video-editor-tech-guide.md) |
 | 历史交接记录 | [plan/remaining-work.md](plan/remaining-work.md) |
 
+**四份文档的分工**（别把它们混成一份）：
+
+- **quickstart** = 最短的路，只讲"怎么做"；
+- **usage** = 全部开关与用法，任务导向；
+- **api** = 承诺边界与入口地图（**先读承诺等级那张表**）；
+- **api-surface / host-api** = 机器生成的名单与形状，是**真值**，不手改。
+
 **改决策要改文档，不能只在代码里改。**
 
 ### 最短的一次「跑通」
 
 ```bash
-cargo test --workspace                     # native 全量，547 条
+cargo test --workspace                     # native 全量
 node scripts/run-guards.mjs                # 19 条守卫全绿
 cargo run -q -p dhampir-worker --bin dhampir -- --help
 ```
