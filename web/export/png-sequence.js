@@ -4,7 +4,11 @@
 // 而本项目的铁律是帧精确。逐帧渲染一帧一次读回，帧数就是帧数，没有"大约"。
 // 编码交给 FFmpeg（下游或本地），这一层只负责把帧**原样**交出去。
 
-function base64ToBytes(base64) {
+/**
+ * dataURL 的 base64 段 -> 字节。**导出**出去，是因为"把画布交给驱动"这件事
+ * 不只导出那条路要做（判定留证据也要），两处各写一份就会各错各的。
+ */
+export function base64ToBytes(base64) {
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
   // 下标必须是 index。写成 charCodeAt(0) 会把每个字节都变成首字符——

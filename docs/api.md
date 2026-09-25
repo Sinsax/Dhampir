@@ -135,9 +135,44 @@ dhampir edit --project P --op '...' --write                          # 真写
 | POST | `/assets` | `dhampir import` |
 | GET | `/projects/:id/library` | `dhampir library` |
 | POST | `/export` | `dhampir render`（任务式：提交 -> 轮询 -> 下载） |
+| POST | `/frame` | `dhampir frame`（同步出一帧 PNG） |
 
 **素材位置由 id 经资产索引解释**（工程文件的 `assets` 优先，兜底表补缺），
 **不是**按 id 找同名文件 —— 样本工程引用 `a.mp4`，文件却叫 `proxy1080p.mp4`。
+
+### 4.1 `POST /frame`：出一帧真实出片帧
+
+这是**核心承诺的兑现口**：同一个工程、同一个帧号，页面上的预览与出片路径渲染出来的
+东西必须可比。请求体与 `/export` 同形（**工程在请求体里**），只是多一个帧号：
+
+```json
+{ "project": { ...工程... }, "frame": 12 }
+```
+
+响应 `200` 且 `content-type: image/png`，body 就是 PNG 字节：
+
+* `x-dhampir-frame` 回帧号 —— 调用方据此确认拿到的**就是**自己点的那一帧；
+* 尺寸**不由请求决定**，取工程自己的 `render_hints` / `sequence_size`（与 `render` 同源）。
+  要比「预览与出片一不一致」的人要的正是出片那一份，而不是预览画布那一份。
+
+出错时是 JSON（形状与别的路由一致）：
+
+| 状态 | `error.code` | 什么时候 |
+|---|---|---|
+| 400 | `bad_request` | 请求体不是 JSON |
+| 400 | `bad_frame` | `frame` 不是非负整数（**收小数会让它被静默取整**） |
+| 500 | `frame_failed` | `dhampir frame` 非 0 退出（message 是它的 stderr） |
+| 500 | `frame_no_output` | 它报成功但给不出可读的产物路径 |
+| 503 | `cli_missing` | 没找到 `dhampir` 可执行文件 |
+
+为什么不做成 `GET /projects/:id/frame/:n`：那样只能渲染**磁盘上**那份工程，
+而「我刚拉完这一刀，出片会是什么样」恰恰是编辑中的人最想问的。
+
+> **已知限制（实测，不是推测）**：样本工程第 12 帧上，预览与出片路径的
+> 4x4 块均值差 **14.22**（逐通道均值 R 51.8 / G 22.2 / B 0.7，逐像素全等 12.3%）。
+> 右半（同一路素材）均值差 4.1、最佳匹配帧号就是 12；**左半差 45.7，且对帧号不敏感**，
+> 说明预览的左路素材没跟着播放头走。再 seek 一次回来数字不变，**不是抄早了**。
+> 判据与实测命令：`node scripts/web-check.mjs --verdict realframe --local`。
 
 ---
 

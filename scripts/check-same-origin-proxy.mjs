@@ -24,6 +24,9 @@
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+// 判据的**实现**也拿过来测：文本判据拦得住"又写成白名单"的形状，
+// 但拦不住"insideWebDir 自己写错了"。越界读文件那类问题只能靠行为用例。
+import { insideWebDir } from './web-static.mjs';
 
 const REPO_ROOT = join(import.meta.dirname, '..');
 const TARGET = join(REPO_ROOT, 'scripts', 'web-check.mjs');
@@ -36,6 +39,23 @@ const FORWARD_GATE = 'if (backendPort !== 0) {';
 const STATIC_SERVE = 'createReadStream(file).pipe(res);';
 const BACKEND_KILL = 'backendProcess.kill()';
 const SERVER_CLOSE = 'server.close();';
+/** 静态路由：web/ **整个目录**按存在性服务，不是逐文件列举。 */
+const WHOLE_DIR = 'insideWebDir(WEB_DIR, path)';
+/**
+ * 曾经逐条列举过的那两行。它们回来了就说明"整目录"那条规则被拆掉了。
+ * 判据抓的是**这个形状**：本轮加 `web/app.css` 时，正是因为静态段在逐文件列举，
+ * 样式表被转给后端拿回 404 —— 页面照常渲染、只是完全没有样式。
+ */
+const PER_FILE_WHITELISTS = ["path === '/app.js'", "path.startsWith('/export/')"];
+/**
+ * 响应头**整份转发**的标志。原来这里是四条头的白名单，
+ * 后果与请求侧的白名单一模一样：后端加一个响应头就静默丢掉
+ * （本轮：`x-dhampir-frame` 到不了页面，页面的校验反而报"后端回的是另一帧"）。
+ * **同一个毛病出现第二次了**，所以这次钉的是"整份"，不是再补一条名单。
+ */
+const HEADER_PASSTHROUGH = 'upstream.headers.forEach(';
+/** 曾经那四条的白名单写法。回来了就说明又退回去了。 */
+const HEADER_WHITELIST = "for (const name of ['content-type', 'content-length', 'content-range', 'accept-ranges'])";
 
 /**
  * 判据。**吃源码文本而不是读文件** —— 这样自检能喂一份故意写坏的进来，
@@ -80,7 +100,29 @@ export function judge(source) {
     }
   }
 
-  // ---- 3. 页面服务必须活到报告（下载）结束 ----
+  // ---- 3. 静态路由是「web/ 整个目录」，不是逐文件列举 ----
+  if (at(WHOLE_DIR) < 0) {
+    problems.push('静态路由没走「web/ 整目录」那条规则（' + WHOLE_DIR + '）—— '
+      + '逐文件列举的后果是每加一个前端文件都要记得回来改，忘了就是静默 404');
+  }
+  for (const needle of PER_FILE_WHITELISTS) {
+    if (source.includes(needle)) {
+      problems.push('静态段又在逐条列举 web 文件了（' + needle + '）—— 这正是'
+        + '「加了 web/app.css 却拿回 404、页面完全没有样式」那个故障的形状');
+    }
+  }
+
+  // ---- 4. 响应头整份转发，不是白名单 ----
+  if (at(HEADER_PASSTHROUGH) < 0) {
+    problems.push('代理没有整份转发后端响应头（' + HEADER_PASSTHROUGH + '）—— '
+      + '白名单漏一个头就是静默失效，而症状与真正的原因毫无关系');
+  }
+  if (source.includes(HEADER_WHITELIST)) {
+    problems.push('代理的响应头又变回白名单了 —— 后端新加的响应头会被静默丢掉'
+      + '（本轮：x-dhampir-frame 到不了页面，页面据此判出「后端回的是另一帧」）');
+  }
+
+  // ---- 5. 页面服务必须活到报告（下载）结束 ----
   // 收摊要在后端收摊之后：报告那一段正是在后端收摊前跑的。
   if (!(killAt < closeAt)) {
     problems.push('页面服务在报告（下载产物）之前就 close 了 —— 同源模式下下载地址'
@@ -109,6 +151,10 @@ function runSelfTest() {
     if (problems.length < 1) throw new Error('自检失败：' + name + '（一条都没红）');
     passed += 1;
   };
+  const expectTrue = (name, condition) => {
+    if (condition !== true) throw new Error('自检失败：' + name);
+    passed += 1;
+  };
 
   // 真的源码应当通过。
   expect('真的实现通过', 0, real);
@@ -134,6 +180,29 @@ function runSelfTest() {
   // 5) 页面服务提前收摊（本轮的真实故障）。
   atLeast('页面服务提前收摊 -> 抓住',
     real.replace(BACKEND_KILL, SERVER_CLOSE + ' ' + BACKEND_KILL));
+
+  // 6) 静态段退回逐文件列举（本轮的真实故障：加了 web/app.css 却 404）。
+  atLeast('静态段退回逐文件列举 -> 抓住',
+    real.replace(WHOLE_DIR, "path === '/app.js' ? join(WEB_DIR, 'app.js') : null"));
+
+  // 7) 响应头退回白名单（本轮的真实故障：x-dhampir-frame 被丢掉）。
+  atLeast('响应头退回白名单 -> 抓住',
+    real.replace(HEADER_PASSTHROUGH,
+      '/* 白名单回来了 */ ' + HEADER_WHITELIST + ' void ('));
+
+  // ---- 静态路由的**行为**：越界必须挡住，正常路径必须放行 ----
+  // 文本判据挡不住"insideWebDir 自己写错了"，而它写错的后果是**读到仓库外面**
+  // （页面看起来完全正常）。所以这几条必须真的调它。
+  const webDir = join(REPO_ROOT, 'web');
+  expectTrue('正常文件放行', insideWebDir(webDir, '/app.css') === join(webDir, 'app.css'));
+  expectTrue('子目录放行', insideWebDir(webDir, '/export/http.js') === join(webDir, 'export', 'http.js'));
+  expectTrue('空路径挡住', insideWebDir(webDir, '') === null);
+  expectTrue('根路径不放行（它由上面单独处理）', insideWebDir(webDir, '/') === null);
+  expectTrue('上一级挡住', insideWebDir(webDir, '/../package.json') === null);
+  expectTrue('深层越界挡住', insideWebDir(webDir, '/../../etc/passwd') === null);
+  expectTrue('NUL 挡住', insideWebDir(webDir, '/app.js' + String.fromCharCode(0) + '.png') === null);
+  // 前缀相同的兄弟目录**不是**子目录 —— startsWith(WEB_DIR) 那种写法会在这里放行。
+  expectTrue('前缀兄弟目录挡住', insideWebDir(webDir, '/../web-evil/secret.js') === null);
 
   console.log('✓ 同源代理守卫自检通过（' + passed + ' 条断言）');
 }

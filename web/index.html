@@ -2,124 +2,134 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>dhampir 剪辑</title>
-<style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
-  body { margin: 0; font: 13px/1.5 system-ui, sans-serif; background: #17181c; color: #e6e6e6; }
-  #layout {
-    display: grid; grid-template-columns: 1fr 320px;
-    grid-template-rows: auto auto 1fr auto auto; gap: 10px; padding: 10px; height: 100vh;
-  }
-  #preview { grid-column: 1; grid-row: 1; background: #000; border: 1px solid #2c2e36; border-radius: 6px; width: 100%; max-height: 42vh; object-fit: contain; }
-  #inspector { grid-column: 2; grid-row: 1 / span 5; background: #1d1f25; border: 1px solid #2c2e36; border-radius: 6px; padding: 10px; overflow: auto; }
-  #transport { grid-column: 1; grid-row: 2; display: flex; align-items: center; gap: 8px; }
-  #trackArea { grid-column: 1; grid-row: 3; overflow: auto; background: #1d1f25; border: 1px solid #2c2e36; border-radius: 6px; padding: 8px; }
-  #markers { position: relative; height: 12px; margin-bottom: 4px; border-bottom: 1px solid #2c2e36; }
-  #progress { grid-column: 1; grid-row: 4; display: flex; align-items: center; gap: 10px; }
-  #issues { grid-column: 1 / span 2; grid-row: 5; min-height: 32px; font-size: 12px; overflow: auto; max-height: 110px; }
-  #progressTrack { flex: 1; height: 8px; background: #24262d; border-radius: 4px; overflow: hidden; }
-  #progressBar { height: 100%; width: 0; background: #4f6da3; transition: width .2s linear; }
-  #progressBar.indeterminate { width: 100%; background: repeating-linear-gradient(45deg, #37507a 0 10px, #2f4a75 10px 20px); }
-  .track { position: relative; height: 30px; margin: 5px 0; background: #24262d; border-radius: 4px; }
-  .track-label { position: absolute; left: 4px; top: 7px; font-size: 11px; color: #8b90a0; pointer-events: none; z-index: 2; }
-  .layer { position: absolute; top: 4px; height: 22px; background: #37507a; border: 1px solid #4f6da3; border-radius: 3px; font-size: 11px; padding: 2px 5px; overflow: hidden; white-space: nowrap; cursor: pointer; user-select: none; touch-action: none; }
-  .layer.selected { background: #7a5a2c; border-color: #c99b48; }
-  .layer.adjustment { background: #4a3a6a; border-color: #7d63a8; }
-  .layer.disabled { opacity: .45; }
-  .layer .tr { position: absolute; left: 0; top: 0; bottom: 0; background: #d09a3c; opacity: .6; }
-  /* 左右缘的改时长手柄。**必须盖在 .tr 之上**（.tr 是过渡标记，占着左缘），
-     否则淡入标记会把左手柄吃掉。透明加宽是为了好抓（22px 高的条上细线抓不住）。 */
-  .layer .handle { position: absolute; top: 0; bottom: 0; width: 7px; cursor: ew-resize; z-index: 3; }
-  .layer .handle.l { left: -1px; }
-  .layer .handle.r { right: -1px; }
-  .layer:hover .handle { background: rgba(232, 196, 106, .85); }
-  .layer .handle:hover { background: #e8c46a; }
-  .marker { position: absolute; top: 0; width: 2px; height: 10px; background: #d09a3c; }
-  input[type=number] { width: 96px; background: #12131a; color: #e6e6e6; border: 1px solid #34374a; border-radius: 3px; padding: 2px 4px; }
-  select { width: 96px; background: #12131a; color: #e6e6e6; border: 1px solid #34374a; border-radius: 3px; padding: 2px 4px; }
-  label { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin: 5px 0; }
-  h3 { margin: 4px 0 8px; font-size: 12px; color: #9aa0b0; text-transform: uppercase; letter-spacing: .06em; }
-  button { background: #2f4a75; color: #e6e6e6; border: 1px solid #4f6da3; border-radius: 4px; padding: 5px 10px; cursor: pointer; }
-  a#download { background: #2f6b3a; border: 1px solid #4a9a5a; border-radius: 4px; padding: 5px 10px; color: #e6e6e6; text-decoration: none; }
-  .identity { font-size: 11px; color: #9aa0b0; margin-bottom: 8px; word-break: break-all; }
-  .lib { font-size: 11px; max-height: 120px; overflow: auto; }
-  .lib .row { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 2px 0; border-bottom: 1px solid #24262d; }
-  .lib .row button { padding: 1px 6px; font-size: 11px; }
-  .lib .unused { color: #e8c46a; }
-  #editBar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
-  #editBar button { padding: 3px 7px; font-size: 11px; }
-  #editBar label { font-size: 11px; gap: 4px; margin: 0; }
-  #play.playing { background: #7a5a2c; border-color: #c99b48; }
-  .muted { color: #8b90a0; }
-  .small { font-size: 11px; }
-  .hint { color: #c9c9c9; }
-  .bad { color: #ff8f8f; }
-  .warn { color: #e8c46a; }
-  .ok { color: #8fd18f; }
-  video { display: none; }
-  audio { display: none; }
-</style>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dhampir · 预览与出片</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%239A6BC4'/%3E%3Ctext x='32' y='45' font-size='36' font-family='Arial' font-weight='bold' fill='%23fff' text-anchor='middle'%3Ed%3C/text%3E%3C/svg%3E">
+<!-- 样式在 web/app.css。**放在文件里而不是内联**：内联样式表会随 index.html 一起
+     被"整页替换"式的改动波及，而它的改动频率远低于结构。 -->
+<link rel="stylesheet" href="/app.css">
 </head>
 <body>
 <div id="layout">
-  <canvas id="preview" width="640" height="360"></canvas>
-  <div id="transport">
-    <button id="first" title="回到首帧（Home）">|&lt;</button>
-    <button id="prev" title="上一帧（←）">−1</button>
-    <!-- 播放是**帧号驱动**的：素材元素是被 seek 出来的一帧，让它自己播就等于预览
-         有了第二个时钟，与出片那条路迟早分叉（那正是本工程最忌讳的事）。 -->
-    <button id="play" title="播放 / 暂停（空格）">▶</button>
-    <input id="frame" type="range" min="0" max="89" value="0" style="flex:1">
-    <button id="next" title="下一帧（→）">+1</button>
-    <button id="last" title="到末帧（End）">&gt;|</button>
-    <span id="frameLabel">0</span>
-    <span id="fpsLabel" class="muted small"></span>
+
+  <!-- 顶栏：这一屏唯一会真的产出东西的按钮（导出）放最右。 -->
+  <header id="topbar">
+    <span class="brand">dhampir</span>
+    <span class="rule"></span>
+    <!-- 工程身份由 app.js 填（工程 id / 轨道数 / 序列尺寸）。**放在顶栏**是因为
+         "我现在在剪哪一份工程、多大尺寸"是判断"画面为什么是这样"的第一个前提。 -->
+    <span class="identity" id="projectId">正在载入…</span>
+    <span class="spacer"></span>
+    <span class="chip n" id="fpsLabel"></span>
     <!-- 丢帧统计。播放跟不上时**必须说出来**：画面在跳是看得见的，
          跳了几帧、是解码不行还是刚切过标签页，看不见。 -->
-    <span id="playStats" class="muted small"></span>
-    <!-- 音频只有播放/定位/音量三样：用户明确说了音频不要特效。 -->
-    <button id="muteBtn" title="静音 / 取消静音（M）">🔊</button>
-    <input id="volume" type="range" min="0" max="100" value="80" style="width:80px"
-           title="音量（只有播放时才有声音）">
-    <button id="export">导出视频</button>
-  </div>
-  <div id="trackArea">
-    <div id="markers"></div>
-    <div id="timeline"></div>
-  </div>
+    <span class="chip n" id="playStats"></span>
+    <!-- 这一条按钮是**核心承诺的兑现口**：预览与出片必须给出可比的帧。
+         点一下就把后端渲染的那一帧取回来，并报出两边的像素差 —— 对了要看得见，
+         不对也要看得见。 -->
+    <button class="mini-btn" id="realFrameBtn" title="用出片那条路渲染当前帧，与预览比对">真实出片帧</button>
+    <button class="mini-btn" id="shortcutBtn" title="快捷键（?）">快捷键</button>
+    <button class="mini-btn primary" id="export">导出视频</button>
+  </header>
+
+  <section id="stage">
+    <!-- 舞台是中性的深底：浅底会把暗部看错，而预览的职责就是让人判断画面。 -->
+    <div class="stage-frame">
+      <canvas id="preview" width="640" height="360"></canvas>
+      <!-- **真实出片帧**：后端拿同一份工程渲染的同一帧（走 dhampir frame 那条路）。
+           它盖在画布上而不是另开一个窗口 —— 要比的是"同一帧的两次渲染"，
+           并排放两个盒子会让人先比较布局、再比较画面。 -->
+      <img id="realFrame" hidden alt="后端渲染的真实出片帧">
+      <span class="stage-tag" id="stageTag" hidden></span>
+    </div>
+
+    <div id="transport">
+      <button class="icon-btn" id="first" title="回到首帧（Home）"></button>
+      <button class="icon-btn" id="prev" title="上一帧（← / ,）"></button>
+      <!-- 播放是**帧号驱动**的：素材元素是被 seek 出来的一帧，让它自己播就等于预览
+           有了第二个时钟，与出片那条路迟早分叉（那正是本工程最忌讳的事）。 -->
+      <button class="icon-btn" id="play" title="播放 / 暂停（空格 / K）"></button>
+      <button class="icon-btn" id="next" title="下一帧（→ / .）"></button>
+      <button class="icon-btn" id="last" title="到末帧（End）"></button>
+      <!-- 时码：帧号是**契约单位**，时间读数是给人看的。两个都给，别让人换算。 -->
+      <span class="timecode" id="frameLabel">帧 <b id="frameNow">0</b> <span class="tc-sub" id="frameTime">00:00.00</span></span>
+      <input id="frame" type="range" min="0" max="89" value="0" aria-label="播放头">
+      <span class="spacer"></span>
+      <!-- 音频只有播放/定位/音量三样：用户明确说了音频不要特效。 -->
+      <button class="icon-btn" id="muteBtn" title="静音 / 取消静音（M）"></button>
+      <input id="volume" type="range" min="0" max="100" value="80" aria-label="音量"
+             title="音量（只有播放时才有声音）">
+    </div>
+  </section>
+
+  <section id="timeline-panel">
+    <div class="panel-head">
+      <span class="panel-title">时间线</span>
+      <span class="hint">拖动片段改位置 · 拖左右缘改时长 · 点击选中</span>
+    </div>
+    <div id="trackArea">
+      <div id="markers"></div>
+      <div id="timeline"></div>
+    </div>
+  </section>
+
   <!-- 出片进度。进度未知时显示不确定态，**不用 0 冒充**。 -->
   <div id="progress" hidden>
     <div id="progressTrack"><div id="progressBar"></div></div>
     <span id="progressText"></span>
-    <a id="download" hidden>下载成片</a>
+    <a class="mini-btn" id="download" hidden>下载成片</a>
   </div>
+
+  <div id="issues"></div>
+
   <aside id="inspector">
     <h3>素材库</h3>
     <!-- 引用次数由 Rust 算（dhampir library），这里只负责画出来 ——
          在前端重数一遍就是第二份实现，而两份实现一定会漂。 -->
-    <div id="library" class="lib">（未连接后端）</div>
+    <div id="library" class="lib"></div>
     <h3>编辑</h3>
     <div id="editBar">
-      <button id="undoBtn">撤销</button>
-      <button id="redoBtn">重做</button>
-      <button id="splitBtn">剃刀（播放头）</button>
-      <button id="removeBtn">删除</button>
-      <button id="rippleBtn">波纹删除</button>
+      <button class="mini-btn" id="undoBtn" title="撤销（Ctrl+Z）">撤销</button>
+      <button class="mini-btn" id="redoBtn" title="重做（Ctrl+Shift+Z）">重做</button>
+      <button class="mini-btn" id="splitBtn" title="在播放头处切开选中片段（S）">剃刀</button>
+      <button class="mini-btn danger" id="removeBtn" title="删除选中片段（Delete）">删除</button>
+      <button class="mini-btn danger" id="rippleBtn" title="删除并把后面的片段左移补位">波纹删除</button>
       <label>序列帧率<input id="seqFps" type="number" min="1" value="30"></label>
-      <button id="applyFps">应用帧率</button>
+      <button class="mini-btn" id="applyFps">应用帧率</button>
     </div>
     <h3>元素属性</h3>
-    <div id="props">（未选中元素）</div>
+    <div id="props" class="pane"></div>
   </aside>
-  <div id="issues"></div>
-  <!-- 导出范围。app.js 把 first..end-1 写进 data-*；hidden 是因为 v1 不做范围选择 UI。 -->
-  <div id="frameOnly" hidden data-from="0" data-to="0"></div>
 </div>
+
+<!-- 素材与音轨的宿主。**藏起来**：画面一律走 canvas，声音只从 <audio> 出。 -->
 <div id="videos"></div>
-<!-- 音轨的 <audio> 元素挂在这里。与 <video> 一样藏起来：它们只供播放取声音，
-     画面一律走 canvas。 -->
 <div id="audios"></div>
+<!-- 导出范围。app.js 把 first..end-1 写进 data-*；hidden 是因为 v1 不做范围选择 UI。 -->
+<div id="frameOnly" hidden data-from="0" data-to="0"></div>
+<div id="toasts"></div>
+
+<div id="shortcuts" hidden>
+  <div class="sheet">
+    <h3>快捷键</h3>
+    <table>
+      <tr><td class="k">空格 / K</td><td class="d">播放 · 暂停</td></tr>
+      <tr><td class="k">← / ,</td><td class="d">上一帧</td></tr>
+      <tr><td class="k">→ / .</td><td class="d">下一帧</td></tr>
+      <tr><td class="k">Shift + ← / →</td><td class="d">前后 1 秒</td></tr>
+      <tr><td class="k">Home / End</td><td class="d">首帧 · 末帧</td></tr>
+      <tr><td class="k">J / L</td><td class="d">上一帧 · 下一帧（剪辑台习惯）</td></tr>
+      <tr><td class="k">M</td><td class="d">静音开关</td></tr>
+      <tr><td class="k">S</td><td class="d">在播放头剃刀</td></tr>
+      <tr><td class="k">Delete</td><td class="d">删除选中片段</td></tr>
+      <tr><td class="k">Ctrl + Z</td><td class="d">撤销</td></tr>
+      <tr><td class="k">Ctrl + Shift + Z</td><td class="d">重做</td></tr>
+      <tr><td class="k">?</td><td class="d">打开 · 关闭这张表</td></tr>
+    </table>
+    <p class="hint" style="margin-top:10px">输入框里打字时快捷键一律让位。</p>
+  </div>
+</div>
+
 <script>
 // **页面里的错要发得出去。**
 // 没有这段，页面里抛的错在外面只能表现为「什么都没发生」——

@@ -46,6 +46,8 @@ const FALLBACK_REGISTRY = join(PROJECTS_DIR, 'local-assets.json');
 /** 出片产物与临时文件都放 target/（已忽略），仓库里不留垃圾。 */
 const EXPORT_DIR = join(REPO_ROOT, 'target', 'p6', 'local-exports');
 const TMP_DIR = join(REPO_ROOT, 'target', 'p6', 'local-tmp');
+/** 单帧 PNG 的落地目录。也是 target/ 下的：它是中间产物，不是交付物。 */
+const FRAME_DIR = join(REPO_ROOT, 'target', 'p6', 'local-frames');
 
 const MIME = {
   '.mp4': 'video/mp4',
@@ -641,6 +643,104 @@ function handle(req, res, context, url) {
         } catch (error) {
           return sendJson(res, 500, { error: issue('validate_bad_json', path, '校验器没给出 JSON：' + error.message) });
         }
+      });
+    });
+  }
+
+  // 出一帧**真实出片帧**（PNG）。
+  //
+  // 这是"预览与出片给出可比的帧"那条承诺的兑现口：页面手上有一份工程
+  // （可能刚编辑过、还没落盘），把它连同帧号发过来，这里走的是**与 render
+  // 完全相同的那条 Rust 路径**（同一个 cmd_frame、同一份时间线实现），
+  // 于是"画布上这一帧"与"这张 PNG"是同一份工程的两次渲染，可以逐像素比。
+  //
+  // 为什么不是 GET /projects/:id/frame/:n：那样只能渲染**磁盘上**那份工程，
+  // 而"我刚拉完这一刀，出片会是什么样"恰恰是编辑中的人最想问的。
+  // 请求形状与 /export 一致（工程在请求体里），调用方不必学两套。
+  //
+  // **尺寸不由这里决定**：用工程自己的 render_hints / sequence_size
+  // （CLI 的 resolve_size）。理由是这样拿到的就是**出片尺寸** ——
+  // 想比"预览与出片一不一致"的人，要的正是出片那一份，而不是预览画布那一份。
+  if (req.method === 'POST' && path === '/frame') {
+    if (cli === null) {
+      return sendJson(res, 503, {
+        error: issue(
+          'cli_missing',
+          path,
+          '没找到 dhampir 可执行文件。先跑：cargo build -p dhampir-worker --bin dhampir'
+        ),
+      });
+    }
+    return readBody(req, (body) => {
+      let parsed = null;
+      try { parsed = JSON.parse(body.toString('utf8')); } catch (error) {
+        return sendJson(res, 400, { error: issue('bad_request', path, '请求体不是 JSON：' + error.message) });
+      }
+      const project = projectFromBody(parsed);
+      if (project === null) {
+        return sendJson(res, 400, { error: issue('no_project', 'project', '请求里没有工程') });
+      }
+      // 帧号必须是**非负整数**。收小数的话它会被静默取整，
+      // 而"我要第 12.7 帧"变成第 12 帧而没有任何人说出来 —— 帧号是契约单位。
+      if (!Number.isInteger(parsed.frame) || parsed.frame < 0) {
+        return sendJson(res, 400, {
+          error: issue('bad_frame', 'frame', 'frame 要是非负整数：' + String(parsed.frame)),
+        });
+      }
+      const frame = parsed.frame;
+
+      mkdirSync(FRAME_DIR, { recursive: true });
+      mkdirSync(TMP_DIR, { recursive: true });
+      const stamp = Date.now() + '-' + process.pid + '-' + frame;
+      const temporary = join(TMP_DIR, 'frame-' + stamp + '.json');
+      const outDir = join(FRAME_DIR, stamp);
+      mkdirSync(outDir, { recursive: true });
+      writeFileSync(temporary, JSON.stringify(project), 'utf8');
+
+      const args = ['frame', '--project', temporary, '--frame', String(frame),
+        '--out', outDir, '--asset-root', assetRoot];
+      // 兜底登记表：**只对工程文件没登记的 id 生效**（CLI 侧同样是工程文件优先）。
+      if (existsSync(FALLBACK_REGISTRY)) args.push('--asset-map', FALLBACK_REGISTRY);
+
+      const cleanup = () => {
+        try { rmSync(temporary, { force: true }); } catch (error) { /* 清不掉就算了 */ }
+        try { rmSync(outDir, { recursive: true, force: true }); } catch (error) { /* 同上 */ }
+      };
+
+      return void runCli(cli, args, 120000).then((result) => {
+        if (result.code !== 0) {
+          cleanup();
+          return sendJson(res, 500, {
+            error: issue('frame_failed', path,
+              (result.stderr || '').trim() || ('dhampir frame 退出 ' + result.code)),
+          });
+        }
+        // **产物路径从 stdout 读**，不自己拼文件名。名字是 CLI 的事
+        // （今天叫 frame-0012.png），在这边再拼一份就是第二份实现，改一天就漂。
+        let produced = null;
+        try {
+          const meta = JSON.parse(result.stdout);
+          if (typeof meta.path === 'string') produced = resolve(REPO_ROOT, meta.path);
+        } catch (error) { produced = null; }
+        if (produced === null || !existsSync(produced)) {
+          // **不假装**：报成功但给不出产物，就是失败，退回"目录里唯一一张图"去猜更坏。
+          cleanup();
+          return sendJson(res, 500, {
+            error: issue('frame_no_output', path, 'dhampir frame 报成功，但 stdout 里没有可读的产物路径'),
+          });
+        }
+        const bytes = readFileSync(produced);
+        cleanup();
+        res.writeHead(200, {
+          'content-type': 'image/png',
+          'content-length': String(bytes.length),
+          // 帧号回在头里：调用方据此确认拿到的**就是**自己点的那一帧，
+          // 而不是"看起来像"。
+          'x-dhampir-frame': String(frame),
+          'cache-control': 'no-store',
+        });
+        res.end(bytes);
+        return undefined;
       });
     });
   }

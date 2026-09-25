@@ -40,6 +40,9 @@ import { dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { firstDifference, firstSubsetDifference } from './verdict-compare.mjs';
 import { ensureFreshPkg } from './stale-pkg.mjs';
+// 静态路由的判据只有一份实现（守卫要测它，所以它不能住在这个文件里 ——
+// 这个文件顶层就会起服务）。
+import { insideWebDir } from './web-static.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, '..');
@@ -245,22 +248,25 @@ const server = createServer(async (req, res) => {
   // 「导出失败：查询失败：HTTP 404」—— 看不出是路由没转，查起来很贵。
   // 本轮就踩到过一次：同源代理只转了 /export 这一条精确路径，
   // 漏掉了 /export/<jobId> 的轮询与 /export/<jobId>/download。
+  // **web/ 整个目录都算「页面自己的」**：路径就是它相对 web/ 的路径。
+  //
+  // 这里原来是一张逐文件名单（index.html / probe.html / app.js / export/…），
+  // 后果是**每加一个前端文件都要记得回来改它**，忘了就是静默 404 ——
+  // 而 404 的表现是「页面白屏」或「样式没生效」，都不指向真正的原因。
+  // 本轮加 web/app.css 时又一次撞上：名单里没有 .css，于是样式表被转给后端、拿回 404，
+  // 页面照常渲染、只是完全没有样式。**把类别消掉，而不是再补一条。**
+  //
+  // 越界防护：解析结果必须仍在 WEB_DIR 里（`..` 与绝对路径都会被挡掉），
+  // 否则 `/../../etc/passwd` 这种请求会读到仓库外面去。
   let file = null;
   if (path === '/' || path === '/index.html') file = join(WEB_DIR, 'index.html');
-  else if (path === '/probe.html') file = join(WEB_DIR, 'probe.html');
-  else if (path === '/synthetic.html') file = join(WEB_DIR, 'synthetic.html');
-  // 一次性诊断页：用来在**真实浏览器里**做 A/B，而不是靠对规范的印象下结论。
-
   else if (path.startsWith('/pkg/')) file = join(PKG_DIR, path.slice('/pkg/'.length));
   else if (path === '/sample-project.json') file = join(REPO_ROOT, 'fixtures', 'sample-project.json');
   // 工程文件形态（带资产表、v2 元素）。**页面默认要的是这一份** ——
   // 裸契约没有资产表，页面读不到 assets，多素材就无从解析。
   else if (path === '/sample-project.doc.json') file = join(REPO_ROOT, 'fixtures', 'sample-project.doc.json');
   else if (path === '/media/proxy.mp4') file = join(REPO_ROOT, MEDIA);
-  // web/ 下的前端模块一律照原样服务。写死清单会在加文件时静默 404 ——
-  // 而 404 的表现是「页面白屏」，不是「少一个文件」，很难查。
-  else if (path === '/app.js' || path === '/engine.js' || path === '/backend.js') file = join(WEB_DIR, path.slice(1));
-  else if (path.startsWith('/export/')) file = join(WEB_DIR, path.slice(1));
+  else file = insideWebDir(WEB_DIR, path);
   if (file !== null && existsSync(file) && statSync(file).isFile()) {
     res.writeHead(200, {
       'content-type': MIME[extname(file)] || 'application/octet-stream',
@@ -301,11 +307,24 @@ const server = createServer(async (req, res) => {
     const upstream = await fetch('http://127.0.0.1:' + backendPort + path, {
       method: req.method, headers: upstreamHeaders, body: body,
     });
+    // **响应头整份转发，只剔除逐跳的那几个。**
+    //
+    // 原来是白名单（只抄 content-type / content-length / content-range / accept-ranges），
+    // 于是后端新加一个响应头就被**静默丢掉**。本轮真的踩到：`/frame` 把帧号回在
+    // `x-dhampir-frame` 里，到了页面就没了，页面的校验因此判定"后端回的是另一帧"。
+    // **这是同一个毛病的第二次**（请求侧那次漏的是路由），所以这次按整份转发写，
+    // 而不是再往名单里补一条 —— 补名单等于承认下次还会漏。
+    const HOP_BY_HOP = new Set([
+      'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
+      'te', 'trailer', 'transfer-encoding', 'upgrade',
+      // fetch 已经解压过了，再说一遍 content-encoding 就会说错；
+      // content-length 同理（解压后的长度变了）—— 交给 Node 自己按 body 长度算。
+      'content-encoding', 'content-length',
+    ]);
     const outHeaders = {};
-    for (const name of ['content-type', 'content-length', 'content-range', 'accept-ranges']) {
-      const value = upstream.headers.get(name);
-      if (value !== null) outHeaders[name] = value;
-    }
+    upstream.headers.forEach((value, name) => {
+      if (!HOP_BY_HOP.has(name.toLowerCase())) outHeaders[name] = value;
+    });
     res.writeHead(upstream.status, outHeaders);
     if (upstream.body === null) { res.end(); return; }
     for await (const chunk of upstream.body) res.write(chunk);
@@ -2021,6 +2040,76 @@ async function reportVerdict(name) {
     }
     return;
   }
+  // 「界面骨架还在不在」。改版最容易顺手删掉一个 id，而那种坏法在别的判定里看不见。
+  if (value.kind === 'ui') {
+    const missing = Array.isArray(value.missing_ids) ? value.missing_ids : [];
+    const noIcon = Array.isArray(value.icons_missing) ? value.icons_missing : [];
+    console.log('  画布 ' + value.canvas + ' · 顶栏工程摘要「' + value.project_label + '」');
+    if (missing.length > 0) console.log('  - 少了 DOM 契约里的 id：' + missing.join(' / '));
+    if (noIcon.length > 0) console.log('  - 这些按钮没画出图标：' + noIcon.join(' / '));
+    if (value.ready !== true) console.log('  - 页面没到 ready（window.dhampirReady 不是 true）');
+    const ok = missing.length === 0 && noIcon.length === 0 && value.ready === true;
+    console.log((ok ? '  ✓ ' : '  - ') + (ok
+      ? '界面骨架完整（DOM 契约 32 个 id 全在、图标按钮都画了图标）'
+      : '界面骨架不完整'));
+    if (!ok) process.exitCode = 1;
+    return;
+  }
+
+  // 「预览与出片给出的帧一致吗」。**判据是一个数，不是印象。**
+  if (value.kind === 'realframe') {
+    if (value.compared !== true) {
+      console.log('  - 这一轮没比成：' + String(value.reason));
+      // 收不到一句能看懂的理由时，**把整份回传原样打出来**：
+      // 只印 reason 的话，"回传里到底有什么"就只能靠猜。
+      console.log('    回传原样：' + JSON.stringify(value));
+      process.exitCode = 1;
+      return;
+    }
+    const max = Number(value.max_abs_channel_diff);
+    const mean = Number(value.mean_abs_channel_diff);
+    const over = Number(value.over_threshold_ratio);
+    console.log('  第 ' + value.frame + ' 帧：预览 ' + value.preview_size
+      + ' / 出片 ' + value.render_size);
+    console.log('  逐通道差：最大 ' + max + ' · 均值 ' + mean.toFixed(3)
+      + ' · 超阈值(>2) 占 ' + (over * 100).toFixed(2) + '%');
+    // **结论之外要有事实**：为什么不一样，比"不一样"有用得多。
+    const cm = value.channel_mean_diff;
+    if (Array.isArray(cm)) {
+      console.log('  分通道均值 R ' + cm[0].toFixed(2) + ' G ' + cm[1].toFixed(2)
+        + ' B ' + cm[2].toFixed(2) + '（三个一起偏 = 色彩换算口径不同）');
+    }
+    if (typeof value.same_pixel_ratio === 'number') {
+      console.log('  逐像素全等（各通道差 <=1）占 ' + (value.same_pixel_ratio * 100).toFixed(2) + '%');
+    }
+    if (typeof value.block_mean_abs_diff === 'number') {
+      console.log('  4x4 块均值差 ' + Number(value.block_mean_abs_diff).toFixed(3)
+        + '（对采样滤波不敏感的一档）');
+    }
+    // 阈值取 2 与页面里那个口径**同源**：8 位色深下 ±1 是舍入，±2 是抖动的边缘。
+    // 超过就说明两次渲染真的不一样 —— 那是本工程最该被发现的事，不该被抹平。
+    // 等一下再抄的那一组：两组数放在一起才看得出「是渲染不一致还是抄早了」。
+    if (typeof value.settled_max_abs_channel_diff === 'number') {
+      console.log('  再 seek 一次回来：最大 ' + value.settled_max_abs_channel_diff
+        + ' · 均值 ' + Number(value.settled_mean_abs_channel_diff).toFixed(3)
+        + ' · 4x4 块均值 ' + Number(value.settled_block_mean_abs_diff).toFixed(3));
+      console.log('    ' + (max > 2 && value.settled_max_abs_channel_diff <= 2
+        ? '-> 第一遍差、第二遍好了：**是第一遍还没稳定**（读数太早），不是渲染不一致'
+        : '-> 等一会儿仍然差：两次渲染确实不一致'));
+    }
+    // 判据取**块均值**而不是单个像素的最大值：
+    // 最大值对重采样的边缘极敏感（一个像素差 205 可能只是缩放滤波器不同），
+    // 而 4x4 块均值看的是「这一小块整体对不对」—— 它对滤波不敏感，对真实差异敏感。
+    // 阈值 2 与页面里那个口径同源：8 位色深下 ±1 是舍入。
+    const block = Number(value.block_mean_abs_diff);
+    const ok = Number.isFinite(block) && block <= 2;
+    console.log((ok ? '  ✓ ' : '  - ') + (ok
+      ? '预览与出片在同一帧上结构一致（4x4 块均值差 ' + block + ' <= 2）'
+      : '**预览与出片不一致**：4x4 块均值差 ' + block + ' > 2 —— 这正是本工程要防的那件事'));
+    if (!ok) process.exitCode = 1;
+    return;
+  }
+
   console.log('  op：' + JSON.stringify(value.op));
   const parity = runCliParity(value);
   console.log((parity.ok ? '  ✓ ' : '  - ') + parity.detail);

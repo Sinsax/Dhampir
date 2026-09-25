@@ -1,0 +1,338 @@
+/* ============================================================================
+   dhampir WebUI 设计系统
+   ----------------------------------------------------------------------------
+   结构取自 V-Trim 的 webui（tokens.css + app.css）：**令牌分层、圆角阶梯、
+   语义三色组（本色/浅底/深字）、卡片与胶囊**。那套骨架经得起读，直接沿用。
+   配色没有照抄：V-Trim 的品牌是樱花粉，这里是**暖底 + 梅子紫**，同一族但各有身份
+   （底座是"渲染与预览同源"，不是"切片"）。字号、圆角、间距照那套的相对关系走。
+
+   **没有字体依赖**：V-Trim 用 LXGW WenKai（手写体），装不上的机器会静默回退，
+   于是"长得不一样"变成环境问题。这里只用系统字体栈 + 等宽，保证到哪儿都一样。
+   时间码与帧号一律等宽：数字不等宽时播放中会左右抖。
+
+   颜色一律走令牌。**不要在组件里写死色值** —— 写死了改主题就得满文件找。
+   ============================================================================ */
+
+:root {
+  /* 底色 / 文字 */
+  --bg: #FBF8F6;
+  --bg-soft: #F5EFEC;
+  --card: #fff;
+  --line: #EDE2DD;
+  --line-soft: #F6EEEA;
+  --ink: #3F3742;
+  --ink-dim: #8E8493;
+  --ink-faint: #C0B6C0;
+
+  /* 品牌：梅子紫 */
+  --main: #9A6BC4;
+  --main-deep: #8355AC;
+  --main-soft: #F1E8F8;
+  --main-glow: #E3D3F0;
+  --plum-text: #7A4CA6;
+
+  /* 语义色：soft 作底 / 本色作块 / deep 作文字 */
+  --blue: #7FA8F0;
+  --blue-deep: #5E7FD8;
+  --blue-soft: #E8EEFC;
+  --amber: #E8B44A;
+  --amber-deep: #A8721A;
+  --amber-soft: #FBF0D6;
+  --green: #4FBF9C;
+  --green-deep: #2FA07E;
+  --green-soft: #DEF2EA;
+  --red: #E8727E;
+  --red-deep: #D9566A;
+  --red-soft: #FBE3E5;
+
+  /* 舞台专用：预览必须judged在**中性深底**上，浅底会把暗部看错 */
+  --stage: #221E24;
+  --stage-line: #37313A;
+
+  --r-sm: 8px;
+  --r: 14px;
+  --r-full: 999px;
+
+  --shadow: 0 6px 20px rgba(122,76,166,.08), 0 1px 3px rgba(70,50,60,.04);
+  --shadow-hover: 0 10px 28px rgba(122,76,166,.16), 0 2px 6px rgba(70,50,60,.05);
+  --shadow-main: 0 4px 14px rgba(131,85,172,.34);
+
+  --font: system-ui, -apple-system, 'Segoe UI', 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+  --mono: ui-monospace, 'Cascadia Mono', Consolas, 'Courier New', monospace;
+
+  /* 时间线几何：行高与手柄宽度被 app.js 的拖拽判据依赖（.handle 要够好抓），
+     所以它们是令牌而不是随手写的数 —— 改这里要连 drag 的容差一起想。 */
+  --lane-h: 34px;
+  --lane-gap: 6px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink);
+  font: 13px/1.55 var(--font);
+  height: 100vh; overflow: hidden;
+}
+/* 背景手绘圆点纹理（同 V-Trim 的 sakura 底纹手法，换成梅子色） */
+body::after {
+  content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+  background-image: radial-gradient(rgba(154,107,196,.07) 1.5px, transparent 1.6px);
+  background-size: 26px 26px;
+}
+button { font: inherit; cursor: pointer; border: none; background: none; color: inherit; }
+input, select, button { font-family: inherit; }
+input[type=number], input[type=text], select {
+  background: var(--card); color: var(--ink);
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  padding: 4px 7px; font-size: 12px;
+}
+input[type=number]:focus, select:focus { outline: 2px solid var(--main-glow); outline-offset: 0; }
+input[type=range] { accent-color: var(--main); height: 18px; }
+:focus-visible { outline: 2px solid var(--main); outline-offset: 1px; }
+
+/* ---------- 布局壳 ---------- */
+#layout {
+  position: relative; z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 344px;
+  grid-template-rows: auto minmax(0, 1fr) auto auto auto;
+  gap: 10px; padding: 10px; height: 100vh;
+}
+/* 顶栏：品牌 + 工程身份 + 状态 + 主操作。**主操作（导出）放最右**，
+   因为它是这一屏唯一会真的产出东西的按钮。 */
+#topbar {
+  grid-column: 1 / span 2; grid-row: 1;
+  display: flex; align-items: center; gap: 10px;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--r); padding: 8px 14px; box-shadow: var(--shadow);
+}
+.brand { font-weight: 700; font-size: 14px; color: var(--plum-text); letter-spacing: .02em; flex: none; }
+#topbar .rule { width: 1px; height: 20px; background: var(--line); flex: none; }
+.spacer { flex: 1; }
+
+/* ---------- 舞台 ---------- */
+#stage {
+  grid-column: 1; grid-row: 2;
+  display: flex; flex-direction: column; gap: 8px; min-height: 0;
+}
+.stage-frame {
+  flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center;
+  background: var(--stage); border: 1px solid var(--stage-line);
+  border-radius: var(--r); overflow: hidden; position: relative;
+}
+#preview { max-width: 100%; max-height: 100%; display: block; }
+/* 真实出片帧盖在画布正上方，尺寸**完全重合** —— 位置一样才比得出画面差异。 */
+#realFrame { position: absolute; inset: 0; margin: auto; max-width: 100%; max-height: 100%; display: block; }
+#realFrame[hidden] { display: none; }
+.stage-tag {
+  position: absolute; left: 10px; top: 10px; z-index: 2;
+  background: rgba(34,30,36,.82); color: #F0E7F5; font-size: 11px;
+  border-radius: var(--r-full); padding: 3px 11px; font-family: var(--mono);
+  border: 1px solid var(--stage-line);
+}
+.stage-tag[hidden] { display: none; }
+/* 比对结论：差多少要是个**数**，不能只说"看起来一样"。 */
+.stage-tag .delta { color: var(--main-glow); }
+
+/* ---------- 传输条 ---------- */
+#transport {
+  display: flex; align-items: center; gap: 6px;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--r); padding: 6px 10px; box-shadow: var(--shadow); flex: none;
+}
+#frame { flex: 1; min-width: 80px; }
+/* 时码：等宽 + 固定最小宽度，播放时数字不会左右撑。 */
+.timecode {
+  font-family: var(--mono); font-size: 12px; color: var(--ink);
+  font-variant-numeric: tabular-nums; white-space: nowrap; flex: none;
+  background: var(--bg-soft); border-radius: var(--r-sm); padding: 3px 8px;
+}
+.timecode .tc-sub { color: var(--ink-dim); }
+#volume { width: 76px; flex: none; }
+
+/* ---------- 时间线 ---------- */
+#timeline-panel {
+  grid-column: 1; grid-row: 3;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--r); box-shadow: var(--shadow);
+  display: flex; flex-direction: column; min-height: 0; max-height: 38vh;
+}
+.panel-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; border-bottom: 1px solid var(--line-soft); flex: none;
+}
+.panel-title { font-weight: 700; font-size: 12px; color: var(--ink); }
+#trackArea { overflow: auto; padding: 8px 10px 10px; }
+#markers { position: relative; height: 14px; margin-bottom: 2px; border-bottom: 1px solid var(--line-soft); }
+.marker { position: absolute; top: 0; width: 2px; height: 11px; background: var(--amber); border-radius: 1px; }
+
+.track {
+  position: relative; height: var(--lane-h); margin: var(--lane-gap) 0;
+  background: var(--bg-soft); border: 1px solid var(--line-soft); border-radius: var(--r-sm);
+}
+.track-label {
+  position: absolute; left: 7px; top: 9px; font-size: 11px;
+  color: var(--ink-faint); pointer-events: none; z-index: 2;
+  font-family: var(--mono); letter-spacing: .01em;
+}
+.layer {
+  position: absolute; top: 5px; height: calc(var(--lane-h) - 12px);
+  background: linear-gradient(180deg, #B48CD6, var(--main));
+  border: 1px solid var(--main-deep); border-radius: 6px;
+  font-size: 11px; color: #fff; padding: 3px 7px; overflow: hidden;
+  white-space: nowrap; cursor: pointer; user-select: none; touch-action: none;
+  display: flex; align-items: center;
+  box-shadow: 0 1px 3px rgba(70,40,90,.18);
+}
+.layer:hover { filter: brightness(1.06); }
+.layer.selected { background: linear-gradient(180deg, #F0C063, var(--amber)); border-color: var(--amber-deep); color: #4A3A10; }
+.layer.adjustment { background: linear-gradient(180deg, #7FA8F0, var(--blue)); border-color: var(--blue-deep); }
+.layer.disabled { opacity: .45; }
+.layer .tr { position: absolute; left: 0; top: 0; bottom: 0; background: var(--amber); opacity: .55; }
+/* 左右缘改时长手柄。**必须盖在 .tr 之上**（.tr 占着左缘），否则淡入标记吃掉左手柄。
+   透明加宽到 9px 是为了好抓：34px 的行上一条细线抓不住。 */
+.layer .handle { position: absolute; top: 0; bottom: 0; width: 9px; cursor: ew-resize; z-index: 3; }
+.layer .handle.l { left: -1px; }
+.layer .handle.r { right: -1px; }
+.layer:hover .handle { background: rgba(255,255,255,.34); }
+.layer .handle:hover { background: var(--amber); }
+
+/* ---------- 检查器 ---------- */
+#inspector {
+  grid-column: 2; grid-row: 2 / span 4;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--r); box-shadow: var(--shadow);
+  padding: 0; overflow: auto; display: flex; flex-direction: column;
+}
+#inspector h3 {
+  font-size: 11px; color: var(--ink-dim); text-transform: uppercase;
+  letter-spacing: .07em; font-weight: 700;
+  padding: 11px 14px 6px; position: sticky; top: 0;
+  background: linear-gradient(var(--card) 72%, rgba(255,255,255,0));
+  z-index: 1;
+}
+.pane { padding: 0 14px 12px; }
+#editBar { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 14px 4px; }
+#editBar label { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--ink-dim); }
+#editBar input[type=number] { width: 62px; }
+
+/* 素材库 */
+.lib { font-size: 11px; padding: 0 14px 8px; }
+.lib .row {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  padding: 5px 0; border-bottom: 1px solid var(--line-soft);
+}
+.lib .row:last-child { border-bottom: none; }
+.lib .row button { padding: 2px 8px; font-size: 11px; }
+.lib .unused { color: var(--amber-deep); }
+
+/* 属性字段：标签在左、控件在右，两个面板共用一套读法 */
+.field { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 6px 0; }
+.field > span { color: var(--ink-dim); font-size: 12px; }
+.field input[type=number] { width: 88px; }
+.field select { width: 108px; }
+
+/* ---------- 进度 ---------- */
+#progress {
+  grid-column: 1; grid-row: 4;
+  display: flex; align-items: center; gap: 10px;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--r); padding: 7px 12px; box-shadow: var(--shadow);
+}
+#progress[hidden] { display: none; }
+#progressTrack { flex: 1; height: 8px; background: var(--bg-soft); border-radius: var(--r-full); overflow: hidden; }
+#progressBar { height: 100%; width: 0; background: linear-gradient(90deg, var(--main), var(--main-deep)); transition: width .2s linear; }
+/* 进度未知时走不确定态。**不用 0 冒充** —— 用户看到 0% 会以为卡住了。 */
+#progressBar.indeterminate {
+  width: 100%;
+  background: repeating-linear-gradient(45deg, var(--main-glow) 0 10px, var(--main-soft) 10px 20px);
+}
+#progressText { font-size: 12px; color: var(--ink-dim); font-variant-numeric: tabular-nums; }
+
+/* ---------- 问题清单 ---------- */
+#issues {
+  grid-column: 1 / span 2; grid-row: 5;
+  min-height: 30px; max-height: 132px; overflow: auto;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--r); padding: 7px 12px; font-size: 12px;
+}
+#issues .line { padding: 1px 0; }
+
+/* ---------- 组件 ---------- */
+.btn, .mini-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  border-radius: var(--r-full); border: 1px solid var(--line);
+  background: var(--card); transition: .15s; white-space: nowrap; flex: none;
+}
+.btn { padding: 7px 15px; font-size: 13px; }
+.btn:hover, .mini-btn:hover { border-color: var(--main); color: var(--plum-text); background: var(--main-soft); }
+.mini-btn { padding: 4px 11px; font-size: 12px; color: var(--ink-dim); }
+.btn-primary, .mini-btn.primary {
+  background: linear-gradient(135deg, var(--main), var(--main-deep));
+  color: #fff; border-color: transparent; font-weight: 600; box-shadow: var(--shadow-main);
+}
+.btn-primary:hover, .mini-btn.primary:hover { filter: brightness(1.06); color: #fff; }
+.mini-btn.danger { color: var(--red-deep); }
+.mini-btn.danger:hover { border-color: var(--red); background: var(--red-soft); color: var(--red-deep); }
+/* 图标按钮：方形、无边框，只有 hover 才浮出底 —— 传输条上 6 个按钮都带边框会吵。 */
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; border-radius: var(--r-sm);
+  color: var(--ink-dim); flex: none; transition: .15s;
+}
+.icon-btn:hover { background: var(--main-soft); color: var(--plum-text); }
+.icon-btn:disabled { opacity: .38; cursor: not-allowed; background: none; }
+.icon-btn.playing { background: var(--amber-soft); color: var(--amber-deep); }
+.icon-btn svg { width: 15px; height: 15px; }
+#play { width: 34px; height: 34px; background: var(--main-soft); color: var(--plum-text); }
+#play:hover { background: var(--main-glow); }
+#play.playing { background: var(--amber-soft); color: var(--amber-deep); }
+
+.chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 10px; border-radius: var(--r-full); font-size: 11px;
+  background: var(--bg-soft); color: var(--ink-dim); flex: none;
+}
+.chip.g { background: var(--green-soft); color: var(--green-deep); }
+.chip.b { background: var(--blue-soft); color: var(--blue-deep); }
+.chip.a { background: var(--amber-soft); color: var(--amber-deep); }
+.chip.r { background: var(--red-soft); color: var(--red-deep); }
+.chip.n { background: var(--bg-soft); color: var(--ink-dim); }
+.identity { font-size: 11px; color: var(--ink-dim); font-family: var(--mono); }
+.hint { color: var(--ink-faint); font-size: 11px; }
+.small { font-size: 11px; }
+.muted { color: var(--ink-dim); }
+.bad { color: var(--red-deep); }
+.warn { color: var(--amber-deep); }
+.ok { color: var(--green-deep); }
+
+/* 空态：**"读不到"与"真的没有"必须是两句话** —— 前者要用户去查连接，
+   后者只是还没放东西。合成一句"暂无数据"就把这两件事混成了一件。 */
+.empty { padding: 14px 14px; color: var(--ink-faint); font-size: 12px; text-align: center; }
+.empty.error { color: var(--red-deep); text-align: left; }
+.empty .why { display: block; margin-top: 4px; color: var(--ink-dim); font-size: 11px; }
+
+/* toast：短暂反馈（已撤销、已保存）。与 #issues 分工 ——
+   那里是**留着的问题清单**，这里是**说过就走的确认**。 */
+#toasts { position: fixed; right: 18px; bottom: 18px; z-index: 50; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
+.toast {
+  background: var(--card); border: 1px solid var(--line); border-left: 3px solid var(--main);
+  border-radius: var(--r-sm); padding: 8px 14px; font-size: 12px; color: var(--ink);
+  box-shadow: var(--shadow-hover); max-width: 340px; animation: toast-in .16s ease-out;
+}
+.toast.err { border-left-color: var(--red); }
+.toast.ok { border-left-color: var(--green); }
+.toast.warn { border-left-color: var(--amber); }
+@keyframes toast-in { from { opacity: 0; transform: translateY(6px); } }
+
+/* 快捷键面板 */
+#shortcuts { position: fixed; inset: 0; z-index: 60; background: rgba(40,32,44,.34); display: flex; align-items: center; justify-content: center; }
+#shortcuts[hidden] { display: none; }
+#shortcuts .sheet { background: var(--card); border-radius: var(--r); box-shadow: var(--shadow-hover); padding: 18px 22px; min-width: 340px; }
+#shortcuts h3 { font-size: 13px; margin-bottom: 10px; color: var(--plum-text); text-transform: none; letter-spacing: 0; }
+#shortcuts table { border-collapse: collapse; font-size: 12px; }
+#shortcuts td { padding: 3px 10px 3px 0; }
+#shortcuts td.k { font-family: var(--mono); color: var(--ink); white-space: nowrap; }
+#shortcuts td.d { color: var(--ink-dim); }
+
+/* 隐藏宿主：素材元素只供取帧取声，画面一律走 canvas */
+#videos, #audios { display: none; }

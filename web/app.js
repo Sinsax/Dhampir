@@ -15,7 +15,7 @@
 // 页面里搜不到任何写死的素材路径 —— 那条不变量由 scripts/check-web-invariants.mjs 盯着。
 
 import { loadEngine } from "/engine.js";
-import { exportPngSequence } from "/export/png-sequence.js";
+import { exportPngSequence, base64ToBytes } from "/export/png-sequence.js";
 import { activeBackendFrom } from "/backend.js";
 import { createHttpBackend } from "/export/http.js";
 
@@ -62,6 +62,86 @@ function mark(name) {
 function notice(text) {
   state.notices.push(String(text));
   renderIssues();
+}
+
+// --- 界面零件（图标 / toast / 空态 / 时码） ---------------------------------------
+//
+// 设计参照 V-Trim 的 webui：图标内联、控件胶囊化、**三态分明**（载入 / 空 / 读不到）。
+// 没有 npm 依赖 —— scripts/check-web-invariants.mjs 盯着 web/node_modules 不许存在 ——
+// 所以这里是一张内联 SVG 表，不是图标字体、也不是打包进来的组件库。
+
+/** Lucide 风格 stroke 图标，24x24 viewBox。**只放用得到的**，不搬整套。 */
+const ICONS = {
+  first: '<path d="M19 20 9 12l10-8v16z"/><path d="M5 19V5"/>',
+  prev: '<path d="M15 18l-6-6 6-6"/>',
+  play: '<path d="M6 3l14 9-14 9V3z"/>',
+  pause: '<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>',
+  next: '<path d="M9 18l6-6-6-6"/>',
+  last: '<path d="M5 4l10 8-10 8V4z"/><path d="M19 5v14"/>',
+  volume: '<path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a10 10 0 0 1 0 14"/>',
+  "volume-x": '<path d="M11 5 6 9H2v6h4l5 4z"/><path d="m23 9-6 6"/><path d="m17 9 6 6"/>',
+};
+
+/**
+ * 把一张图标放进某个元素。**替换内容而不是追加** ——
+ * 追加的话每切一次播放/暂停都会多叠一层看不见的 svg。
+ */
+function setIcon(id, name) {
+  const host = $(id);
+  if (host === null) return;
+  host.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+    + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    + (ICONS[name] === undefined ? "" : ICONS[name]) + "</svg>";
+}
+
+/**
+ * 短暂反馈。与 #issues 是**分工**而不是重复：
+ * 那里是**留着的问题清单**（"它还在那儿"才是它的价值），这里是**说过就走的确认**。
+ * 把"已撤销"这类确认也塞进问题清单，真正的问题会被一句句确认挤下去。
+ */
+function toast(text, kind, ms) {
+  const host = $("toasts");
+  if (host === null) return;
+  const el = document.createElement("div");
+  el.className = "toast " + (kind === undefined ? "ok" : kind);
+  el.textContent = String(text);
+  host.appendChild(el);
+  window.setTimeout(() => { el.remove(); }, ms === undefined ? 2600 : ms);
+}
+
+/**
+ * 画一个空态。**"读不到"与"真的没有"必须是两句不同的话** ——
+ * 合成一句「暂无数据」就把"去查连接"和"这里本来就空着"混成了一件事，
+ * 而这两件事该做的事情完全相反。
+ */
+function setEmpty(id, text, options) {
+  const host = $(id);
+  if (host === null) return;
+  const opts = options === undefined ? {} : options;
+  host.textContent = "";
+  const el = document.createElement("div");
+  el.className = "empty" + (opts.error === true ? " error" : "");
+  el.textContent = String(text);
+  if (typeof opts.why === "string" && opts.why !== "") {
+    const why = document.createElement("span");
+    why.className = "why";
+    why.textContent = opts.why;
+    el.appendChild(why);
+  }
+  host.appendChild(el);
+}
+
+/**
+ * 秒读数。**帧号才是契约单位**（铁律：编辑一律用整数帧，不用秒），
+ * 秒只是给人一眼判断"到哪儿了"。所以两个都给，且秒**绝不参与任何编辑计算** ——
+ * 一旦有人拿它去换算，浮点就会回到这条路的中间（那正是铁律要挡的东西）。
+ */
+function formatTimecode(frame, fps) {
+  if (!(fps > 0)) return "00:00.00";
+  const seconds = frame / fps;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds - minutes * 60;
+  return String(minutes).padStart(2, "0") + ":" + (rest < 10 ? "0" : "") + rest.toFixed(2);
 }
 
 // --- 判定回传（程序化验收唯一可靠的出口） -----------------------------------------
@@ -1156,6 +1236,113 @@ async function runPlaythroughVerdict(name) {
   });
 }
 
+/**
+ * 判定：**预览那一帧与出片那一帧一致吗。**
+ *
+ * 挑的是**需要多路素材**的那一帧：只走一路的帧两边都简单，一致了也说明不了什么。
+ * 报的是**实测的逐通道差**，不是「看起来一样」。
+ */
+async function runRealFrameVerdict(name) {
+  const end = state.engine.endFrame();
+  const target = Math.min(12, Math.max(0, end - 1));
+  await seekTo(target);
+  // **不跟着按钮的开关状态走**：判定要的是"这一帧重新取一次再比"。
+  // 页面预检可能已经点过这个按钮，于是这里会撞上"已经展示着"那条路径、
+  // 什么都没比就回传 —— 判定必须是可重复的。
+  hideRealFrame();
+  const result = await showRealFrame();
+  if (result === null || result.ok !== true) {
+    await reportVerdict(name, { ok: false, reason: result === null ? "没有结果" : result.reason });
+    return;
+  }
+  // **对照：再 seek 一次回来。**
+  // 第一遍抄到的是「seek 刚结束」那一刻的画面。用户实际的用法是拖过去再拖回来，
+  // 所以第二遍抄的才是他真正看到的。两遍不一样，就说明第一遍**还没稳定** ——
+  // 那是「读数太早」，与「两次渲染不一致」要修的东西完全不同。
+  let settled = null;
+  if (result.compared === true) {
+    await seekTo(Math.max(0, result.frame - 1));
+    await seekTo(result.frame);
+    const again = capturePreviewPixels($("preview"));
+    if (!again.uniform) {
+      const realPixels = captureRealFramePixels();
+      const w = $("preview").width;
+      const h = $("preview").height;
+      const d2 = diffImageData(again.data, realPixels, w, h);
+      settled = { max: d2.maxAbs, mean: d2.meanAbs, block: d2.blockMeanAbs };
+    }
+  }
+  // **证据要在最后留。**
+  // WebGPU 画布被 toDataURL 读一次之后，交换链里的内容就没了，后面再 drawImage 抄到的是空白。
+  // 本轮真踩到两次：先留证据，判定就报"预览画布读回来是纯色"。
+  // 帧号取 9999：它是**证据**不是产物，用一个不可能撞上的号。
+  try {
+    const dataUrl = $("preview").toDataURL("image/png");
+    const comma = dataUrl.indexOf(",");
+    if (comma < 0) throw new Error("toDataURL 没有数据段");
+    // **发字节而不是 base64 文本**：驱动那一侧是 writeFileSync 原样落盘，
+    // 发文本落下来的就是一个 .png 后缀的 base64 文件 —— 打开时"不是图片"，
+    // 而长度看着还挺像样，最容易把人引到别处去。
+    await fetch("/frame-png?frame=9999", {
+      method: "POST",
+      headers: { "content-type": "image/png" },
+      body: base64ToBytes(dataUrl.slice(comma + 1)),
+    });
+  } catch (error) { log("留预览证据失败：" + String(error)); }
+  await reportVerdict(name, {
+    // kind 决定驱动那一侧怎么读这份判定（按形状分派，不按名字）。
+    kind: "realframe",
+    ok: true,
+    compared: result.compared === true,
+    // 没比成时要有一句能看懂的理由 —— 少了它，驱动那侧只会打出 undefined。
+    reason: result.reason,
+    frame: result.frame,
+    max_abs_channel_diff: result.maxAbs,
+    mean_abs_channel_diff: result.meanAbs,
+    over_threshold_ratio: result.overRatio,
+    same_pixel_ratio: result.samePixelRatio,
+    channel_mean_diff: result.chanMean,
+    block_mean_abs_diff: result.blockMeanAbs,
+    render_size: result.width + "x" + result.height,
+    preview_size: $("preview").width + "x" + $("preview").height,
+    settled_max_abs_channel_diff: settled === null ? null : settled.max,
+    settled_mean_abs_channel_diff: settled === null ? null : settled.mean,
+    settled_block_mean_abs_diff: settled === null ? null : settled.block,
+    note: "同一份工程、同一帧：预览走浏览器 wasm，出片帧走 dhampir frame",
+  });
+}
+/**
+ * 判定：**界面骨架还在不在。**
+ *
+ * `web/index.html` 是这个仓库里唯一没有守卫盯着的大件：改版很容易顺手删掉一个 id，
+ * 而后果是某个按钮点了没反应 —— 那种坏法在程序化验收里完全看不见
+ * （驱动只读 `window.__dhampirMarks` 与 `document.title`）。
+ * 所以这里把**契约**摆出来逐个点一遍。
+ */
+const UI_CONTRACT_IDS = [
+  "applyFps", "audios", "download", "export", "first", "fpsLabel", "frame", "frameLabel", "issues", "last", "library", "markers", "muteBtn", "next", "play", "playStats", "prev", "preview", "progress", "progressBar", "progressText", "props", "redoBtn", "removeBtn", "rippleBtn", "seqFps", "splitBtn", "timeline", "undoBtn", "videos", "volume", "frameOnly",
+];
+
+async function runUiVerdict(name) {
+  const missing = UI_CONTRACT_IDS.filter((id) => $(id) === null);
+  // 图标按钮：`setIcon` 是启动末尾才跑的，所以"按钮在"不等于"图标画出来了"。
+  const iconHosts = ["first", "prev", "play", "next", "last", "muteBtn"];
+  const noIcon = iconHosts.filter((id) => {
+    const host = $(id);
+    return host === null || host.querySelector("svg") === null;
+  });
+  const canvas = $("preview");
+  await reportVerdict(name, {
+    kind: "ui",
+    ok: true,
+    ready: window.dhampirReady === true,
+    missing_ids: missing,
+    icons_missing: noIcon,
+    canvas: canvas === null ? "没有 canvas" : canvas.width + "x" + canvas.height,
+    // 顶栏那行工程摘要也是本轮新加的：它要么是空的，要么说明白是哪份工程。
+    project_label: $("projectId") === null ? "(没有 projectId)" : $("projectId").textContent,
+  });
+}
 /** 判定按**名字**选路。表在这里，规则在各判定函数里。 */
 const VERDICTS = {
   "trim-parity": runTrimParity,
@@ -1166,6 +1353,8 @@ const VERDICTS = {
   "audio-track": runAudioTrackVerdict,
   perf: runPerfVerdict,
   playthrough: runPlaythroughVerdict,
+  realframe: runRealFrameVerdict,
+  ui: runUiVerdict,
 };
 
 /** 状态栏：写一条最新的进展/结果。 */
@@ -1412,7 +1601,12 @@ function renderLibrary() {
   const host = $("library");
   host.textContent = "";
   if (state.library === null) {
-    host.textContent = "（未连接后端 —— 加素材请用 dhampir import 或后端的 POST /assets）";
+    // **"读不到"要说出下一步做什么。** 只说"未连接后端"的话，用户不知道
+    // 是网络问题、是没启动、还是本来就不该有 —— 所以这里把两条出路都写出来。
+    setEmpty("library", "素材库读不到", {
+      error: true,
+      why: "没连上后端。加素材用 dhampir import，或起后端后刷新（POST /assets）。",
+    });
     return;
   }
   const unused = new Set(Array.isArray(state.library.unused) ? state.library.unused : []);
@@ -1430,7 +1624,10 @@ function renderLibrary() {
     row.appendChild(insert);
     host.appendChild(row);
   }
-  if (state.library.assets.length === 0) host.textContent = "（库里什么都没有）";
+  // 与上面那句**必须不同**：那里是"读不到"，这里是"读到了、真的是空的"。
+  if (state.library.assets.length === 0) {
+    setEmpty("library", "工程里还没有素材", { why: "用 dhampir import 登记一个文件，它就会出现在这里。" });
+  }
 }
 
 /** 往选中的元素所在轨道（没有就第一条视频轨）的当前帧放一个引用。 */
@@ -1488,11 +1685,17 @@ async function runHistoryStep(which) {
     state.issues = result.issues || [];
     renderIssues();
     log(verb + " 没生效：" + state.issues.map((issue) => issue.code).join(", "));
+    // **退不动要说出来。** 静默什么都不做的话，用户会以为按钮坏了；
+    // 而且"没有可撤销的步骤"与"撤销失败了"必须听起来不一样。
+    toast(verb + " 没生效：" + (state.issues.map((issue) => issue.code).join(", ") || "没有可撤销的步骤"), "warn");
     return;
   }
   state.doc = state.engine.doc();
   await refreshAfterEdit();
   log(result.summary);
+  // 成功也回一声：撤销是"看不见结果"的操作之一（画面可能恰好一样），
+  // 没有确认时用户会连按好几次。
+  toast(verb + "：" + result.summary, "ok");
 }
 
 /** 一次成功改动之后把三个面板与当前帧重新画一遍。
@@ -1815,7 +2018,8 @@ function renderInspector() {
   host.textContent = "";
   const layer = selectedLayer();
   if (layer === null) {
-    host.textContent = "（未选中元素）";
+    // 空态要说**怎么让它不空**：时间线上点一个片段就行。
+    setEmpty("props", "还没有选中元素", { why: "在时间线上点一个片段，这里就会出现它的属性。" });
     return;
   }
 
@@ -2139,7 +2343,7 @@ function play() {
   // 统计是"这一次播放"的 —— 不清的话上一次的丢帧会累加到这一次，看起来像越来越糟。
   resetPlaybackStats();
   renderPlaybackStats();
-  $("play").textContent = "❚❚";
+  setIcon("play", "pause");
   $("play").classList.add("playing");
   applyAudioVolume();
   syncAudioToFrame(state.frame, true);
@@ -2153,7 +2357,7 @@ function pause() {
     cancelAnimationFrame(playback.rafId);
     playback.rafId = 0;
   }
-  $("play").textContent = "▶";
+  setIcon("play", "play");
   $("play").classList.remove("playing");
   // 停播时**只是暂停**、不回卷：用户按暂停是想停在这一刻看，不是想回开头。
   syncAudioToFrame(state.frame, false);
@@ -2171,8 +2375,13 @@ function renderPlaybackStats() {
   const host = $("playStats");
   if (host === null) return;
   const stats = playbackStats();
-  host.textContent = " " + stats.text;
-  host.className = stats.droppedTotal > 0 ? "warn small" : "muted small";
+  // 空文本就整个藏起来：一个写着"无丢帧"的胶囊在没播过的时候是噪音，
+  // 而"没播过"与"播了且没丢"是两件事。
+  if (stats.ticks === 0) { host.textContent = ""; host.hidden = true; return; }
+  host.hidden = false;
+  host.textContent = stats.text;
+  // className 是**整个换掉**的（这里原来就是覆盖写法）：胶囊的底色要跟着丢帧走。
+  host.className = stats.droppedTotal > 0 ? "chip a" : "chip g";
 }
 
 function togglePlay() {
@@ -2308,7 +2517,13 @@ async function seekTo(frame) {
   const end = state.engine.endFrame();
   state.frame = Math.max(0, Math.min(frame, Math.max(0, end - 1)));
   $("frame").value = String(state.frame);
-  $("frameLabel").textContent = String(state.frame);
+  // 播放头一动，盖着的那张出片帧就**不再对应当前这一帧**了 —— 收回去。
+  // 留着它比让人比错更坏：两张不同的帧叠在一起，「看起来不一样」会被当成渲染不一致。
+  hideRealFrame();
+  // 只动两个子节点的 textContent。**不用 innerHTML** —— 播放中每帧都走这一行，
+  // 每帧重建一次 DOM 是在给 GC 制造工作量，而它换不来任何东西。
+  $("frameNow").textContent = String(state.frame);
+  $("frameTime").textContent = formatTimecode(state.frame, sequenceFps());
   // 不播时把音频**对齐但不播** —— 拖动播放头之后再按播放，声音要从那个位置起，
   // 而不是从上次停下的地方接着走。
   if (!isPlaying()) syncAudioToFrame(state.frame, false);
@@ -2496,6 +2711,225 @@ async function runExport() {
   return renderPngSequence(from, to);
 }
 
+// --- 真实出片帧（预览 vs 出片那条路） ---------------------------------------------
+//
+// **这是本工程那条核心承诺的兑现口**：同一个工程，预览与出片必须给出可比的帧。
+// 点一下按钮，后端用 `dhampir frame`（与 render 同一条 Rust 路径）渲染**当前这一帧**，
+// 把 PNG 取回来盖在画布上，并报出两边的像素差。
+//
+// 为什么要报一个**数**：这类「看起来一样」的判断最容易自我安慰 ——
+// 分辨率、色深、缩放都可能在骗眼睛。给一个逐通道差的最大值与均值，
+// 对了是证据，不对也是证据。
+
+/**
+ * 逐像素比两块 ImageData。**尺寸不同就不比** —— 缩放比出来的数没有意义。
+ *
+ * 除了最大/均值，还算三样能把「为什么不一样」分开的东西：
+ *   * 分通道均值 —— 三个通道一起偏，是**色彩换算**（YUV->RGB 的口径不同），不是内容不一致；
+ *   * 逐像素全等比例 —— 有多少像素三个通道都几乎一样；
+ *   * 4x4 块均值的差 —— **对滤波不敏感**的那一档。全分辨率差得大、块均值差得小，
+ *     说明差异集中在前者的**高频**上（缩放的采样滤波器不同），而不是画面内容不同。
+ */
+function diffImageData(a, b, width, height) {
+  let maxAbs = 0;
+  let sum = 0;
+  let over = 0;
+  let same = 0;
+  const chan = [0, 0, 0];
+  const n = a.length;
+  for (let i = 0; i < n; i += 4) {
+    let worst = 0;
+    for (let c = 0; c < 3; c += 1) {
+      const d = Math.abs(a[i + c] - b[i + c]);
+      chan[c] += d;
+      if (d > worst) worst = d;
+      if (d > maxAbs) maxAbs = d;
+      sum += d;
+      if (d > 2) over += 1;
+    }
+    if (worst <= 1) same += 1;
+  }
+  const pixels = n / 4;
+  let blockSum = 0;
+  let blocks = 0;
+  for (let by = 0; by + 4 <= height; by += 4) {
+    for (let bx = 0; bx + 4 <= width; bx += 4) {
+      let sa = 0;
+      let sb = 0;
+      for (let y = 0; y < 4; y += 1) {
+        for (let x = 0; x < 4; x += 1) {
+          const i = ((by + y) * width + (bx + x)) * 4;
+          sa += a[i] + a[i + 1] + a[i + 2];
+          sb += b[i] + b[i + 1] + b[i + 2];
+        }
+      }
+      blockSum += Math.abs(sa - sb) / 48;
+      blocks += 1;
+    }
+  }
+  return {
+    maxAbs: maxAbs,
+    meanAbs: n > 0 ? sum / n : 0,
+    overRatio: n > 0 ? over / n : 0,
+    samePixelRatio: pixels > 0 ? same / pixels : 0,
+    chanMean: pixels > 0 ? chan.map((v) => v / pixels) : [0, 0, 0],
+    blockMeanAbs: blocks > 0 ? blockSum / blocks : 0,
+    channels: n,
+  };
+}
+
+/**
+ * 把当前画布抄成一块 ImageData。**必须在同一轮任务里调**（调用处有说明）。
+ *
+ * 顺带判一下它是不是**纯色**：纯色说明根本没抄到画面，而这时的差异读数不可信 ——
+ * 把它报成「渲染不一致」是最坏的一种错，因为方向完全反了。
+ */
+function capturePreviewPixels(canvas) {
+  const scratch = document.createElement("canvas");
+  scratch.width = canvas.width;
+  scratch.height = canvas.height;
+  const ctx = scratch.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(canvas, 0, 0);
+  const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+  let first = null;
+  let uniform = true;
+  for (let i = 0; i < data.length; i += 4) {
+    if (first === null) { first = [data[i], data[i + 1], data[i + 2]]; continue; }
+    if (data[i] !== first[0] || data[i + 1] !== first[1] || data[i + 2] !== first[2]) {
+      uniform = false;
+      break;
+    }
+  }
+  return { data: data, width: canvas.width, height: canvas.height, uniform: uniform };
+}
+/** 把盖着的那张后端帧抄成 ImageData（比对要用它的像素）。 */
+function captureRealFramePixels() {
+  const canvas = $("preview");
+  const img = $("realFrame");
+  const scratch = document.createElement("canvas");
+  scratch.width = canvas.width;
+  scratch.height = canvas.height;
+  const ctx = scratch.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  return ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+}
+/** 收回盖着的那张出片帧。播放头一动它就不再对应当前这一帧了。 */
+function hideRealFrame() {
+  const img = $("realFrame");
+  if (img === null || img.hidden) return;
+  img.hidden = true;
+  $("stageTag").hidden = true;
+  $("realFrameBtn").classList.remove("primary");
+}
+
+async function showRealFrame() {
+  const button = $("realFrameBtn");
+  const img = $("realFrame");
+  const tag = $("stageTag");
+  const canvas = $("preview");
+  if (state.doc === null) { toast("工程还没载入", "warn"); return { ok: false, reason: "工程还没载入" }; }
+
+  // 再点一次 = 收回比对（按钮是开关，不是只能往前）。
+  if (!img.hidden) {
+    hideRealFrame();
+    // 带 reason：这条路径也可能是"判定被跑了第二遍"，
+    // 那时只回一个没有理由的 ok 会让驱动打出 undefined，看不出发生了什么。
+    return { ok: true, closed: true, compared: false, reason: "这一次没有取（已经处于展示状态）" };
+  }
+
+  button.disabled = true;
+  button.textContent = "渲染中…";
+  const frame = state.frame;
+  // **先把预览这一帧抄下来，再去取后端那一帧。**
+  // 不能等 fetch 回来再读画布：WebGPU 交换链的内容**不保证跨任务还在**，
+  // 中间隔了几个 await 之后 drawImage 很可能拿到空白 ——
+  // 而空白的表现是"两边差得离谱"，会被误读成"渲染不一致"，方向正好是反的。
+  const preview = capturePreviewPixels(canvas);
+  try {
+    const response = await fetch("/frame", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ project: state.doc, frame: frame }),
+    });
+    if (!response.ok) {
+      let detail = "HTTP " + response.status;
+      try {
+        const parsed = await response.json();
+        if (parsed && parsed.error && parsed.error.message) detail = parsed.error.message;
+      } catch (error) { /* 不是 JSON 就用状态码 */ }
+      throw new Error(detail);
+    }
+    // **确认拿到的就是我要的那一帧**，不是「看起来像」。
+    //
+    // 注意 `Number(null) === 0`：头不存在时直接 Number() 会得到 0，
+    // 于是"头没了"会被报成"后端回的是第 0 帧" —— 一个完全错误的方向。
+    // 所以先判 null，再转数。
+    const rawFrame = response.headers.get("x-dhampir-frame");
+    const got = rawFrame === null ? Number.NaN : Number(rawFrame);
+    if (Number.isFinite(got) && got !== frame) {
+      throw new Error("后端回的是第 " + got + " 帧，我要的是第 " + frame + " 帧");
+    }
+    const blob = await response.blob();
+    await new Promise((resolveLoad, rejectLoad) => {
+      img.onload = () => resolveLoad(undefined);
+      img.onerror = () => rejectLoad(new Error("取回来的 PNG 解不开"));
+      img.src = URL.createObjectURL(blob);
+    });
+    img.hidden = false;
+    button.classList.add("primary");
+
+    // ---- 比对 ----
+    // 出片尺寸与画布尺寸**可以不同**（前者来自 render_hints）。不同就不报差值：
+    // 缩放之后逐像素比出来的数不是「渲染差异」，是「缩放差异」，报出来会误导。
+    const outW = img.naturalWidth;
+    const outH = img.naturalHeight;
+    if (outW !== canvas.width || outH !== canvas.height) {
+      tag.textContent = "出片 " + outW + "x" + outH + " · 预览 " + canvas.width + "x"
+        + canvas.height + " · 尺寸不同，未逐像素比";
+      tag.hidden = false;
+      toast("出片帧尺寸与预览画布不同（" + outW + "x" + outH + " vs " + canvas.width + "x"
+        + canvas.height + "）：尺寸不同就不报像素差", "warn", 5200);
+      // **比对没做就是没做**：返回 compared:false，而不是塞一个 maxAbs:0 上去。
+      // 0 会被读成"完全一致"，那是这个功能最不该制造的误解。
+      return { ok: true, frame: frame, compared: false, width: outW, height: outH,
+        reason: "出片帧与预览画布尺寸不同，未逐像素比" };
+    }
+    // 抄到纯色说明**没抄到画面**（读回时机不对 / 画布没内容）。
+    // 这时报差异就是把"我读错了"说成"渲染不一致" —— 宁可不给结论。
+    if (preview.uniform) {
+      tag.textContent = "预览画布读回来是纯色 —— 读数不可信，不当作渲染差异";
+      tag.hidden = false;
+      toast("预览画布读回来是纯色：这是**读数**的问题，不是渲染不一致。先别信这次的差值。",
+        "warn", 6000);
+      return { ok: true, frame: frame, compared: false,
+        reason: "预览画布读回来是纯色，读数不可信" };
+    }
+    const scratch = document.createElement("canvas");
+    scratch.width = canvas.width;
+    scratch.height = canvas.height;
+    const ctx = scratch.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    const realData = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    const d = diffImageData(preview.data, realData, canvas.width, canvas.height);
+    tag.textContent = "出片路径渲染 · 第 " + frame + " 帧 · 最大通道差 " + d.maxAbs
+      + " · 均值 " + d.meanAbs.toFixed(3)
+      + " · 超阈值通道 " + (d.overRatio * 100).toFixed(2) + "%";
+    tag.hidden = false;
+    toast("出片帧已取回：第 " + frame + " 帧，最大通道差 " + d.maxAbs,
+      d.maxAbs === 0 ? "ok" : "warn", 4200);
+    return { ok: true, frame: frame, compared: true, width: outW, height: outH,
+      maxAbs: d.maxAbs, meanAbs: d.meanAbs, overRatio: d.overRatio,
+      samePixelRatio: d.samePixelRatio, chanMean: d.chanMean, blockMeanAbs: d.blockMeanAbs };
+  } catch (error) {
+    const message = String(error && error.message ? error.message : error);
+    log("取真实出片帧失败：" + message);
+    toast("取真实出片帧失败：" + message, "err", 6000);
+    return { ok: false, reason: message };
+  } finally {
+    button.disabled = false;
+    button.textContent = "真实出片帧";
+  }
+}
 // --- 启动 -------------------------------------------------------------------------
 
 async function main() {
@@ -2562,6 +2996,26 @@ async function main() {
   await seekTo(0);
   mark("首帧已上屏");
 
+  // 图标只在启动时铺一次；之后只有播放键与静音键会换脸。
+  setIcon("first", "first");
+  setIcon("prev", "prev");
+  setIcon("play", "play");
+  setIcon("next", "next");
+  setIcon("last", "last");
+  setIcon("muteBtn", audioState.muted ? "volume-x" : "volume");
+
+  // 工程身份写进顶栏。**出片尺寸取自 render_hints 而不是画布** ——
+  // 两者可以不同（画布是宿主参数、render_hints 是宿主的提示），
+  // 而"预览看到的"与"出片写出来的"尺寸不同时，看的人第一件该知道的就是这件事。
+  const hints = state.doc.render_hints || {};
+  const outSize = (Number(hints.width) > 0 && Number(hints.height) > 0)
+    ? hints.width + "x" + hints.height
+    : canvas.width + "x" + canvas.height;
+  const tb = state.doc.timeline.timebase;
+  $("projectId").textContent = (state.doc.meta && state.doc.meta.title ? state.doc.meta.title : "未命名工程")
+    + " · " + state.doc.timeline.tracks.length + " 轨 · 出片 " + outSize
+    + " · " + tb.num + "/" + tb.den;
+
   $("first").addEventListener("click", () => { pause(); seekTo(engine.firstFrame()); });
   $("prev").addEventListener("click", () => { pause(); seekTo(state.frame - 1); });
   $("next").addEventListener("click", () => { pause(); seekTo(state.frame + 1); });
@@ -2570,35 +3024,69 @@ async function main() {
   $("volume").addEventListener("input", (event) => {
     audioState.volume = Math.max(0, Math.min(1, Number(event.target.value) / 100));
     // 动过音量就等于"我要听声音"：顺手解除静音（否则用户会以为音量坏了）。
-    if (audioState.volume > 0) { audioState.muted = false; $("muteBtn").textContent = "🔊"; }
+    if (audioState.volume > 0) { audioState.muted = false; setIcon("muteBtn", "volume"); }
     applyAudioVolume();
   });
   $("muteBtn").addEventListener("click", () => {
     audioState.muted = !audioState.muted;
-    $("muteBtn").textContent = audioState.muted ? "🔇" : "🔊";
+    setIcon("muteBtn", audioState.muted ? "volume-x" : "volume");
     applyAudioVolume();
   });
   $("volume").value = String(Math.round(audioState.volume * 100));
   // 拖动滑块 = 手动定位，播放要让位（否则手一松就被播放头拽走，那是"抢方向盘"）。
   $("frame").addEventListener("input", (event) => { pause(); seekTo(Number(event.target.value)); });
   $("fpsLabel").textContent = sequenceFps() + " fps";
-  // 空格播放/暂停。**只在没聚焦到输入控件时**生效 —— 否则在数字框里打空格会变成播放，
-  // 那种"快捷键抢输入"的行为用户没法自己发现原因。
+  // --- 快捷键 -----------------------------------------------------------------------
+  //
+  // 一律与按钮**走同一条路**（click() 或同一个函数）：快捷键若有自己的实现，
+  // 它与按钮迟早会有两种行为，而"用键盘和用鼠标为什么会不一样"是最难查的那类问题。
+  //
+  // 输入框里一律让位 —— 否则在数字框里打空格会变成播放，
+  // 而那种"快捷键抢输入"的行为用户没法自己发现原因。
+  const stepBy = (delta) => { pause(); seekTo(state.frame + delta); };
+  // "一秒"按**帧率**换算，不写死 30：29.97 的工程里写死就会每次都差一点。
+  const oneSecond = Math.max(1, Math.round(sequenceFps()));
+  const setShortcuts = (open) => {
+    const panel = $("shortcuts");
+    panel.hidden = open === undefined ? !panel.hidden : !open;
+  };
+  $("shortcutBtn").addEventListener("click", () => setShortcuts());
+  // 点背景关掉；点面板本身不关（否则想选文字复制都会被关掉）。
+  $("shortcuts").addEventListener("click", (event) => {
+    if (event.target === $("shortcuts")) setShortcuts(false);
+  });
   window.addEventListener("keydown", (event) => {
     const target = event.target;
     const typing = target !== null && (target.tagName === "INPUT" || target.tagName === "SELECT"
       || target.tagName === "TEXTAREA" || target.isContentEditable === true);
-    if (event.code === "Space" && !typing) {
+    // 帮助面板开着时：Esc 与 ? 都能关（两个方向都留出口，不必记住是哪一个）。
+    if (event.key === "Escape" && !$("shortcuts").hidden) { setShortcuts(false); return; }
+    if (event.key === "?" && !typing) { event.preventDefault(); setShortcuts(); return; }
+    if (typing) return;
+    if ((event.ctrlKey || event.metaKey) && (event.key === "z" || event.key === "Z")) {
+      event.preventDefault();
+      runHistoryStep(event.shiftKey ? "redo" : "undo").catch((error) => log(String(error)));
+      return;
+    }
+    if (event.code === "Space") {
       event.preventDefault();  // 不拦的话浏览器会把空格当页面滚动
       togglePlay();
       return;
     }
-    if (typing) return;
     if (event.key === "m" || event.key === "M") { $("muteBtn").click(); return; }
-    if (event.key === "ArrowLeft") { pause(); seekTo(state.frame - 1); }
-    else if (event.key === "ArrowRight") { pause(); seekTo(state.frame + 1); }
+    if (event.key === "s" || event.key === "S") { $("splitBtn").click(); return; }
+    if (event.key === "Delete") { $("removeBtn").click(); return; }
+    if (event.key === "ArrowLeft") { stepBy(event.shiftKey ? -oneSecond : -1); }
+    else if (event.key === "ArrowRight") { stepBy(event.shiftKey ? oneSecond : 1); }
+    // 剪辑台的 J/L 习惯（J 退、L 进）。这里不做变速播放 —— 播放是帧驱动的，
+    // 变速意味着"每帧的墙钟预算"跟着变，那是另一个特性，不该顺手塞进快捷键。
+    else if (event.key === "," || event.key === "j" || event.key === "J") { stepBy(-1); }
+    else if (event.key === "." || event.key === "l" || event.key === "L") { stepBy(1); }
     else if (event.key === "Home") { pause(); seekTo(engine.firstFrame()); }
     else if (event.key === "End") { pause(); seekTo(end - 1); }
+  });
+  $("realFrameBtn").addEventListener("click", () => {
+    showRealFrame().catch((error) => log(String(error)));
   });
   $("export").addEventListener("click", runExport);
   $("undoBtn").addEventListener("click", () => { runHistoryStep("undo").catch((error) => log(String(error))); });

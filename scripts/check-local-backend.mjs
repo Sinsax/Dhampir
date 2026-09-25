@@ -43,6 +43,8 @@ export const EXPECTED = [
   'assets-guard',
   'validate-clean',
   'validate-broken',
+  'frame-png',
+  'frame-rejects-fraction',
   'export-accepted',
   'export-succeeded',
   'export-progress-unknown-or-one',
@@ -210,6 +212,40 @@ async function collect(port) {
     record('validate-broken', brokenResponse.status === 200 && brokenBody.errors.length > 0,
       brokenResponse.status + ' errors=' + brokenBody.errors.length);
 
+
+    // ---- 「出一帧真实出片帧」这条 API ----
+    // 它兑现的是本工程的核心承诺（预览与出片给出的帧可比），所以两条都要钉：
+    // 出得来（200 + 真 PNG + 帧号回在头里），以及**帧号是整数**这条契约。
+    const frameResponse = await fetch(base + '/frame', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ project: project, frame: 12 }),
+    });
+    const frameBytes = Buffer.from(await frameResponse.arrayBuffer());
+    const isPng = frameBytes.length > 8 && frameBytes[0] === 0x89
+      && frameBytes.subarray(1, 4).toString('latin1') === 'PNG';
+    // 尺寸从 PNG 的 IHDR 里读（第 16 字节起，大端）—— 不靠猜，也不靠再问一次接口。
+    const pngWidth = isPng ? frameBytes.readUInt32BE(16) : 0;
+    const pngHeight = isPng ? frameBytes.readUInt32BE(20) : 0;
+    record('frame-png',
+      frameResponse.status === 200
+      && String(frameResponse.headers.get('content-type')).startsWith('image/png')
+      && isPng
+      && frameResponse.headers.get('x-dhampir-frame') === '12'
+      && pngWidth === 640 && pngHeight === 360,
+      frameResponse.status + ' ' + frameResponse.headers.get('content-type')
+        + ' x-frame=' + frameResponse.headers.get('x-dhampir-frame')
+        + ' png=' + isPng + ' ' + pngWidth + 'x' + pngHeight + ' ' + frameBytes.length + 'B');
+
+    // 帧号是**契约单位**：收小数会让它被静默取整，那时「我要第 12.7 帧」变成第 12 帧，
+    // 而没有任何人说出来。所以这里钉死它必须被拒。
+    const badFrame = await fetch(base + '/frame', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ project: project, frame: 12.7 }),
+    });
+    const badFrameBody = await badFrame.json();
+    record('frame-rejects-fraction',
+      badFrame.status === 400 && badFrameBody.error && badFrameBody.error.code === 'bad_frame',
+      badFrame.status + ' ' + JSON.stringify(badFrameBody).slice(0, 160));
     const submitted = await fetch(base + '/export', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ project: project, from: 0, to: 29, width: 640, height: 360 }),
