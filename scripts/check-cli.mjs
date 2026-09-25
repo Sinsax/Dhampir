@@ -70,6 +70,12 @@ export const EXPECTED = [
   'batch-matches-edits',
   'batch-atomic',
   'batch-empty',
+  // 退出码契约里**最容易漏的一条**：缺一个必给的开关是用法错（2），不是运行期失败（1）。
+  // 从前 14 个子命令里有 9 个退 1 —— 而 30 条判据一条都没钉它，所以它活了很久。
+  // 本机后端正是靠 0 / 2 区分「成功」与「用户能改的错」，混淆的代价是它去查渲染管线。
+  'usage-error-exit-code',
+  // frame 从前只出单帧，而多给的 --to 会被静默收下（用户以为出了一段）。
+  'frame-range',
 ];
 
 /**
@@ -208,6 +214,18 @@ function collect(cli) {
       && typeof gopBody.dts_origin === 'number',
     'exit=' + gop.code + ' slices=' + (gopBody === null ? 'none' : gopBody.slices.length));
 
+  // ---- 用法错的退出码：**缺一个必给的开关是 2，不是 1** ----
+  //
+  // 这一条钉的是分类而不是文案：少给开关的人要去补开关，而不是去查 GPU。
+  // 判据拿**每一个**子命令的「什么都不给」来跑，所以新加子命令若忘了给这条
+  // 留出口，它自己就会掉进这里变红（`unknown-subcommand` 那条只管名字认不认）。
+  const bareUsage = SUBCOMMANDS.map((name) => ({ name: name, code: run(cli, [name]).code }));
+  const notTwo = bareUsage.filter((row) => row.code !== 2);
+  // 例外：`clip` / `sequence` 的第一个位置参数是动作名，缺动作名也是用法错（2），
+  // 所以它们**不该**出现在例外名单里 —— 一律要求 2。
+  record('usage-error-exit-code', notTwo.length === 0,
+    '退的不是 2 的：' + (notTwo.map((row) => row.name + '=' + row.code).join(' ') || '（无）'));
+
   // ---- frame ----
   const frameDir = join(TMP, 'frames');
   const frame = run(cli, ['frame', '--project', PROJECT, '--frame', '30', '--out', frameDir]);
@@ -218,6 +236,24 @@ function collect(cli) {
     frame.code === 0 && frameBody !== null && /^[0-9a-f]{16}$/.test(String(frameBody.digest))
       && existsSync(png) && statSync(png).size > 1000,
     'exit=' + frame.code + ' ' + JSON.stringify(frameBody));
+
+  // `frame` 出**一段**：从前 `--to` 会被静默收下（用户以为出了一段，实际只出一帧，
+  // 退出码还是 0）。这条钉住三件事：帧数对、文件名逐个落盘、多给 --frame 要退 2。
+  // 后一半与前半同样重要 —— 让 --frame 悄悄赢，产出的就不是用户要的那一份。
+  const rangeDir = join(TMP, 'frame-range');
+  const ranged = run(cli, ['frame', '--project', PROJECT, '--from', '0', '--to', '4', '--out', rangeDir]);
+  let rangedBody = null;
+  try { rangedBody = JSON.parse(ranged.stdout); } catch (error) { rangedBody = null; }
+  const rangeFiles = [0, 1, 2, 3, 4].map((n) => join(rangeDir, 'frame-' + String(n).padStart(4, '0') + '.png'));
+  const bothWays = run(cli, ['frame', '--project', PROJECT, '--frame', '1', '--from', '0', '--out', rangeDir]);
+  record('frame-range',
+    ranged.code === 0 && rangedBody !== null && Array.isArray(rangedBody.frames)
+      && rangedBody.frames.length === 5 && rangedBody.count === 5
+      && rangeFiles.every((file) => existsSync(file) && statSync(file).size > 1000)
+      && bothWays.code === 2,
+    'exit=' + ranged.code + ' 帧数=' + (rangedBody === null || !rangedBody.frames ? 'none' : rangedBody.frames.length)
+      + ' 落盘=' + rangeFiles.filter((file) => existsSync(file)).length + '/5'
+      + ' 混给 --frame 的 exit=' + bothWays.code);
 
   // ---- render ----
   const outPath = join(TMP, 'out.mp4');

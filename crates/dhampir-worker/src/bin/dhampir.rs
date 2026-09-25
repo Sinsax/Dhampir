@@ -54,6 +54,13 @@ const USAGE: &str = "\
   gop     --asset <文件>                          打印 GOP 切片表
   frame   --project <文件> --frame <N> --out <目录>
                                                   出第 N 帧的 PNG（文件名 frame-<N>.png）
+  frame   --project <文件> --from <N> --to <N> --out <目录>
+                                                  出一段 PNG（一张一帧，名字同上）。
+                                                  **与 --frame 只能给一种**：
+                                                  同时给会退 2，而不是让其中一个悄悄赢。
+                                                  只给 --from 就是「从这里到结尾」，
+                                                  只给 --to 就是「从第 0 帧到这里」；
+                                                  一个都不给则退 2（不替你猜要哪几帧）
   render  --project <文件> --from <N> --to <N> --out <文件.mp4>
                                                   出片（stdout 是 NDJSON 进度）
           [--subtitle-out <文件>] [--format srt|ass]
@@ -353,6 +360,98 @@ fn op_shape(op: &str) -> (&'static [&'static str], &'static [&'static str]) {
         "set" => (&["--timebase"], &["--timebase", "--width", "--height"]),
         _ => (&[], &[]),
     }
+}
+
+/// 一个**用法错**（退出码 2），与运行期失败（退出码 1）分开。
+///
+/// # 它为什么不是一句 `format!`
+///
+/// 「少给了一个开关」与「GPU 拿不到上下文」是两种完全不同的事，而它们从同一条
+/// `Result<_, String>` 里出来时长得一模一样 —— 调用方只能去做字符串匹配，
+/// 而那种判据会在文案改一个字之后静默失效（表现是"用法错被当成运行期失败"，
+/// 于是调用方去查渲染管线，而真正该做的是补上那个开关）。
+///
+/// 所以这里给用法错一个**类型**：`main` 只看类型，不看文案。
+/// 运行期失败仍是裸 `String`，两种不会互相冒充。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Usage(String);
+
+impl Usage {
+    /// 退出码。**只此一处**定义"用法错退几" —— 别处再写一个 2 就会漂。
+    fn code(self) -> ExitCode {
+        eprintln!("{self}");
+        ExitCode::from(2)
+    }
+}
+
+impl std::fmt::Display for Usage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// 让 `?` 能把用法错送进 `Result<_, String>` 的那些函数。
+///
+/// # 为什么单靠这个 `From` 还不够
+///
+/// 它只解决**编译**：`cmd_*` 仍声明成 `Result<ExitCode, String>`，用法错在类型上
+/// 被抹平成字符串，`main` 就再也分不出它。所以真正的判据在下面这个 [`CommandError`]：
+/// 子命令返回的是它，而不是裸 `String` —— 于是"用法错退 2、运行期失败退 1"
+/// 这件事在类型上就没法写错。
+impl From<Usage> for String {
+    fn from(error: Usage) -> Self {
+        error.0
+    }
+}
+
+/// 子命令的报错：**两类分开**。
+///
+/// `main` 只按这个枚举决定退出码，不去看文案 —— 文案会改，而分类不会。
+#[derive(Debug, Clone)]
+enum CommandError {
+    /// 用法错（退出码 2）：少给了开关、值不对、区间反了。**用户能改**。
+    Usage(Usage),
+    /// 运行期失败（退出码 1）：GPU、ffmpeg、写盘、渲染报告判失败。
+    Runtime(String),
+}
+
+impl CommandError {
+    fn code(self) -> ExitCode {
+        match self {
+            Self::Usage(error) => error.code(),
+            Self::Runtime(message) => {
+                eprintln!("{message}");
+                ExitCode::from(1)
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for CommandError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Usage(error) => write!(formatter, "{error}"),
+            Self::Runtime(message) => formatter.write_str(message),
+        }
+    }
+}
+
+/// 子命令里那些 `?` 的来源：裸 `String` 与 [`Usage`] 都收，但**落点不同**。
+impl From<String> for CommandError {
+    fn from(message: String) -> Self {
+        Self::Runtime(message)
+    }
+}
+
+impl From<Usage> for CommandError {
+    fn from(error: Usage) -> Self {
+        Self::Usage(error)
+    }
+}
+
+/// 造一个用法错。`format!` 的参数与它同形，所以调用点读起来与从前一样。
+fn usage_error(message: String) -> Usage {
+    Usage(message)
 }
 
 /// 报错文案里的名单。
@@ -954,7 +1053,7 @@ fn gate(doc: &ProjectDoc) -> Option<ExitCode> {
     Some(ExitCode::from(2))
 }
 
-fn print_json<T: serde::Serialize>(value: &T) -> Result<ExitCode, String> {
+fn print_json<T: serde::Serialize>(value: &T) -> Result<ExitCode, CommandError> {
     println!(
         "{}",
         serde_json::to_string_pretty(value).map_err(|error| error.to_string())?
@@ -966,8 +1065,11 @@ fn print_json<T: serde::Serialize>(value: &T) -> Result<ExitCode, String> {
 // 子命令
 // ---------------------------------------------------------------------------
 
-fn cmd_probe(args: &Args) -> Result<ExitCode, String> {
-    let project = args.project.as_ref().ok_or("probe 要 --project <文件>")?;
+fn cmd_probe(args: &Args) -> Result<ExitCode, CommandError> {
+    let project = args
+        .project
+        .as_ref()
+        .ok_or_else(|| usage_error("probe 要 --project <文件>".to_string()))?;
     let doc = match load_project_or_usage(project) {
         Ok(doc) => doc,
         Err(code) => return Ok(code),
@@ -984,14 +1086,20 @@ fn cmd_probe(args: &Args) -> Result<ExitCode, String> {
     Ok(code)
 }
 
-fn cmd_info(args: &Args) -> Result<ExitCode, String> {
-    let asset = args.asset.as_ref().ok_or("info 要 --asset <文件>")?;
+fn cmd_info(args: &Args) -> Result<ExitCode, CommandError> {
+    let asset = args
+        .asset
+        .as_ref()
+        .ok_or_else(|| usage_error("info 要 --asset <文件>".to_string()))?;
     let info = asset_info(Path::new(asset))?;
     print_json(&info)
 }
 
-fn cmd_gop(args: &Args) -> Result<ExitCode, String> {
-    let asset = args.asset.as_ref().ok_or("gop 要 --asset <文件>")?;
+fn cmd_gop(args: &Args) -> Result<ExitCode, CommandError> {
+    let asset = args
+        .asset
+        .as_ref()
+        .ok_or_else(|| usage_error("gop 要 --asset <文件>".to_string()))?;
     let packets = ffprobe_json(&PACKET_ARGS, Path::new(asset))?;
     let (samples, dts_origin) = samples_from_packets(&packets)?;
     let slices = gop_slices(&samples);
@@ -1026,10 +1134,62 @@ fn project_frames(doc: &ProjectDoc) -> usize {
     usize::try_from(end.saturating_sub(first).max(0)).unwrap_or(0)
 }
 
-fn cmd_frame(args: &Args) -> Result<ExitCode, String> {
-    let project = args.project.as_ref().ok_or("frame 要 --project <文件>")?;
-    let out = args.out.as_ref().ok_or("frame 要 --out <目录>")?;
-    let frame = args.frame.ok_or("frame 要 --frame <N>")?;
+/// `frame` 要出哪几帧。
+///
+/// # 为什么是两种写法而不是一种
+///
+/// 「出一帧」与「出一段」在调用方那里是两件事：前者是看一眼这一帧长什么样，
+/// 后者是拿一串 PNG 去拼预览或做像素比对。
+///
+/// 从前只有 `--frame`，而**多给的 `--to` 会被静默收下**（解析阶段认它，
+/// 这里却不读）—— 用户以为出了一段，实际只出了一帧，退出码还是 0。
+/// 这正是本文件开头在防的那件事，所以现在把它变成一条真的路。
+///
+/// 两种写法**互斥**：同时给 `--frame` 与 `--from` / `--to` 是用法错。
+/// 让后者悄悄赢（或让前者悄悄赢）都会产出与用户预期不同的那一份。
+fn frame_range(args: &Args) -> Result<Vec<Frame>, Usage> {
+    let explicit = args.frame.is_some();
+    let ranged = args.from.is_some() || args.to.is_some();
+    if explicit && ranged {
+        return Err(usage_error(
+            "--frame 与 --from / --to 只能给一种：前者出一帧，后者出一段".to_string(),
+        ));
+    }
+    if explicit {
+        return Ok(vec![args.frame.expect("刚刚判过它存在")]);
+    }
+    if !ranged {
+        return Err(usage_error(
+            "frame 要 --frame <N>，或者 --from <N> / --to <N> 出一段".to_string(),
+        ));
+    }
+    // 只给一头是**有意的**，但两头的含义**不对称** —— 这是这里唯一容易写错的地方：
+    //
+    //   * 只给 `--from 10`：“从第 10 帧起，到工程结尾”；
+    //   * 只给 `--to 5` ：“从第 0 帧到第 5 帧”。
+    //
+    // 两头都缺省成"另一头"的话，`--to 5` 会变成 `from=5, to=5`（只出第 5 帧）——
+    // 一个看着成功、实际少了 5 帧的结果。缺的那一头固定取 0，不做对称处理。
+    let from = args.from.unwrap_or(0);
+    let to = args.to.unwrap_or(from);
+    if to < from {
+        return Err(usage_error(format!(
+            "帧区间是空的：from={from} to={to}（--to 要比 --from 大）"
+        )));
+    }
+    Ok((from..=to).collect())
+}
+
+fn cmd_frame(args: &Args) -> Result<ExitCode, CommandError> {
+    let project = args
+        .project
+        .as_ref()
+        .ok_or_else(|| usage_error("frame 要 --project <文件>".to_string()))?;
+    let out = args
+        .out
+        .as_ref()
+        .ok_or_else(|| usage_error("frame 要 --out <目录>".to_string()))?;
+    let frames = frame_range(args)?;
     let doc = match load_project_or_usage(project) {
         Ok(doc) => doc,
         Err(code) => return Ok(code),
@@ -1053,16 +1213,21 @@ fn cmd_frame(args: &Args) -> Result<ExitCode, String> {
     let subtitles = load_subtitles(&doc, &sources)?;
 
     // 文件名固定按帧号，调用方给的是**目录** —— 这样同一帧重跑一定落在同一个路径上。
+    // 区间也走这一条：文件名是 `frame-<帧号四位>.png`，一帧一条，不会互相覆盖。
     let output = PathBuf::from(out).join("frame.png");
     // **把资产时间基带上。** 少了它就会退回恒等换算（素材帧率按时间线算），
     // 而 60fps 素材放进 30fps 工程的表现是**半速播放**。
     let asset_timebases = doc.asset_timebases();
+    let (first_frame, last_frame) = (
+        frames.first().copied().expect("frame_range 一定给至少一帧"),
+        frames.last().copied().expect("frame_range 一定给至少一帧"),
+    );
     let plan = RenderPlan {
         timeline: &doc.timeline,
         sources: &sources,
         asset_timebases: &asset_timebases,
-        from: frame,
-        to: frame,
+        from: first_frame,
+        to: last_frame,
         width,
         height,
         sequence: doc.sequence_size(),
@@ -1072,32 +1237,78 @@ fn cmd_frame(args: &Args) -> Result<ExitCode, String> {
         audio: AudioMode::Silent,
         output: &output,
     };
-    let written = render_frames_png(&plan, &[frame])?;
-    let first = written.first().ok_or("一帧都没出")?;
-    // 字幕画不出来 / 被切 -> 这张 PNG 里的字幕不对，**不能报成功**。
+    let written = render_frames_png(&plan, &frames)?;
+    // 字幕画不出来 / 被切 -> 这几张 PNG 里的字幕不对，**不能报成功**。
     // 与 render 的判据同源：都读问题清单，不另设一套。
-    let failed = !first.issues.is_empty();
-    print_json(&serde_json::json!({
-        "frame": frame,
-        "path": first.path.display().to_string(),
-        "digest": first.digest,
+    //
+    // 区间是**整体**判：一段里坏了一帧就退出 1，但那些好帧的账照打 ——
+    // 只报第一帧的问题会让"第 47 帧的字幕被切了"看起来像是第 1 帧的事。
+    let failed = written.iter().any(|frame| !frame.issues.is_empty());
+    let failures: Vec<serde_json::Value> = written
+        .iter()
+        .filter(|frame| !frame.issues.is_empty())
+        .map(|frame| {
+            serde_json::json!({
+                "frame": frame.frame,
+                "path": frame.path.display().to_string(),
+                "issues": frame.issues,
+            })
+        })
+        .collect();
+    // 单帧那一路的字段**逐字保留**（frame / path / digest / overlay）：
+    // 老的调用方（check-cli、任何按一份 JSON 读的人）不该因为这里支持了区间就变。
+    // 区间那一路多出来的两个键只在真出多帧时出现 —— 一帧时它们与单帧同义，
+    // 写出来只会让"这一趟到底出了几张"这件事有两种读法。
+    let single = written.len() == 1;
+    let mut body = serde_json::json!({
+        "frame": first_frame,
+        "path": written.first().map(|f| f.path.display().to_string()),
+        "digest": written.first().map(|f| f.digest.clone()),
         "width": width,
         "height": height,
         "project_frames": project_frames(&doc),
-        "overlay": first.overlay,
-        "issues": first.issues,
+        "overlay": written.first().map(|f| f.overlay.clone()),
+        "issues": written.first().map(|f| f.issues.clone()).unwrap_or_default(),
         "failed": failed,
-    }))?;
+    });
+    if !single {
+        // 摘要：一帧一条，**顺序与请求一致** —— 调用方要拿它去比对
+        // "第 N 张是不是我要的那一帧"，乱序会让比对静默错位。
+        body["frames"] = serde_json::json!(written
+            .iter()
+            .map(|frame| serde_json::json!({
+                "frame": frame.frame,
+                "path": frame.path.display().to_string(),
+                "digest": frame.digest,
+            }))
+            .collect::<Vec<_>>());
+        body["count"] = serde_json::json!(written.len());
+        body["failures"] = serde_json::json!(failures);
+    }
+    print_json(&body)?;
     if failed {
-        eprintln!("这一帧的字幕有问题（见 issues）—— 出图了，但图里的字幕不对。");
+        if single {
+            eprintln!("这一帧的字幕有问题（见 issues）—— 出图了，但图里的字幕不对。");
+        } else {
+            eprintln!(
+                "这一段里有 {} 帧的字幕有问题（见 failures）—— 图出了，但那些帧的字幕不对。",
+                failures.len()
+            );
+        }
         return Ok(ExitCode::from(1));
     }
     Ok(ExitCode::SUCCESS)
 }
 
-fn cmd_render(args: &Args) -> Result<ExitCode, String> {
-    let project = args.project.as_ref().ok_or("render 要 --project <文件>")?;
-    let out = args.out.as_ref().ok_or("render 要 --out <文件.mp4>")?;
+fn cmd_render(args: &Args) -> Result<ExitCode, CommandError> {
+    let project = args
+        .project
+        .as_ref()
+        .ok_or_else(|| usage_error("render 要 --project <文件>".to_string()))?;
+    let out = args
+        .out
+        .as_ref()
+        .ok_or_else(|| usage_error("render 要 --out <文件.mp4>".to_string()))?;
     let doc = match load_project_or_usage(project) {
         Ok(doc) => doc,
         Err(code) => return Ok(code),
@@ -1346,9 +1557,15 @@ fn relativize_uri(path: &Path, asset_root: &Path) -> String {
     }
 }
 
-fn cmd_import(args: &Args) -> Result<ExitCode, String> {
-    let project = args.project.as_ref().ok_or("import 要 --project <文件>")?;
-    let file = args.file.as_ref().ok_or("import 要 --file <素材>")?;
+fn cmd_import(args: &Args) -> Result<ExitCode, CommandError> {
+    let project = args
+        .project
+        .as_ref()
+        .ok_or_else(|| usage_error("import 要 --project <文件>".to_string()))?;
+    let file = args
+        .file
+        .as_ref()
+        .ok_or_else(|| usage_error("import 要 --file <素材>".to_string()))?;
     let path = Path::new(file);
     if !path.exists() {
         eprintln!("文件不在：{file}");
@@ -1364,7 +1581,9 @@ fn cmd_import(args: &Args) -> Result<ExitCode, String> {
         None => path
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
-            .ok_or("这个路径没有文件名，请用 --id 指定")?,
+            .ok_or_else(|| {
+                usage_error("这个路径没有文件名，请用 --id 指定".to_string())
+            })?,
     };
     let kind = infer_kind(path);
     let mut built = Asset {
@@ -1424,8 +1643,11 @@ fn cmd_import(args: &Args) -> Result<ExitCode, String> {
     })
 }
 
-fn cmd_library(args: &Args) -> Result<ExitCode, String> {
-    let project = args.project.as_ref().ok_or("library 要 --project <文件>")?;
+fn cmd_library(args: &Args) -> Result<ExitCode, CommandError> {
+    let project = args
+        .project
+        .as_ref()
+        .ok_or_else(|| usage_error("library 要 --project <文件>".to_string()))?;
     let doc = match load_project_or_usage(project) {
         Ok(doc) => doc,
         Err(code) => return Ok(code),
@@ -1641,12 +1863,14 @@ fn sidecar_text(
 /// （牵动 `to_ass` 与两端），要么再添一个旗标。而 T3 的验收只要求**结构一致**
 /// （同一输入两端给出相同的 text / 泳道 / 进出帧、丢弃数一致），
 /// 所以这里先记为边界，不顺手扩契约。
-fn cmd_subtitle(args: &Args) -> Result<ExitCode, String> {
+fn cmd_subtitle(args: &Args) -> Result<ExitCode, CommandError> {
     let project = args
         .project
         .as_ref()
-        .ok_or("subtitle 要 --project <文件>")?;
-    let frame = args.frame.ok_or("subtitle 要 --frame <帧号>")?;
+        .ok_or_else(|| usage_error("subtitle 要 --project <文件>".to_string()))?;
+    let frame = args
+        .frame
+        .ok_or_else(|| usage_error("subtitle 要 --frame <帧号>".to_string()))?;
     let doc = match load_project_or_usage(project) {
         Ok(doc) => doc,
         Err(code) => return Ok(code),
@@ -1751,11 +1975,13 @@ fn save_history(path: &str, history: &History) -> Result<(), String> {
         .map_err(|error| format!("写不回历史文件 {path}：{error}"))
 }
 
-fn cmd_edit(args: &Args) -> Result<ExitCode, String> {
+fn cmd_edit(args: &Args) -> Result<ExitCode, CommandError> {
     let project = args
         .project
         .as_ref()
-        .ok_or_else(|| format!("{} 要 --project <文件>", command_name(args)))?;
+        .ok_or_else(|| {
+            usage_error(format!("{} 要 --project <文件>", command_name(args)))
+        })?;
     let doc = match load_project_or_usage(project) {
         Ok(doc) => doc,
         Err(code) => return Ok(code),
@@ -1820,7 +2046,7 @@ fn record_edit(
     project: &str,
     doc: ProjectDoc,
     op: &EditOp,
-) -> Result<ExitCode, String> {
+) -> Result<ExitCode, CommandError> {
     let outcome = apply_edit(&doc, REGISTRY, op);
     if args.write && outcome.is_ok() {
         let label = if outcome.summary.is_empty() {
@@ -1888,11 +2114,13 @@ fn build_named_op(args: &Args) -> EditOp {
 }
 
 /// `clip` / `sequence`：把开关拼成 op，然后走**同一条** `record_edit`。
-fn cmd_named_op(args: &Args) -> Result<ExitCode, String> {
+fn cmd_named_op(args: &Args) -> Result<ExitCode, CommandError> {
     let project = args
         .project
         .as_ref()
-        .ok_or_else(|| format!("{} 要 --project <文件>", command_name(args)))?;
+        .ok_or_else(|| {
+            usage_error(format!("{} 要 --project <文件>", command_name(args)))
+        })?;
     let doc = match load_project_or_usage(project) {
         Ok(doc) => doc,
         Err(code) => return Ok(code),
@@ -1904,7 +2132,7 @@ fn cmd_named_op(args: &Args) -> Result<ExitCode, String> {
 /// `undo` / `redo`：**连函数都不换** —— 把旗标设上再调 `cmd_edit`。
 ///
 /// 这是"糖"最诚实的形态：想有一处行为不同都不可能，因为根本没有第二份实现。
-fn cmd_named_history(args: &Args) -> Result<ExitCode, String> {
+fn cmd_named_history(args: &Args) -> Result<ExitCode, CommandError> {
     cmd_edit(&history_alias(args))
 }
 
@@ -1928,8 +2156,11 @@ fn history_alias(args: &Args) -> Args {
 /// * 中途有一步不成立就**整份不落盘**，并明说**卡在第几行** ——
 ///   否则用户只能靠 diff 猜是哪一步的问题；
 /// * 空脚本**不算成功**：它会打印 ok 却什么都没做，与"脚本路径写错了"分不开。
-fn cmd_batch(args: &Args) -> Result<ExitCode, String> {
-    let project = args.project.as_ref().ok_or("batch 要 --project <文件>")?;
+fn cmd_batch(args: &Args) -> Result<ExitCode, CommandError> {
+    let project = args
+        .project
+        .as_ref()
+        .ok_or_else(|| usage_error("batch 要 --project <文件>".to_string()))?;
     let script = args.script.as_ref().expect("--script 解析阶段就要求了");
     let doc = match load_project_or_usage(project) {
         Ok(doc) => doc,
@@ -2000,7 +2231,7 @@ fn cmd_batch(args: &Args) -> Result<ExitCode, String> {
 /// 撤销 / 重做：从历史文件里退一步或进一步。
 ///
 /// **不给 `--write` 就是干跑** —— 连历史文件都不碰（干跑不许在磁盘上留下任何痕迹）。
-fn cmd_edit_history(args: &Args, project: &str, doc: ProjectDoc) -> Result<ExitCode, String> {
+fn cmd_edit_history(args: &Args, project: &str, doc: ProjectDoc) -> Result<ExitCode, CommandError> {
     let history_path = args
         .history
         .as_ref()
@@ -2070,14 +2301,22 @@ fn main() -> ExitCode {
         "undo" | "redo" => cmd_named_history(&args),
         "clip" | "sequence" => cmd_named_op(&args),
         "batch" => cmd_batch(&args),
-        other => Err(format!("不认识的子命令：{other}")),
+        other => Err(CommandError::Usage(usage_error(format!(
+            "不认识的子命令：{other}"
+        )))),
     };
+    // **退出码由类型决定，不由文案决定。**
+    //
+    // 这一段从前无条件退 1，于是「忘给 --project」与「GPU 拿不到上下文」
+    // 在调用方眼里长得一模一样 —— 而本机后端正是靠 0 / 2 区分
+    // 「成功」与「用户能改的错」。混淆的方向是坏的：调用方会去查渲染管线，
+    // 而真正该做的是补上那个开关。
+    //
+    // 所以 `Err` 两侧是不同的类型（见 [`CommandError`]）：用法错带的是
+    // [`Usage`]，运行期失败带的是裸 `String`。想混都混不了。
     match result {
         Ok(code) => code,
-        Err(error) => {
-            eprintln!("{error}");
-            ExitCode::from(1)
-        }
+        Err(error) => error.code(),
     }
 }
 
@@ -2661,6 +2900,58 @@ mod tests {
         assert!(args.help);
         let args = parse(&[]).expect("合法");
         assert!(args.command.is_empty());
+    }
+
+    #[test]
+    fn frame_的两种写法互斥且各出各的() {
+        // 「出一帧」与「出一段」是两件事，同时给必须报错 ——
+        // 让其中一个悄悄赢，产出的就不是用户要的那一份。
+        let both = parse(&argv(&["frame", "--project", "p.json", "--frame", "1", "--from", "0"]))
+            .expect("解析这一关不该拦（--from 不是 clip 专用开关）");
+        assert!(matches!(frame_range(&both), Err(_)), "同时给应当是用法的错");
+
+        // 单帧：就是那一个帧号，原样。
+        let one = parse(&argv(&["frame", "--project", "p.json", "--frame", "30"]))
+            .expect("合法");
+        assert_eq!(frame_range(&one).expect("合法"), vec![30]);
+
+        // 区间：闭区间，两头都算上。
+        let span = parse(&argv(&["frame", "--project", "p.json", "--from", "0", "--to", "2"]))
+            .expect("合法");
+        assert_eq!(frame_range(&span).expect("合法"), vec![0, 1, 2]);
+
+        // **两头的缺省不对称**：只给 --from 是「从这里到它自己」，
+        // 只给 --to 是「从第 0 帧到这里」。写成 `from.unwrap_or(to)` 的话
+        // `--to 5` 会退化成只出第 5 帧 —— 一个看着成功、实际少了 5 帧的结果。
+        let tail = parse(&argv(&["frame", "--project", "p.json", "--from", "3"]))
+            .expect("合法");
+        assert_eq!(frame_range(&tail).expect("合法"), vec![3]);
+        let head = parse(&argv(&["frame", "--project", "p.json", "--to", "2"]))
+            .expect("合法");
+        assert_eq!(frame_range(&head).expect("合法"), vec![0, 1, 2]);
+
+        // 一头都不给：**不猜**要哪几帧，报用法错。
+        let none = parse(&argv(&["frame", "--project", "p.json"])).expect("合法");
+        assert!(matches!(frame_range(&none), Err(_)), "都没给应当是用法的错");
+
+        // 区间反了：在这里判掉，而不是等渲染时发现一帧都没出。
+        let reversed = parse(&argv(&["frame", "--project", "p.json", "--from", "9", "--to", "2"]))
+            .expect("合法");
+        assert!(matches!(frame_range(&reversed), Err(_)), "反区间应当是用法的错");
+    }
+
+    #[test]
+    fn 用法错与运行期失败是不同的类型() {
+        // 退出码契约：0 成功 / 2 用法或校验错 / 1 运行期失败。
+        // 这两类从前都走 `Err(String)`，于是「忘给 --project」与「GPU 起不来」
+        // 在调用方眼里一模一样。这条把分类钉在类型上。
+        let usage: CommandError = usage_error("缺一个开关".to_string()).into();
+        assert!(matches!(usage, CommandError::Usage(_)));
+        let runtime: CommandError = "GPU 起不来".to_string().into();
+        assert!(matches!(runtime, CommandError::Runtime(_)));
+        // 文案要能原样透出去：分类变了，说的话不能变。
+        assert_eq!(usage.to_string(), "缺一个开关");
+        assert_eq!(runtime.to_string(), "GPU 起不来");
     }
 
     #[test]
