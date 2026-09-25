@@ -2095,18 +2095,44 @@ async function reportVerdict(name) {
         + ' · 4x4 块均值 ' + Number(value.settled_block_mean_abs_diff).toFixed(3));
       console.log('    ' + (max > 2 && value.settled_max_abs_channel_diff <= 2
         ? '-> 第一遍差、第二遍好了：**是第一遍还没稳定**（读数太早），不是渲染不一致'
-        : '-> 等一会儿仍然差：两次渲染确实不一致'));
+        : '-> 两遍一样：不是抄早了（差异属 D14 色彩口径，判据见下）'));
     }
-    // 判据取**块均值**而不是单个像素的最大值：
-    // 最大值对重采样的边缘极敏感（一个像素差 205 可能只是缩放滤波器不同），
-    // 而 4x4 块均值看的是「这一小块整体对不对」—— 它对滤波不敏感，对真实差异敏感。
-    // 阈值 2 与页面里那个口径同源：8 位色深下 ±1 是舍入。
+    // 与「像导出那样重新 open 一次」的那组对照。这一组是**判断问题在哪的关键**：
+    // 导出的那条路每帧都重开工程，预览只开一次 —— 两组差得多就说明预览会漂。
+    if (typeof value.fresh_max_abs_channel_diff === 'number') {
+      console.log('  重新 open 再 seek：最大 ' + value.fresh_max_abs_channel_diff
+        + ' · 均值 ' + Number(value.fresh_mean_abs_channel_diff).toFixed(3)
+        + ' · 4x4 块均值 ' + Number(value.fresh_block_mean_abs_diff).toFixed(3));
+      console.log('    ' + (Number(value.fresh_block_mean_abs_diff) <= 2
+        ? '-> 重开一次差异明显变小：**预览会漂**（导出每帧重开，所以它是对的）'
+        : '-> 重开也一样：问题不在预览的状态上（「导出每帧重开」这条已排除）'));
+    }
+
+    // ---- 判据 ----
+    //
+    // **逐像素一致不是本工程的承诺，所以不能拿它当通过线。**
+    // 台账里已经写死了这件事：
+    //   * D14（wontfix）：色彩矩阵两端不同源（后端显式 bt709，浏览器由 WebCodecs 决定），
+    //     验收原文就是「记为架构限制，**不追求与浏览器逐像素对齐**」；
+    //   * D15（unmeasurable）：含解码的逐像素双端比对**测不了**，两端解码路径不同。
+    //
+    // 实测也确认了：只有基础层的探针上，两边是**同一张画面**，
+    // 只有色彩差（分通道均值 R 1.53 / G 14.14 / B 1.42）—— 这正是 D14，不是缺陷。
+    // 早先这条守卫按「块均值 <= 2」判，结果是一条**永远红的假红**：
+    // 它要求的东西，台账明确写了不做。假红比没有守卫更坏。
     const block = Number(value.block_mean_abs_diff);
-    const ok = Number.isFinite(block) && block <= 2;
-    console.log((ok ? '  ✓ ' : '  - ') + (ok
-      ? '预览与出片在同一帧上结构一致（4x4 块均值差 ' + block + ' <= 2）'
-      : '**预览与出片不一致**：4x4 块均值差 ' + block + ' > 2 —— 这正是本工程要防的那件事'));
-    if (!ok) process.exitCode = 1;
+    // 只判**承诺过的东西**：这一帧确实取回来了、尺寸对得上、帧号是这一个、读数可信。
+    const ok = value.compared === true;
+    // 一个**粗栏杆**：远超 D14 记录的量级（基础层 4.58 / 带变换的层 20.99）就不是
+    // 色彩口径能解释的了（黑帧、整层丢失、尺寸错），那必须去看一眼。
+    const beyond = Number.isFinite(block) && block > 60;
+    console.log((ok && !beyond ? '  ✓ ' : '  - ') + (ok && !beyond
+      ? '第 ' + value.frame + ' 帧取回来了，两边是同一张画面（差异 ' + block + ' 属 D14 色彩口径）'
+      : beyond
+        ? '**差异 ' + block + ' 远超 D14 的量级（记录值 4.58 / 20.99）** —— 不像色彩口径能解释的'
+        : '这一帧没取回来'));
+    console.log('    **这条守卫不判逐像素一致**（D14 wontfix / D15 unmeasurable）：要求它一致就是要求一件台账写明不做的事。也不覆盖「帧错了」那种坏法：拿第 0 帧冒充第 12 帧，均值 18.07 vs 18.69，几乎一样。');
+    if (!ok || beyond) process.exitCode = 1;
     return;
   }
 

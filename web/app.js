@@ -1272,6 +1272,24 @@ async function runRealFrameVerdict(name) {
       settled = { max: d2.maxAbs, mean: d2.meanAbs, block: d2.blockMeanAbs };
     }
   }
+  // **对照 2：像导出那样重新 open 一次再 seek。**
+  // `exportPngSequence` 每出一帧都先 `engine.open(工程)` 再 `seek`；
+  // 而界面上的预览是启动时 open 一次、之后只 seek。
+  // 两边的数不一样，就说明**预览会漂**、而导出那条路因为每帧重开所以是对的 ——
+  // 这也正好解释了 `check-dual-end` 的 SSIM 是 1.0（它比的是导出，不是预览）。
+  let fresh = null;
+  if (result.compared === true) {
+    state.engine.open(JSON.stringify(state.doc));
+    await state.engine.seek(result.frame);
+    const reopened = capturePreviewPixels($("preview"));
+    if (!reopened.uniform) {
+      const realPixels = captureRealFramePixels();
+      const w = $("preview").width;
+      const h = $("preview").height;
+      const d3 = diffImageData(reopened.data, realPixels, w, h);
+      fresh = { max: d3.maxAbs, mean: d3.meanAbs, block: d3.blockMeanAbs };
+    }
+  }
   // **证据要在最后留。**
   // WebGPU 画布被 toDataURL 读一次之后，交换链里的内容就没了，后面再 drawImage 抄到的是空白。
   // 本轮真踩到两次：先留证据，判定就报"预览画布读回来是纯色"。
@@ -1308,6 +1326,9 @@ async function runRealFrameVerdict(name) {
     settled_max_abs_channel_diff: settled === null ? null : settled.max,
     settled_mean_abs_channel_diff: settled === null ? null : settled.mean,
     settled_block_mean_abs_diff: settled === null ? null : settled.block,
+    fresh_max_abs_channel_diff: fresh === null ? null : fresh.max,
+    fresh_mean_abs_channel_diff: fresh === null ? null : fresh.mean,
+    fresh_block_mean_abs_diff: fresh === null ? null : fresh.block,
     note: "同一份工程、同一帧：预览走浏览器 wasm，出片帧走 dhampir frame",
   });
 }

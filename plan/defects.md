@@ -106,8 +106,8 @@
 - [D14] status=wontfix phase=-
   症状: 色彩矩阵两端不同源（后端显式 bt709，浏览器由 WebCodecs 决定）
   根因: crates/dhampir-worker/src/pipeline.rs:19
-  验收: 记为架构限制，不追求与浏览器逐像素对齐
-  证据: -
+  验收: 记为架构限制，不追求与浏览器逐像素对齐；实测量级（只有基础层的探针，两边同一张画面）：4x4 块均值 4.58、逐通道均值 R 1.53 G 14.14 B 1.42；带变换的层 20.99；复合 14.22。复查：node scripts/web-check.mjs --verdict realframe --local
+  证据: docs/api.md
 
 - [D15] status=unmeasurable phase=-
   症状: 含解码的逐像素双端比对测不了

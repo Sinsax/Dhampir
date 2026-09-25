@@ -1,0 +1,122 @@
+{
+  "project_schema": 1,
+  "generator": {
+    "app": "dhampir",
+    "version": "0.0.1"
+  },
+  "meta": {
+    "title": "探针：只有基础层 a",
+    "created_at": null,
+    "modified_at": null
+  },
+  "assets": [
+    {
+      "id": "a.mp4",
+      "kind": "video",
+      "name": "A 段",
+      "uri": "proxy1080p.mp4",
+      "frame_count": 480,
+      "timebase": {
+        "num": 60,
+        "den": 1
+      },
+      "width": 1920,
+      "height": 1080,
+      "content_hash": null,
+      "tags": {},
+      "note": "四个 asset id 指向同一个真文件：仓库里只有这一份素材。"
+    },
+    {
+      "id": "b.mp4",
+      "kind": "video",
+      "name": "B 段",
+      "uri": "proxy1080p.mp4",
+      "frame_count": 480,
+      "timebase": {
+        "num": 60,
+        "den": 1
+      },
+      "width": 1920,
+      "height": 1080,
+      "content_hash": null,
+      "tags": {},
+      "note": ""
+    },
+    {
+      "id": "c.mp4",
+      "kind": "video",
+      "name": "C 段",
+      "uri": "proxy1080p.mp4",
+      "frame_count": 480,
+      "timebase": {
+        "num": 60,
+        "den": 1
+      },
+      "width": 1920,
+      "height": 1080,
+      "content_hash": null,
+      "tags": {},
+      "note": ""
+    },
+    {
+      "id": "d.mp4",
+      "kind": "video",
+      "name": "D 段",
+      "uri": "proxy1080p.mp4",
+      "frame_count": 480,
+      "timebase": {
+        "num": 60,
+        "den": 1
+      },
+      "width": 1920,
+      "height": 1080,
+      "content_hash": null,
+      "tags": {},
+      "note": ""
+    }
+  ],
+  "timeline": {
+    "schema": 3,
+    "timebase": {
+      "num": 30,
+      "den": 1
+    },
+    "markers": [
+      {
+        "id": "m1",
+        "frame": 30,
+        "name": "转场",
+        "color": "#d09a3c"
+      }
+    ],
+    "tracks": [
+      {
+        "id": "v1",
+        "kind": "video",
+        "layers": [
+          {
+            "id": "a",
+            "start": 0,
+            "end": 30,
+            "source": {
+              "asset_id": "a.mp4",
+              "source_in": 0
+            },
+            "note": "基础元素 + 素材引用"
+          }
+        ]
+      }
+    ]
+  },
+  "view": {
+    "playhead": 0,
+    "selection": "c",
+    "zoom": 1
+  },
+  "render_hints": {
+    "width": 640,
+    "height": 360,
+    "format": "mp4"
+  },
+  "extensions": {}
+}
