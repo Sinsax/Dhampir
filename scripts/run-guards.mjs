@@ -118,6 +118,9 @@ export const GUARDS = [
   { script: 'check-media-status.mjs', args: [] },
   { script: 'check-effect-registry.mjs', args: [] },
   { script: 'check-local-backend.mjs', args: [] },
+  // 同源代理那条路：它坏了不会有别的守卫变红（check-local-backend 直接打后端，
+  // 不经过转发），而产品路径的最后一跳正是从它上面走的。
+  { script: 'check-same-origin-proxy.mjs', args: [] },
   { script: 'api-surface.mjs', args: [] },
   { script: 'timeline-contract.mjs', args: [] },
   { script: 'check-cli.mjs', args: [] },

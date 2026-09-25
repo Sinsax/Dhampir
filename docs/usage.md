@@ -382,7 +382,7 @@ node scripts/dhampir-local.mjs --port 8787 --asset-root target/s3
 ### 8.1 跑全部守卫
 
 ```bash
-node scripts/run-guards.mjs              # 跑全部 19 条（每条先自检、再正跑）
+node scripts/run-guards.mjs              # 跑全部 20 条（每条先自检、再正跑）
 node scripts/run-guards.mjs --list       # 只列清单
 node scripts/run-guards.mjs --self-test  # 只跑各自的 --self-test
 ```

@@ -50,7 +50,7 @@
 
 ```bash
 cargo test --workspace                     # native 全量
-node scripts/run-guards.mjs                # 19 条守卫全绿
+node scripts/run-guards.mjs                # 20 条守卫全绿
 cargo run -q -p dhampir-worker --bin dhampir -- --help
 ```
 
@@ -138,7 +138,7 @@ cargo run -q -p dhampir-worker --bin dhampir -- --help
 
 ### 守卫脚本
 
-一共 **19 条**（`scripts/` 下，各带自己的 `--self-test`），用 `node scripts/run-guards.mjs` 全跑。
+一共 **20 条**（`scripts/` 下，各带自己的 `--self-test`），用 `node scripts/run-guards.mjs` 全跑。
 每个守卫都被**反向验证**过（临时植入违例，确认它真的会红）。**守卫若不会红，就不是守卫。**
 
 CI 里跑的是其中**不依赖本机资产**的三条：

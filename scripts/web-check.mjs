@@ -239,6 +239,40 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // **页面自己的静态文件优先，判据是「文件在不在」，不是路径白名单。**
+  //
+  // 白名单漏一条就是静默 404，而这类 404 在这里的表现是「页面白屏」或
+  // 「导出失败：查询失败：HTTP 404」—— 看不出是路由没转，查起来很贵。
+  // 本轮就踩到过一次：同源代理只转了 /export 这一条精确路径，
+  // 漏掉了 /export/<jobId> 的轮询与 /export/<jobId>/download。
+  let file = null;
+  if (path === '/' || path === '/index.html') file = join(WEB_DIR, 'index.html');
+  else if (path === '/probe.html') file = join(WEB_DIR, 'probe.html');
+  else if (path === '/synthetic.html') file = join(WEB_DIR, 'synthetic.html');
+  // 一次性诊断页：用来在**真实浏览器里**做 A/B，而不是靠对规范的印象下结论。
+
+  else if (path.startsWith('/pkg/')) file = join(PKG_DIR, path.slice('/pkg/'.length));
+  else if (path === '/sample-project.json') file = join(REPO_ROOT, 'fixtures', 'sample-project.json');
+  // 工程文件形态（带资产表、v2 元素）。**页面默认要的是这一份** ——
+  // 裸契约没有资产表，页面读不到 assets，多素材就无从解析。
+  else if (path === '/sample-project.doc.json') file = join(REPO_ROOT, 'fixtures', 'sample-project.doc.json');
+  else if (path === '/media/proxy.mp4') file = join(REPO_ROOT, MEDIA);
+  // web/ 下的前端模块一律照原样服务。写死清单会在加文件时静默 404 ——
+  // 而 404 的表现是「页面白屏」，不是「少一个文件」，很难查。
+  else if (path === '/app.js' || path === '/engine.js' || path === '/backend.js') file = join(WEB_DIR, path.slice(1));
+  else if (path.startsWith('/export/')) file = join(WEB_DIR, path.slice(1));
+  if (file !== null && existsSync(file) && statSync(file).isFile()) {
+    res.writeHead(200, {
+      'content-type': MIME[extname(file)] || 'application/octet-stream',
+      // **不许缓存。** 这是个验收入口：改了 app.js / engine.js 之后，
+      // 浏览器拿缓存里的旧版本会让"改了没生效"，而那种表现和"改错了"一模一样。
+      // 手工看的时候（--serve）这一条尤其重要 —— 少一次 Ctrl+Shift+R 的猜谜。
+      'cache-control': 'no-store',
+    });
+    createReadStream(file).pipe(res);
+    return;
+  }
+
   // **素材走同一源代理转发**（这是预览性能的关键，不是可有可无的转发）。
   //
   // 页面由本进程服务，而素材在后端（另一个端口）。浏览器把这种视频当**跨源媒体**：
@@ -250,22 +284,10 @@ const server = createServer(async (req, res) => {
   //
   // 转发时**必须把 Range 原样带过去**：video 元素一定会发 Range，
   // 吞掉它会让浏览器拿不到读到哪一段的确认，表现是**卡住而不报错**。
-  // 走同源的那一条：**除了页面自己的静态文件，其余一律转给后端**。
-  // 只转 /assets 是不够的 —— 工程（/projects）、能力（/capabilities）、
-  // 预检与出片也都走后端，漏掉任一条页面就起不来，而症状是"判定没回传"。
-  // **按前缀分流，不按白名单**：白名单漏一条就静默 404，
-  // 而 404 在这里的表现是「判定没回传」，看不出是路由没转。
-  // 页面自己的东西（html/js/pkg/export/示例工程 json）留在本地，其余转后端。
-  const backendOwned = path.startsWith('/assets/') || path.startsWith('/projects/')
-    || path === '/capabilities' || path === '/validate' || path === '/precheck'
-    || path === '/precheck-result' || path === '/export' || path.startsWith('/render')
-    || path === '/verdict';
-  if (backendOwned) {
-    if (backendPort === 0) {
-      res.writeHead(503, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ error: 'no backend' }));
-      return;
-    }
+
+  // **其余一律转后端。** 判据是「不是页面自己的文件」，所以后端新增路由
+  // （/export/<id>/download 就是一条）这里不用跟着改。
+  if (backendPort !== 0) {
     const upstreamHeaders = {};
     // Range 要原样带过去（video 一定会发）；content-type 也要，body 是 JSON。
     if (typeof req.headers.range === 'string') upstreamHeaders.range = req.headers.range;
@@ -291,35 +313,7 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  let file = null;
-  if (path === '/' || path === '/index.html') file = join(WEB_DIR, 'index.html');
-  else if (path === '/probe.html') file = join(WEB_DIR, 'probe.html');
-  else if (path === '/synthetic.html') file = join(WEB_DIR, 'synthetic.html');
-  // 一次性诊断页：用来在**真实浏览器里**做 A/B，而不是靠对规范的印象下结论。
-
-  else if (path.startsWith('/pkg/')) file = join(PKG_DIR, path.slice('/pkg/'.length));
-  else if (path === '/sample-project.json') file = join(REPO_ROOT, 'fixtures', 'sample-project.json');
-  // 工程文件形态（带资产表、v2 元素）。**页面默认要的是这一份** ——
-  // 裸契约没有资产表，页面读不到 assets，多素材就无从解析。
-  else if (path === '/sample-project.doc.json') file = join(REPO_ROOT, 'fixtures', 'sample-project.doc.json');
-  else if (path === '/media/proxy.mp4') file = join(REPO_ROOT, MEDIA);
-  // web/ 下的前端模块一律照原样服务。写死清单会在加文件时静默 404 ——
-  // 而 404 的表现是「页面白屏」，不是「少一个文件」，很难查。
-  else if (path === '/app.js' || path === '/engine.js' || path === '/backend.js') file = join(WEB_DIR, path.slice(1));
-  else if (path.startsWith('/export/')) file = join(WEB_DIR, path.slice(1));
-
-  if (file === null || !existsSync(file) || !statSync(file).isFile()) {
-    res.writeHead(404).end('not found: ' + path);
-    return;
-  }
-  res.writeHead(200, {
-    'content-type': MIME[extname(file)] || 'application/octet-stream',
-    // **不许缓存。** 这是个验收入口：改了 app.js / engine.js 之后，
-    // 浏览器拿缓存里的旧版本会让"改了没生效"，而那种表现和"改错了"一模一样。
-    // 手工看的时候（--serve）这一条尤其重要 —— 少一次 Ctrl+Shift+R 的猜谜。
-    'cache-control': 'no-store',
-  });
-  createReadStream(file).pipe(res);
+  res.writeHead(404).end('not found: ' + path);
 });
 
 await new Promise((resolveListen) => server.listen(0, '127.0.0.1', resolveListen));
@@ -532,10 +526,14 @@ if (mode === 'serve') {
   // **收尾之前先把页面里的脚印读出来** —— 杀掉 Chrome 之后就读不到了。
   if (!readyOnly) pageMarks = await readPageMarks(debugPort);
   try { child.kill(); } catch (error) { /* 已经没了 */ }
-  server.close();
 
-  // **报告要在杀掉后端之前跑完。** 产品路径的最后一步是下载产物，
+  // **报告要在关掉页面服务与后端之前跑完。** 产品路径的最后一步是下载产物，
   // 而后端一停就下载不了 —— 上一次就是这样拿到了 ECONNRESET。
+  //
+  // **页面服务也必须活到那一刻**（本轮踩到）：同源模式下页面把后端的相对
+  // 下载地址按**自己的来源**解析，也就是解析到本进程这个服务上。
+  // 先关它再去下载，拿到的是 ECONNREFUSED —— 那个报错看着像"后端没起"，
+  // 会把人带到错的方向；实际是测试台自己把路拆了。
   try {
     if (readyOnly) {
       // --exec：页面起来之后在页面里跑一段 JS 并把结果打出来。
@@ -568,6 +566,8 @@ if (mode === 'serve') {
     // **跑完就杀，不能只靠 process.on('exit')** —— 子进程自己会让事件循环活着，
     // 于是 Node 永不退出、管道永不刷出，看起来像浏览器卡住。
     if (backendProcess) { backendProcess.kill(); backendProcess = null; }
+    // 页面服务同理：报告跑完（下载结束）才关。
+    server.close();
   }
 }
 
@@ -851,8 +851,9 @@ async function reportBackendExport(stderr) {
         info = probeVideo(BACKEND_EXPORT_PATH);
       }
     } catch (error) {
+      const cause = error && error.cause ? (' | cause=' + String(error.cause && error.cause.message ? error.cause.message : error.cause) + ' code=' + String(error.cause && error.cause.code)) : '';
       problems.push('下载成片时连接失败：' + String(error && error.message ? error.message : error)
-        + '（' + downloadUrl + '）');
+        + cause + '（' + downloadUrl + '）');
     }
   }
 
