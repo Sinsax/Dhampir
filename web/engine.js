@@ -310,14 +310,51 @@ export class Engine {
     return JSON.parse(await this.mod.dhampir_project_text_probe(frame));
   }
 
-  /** 把一个 video 定位到指定秒数，等它真的 seek 完。 */
+  /**
+   * 把一个 video 定位到指定秒数，等它真的 seek 完。
+   *
+   * # 为什么先比一次 currentTime（这是预览帧率的关键）
+   *
+   * 浏览器对**相同的 currentTime** 不会重新解码（实测 0.3ms），但**也不一定派 seeked**
+   * —— 于是"设一次、等事件"的写法在值没变时会一直等到兜底超时，白白卡住每一帧。
+   *
+   * 实测（headless Chrome，640x360 素材）：
+   *   * 同值 seek 5 次： 11.2ms（约 2.2ms/次）
+   *   * 异值 seek 5 次： 51.8ms（约 10.4ms/次）
+   * 而逐帧 seek 的总耗时里 **12–30ms 全在这一步**（sourcesFor / text / draw 合计不到 2ms）。
+   * 所以"值没变就直接返回"不是微优化，它决定预览能不能跑到序列帧率。
+   *
+   * # 兜底定时器为什么必须清
+   *
+   * 原来每次调用都挂一个 3000ms 的 setTimeout，**用掉了也不清**。播放时一秒 30 帧
+   * 就是 30 个挂着的定时器，它们到期后各调一次 done（done 已 removeEventListener，
+   * 重复调用无害，但定时器本身一直占着）。清掉它，顺带让 `done` 幂等。
+   */
   async seekVideo(video, seconds) {
+    // **相同值直接返回**：浏览器不会重新解码，seeked 也未必派发。
+    // 用严格相等：currentTime 是双精度，同一个算式重复算出的位模式相同。
+    if (video.currentTime === seconds && video.readyState >= 2) return null;
     return new Promise((resolve) => {
-      const done = (event) => { video.removeEventListener("seeked", done); resolve(event); };
+      let settled = false;
+      let timer = 0;
+      const done = (event) => {
+        if (settled) return;
+        settled = true;
+        video.removeEventListener("seeked", done);
+        // **必须清**：不清就是每帧一个 3 秒定时器（见上面那段）。
+        if (timer !== 0) clearTimeout(timer);
+        resolve(event);
+      };
       video.addEventListener("seeked", done);
-      video.currentTime = seconds;
+      try {
+        video.currentTime = seconds;
+      } catch (error) {
+        // 设不进去（还没拿到元数据等）也要收尾，不能让这一帧永远挂着。
+        done(null);
+        return;
+      }
       // 兜底：seek 到同一位置时浏览器可能不派 seeked，不能让预览卡死。
-      setTimeout(done, 3000);
+      timer = setTimeout(done, 3000);
     });
   }
 

@@ -46,6 +46,9 @@ const state = {
   hint: "",
   // 素材库（来自后端的 dhampir library）。null = 没连后端 / 还没取。
   library: null,
+  // 每个素材元素实际拿到的解码尺寸。**记的是 videoWidth（解码后的真实尺寸）**，
+  // 不是素材声明的尺寸 —— 两者可能不同，而决定 seek 代价的是前者。
+  decodeSizes: [],
 };
 
 const $ = (id) => document.getElementById(id);
@@ -236,13 +239,21 @@ async function runUndoDragVerdict(name) {
   };
   if (state.doc === null || state.doc === undefined) return report(false, "页面里还没有工程");
   const tracks = state.doc.timeline.tracks;
-  // 界面上的行：行按轨道顺序、每行里的 .layer 按元素顺序（renderTimeline 就是这么摆的）。
-  const timelineRows = () => Array.from($("timeline").querySelectorAll(".track"));
+  // 界面上的行：**屏幕上最下面一行才是 tracks[0]**（renderTimeline 倒序铺）。
+  // 行与轨道因此不是同一个下标 —— 映射只认 renderTimeline 写下的 dataset，
+  // 不在这里倒算（倒算就是第二份实现，而它错的时候不会红）。
+  const rowForTrack = (trackIndex) => {
+    const rows = Array.from($("timeline").querySelectorAll(".track"));
+    const found = rows.find((row) => Number(row.dataset.trackIndex) === trackIndex);
+    if (found === undefined) {
+      throw new Error("时间线上找不到 tracks[" + trackIndex + "] 对应的行 —— 行序与轨道序的映射断了");
+    }
+    return found;
+  };
   // 行与 bar **每次都现取**：一次成功改动会把时间线整块重画，旧节点随即脱离文档 ——
   // 拖完还攥着同一个节点去读 `style.left`，读到的是被换掉的那一份。
   const barOf = (trackIndex, layerId) => {
-    const row = timelineRows()[trackIndex];
-    if (row === undefined) return null;
+    const row = rowForTrack(trackIndex);
     const bar = Array.from(row.querySelectorAll(".layer")).find((item) => item.textContent === layerId);
     return bar === undefined ? null : { row: row, bar: bar };
   };
@@ -252,7 +263,7 @@ async function runUndoDragVerdict(name) {
   let geometry = null;
   for (const track of tracks) {
     const trackIndex = tracks.indexOf(track);
-    const row = timelineRows()[trackIndex];
+    const row = rowForTrack(trackIndex);
     if (row === undefined) continue;
     const bars = Array.from(row.querySelectorAll(".layer"));
     for (let index = 0; index < track.layers.length; index += 1) {
@@ -468,11 +479,580 @@ async function runUndoDragVerdict(name) {
   });
 }
 
+/**
+ * 验收判据（T2）：**拖手柄真的能改时长，而且改的是 Rust 认的那两个数。**
+ *
+ * 页面做三件事，结论不在这里下：
+ *   1. 找一条能变长的元素，拖它的**右手柄**左移若干个像素；
+ *   2. 把拖拽前后两份工程 + 手柄的几何（行宽、总帧数、实际位移像素）回传；
+ *   3. 顺带验左手柄：拖入点时 **source_in 必须跟着变**（那是 trim 的核心语义，
+ *      也是"前端别自己写 start/end"的理由 —— 直接写数字必然漏掉它）。
+ *
+ * **拖动必须走真手柄上的真 pointer 事件**：直接调 runEdit 就成了"验 runEdit 能不能用"，
+ * 而这一条要验的是**手柄接上了没有** —— 手柄没 append、被过渡标记盖住、
+ * pointerdown 被 bar 抢走，这三种毛病都只有真拖一遍才发现得了。
+ */
+async function runTrimDragVerdict(name) {
+  const report = async (ok, reason, extra) => {
+    await reportVerdict(name, Object.assign({ kind: "trim-drag", ok: ok, reason: reason }, extra || {}));
+  };
+  if (state.doc === null || state.doc === undefined) return report(false, "页面里还没有工程");
+  const doc = state.doc;
+  const tracks = doc.timeline.tracks;
+  const end = Math.max(1, state.engine.endFrame());
+  if (!(end > 1)) return report(false, "工程只有一帧，修剪验不出东西");
+
+  // 挑一条**视频轨**上"右边还有余量"的元素：拖右手柄左移才缩短得了。
+  // 用 dataset 找行 —— 行序与轨道序不是同一个下标（见 renderTimeline 的倒序铺）。
+  const rows = Array.from($("timeline").querySelectorAll(".track"));
+  // **挑元素要有判据，不能撞上谁算谁。** 这一条要同时验"出点会动"与"入点动时
+  // source_in 跟着走"，所以候选必须满足：长度够、**source_in 够大**（不然入点左移会撞素材头，
+  // 引擎正确地拒绝，而看起来像"手柄没接上"）。
+  // 第一版没写这条，挑中了 source_in = 0 的 a，于是如实报了"验不到入点语义"——
+  // 报告是对的，但也说明**这一趟什么也没验到**：探针挑不中场景时不该假装通过。
+  const candidates = [];
+  for (const track of tracks) {
+    const trackIndex = tracks.indexOf(track);
+    const row = rows.find((item) => Number(item.dataset.trackIndex) === trackIndex);
+    if (row === undefined) continue;
+    const bars = Array.from(row.querySelectorAll(".layer"));
+    for (let index = 0; index < track.layers.length; index += 1) {
+      const layer = track.layers[index];
+      const bar = bars[index];
+      if (bar === undefined) continue;
+      if (!(bar.querySelector(".handle.l") && bar.querySelector(".handle.r"))) continue;
+      // 出点要能左移至少 4 帧、source_in 够大，**而且左边要有空间**：
+      // 入点左移撞上同轨前一个元素时，引擎会（正确地）回 layer_overlap ——
+      // 那是一次**规则生效**，不是手柄坏了。探针要挑能过的场景，否则报出来的
+      // "入点没变"会把"规则拦住了"误读成"手柄没接上"。
+      const sourceIn = layer.source ? Number(layer.source.source_in) : -1;
+      if (!(layer.end - layer.start > 4)) continue;
+      if (!(sourceIn > 2)) continue;
+      // 左边有多少帧可退：同轨上**结束点不超过它起点**的那些元素里，取最大出点。
+      // 没有那样的元素就一路退到 0。**别写成 min**：那会把"左边很空"算成 0。
+      let leftEdge = 0;
+      for (const other of track.layers) {
+        if (other === layer) continue;
+        if (other.end <= layer.start && other.end > leftEdge) leftEdge = other.end;
+      }
+      const leftRoom = layer.start - leftEdge;
+      if (!(leftRoom >= 4)) continue;
+      const score = Math.min(layer.end - layer.start - 4, sourceIn, leftRoom);
+      candidates.push({ trackIndex: trackIndex, row: row, bar: bar, layer: layer, score: score });
+    }
+  }
+  candidates.sort((a, b) => b.score - a.score);
+  const picked = candidates.length > 0 ? candidates[0] : null;
+  if (picked === null) {
+    return report(false, "没有任何元素同时具备左右手柄、可修剪长度、以及够大的 source_in —— 手柄没渲染出来，或这份工程验不到入点语义");
+  }
+  const trackWidth = picked.row.clientWidth;
+  if (!(trackWidth > 0)) return report(false, "量不到轨道宽度");
+  const framesPerPixel = end / trackWidth;
+  // 位移取**至少 3 帧**，免得被吸附阈值吃成 0 帧（那会被当成"没拖成"，而不是"没生效"）。
+  const wantedFrames = Math.max(3, Math.round(6 * framesPerPixel) + 2);
+  const dx = -Math.round(wantedFrames / framesPerPixel);
+
+  const pointer = (target, type, x, buttons, y) => target.dispatchEvent(new PointerEvent(type, {
+    bubbles: true, cancelable: true, button: 0, buttons: buttons,
+    clientX: x, clientY: y, pointerId: 1, pointerType: "mouse", isPrimary: true,
+  }));
+
+  const before = JSON.parse(JSON.stringify(state.doc));
+  const layerId = picked.layer.id;
+  const fromStart = picked.layer.start;
+  const fromEnd = picked.layer.end;
+  const fromSourceIn = picked.layer.source ? picked.layer.source.source_in : null;
+
+  // ---- 右手柄：改出点 ----
+  const rightRect = picked.bar.querySelector(".handle.r").getBoundingClientRect();
+  const rx = rightRect.left + rightRect.width / 2;
+  const ry = rightRect.top + 2;
+  const hintBefore = state.hint;
+  pointer(picked.bar.querySelector(".handle.r"), "pointerdown", rx, 1, ry);
+  pointer(picked.bar.querySelector(".handle.r"), "pointermove", rx + dx, 1, ry);
+  pointer(picked.bar.querySelector(".handle.r"), "pointerup", rx + dx, 0, ry);
+  const spoke = await waitUntil(() => state.hint !== hintBefore, 4000);
+  if (!spoke) {
+    return report(false, "拖了右手柄，但状态栏没动静 —— 手柄上的 pointerdown 没接上（或被 bar 抢走了）",
+      { before: before, hint: state.hint, wantedFrames: wantedFrames, dx: dx });
+  }
+  const afterOut = JSON.parse(JSON.stringify(state.doc));
+  const outLayer = findLayerIn(afterOut, layerId);
+  if (outLayer === null) return report(false, "拖完之后工程里没有 " + layerId + " 了");
+  const outChanged = outLayer.end !== fromEnd;
+  if (!outChanged) {
+    return report(false, "拖右手柄之后出点没变（还是第 " + fromEnd + " 帧；引擎说：" + state.hint + "）",
+      { before: before, after: afterOut, hint: state.hint });
+  }
+  if (outLayer.start !== fromStart) {
+    return report(false, "拖右手柄把**起点**也改了：" + fromStart + " -> " + outLayer.start + "（出点只该动 end）",
+      { before: before, after: afterOut, hint: state.hint });
+  }
+  if (outLayer.source && fromSourceIn !== null && outLayer.source.source_in !== fromSourceIn) {
+    return report(false, "拖出点时 source_in 被改了：" + fromSourceIn + " -> " + outLayer.source.source_in
+      + "（出点不该碰素材入点）", { before: before, after: afterOut, hint: state.hint });
+  }
+  const outDuration = outLayer.end - outLayer.start;
+
+  // ---- 左手柄：改入点，source_in 必须跟着走 ----
+  const hintBefore2 = state.hint;
+  // 重画之后行与条都是**新节点**，按 dataset 的轨道序现取（不跨步攥旧节点）。
+  const rows2 = Array.from($("timeline").querySelectorAll(".track"));
+  const row2 = rows2.find((item) => Number(item.dataset.trackIndex) === picked.trackIndex);
+  const bar2 = row2 === undefined ? null
+    : Array.from(row2.querySelectorAll(".layer")).find((item) => item.textContent === layerId);
+  if (bar2 === null || bar2 === undefined) return report(false, "重画之后找不到 " + layerId + " 的条");
+  const leftRect = bar2.querySelector(".handle.l").getBoundingClientRect();
+  const lx = leftRect.left + leftRect.width / 2;
+  const ly = leftRect.top + 2;
+  const startBeforeIn = outLayer.start;
+  const sourceInBefore = outLayer.source ? outLayer.source.source_in : null;
+  if (!(sourceInBefore > 2)) {
+    // 入点为 0 时左移会撞素材头，验不出"source_in 跟着走" —— 如实说，不硬凑。
+    return report(false, "元素的 source_in 是 " + sourceInBefore + "，不够左移 —— 这一趟验不到入点语义",
+      { before: before, after: afterOut, outChanged: outChanged });
+  }
+  // 左移入点 = 往素材前面多要内容 => source_in 变小。
+  pointer(bar2.querySelector(".handle.l"), "pointerdown", lx, 1, ly);
+  pointer(bar2.querySelector(".handle.l"), "pointermove", lx + dx, 1, ly);
+  pointer(bar2.querySelector(".handle.l"), "pointerup", lx + dx, 0, ly);
+  const spoke2 = await waitUntil(() => state.hint !== hintBefore2, 4000);
+  if (!spoke2) {
+    return report(false, "拖了左手柄，但状态栏没动静", { before: before, after: afterOut, hint: state.hint });
+  }
+  const afterIn = JSON.parse(JSON.stringify(state.doc));
+  const inLayer = findLayerIn(afterIn, layerId);
+  if (inLayer === null) return report(false, "拖入点之后工程里没有 " + layerId + " 了");
+  const inChanged = inLayer.start !== startBeforeIn;
+  const sourceInFollowed = inLayer.source ? inLayer.source.source_in !== sourceInBefore : false;
+  if (!inChanged) {
+    return report(false, "拖左手柄之后入点没变（还是第 " + startBeforeIn + " 帧；引擎说：" + state.hint + "）",
+      { before: before, after: afterIn, hint: state.hint });
+  }
+  if (!sourceInFollowed) {
+    return report(false, "入点变了（" + startBeforeIn + " -> " + inLayer.start + "）但 source_in 没跟着变（还是 "
+      + sourceInBefore + "）—— 那不是 trim 的语义", { before: before, after: afterIn, hint: state.hint });
+  }
+  // 入点左移意味着往素材前面多要：source_in 必须**变小**，变大就是把素材放反了。
+  if (!(inLayer.source.source_in < sourceInBefore)) {
+    return report(false, "入点左移了，source_in 反而变大（" + sourceInBefore + " -> " + inLayer.source.source_in
+      + "）—— 方向反了", { before: before, after: afterIn, hint: state.hint });
+  }
+
+  return report(true, "", {
+    layer: layerId,
+    end: end,
+    trackWidth: trackWidth,
+    snapFrames: Math.max(0, Math.round(6 * framesPerPixel)),
+    pixels: dx,
+    out: { from: fromEnd, to: outLayer.end, durationBefore: fromEnd - fromStart, durationAfter: outDuration },
+    in: { from: startBeforeIn, to: inLayer.start, sourceInBefore: sourceInBefore, sourceInAfter: inLayer.source.source_in },
+    hints: { out: state.hint },
+    before: before,
+    afterOut: afterOut,
+    afterIn: afterIn,
+  });
+}
+
+/** 在任意一份工程里按 id 找一个元素（跨轨道）。找不到给 null。 */
+function findLayerIn(doc, id) {
+  for (const track of doc.timeline.tracks) {
+    for (const layer of track.layers) {
+      if (layer.id === id) return layer;
+    }
+  }
+  return null;
+}
+
+/**
+ * 验收判据（T3）：**播放真的按帧号推进，且到末帧自己停住。**
+ *
+ * 这一条验的是"有没有第二个时钟"：如果播放是靠 `<video>.play()` 实现的，
+ * 帧号就不会随它走（画面动、帧号不动），而那种实现看起来"能播"。
+ * 所以判据只看**帧号**：起点、经过若干毫秒之后到了第几帧、末帧之后停没停。
+ *
+ * 另外验一条反向的：**播放中点别处必须能接管** —— 手动 seek 之后播放要停，
+ * 否则用户拖滑块会被播放头拽回去。
+ */
+async function runPlaybackVerdict(name) {
+  const report = async (ok, reason, extra) => {
+    await reportVerdict(name, Object.assign({ kind: "playback", ok: ok, reason: reason }, extra || {}));
+  };
+  if (state.doc === null || state.doc === undefined) return report(false, "页面里还没有工程");
+  const engine = state.engine;
+  const end = Math.max(1, engine.endFrame());
+  if (end < 8) return report(false, "工程只有 " + end + " 帧，播放推进验不出来");
+
+  const fps = sequenceFps();
+  // 先确保是停着的、并且在起点。
+  pause();
+  await seekTo(0);
+  const frameBefore = state.frame;
+  const playingBefore = isPlaying();
+
+  // ---- 播放：等一段**按帧率算出来**的时间，看帧号有没有跟上 ----
+  // 等的是"事实"（帧号变了），不是"睡够多久就一定对" —— 慢机器上固定 sleep 会把
+  // "还没跑到"记成"没在跑"。
+  play();
+  const startedAt = performance.now();
+  const wantFrames = 5;
+  const budgetMs = wantFrames / fps * 1000 * 12 + 4000;   // 宽裕：慢机器也要能跑到
+  const advanced = await waitUntil(() => state.frame >= wantFrames, budgetMs);
+  const elapsedMs = performance.now() - startedAt;
+  const frameAfter = state.frame;
+  const playingDuring = isPlaying();
+  pause();
+  if (!advanced) {
+    return report(false, "播放之后 " + Math.round(budgetMs) + "ms 内帧号只走到 " + frameAfter
+      + "（期望至少 " + wantFrames + "）—— 播放头没在推进",
+      { fps: fps, end: end, frameBefore: frameBefore, frameAfter: frameAfter });
+  }
+  if (!playingDuring) {
+    return report(false, "帧号推进了，但 isPlaying 已经是 false —— 播放状态没被记着", { frameAfter: frameAfter });
+  }
+  // 推进速度要**量级正确**：按帧率算，这段时间该走 elapsedMs/1000*fps 帧上下。
+  // 允许很宽的区间（rAF 粒度、渲染耗时都算在内），只拦"快了几十倍/慢了几十倍"那种
+  // —— 那种说明用的不是同一个帧率。
+  const expectedNow = elapsedMs / 1000 * fps;
+  const ratio = expectedNow > 0 ? frameAfter / expectedNow : 0;
+  if (!(ratio > 0.2 && ratio < 5)) {
+    return report(false, "推进速度与序列帧率对不上：经过 " + Math.round(elapsedMs) + "ms（" + fps
+      + "fps 该走约 " + expectedNow.toFixed(1) + " 帧），实际走到第 " + frameAfter + " 帧",
+      { fps: fps, elapsedMs: Math.round(elapsedMs), frameAfter: frameAfter, expected: expectedNow });
+  }
+
+  // ---- 播放中手动 seek：播放必须让位 ----
+  pause();
+  await seekTo(0);
+  play();
+  await waitUntil(() => state.frame >= 2, 4000);
+  const beforeManual = state.frame;
+  await seekTo(end - 2);   // 手动跳近末尾
+  // seekTo 本身不暂停（它不是"用户操作"）—— 但**滑块与快捷键会**。
+  // 这里验的是"用户那条路"：模拟一次滑块 input。
+  const slider = $("frame");
+  slider.value = String(Math.max(0, end - 3));
+  slider.dispatchEvent(new Event("input", { bubbles: true }));
+  const pausedByUser = !isPlaying();
+  pause();
+  const afterManual = state.frame;
+  if (!pausedByUser) {
+    return report(false, "拖动滑块之后还在播 —— 用户手动定位会被播放头拽回去",
+      { beforeManual: beforeManual, afterManual: afterManual });
+  }
+
+  // ---- 末帧：播放到末尾必须自己停 ----
+  pause();
+  const tailStart = Math.max(0, end - 3);
+  await seekTo(tailStart);
+  play();
+  const reachedEnd = await waitUntil(() => state.frame >= end - 1 && !isPlaying(), 8000);
+  const finalFrame = state.frame;
+  const stillPlaying = isPlaying();
+  pause();
+  if (!reachedEnd) {
+    return report(false, "从第 " + tailStart + " 帧播到第 " + finalFrame + " 帧之后没有自动停"
+      + "（末帧是第 " + (end - 1) + " 帧，isPlaying=" + stillPlaying + "）",
+      { end: end, finalFrame: finalFrame, stillPlaying: stillPlaying });
+  }
+  if (finalFrame !== end - 1) {
+    return report(false, "停了，但停在 " + finalFrame + " 帧而不是末帧 " + (end - 1));
+  }
+
+  return report(true, "", {
+    fps: fps,
+    end: end,
+    advancedTo: frameAfter,
+    elapsedMs: Math.round(elapsedMs),
+    expectedFrames: Number(expectedNow.toFixed(2)),
+    pausedByUser: pausedByUser,
+    stoppedAt: finalFrame,
+  });
+}
+
+/**
+ * 验收判据（T4）：**音轨在界面上看得见、选得中、拖得动。**
+ *
+ * 用户明确说音频不要特效，只要"能剪辑和基本功能" —— 所以这一条只验编辑面：
+ *   1. 音轨**有自己的行**（不是被视频轨吞了，也不是画在屏幕外）；
+ *   2. 音轨上的元素**选得中**（点一下要真的变成选中态）；
+ *   3. 音轨元素**拖得动**（走与视频同一条 move 路）；
+ *   4. 音轨**不参与画面合成** —— 这是既定语义（`compose.rs`），
+ *      所以同一帧上"有没有音轨"不该改变画面。
+ *
+ * 第 4 条是**反向判据**：它盯的是"以后有人图省事把音轨也塞进合成"。
+ */
+async function runAudioTrackVerdict(name) {
+  const report = async (ok, reason, extra) => {
+    await reportVerdict(name, Object.assign({ kind: "audio-track", ok: ok, reason: reason }, extra || {}));
+  };
+  if (state.doc === null || state.doc === undefined) return report(false, "页面里还没有工程");
+  const doc = state.doc;
+  const tracks = doc.timeline.tracks;
+  const audioIndex = tracks.findIndex((track) => track.kind === "audio");
+  if (audioIndex < 0) return report(false, "这份工程的轨道里没有 audio 轨");
+
+  // ---- 1. 音轨有自己的行，且行在模型里的顺序与 dataset 一致 ----
+  const rows = Array.from($("timeline").querySelectorAll(".track"));
+  const audioRow = rows.find((row) => Number(row.dataset.trackIndex) === audioIndex);
+  if (audioRow === undefined) {
+    return report(false, "音轨 tracks[" + audioIndex + "] 在时间线上没有对应的行",
+      { trackKinds: tracks.map((t) => t.kind), domRows: rows.map((r) => r.dataset.trackIndex) });
+  }
+  const audioTrack = tracks[audioIndex];
+  if (audioTrack.layers.length === 0) return report(false, "音轨上一个元素都没有");
+  const bars = Array.from(audioRow.querySelectorAll(".layer"));
+  if (bars.length !== audioTrack.layers.length) {
+    return report(false, "音轨有 " + audioTrack.layers.length + " 个元素，界面上画了 " + bars.length + " 条");
+  }
+  const label = audioRow.querySelector(".track-label").textContent;
+  if (!label.includes(audioTrack.id) || !label.includes("audio")) {
+    return report(false, "音轨那一行的标签没写清是哪条轨道：" + JSON.stringify(label));
+  }
+
+  // ---- 2. 音轨元素选得中 ----
+  const targetLayer = audioTrack.layers[0];
+  const targetBar = bars[0];
+  targetBar.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+  await new Promise((resolve) => { setTimeout(resolve, 80); });
+  const selected = state.selected;
+  if (selected === null || selected.trackIndex !== audioIndex || selected.layerIndex !== 0) {
+    return report(false, "点了音轨元素之后没选中它（选中态是 " + JSON.stringify(selected) + "）");
+  }
+  const selectedNow = selectedLayer();
+  if (selectedNow === null || selectedNow.id !== targetLayer.id) {
+    return report(false, "选中了，但选中的不是 " + targetLayer.id + "（是 "
+      + (selectedNow === null ? "null" : selectedNow.id) + "）");
+  }
+
+  // ---- 3. 音轨元素拖得动（真发 pointer 事件，走与视频同一条路） ----
+  const rows2 = Array.from($("timeline").querySelectorAll(".track"));
+  const audioRow2 = rows2.find((row) => Number(row.dataset.trackIndex) === audioIndex);
+  const bar2 = Array.from(audioRow2.querySelectorAll(".layer")).find((item) => item.textContent === targetLayer.id);
+  if (bar2 === undefined) return report(false, "重画之后找不到音轨上的 " + targetLayer.id);
+  const end = Math.max(1, state.engine.endFrame());
+  const trackWidth = audioRow2.clientWidth;
+  if (!(trackWidth > 0)) return report(false, "量不到音轨行的宽度");
+  const framesPerPixel = end / trackWidth;
+  const before = JSON.parse(JSON.stringify(state.doc));
+  const fromStart = targetLayer.start;
+  const startX = 60;
+  // 往右挪**至少 3 帧**，免得被吸附吃成 0 帧。
+  const wanted = Math.max(3, Math.round(6 * framesPerPixel) + 2);
+  const dx = Math.round(wanted / framesPerPixel);
+  const pointer = (type, x, buttons) => bar2.dispatchEvent(new PointerEvent(type, {
+    bubbles: true, cancelable: true, button: 0, buttons: buttons,
+    clientX: x, clientY: 8, pointerId: 1, pointerType: "mouse", isPrimary: true,
+  }));
+  const hintBefore = state.hint;
+  pointer("pointerdown", startX, 1);
+  pointer("pointermove", startX + dx, 1);
+  pointer("pointerup", startX + dx, 0);
+  const spoke = await waitUntil(() => state.hint !== hintBefore, 4000);
+  if (!spoke) {
+    return report(false, "拖了音轨元素，状态栏没动静 —— 音轨上的元素拖不动",
+      { before: before, hint: state.hint });
+  }
+  const after = JSON.parse(JSON.stringify(state.doc));
+  const moved = findLayerIn(after, targetLayer.id);
+  if (moved === null) return report(false, "拖完之后工程里没有 " + targetLayer.id + " 了");
+  if (moved.start === fromStart) {
+    return report(false, "拖了音轨元素但起点没变（还是第 " + fromStart + " 帧；引擎说：" + state.hint + "）",
+      { before: before, after: after, hint: state.hint });
+  }
+  // 移动**不该改长度**（那是两条不同的编辑）。
+  if (moved.end - moved.start !== targetLayer.end - targetLayer.start) {
+    return report(false, "挪动音轨元素把长度改了：" + (targetLayer.end - targetLayer.start)
+      + " -> " + (moved.end - moved.start) + " 帧");
+  }
+  // 音轨元素仍应是 audio 轨上的（没被挪到别的轨道）。
+  const stillAudio = after.timeline.tracks[audioIndex].layers.some((l) => l.id === targetLayer.id);
+  if (!stillAudio) return report(false, "挪动之后 " + targetLayer.id + " 不在音轨上了");
+
+  // ---- 4. 音频源真的接上了，且能被播放头驱动 ----
+  const wantedIds = audioAssetIdsInUse();
+  const bound = Array.from(audioSources.keys());
+  if (bound.length === 0) {
+    return report(false, "音轨上的素材一个都没挂上 <audio> —— 播放时不会有声音",
+      { wanted: wantedIds, bound: bound });
+  }
+  if (bound.length !== wantedIds.length) {
+    return report(false, "音轨引用了 " + wantedIds.length + " 个素材，只挂上 " + bound.length
+      + " 路（" + wantedIds.join("/") + " -> " + bound.join("/") + "）");
+  }
+  // 对齐：跳到某帧时，音频的 currentTime 应当等于该帧换算出的秒数。
+  const base = state.doc.timeline.timebase;
+  const probeFrame = Math.max(0, Math.min(10, end - 1));
+  await seekTo(probeFrame);
+  const wantSeconds = probeFrame * base.den / base.num;
+  const drifts = [];
+  for (const [assetId, audio] of audioSources.entries()) {
+    if (!Number.isFinite(audio.duration)) { drifts.push(assetId + " 没有可用时长"); continue; }
+    const drift = Math.abs(audio.currentTime - wantSeconds);
+    // 容差与 syncAudioToFrame 一致：小于 80ms 是它**故意不纠**的范围。
+    if (drift > 0.08 + 0.02) {
+      drifts.push(assetId + " 偏离 " + drift.toFixed(3) + "s（应在第 " + wantSeconds.toFixed(3) + "s）");
+    }
+  }
+  if (drifts.length > 0) {
+    return report(false, "音频没有跟着播放头对齐：" + drifts.join("；"),
+      { probeFrame: probeFrame, wantSeconds: wantSeconds });
+  }
+  // 停播时不许有声音在放（"按了暂停还在响"是最容易被忽略的一类毛病）。
+  const stillPlaying = Array.from(audioSources.values()).filter((audio) => !audio.paused);
+  if (stillPlaying.length > 0) {
+    return report(false, "没在播放，但有 " + stillPlaying.length + " 路音频还在放");
+  }
+
+  return report(true, "", {
+    trackId: audioTrack.id,
+    layers: audioTrack.layers.map((l) => l.id),
+    label: label,
+    selected: selectedNow.id,
+    moved: { layer: targetLayer.id, from: fromStart, to: moved.start },
+    hint: state.hint,
+    audio: { assets: wantedIds, bound: bound, probeFrame: probeFrame, wantSeconds: wantSeconds },
+    before: before,
+    after: after,
+  });
+}
+
+/**
+ * 性能判据（测量用，不是验收）：**把逐帧 seek 的代价拆开，别猜。**
+ *
+ * # 为什么要有这一条
+ *
+ * "预览卡"是个感受，不是一个可查的数。拆开之后只有两件事可能出问题：
+ * 素材解码（改不了，但能选素材）与这条链路的开销（能改）。
+ * 不拆开就只能在两侧同时瞎改 —— 而改错的那一侧会让画面悄悄变差。
+ *
+ * 它**不回传 ok/reason 那套判定**，只报数字；驱动侧拿它跟帧率预算比。
+ * 判据是"数字够不够跑满帧率"，不是"通过/不通过"。
+ */
+async function runPerfVerdict(name) {
+  const engine = state.engine;
+  if (state.doc === null || state.doc === undefined) {
+    return reportVerdict(name, { kind: "perf", ok: false, reason: "页面里还没有工程" });
+  }
+  const end = Math.max(1, engine.endFrame());
+  const frameMs = 1000 / sequenceFps();
+  const samples = Math.min(24, Math.max(4, end - 1));
+  const step = Math.max(1, Math.floor((end - 2) / samples));
+
+  // **一个素材一条**：不能只看第 0 帧需要哪些源 —— 那份工程第 0 帧只用到一路，
+  // 于是四路分辨率只会印出一路（第一次跑就是这样，差点把结论下错）。
+  // 遍历整个序列、把所有出现过的 source 收齐。
+  const seenSources = new Map();
+  for (let probeFrame = 0; probeFrame < end; probeFrame += 1) {
+    for (const entry of engine.sourcesFor(probeFrame)) {
+      if (seenSources.has(entry.source)) continue;
+      const video = engine.videos.get(entry.source);
+      if (video === undefined) continue;
+      seenSources.set(entry.source, { source: entry.source, video: video });
+    }
+  }
+  // **逐路自己量**：四路混成一个均值，均值恰好掩盖最慢的那一路 ——
+  // 而"要不要换掉这份素材"恰恰取决于最慢的那一路。
+  const perSource = [];
+  for (const item of seenSources.values()) {
+    const video = item.video;
+    const probes = 5;
+    const times = [];
+    for (let i = 0; i < probes; i += 1) {
+      // 每次换一个位置（同一个秒数不会重新解码，量不出代价）。
+      const seconds = (i + 0.5) / (probes + 1) * Math.min(Number(video.duration) || 1, 2);
+      const t = performance.now();
+      await engine.seekVideo(video, seconds);
+      times.push(Number((performance.now() - t).toFixed(2)));
+    }
+    const sortedTimes = times.slice().sort((a, b) => a - b);
+    // videoWidth 是**解码后的真实尺寸**：设置元素 width/height 之后它会跟着变小，
+    // 所以这个数既是证据（上限真的生效了），也是"这一路到底在解多少像素"的答案。
+    perSource.push({
+      source: item.source,
+      width: video.videoWidth,
+      height: video.videoHeight,
+      duration: Number(video.duration) || 0,
+      decodeMs: sortedTimes[Math.floor(sortedTimes.length / 2)],
+      decodeMaxMs: sortedTimes[sortedTimes.length - 1],
+    });
+  }
+
+  const rows = [];
+  for (let i = 0; i < samples; i += 1) {
+    const frame = 1 + i * step;
+    if (frame >= end - 1) break;
+    // 三段分开计时：**先量 seek，再量剩下的**。
+    // 合在一起计时就只能得出"一帧很慢"，而那不指向任何一处代码。
+    const sources = engine.sourcesFor(frame);
+    const t0 = performance.now();
+    for (const entry of sources) {
+      const video = engine.videos.get(entry.source);
+      if (video === undefined) continue;
+      await engine.seekVideo(video, entry.seconds);
+    }
+    const t1 = performance.now();
+    // **走的就是产品那条路**（engine.seek = prepare + draw）：量一个自己另拼的
+    // 近似路径没有意义 —— 那条路快不快不决定用户看到的快不快。
+    // 上面那次 seek 已经把源都定位好了，所以这里的 prepare 是一次"已就位"的复跑，
+    // 量出来的正是**除解码之外的那部分开销**。
+    await engine.seek(frame);
+    const t2 = performance.now();
+    rows.push({
+      frame: frame,
+      sources: sources.length,
+      // 素材解码：改不了它，但能换素材（这条数决定"要不要用代理"）。
+      seekMs: Number((t1 - t0).toFixed(2)),
+      // 链路开销：seek 之外的一切（宿主 prepare + 文字 + draw）。
+      chainMs: Number((t2 - t1).toFixed(2)),
+      totalMs: Number((t2 - t0).toFixed(2)),
+    });
+  }
+
+  const sorted = rows.map((row) => row.seekMs).slice().sort((a, b) => a - b);
+  const total = rows.map((row) => row.totalMs).slice().sort((a, b) => a - b);
+  const mean = (list) => (list.length === 0 ? 0 : list.reduce((a, b) => a + b, 0) / list.length);
+  const median = (list) => (list.length === 0 ? 0 : list[Math.floor(list.length / 2)]);
+
+  return reportVerdict(name, {
+    kind: "perf",
+    ok: true,
+    reason: "",
+    // 报上限，否则"这次测出来的数"归因不到任何一处设置上。
+    heavyPixels: PREVIEW_HEAVY_PIXELS,
+    decodeSizes: state.decodeSizes,
+    frameMs: Number(frameMs.toFixed(2)),
+    samples: rows.length,
+    sources: perSource,
+    seek: {
+      meanMs: Number(mean(sorted).toFixed(2)),
+      medianMs: Number(median(sorted).toFixed(2)),
+      minMs: sorted.length > 0 ? sorted[0] : 0,
+      maxMs: sorted.length > 0 ? sorted[sorted.length - 1] : 0,
+    },
+    total: {
+      meanMs: Number(mean(total).toFixed(2)),
+      medianMs: Number(median(total).toFixed(2)),
+      maxMs: total.length > 0 ? total[total.length - 1] : 0,
+    },
+    // 链路开销（除 seek 之外的一切）的均值。**这个数才是"精简链路"能改善的部分。**
+    overheadMeanMs: Number(mean(rows.map((row) => row.chainMs)).toFixed(2)),
+    // 能跑满帧率吗？预算就是序列帧率给的每帧毫秒数。
+    budgetOk: median(total) <= frameMs,
+    rows: rows,
+  });
+}
+
 /** 判定按**名字**选路。表在这里，规则在各判定函数里。 */
 const VERDICTS = {
   "trim-parity": runTrimParity,
   subtitle: runSubtitleVerdict,
   "undo-drag": runUndoDragVerdict,
+  "trim-drag": runTrimDragVerdict,
+  playback: runPlaybackVerdict,
+  "audio-track": runAudioTrackVerdict,
+  perf: runPerfVerdict,
 };
 
 /** 状态栏：写一条最新的进展/结果。 */
@@ -549,6 +1129,37 @@ function declaredAsset(assetId) {
 }
 
 /**
+ * 预览里"解不动"的素材阈值（像素）。
+ *
+ * # 这是一个**报告用**的阈值，不是一个能生效的开关
+ *
+ * 实测（`node scripts/decode-cap-probe.mjs`，真实 Chrome，同一份 4K 素材四次）：
+ *
+ * | 尝试的机制 | videoWidth | 单次 seek |
+ * |---|---|---|
+ * | 什么都不设 | 3840x2160 | 115.9ms |
+ * | width/height 属性 | 3840x2160 | 132.6ms |
+ * | CSS 尺寸 | 3840x2160 | 118.8ms |
+ * | 属性 + CSS | 3840x2160 | 143.4ms |
+ *
+ * **没有一种能让 Chrome 少解几个像素。** width/height 属性只是改变元素的
+ * 布局尺寸（attrWidth 确实变成了 1920），`videoWidth` 一路都是 3840 ——
+ * 解码分辨率不跟着走。所以"设个属性就把 4K 降下来"是**错的**，
+ * 这条路在本仓库已经被证伪，不要有人再试一次。
+ *
+ * 真要降只有两条路，都不在这一层：
+ *   * **用低分辨率代理素材**（架构上正确，出片仍用原片）—— 要后端/工程侧配合；
+ *   * 换一条不走 <video> 的解码通路（WebCodecs）—— 是另一个量级的改动。
+ *
+ * # 那这个常量留着干什么
+ *
+ * 用来**在状态栏说出实话**：这份工程里有素材超出预览能逐帧跟上的量级时，
+ * 明确告诉用户"卡是素材的解码量，不是这个页面"。用户能改的东西只有素材，
+ * 所以这条提示必须指向素材，而不是含糊地说一句"性能不佳"。
+ */
+const PREVIEW_HEAVY_PIXELS = 1920 * 1080;
+
+/**
  * 每个被引用的 asset 一个 video 元素。
  *
  * **一个 source 一个元素**：同一帧上不同元素可能是同一素材的不同源内帧，
@@ -564,7 +1175,8 @@ async function bindAllSources() {
   let index = 0;
   const loaded = [];
   for (const assetId of ids) {
-    if (declaredAsset(assetId) === null) {
+    const asset = declaredAsset(assetId);
+    if (asset === null) {
       notice("工程引用了素材 " + assetId + "，但资产表里没有登记它 —— 这一路不会被画出来。");
       continue;
     }
@@ -589,11 +1201,30 @@ async function bindAllSources() {
         video.addEventListener("error", () => reject(new Error("加载失败")), { once: true });
       });
       video.pause();
+      // **把"浏览器到底解了多大"记下来。** 这是唯一能知道"这一路在解多少像素"的地方，
+      // 而它正是逐帧 seek 快不快的决定因素（见 PREVIEW_HEAVY_PIXELS 那段实测）。
+      state.decodeSizes.push({
+        asset_id: assetId,
+        videoWidth: video.videoWidth,
+        videoHeight: video.videoHeight,
+      });
       state.engine.bindSource(assetId, id);
       loaded.push(assetId);
     } catch (error) {
       notice("素材 " + assetId + " 取不到（" + video.src + "）—— 这一路不会被画出来。");
     }
+  }
+  // **解不动的素材要说出来。** 用户看到画面卡，唯一能自己动手改的就是素材；
+  // 含糊地说一句"性能不佳"等于什么都没说 —— 要说清楚是**哪一路、多少像素**。
+  const heavy = state.decodeSizes.filter((item) =>
+    item.videoWidth * item.videoHeight > PREVIEW_HEAVY_PIXELS);
+  if (heavy.length > 0) {
+    const parts = heavy.map((item) => item.asset_id + "（" + item.videoWidth + "x" + item.videoHeight
+      + "，" + (item.videoWidth * item.videoHeight / 1e6).toFixed(1) + "MP）");
+    notice("这些素材超出预览能逐帧跟上的量级：" + parts.join("、")
+      + "。预览逐帧 seek 的代价与解码像素数成正比，实测 4K 单帧约 150ms、1080p 约 45ms，"
+      + "而 30fps 的预算是 33ms —— 卡的是解码量，不是这个页面。"
+      + "要跑满帧率得换低分辨率的预览代理（出片仍用原素材）。");
   }
   return loaded;
 }
@@ -767,6 +1398,36 @@ async function refreshAfterEdit() {
 
 // --- 时间线视图 -------------------------------------------------------------------
 
+/**
+ * 时间线的行序：**屏幕上最下面一行 = tracks[0]**。
+ *
+ * 这不是审美选择，是 Rust 的语义：`compose.rs` 的「多轨从下往上」把
+ * `tracks[0]` 摆在最底层，后画的盖在前面。界面若正序从上往下铺，
+ * 用户看到的叠放关系就是**反的** —— 而且反得"看起来很正常"，不会报错。
+ *
+ * # 为什么要有这两个助手
+ *
+ * 行序反了之后，"第几行"与"第几条轨道"就不再是同一个数。以前它们恰好相等，
+ * 于是各处直接写 `timelineRows()[trackIndex]`。现在若在每一个用到的地方
+ * 各自倒算一次，那就是**同一份映射的多份实现** —— 迟早有一处漏掉，
+ * 而漏掉的表现是"拖错了行"或"验收探针挑错行"，两种都不红。
+ *
+ * 所以映射只在这里推导：**画的时候用 trackIndexToRow，读的时候用 rowToTrackIndex**。
+ */
+function rowIndexForTrack(trackIndex, trackCount) {
+  return trackCount - 1 - trackIndex;
+}
+
+function trackIndexForRow(rowIndex, trackCount) {
+  return trackCount - 1 - rowIndex;
+}
+
+/** 当前 DOM 里的行（已按屏幕顺序），以及配套的轨道条数。 */
+function timelineRows() {
+  const rows = Array.from($("timeline").querySelectorAll(".track"));
+  return { rows: rows, trackCount: rows.length };
+}
+
 function renderTimeline() {
   const host = $("timeline");
   host.textContent = "";
@@ -776,12 +1437,25 @@ function renderTimeline() {
     return;
   }
   const end = Math.max(1, state.engine.endFrame());
-  model.tracks.forEach((track, trackIndex) => {
+  const trackCount = model.tracks.length;
+  // 倒序铺：屏幕上最后一行是 tracks[0]（最底层）。
+  const screenOrder = model.tracks
+    .map((track, trackIndex) => ({ track: track, trackIndex: trackIndex }))
+    .sort((a, b) => rowIndexForTrack(a.trackIndex, trackCount) - rowIndexForTrack(b.trackIndex, trackCount));
+  screenOrder.forEach((entry, rowIndex) => {
+    const track = entry.track;
+    const trackIndex = entry.trackIndex;
     const row = document.createElement("div");
     row.className = "track";
+    // 行序 → 轨道序写进 dataset：**这是界面自己声明的事实**，
+    // 验收驱动与调试都从这里读，不必各自倒算一遍。
+    row.dataset.trackIndex = String(trackIndex);
+    row.dataset.rowIndex = String(rowIndex);
     const label = document.createElement("span");
     label.className = "track-label";
-    label.textContent = track.id + " (" + track.kind + ")";
+    // 层级提示：用户一眼能看出谁盖着谁（第 1 行是最上层）。
+    const layerRank = rowIndex === 0 ? "最上层" : (rowIndex === trackCount - 1 ? "最底层" : "第 " + (rowIndex + 1) + " 层");
+    label.textContent = track.id + " (" + track.kind + " · " + layerRank + ")";
     row.appendChild(label);
     track.layers.forEach((layer, layerIndex) => {
       const bar = document.createElement("div");
@@ -810,6 +1484,9 @@ function renderTimeline() {
         renderInspector();
       });
       attachLayerDrag(bar, row, layer, end);
+      // 左右缘：改**时长**（不是位置）。手柄在 bar 之后 append，于是盖在过渡标记之上。
+      attachEdgeTrim(bar, row, layer, end, "in");
+      attachEdgeTrim(bar, row, layer, end, "out");
       row.appendChild(bar);
     });
     host.appendChild(row);
@@ -829,6 +1506,10 @@ function renderTimeline() {
 function attachLayerDrag(bar, row, layer, end) {
   bar.addEventListener("pointerdown", (event) => {
     if (event.button !== 0) return;
+    // 手柄上的按下归**改时长**那条路（它自己 stopPropagation；这里是第二道保险，
+    // 因为合成事件不一定会冒泡到该到的地方）。
+    if (event.target !== null && event.target.classList
+        && event.target.classList.contains("handle")) return;
     // 时间线宽度 ↔ 帧数的换算只用**轨道**的宽度：bar 自己有最小宽度（1.5%），
     // 拿它去换算会在短元素上算歪。
     const trackWidth = row.clientWidth;
@@ -869,6 +1550,86 @@ function attachLayerDrag(bar, row, layer, end) {
     bar.addEventListener("pointerup", finish);
     bar.addEventListener("pointercancel", finish);
   });
+}
+
+/**
+ * 让一层的**左右缘**可以拖动改时长（修剪）。
+ *
+ * 与 `attachLayerDrag`（整体平移）是两条路，但口径完全一样：
+ *   * 拖动过程只改这一条 bar 的 `left` / `width`（纯视觉预览，`state.doc` 一个字不动）；
+ *   * 落点在 **pointerup** 时才向 Rust 提**一次** `{op:"trim", layer, edge, to}`；
+ *   * 能不能修剪、修剪推多少源帧，**全由 Rust 的 `trim` 判**（`dhampir-timeline::edit`）
+ *     —— 这里没有一条自己的规则，连"最短能到几帧"都不复制。
+ *
+ * # 为什么用 trim 而不是直接改 start/end
+ *
+ * 直接写数字会把"改入点同时要推 source_in"这件事漏掉 —— 那是 `trim` 的核心语义
+ * （入点左移 = 往素材前面多要内容），在前端重写一遍就是第二份实现。
+ *
+ * @param edge `"in"` 拖左缘（改 start + source_in）、`"out"` 拖右缘（只改 end）。
+ */
+function attachEdgeTrim(bar, row, layer, end, edge) {
+  const handle = document.createElement("div");
+  handle.className = "handle " + (edge === "in" ? "l" : "r");
+  handle.title = edge === "in" ? "拖我改入点（同时推 source_in）" : "拖我改出点";
+  handle.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    // **别让手柄的按下冒泡到 bar** —— 冒上去就变成"选中/整体平移"，
+    // 于是拖右缘会把整条挪走，而这正是改时长最容易出的那种错。
+    event.stopPropagation();
+    event.preventDefault();
+    const trackWidth = row.clientWidth;
+    if (!(trackWidth > 0) || !(end > 0)) return;
+    const framesPerPixel = end / trackWidth;
+    const snapFrames = Math.max(0, Math.round(6 * framesPerPixel));
+    const startX = event.clientX;
+    const originalStart = layer.start;
+    const originalEnd = layer.end;
+    const originalLength = originalEnd - originalStart;
+    const originalLeft = bar.style.left;
+    const originalWidth = bar.style.width;
+    let pending = edge === "in" ? originalStart : originalEnd;
+    const boundaries = [];
+    for (const track of (timeline() || { tracks: [] }).tracks) {
+      for (const other of track.layers) {
+        if (other === layer) continue;
+        boundaries.push(other.start, other.end);
+      }
+    }
+    try { handle.setPointerCapture(event.pointerId); } catch (error) { /* 合成事件没有真实指针 */ }
+    const onMove = (moveEvent) => {
+      const delta = Math.round((moveEvent.clientX - startX) * framesPerPixel);
+      pending = edge === "in" ? originalStart + delta : originalEnd + delta;
+      // 预览：入点动 left 与 width，出点只动 width。
+      if (edge === "in") {
+        const nextStart = Math.max(0, Math.min(pending, originalEnd - 1));
+        bar.style.left = (nextStart / end * 100) + "%";
+        bar.style.width = ((originalEnd - nextStart) / end * 100) + "%";
+      } else {
+        const nextEnd = Math.max(originalStart + 1, pending);
+        bar.style.width = ((nextEnd - originalStart) / end * 100) + "%";
+      }
+    };
+    const finish = () => {
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", finish);
+      handle.removeEventListener("pointercancel", finish);
+      // 先还原：编辑万一被拒，界面与宿主必须仍然一致（不能只在成功时才对）。
+      bar.style.left = originalLeft;
+      bar.style.width = originalWidth;
+      const to = snapFrame(pending, boundaries, snapFrames);
+      if (to === (edge === "in" ? originalStart : originalEnd)) return;
+      // 长度没变就什么也别提：拖了一下又回到原地，不该在历史里多出一步。
+      const nextLength = edge === "in" ? (originalEnd - to) : (to - originalStart);
+      if (nextLength === originalLength) return;
+      runEdit({ op: "trim", layer: layer.id, edge: edge, to: to },
+        edge === "in" ? "修剪入点" : "修剪出点").catch((error) => log(String(error)));
+    };
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", finish);
+    handle.addEventListener("pointercancel", finish);
+  });
+  bar.appendChild(handle);
 }
 
 /** 落点的**吸附**：候选帧附近有别的元素边界（阈值内）就吸上去。
@@ -1069,6 +1830,327 @@ function renderIssues() {
   }
 }
 
+// --- 音频 -------------------------------------------------------------------------
+//
+// **音频不参与合成**（`compose.rs` 的既定语义：音轨只影响时间线长度，不产生画面），
+// 所以这一段的职责只有一件：**播放时让音轨出声**，而且与画面**同一个时钟**。
+//
+// 「同一个时钟」是这里唯一难的地方。做法是让音频**跟着帧号走**：
+// 每一拍算出播放头所在的帧，再换算成秒去校准 <audio> 的 currentTime ——
+// 而不是"按播放键时同时按下音频播放键"再指望两边不漂。
+// 后者在头几秒看不出问题，长片子上一定会漂，而"音画不同步"是最难查的一类。
+//
+// 用户明确说了音频不要特效，所以这里**没有**淡入淡出、变速、均衡 —— 只有播放/定位/音量。
+
+/** asset id → <audio> 元素。与视频源一样，一个 asset 一个元素。 */
+const audioSources = new Map();
+
+/** 工程里被音轨引用到的 asset id（去重）。 */
+function audioAssetIdsInUse() {
+  const ids = [];
+  const seen = new Set();
+  const model = timeline();
+  if (model === null) return ids;
+  for (const track of model.tracks) {
+    if (track.kind !== "audio") continue;
+    for (const layer of track.layers) {
+      const id = layer.source && layer.source.asset_id;
+      if (typeof id === "string" && id.length > 0 && !seen.has(id)) {
+        seen.add(id);
+        ids.push(id);
+      }
+    }
+  }
+  return ids;
+}
+
+/**
+ * 给每个音轨素材挂一个 <audio>。
+ *
+ * 与视频源同一条规矩：**某一路加载失败不中止启动** —— 报出来、跳过它，其余照常用。
+ * 一路音频坏了就让整个界面打不开，那是把"部分可用"降级成"完全不可用"。
+ */
+async function bindAudioSources() {
+  const host = $("audios");
+  host.textContent = "";
+  audioSources.clear();
+  const ids = audioAssetIdsInUse();
+  let index = 0;
+  const loaded = [];
+  for (const assetId of ids) {
+    if (declaredAsset(assetId) === null) {
+      notice("音轨引用了素材 " + assetId + "，但资产表里没有登记它 —— 这一路不会出声。");
+      continue;
+    }
+    const audio = document.createElement("audio");
+    audio.id = "aud" + index;
+    index += 1;
+    // 与 <video> 同理：不带 crossorigin 的媒体是"被污染"的，本机/分离模式下跨源。
+    audio.crossOrigin = "anonymous";
+    audio.preload = "auto";
+    audio.src = await backend.mediaUrlFor(assetId);
+    host.appendChild(audio);
+    try {
+      await new Promise((resolve, reject) => {
+        audio.addEventListener("loadeddata", resolve, { once: true });
+        audio.addEventListener("error", () => reject(new Error("加载失败")), { once: true });
+      });
+      audioSources.set(assetId, audio);
+      loaded.push(assetId);
+    } catch (error) {
+      notice("音频素材 " + assetId + " 取不到（" + audio.src + "）—— 这一路不会出声。");
+    }
+  }
+  return loaded;
+}
+
+/** 播放时所有 <audio> 的总音量。1 = 原样，0 = 静音。 */
+const audioState = { muted: false, volume: 0.8 };
+
+function applyAudioVolume() {
+  for (const audio of audioSources.values()) {
+    audio.volume = audioState.muted ? 0 : audioState.volume;
+  }
+}
+
+/**
+ * 把音频**对齐到播放头所在的帧**。
+ *
+ * 只有一处换算：帧号 → 秒。用的是**工程自己的时间基**（有理数转浮点只在这一步），
+ * 与 `sequenceFps()` 同一个来源。
+ *
+ * `playing` 时逐拍调用；不播时只在 seek 对齐一次（对齐但不播）。
+ *
+ * **容差**：小于 80ms 的偏差不去动它。每拍都硬写 `currentTime` 会让浏览器反复重新缓冲，
+ * 听起来是持续的爆音 —— 那比一点点漂更糟。超过容差才纠。
+ */
+function syncAudioToFrame(frame, playing) {
+  if (audioSources.size === 0) return;
+  const base = state.doc === null ? null : state.doc.timeline.timebase;
+  if (base === null || !(base.num > 0) || !(base.den > 0)) return;
+  // 帧号 → 秒：帧 * den / num。整数帧号是唯一的真相，这里只是给 <audio> 用。
+  const seconds = frame * base.den / base.num;
+  for (const audio of audioSources.values()) {
+    if (!Number.isFinite(audio.duration)) continue;
+    if (Math.abs(audio.currentTime - seconds) > 0.08) {
+      try { audio.currentTime = Math.max(0, Math.min(seconds, audio.duration)); } catch (error) { /* 还没就绪 */ }
+    }
+    if (playing === true) {
+      if (audio.paused) { audio.play().catch(() => { /* 浏览器可能拒绝自动播放 */ }); }
+    } else if (!audio.paused) {
+      audio.pause();
+    }
+  }
+}
+
+// --- 播放 -------------------------------------------------------------------------
+//
+// **播放是"按帧号推进的循环"，不是"让视频自己播"。**
+//
+// 素材 `<video>` 是被 seek 出来供渲染取帧用的；让它自己播就等于预览有了第二个时钟，
+// 而本工程的核心命题是"同一个工程在预览与出片给出可比的帧"。两个时钟一定会漂，
+// 漂了之后"预览与出片不一样"就再也说不清是谁的问题。
+//
+// 所以这里只有一件事：**按序列帧率算出这一拍该到第几帧，然后 seek 过去。**
+
+const playback = {
+  playing: false,
+  // 上一拍的墙钟时刻（毫秒）。用来算"这一拍该走几帧" ——
+  // 每拍固定 +1 的话，慢机器上播放会变成慢动作，而"慢动作"看起来像渲染卡住。
+  lastTickMs: 0,
+  // **欠账**（毫秒）。每一拍只走整数帧，余下不足一帧的时间必须攒着 ——
+  // 直接四舍五入的话，30fps 与 60Hz 的 rAF 之间每拍只有 0.5 帧，
+  // 舍掉就永远走不动（第一版正是这样：6 秒只走到第 4 帧）。
+  carryMs: 0,
+  rafId: 0,
+  // --- 丢帧统计 ---------------------------------------------------------------
+  //
+  // **跟不上的时候允许丢帧，但丢了多少必须说出来。**
+  //
+  // 预览追不上序列帧率是正常的（素材解码是瓶颈），而"画面在跳"这件事本身
+  // 看不出跳了几帧、也看不出是这台机器不行还是片子太重。所以每一次跳过的帧
+  // 都记下来，播完/暂停时给出总数与占比。
+  //
+  // 两处来源分开记 —— 它们的**原因完全不同**，混成一个数就没法诊断：
+  //   * `skipped`：按时间推进时一步跨了多帧（解码跟不上，跳着播是对的）；
+  //   * `stalled`：单拍耗时超过上限而被**砍掉**的时间折算的帧（切标签页回来、
+  //     或一次卡顿很久）。那部分时间没有换算成帧，所以只能**估算**着记。
+  dropped: {
+    skipped: 0,      // 时间推进跨过的帧数（确定的）
+    stalledMs: 0,    // 被上限砍掉的毫秒数（原始事实）
+    stalledFrames: 0,// 上面那些毫秒按当前帧率折算的帧数（估算的）
+    rendered: 0,     // 真正 seek 并画出来的帧数
+    ticks: 0,        // 跑了多少拍
+  },
+};
+
+/** 序列帧率（帧/秒）。时间基是**有理数**，整数帧号 ↔ 秒只在渲染与这里换算。 */
+function sequenceFps() {
+  const base = state.doc === null || state.doc === undefined ? null : state.doc.timeline.timebase;
+  if (base === null || !(base.num > 0) || !(base.den > 0)) return 30;
+  return base.num / base.den;
+}
+
+function isPlaying() {
+  return playback.playing === true;
+}
+
+/**
+ * 开始播放。
+ *
+ * 到末帧就**停住**（不回卷、不循环）：回卷会让"导出范围"在播放中莫名其妙地跳，
+ * 而循环播放是另一个功能，混进来会让"什么时候停"说不清。
+ */
+function play() {
+  if (playback.playing) return;
+  const end = Math.max(1, state.engine.endFrame());
+  if (state.frame >= end - 1) {
+    // 停在末帧时按播放 = 从头再来（用户意图显然是"再看一遍"，不是"什么都不发生"）。
+    seekTo(0).catch((error) => log(String(error)));
+  }
+  playback.playing = true;
+  playback.lastTickMs = performance.now();
+  playback.carryMs = 0;   // 上一次播放攒下的欠账不能带进来（否则一按就跳一帧）
+  // 统计是"这一次播放"的 —— 不清的话上一次的丢帧会累加到这一次，看起来像越来越糟。
+  resetPlaybackStats();
+  renderPlaybackStats();
+  $("play").textContent = "❚❚";
+  $("play").classList.add("playing");
+  applyAudioVolume();
+  syncAudioToFrame(state.frame, true);
+  void pumpPlayback();
+}
+
+function pause() {
+  if (!playback.playing) return;
+  playback.playing = false;
+  if (playback.rafId !== 0) {
+    cancelAnimationFrame(playback.rafId);
+    playback.rafId = 0;
+  }
+  $("play").textContent = "▶";
+  $("play").classList.remove("playing");
+  // 停播时**只是暂停**、不回卷：用户按暂停是想停在这一刻看，不是想回开头。
+  syncAudioToFrame(state.frame, false);
+  // 播完/暂停时把丢帧如实说出来。**这是这一轮的关键**：
+  // 画面在跳是看得见的，"跳了几帧、为什么跳"看不见 —— 那个必须由这里给。
+  renderPlaybackStats();
+}
+
+/**
+ * 把播放统计写进状态栏。
+ *
+ * 丢帧时用 warn 色 —— **不丢帧是正常态，不该满屏绿**；丢了才需要看见。
+ */
+function renderPlaybackStats() {
+  const host = $("playStats");
+  if (host === null) return;
+  const stats = playbackStats();
+  host.textContent = " " + stats.text;
+  host.className = stats.droppedTotal > 0 ? "warn small" : "muted small";
+}
+
+function togglePlay() {
+  if (playback.playing) pause();
+  else play();
+}
+
+/**
+ * 每一拍：**按实际经过的时间**推进，而不是"每拍 +1"。
+ *
+ * 掉帧时（渲染一帧要 100ms 而帧率是 30fps）"每拍 +1"会让播放变成慢动作 —— 那看起来
+ * 像卡住，而真正的信息（这台机器跟不上这个帧率）反而看不出来。按时间推进则**跳帧**，
+ * 播放速度始终是真实的；跟不上时画面是跳的，那是能看懂的信号。
+ *
+ * 但要**限幅**：切标签页回来时 `performance.now()` 会跳很大一截，
+ * 不限的话一次算出一大段要跳的帧，于是直接冲到末帧。
+ */
+async function pumpPlayback() {
+  if (!playback.playing) return;
+  const end = Math.max(1, state.engine.endFrame());
+  const now = performance.now();
+  const elapsedMs = Math.max(0, now - playback.lastTickMs);
+  playback.lastTickMs = now;
+  // 切标签页回来时 performance.now() 会跳一大截：**超出部分直接丢掉**，
+  // 不然一次算出一大段要跳的帧，画面会直接冲到末帧。
+  //
+  // 砍掉多少也**记下来** —— 那是"没画出来的时间"，与"跨了几帧"不是一回事：
+  // 这一段根本没进入帧号换算，所以只能说"约等于几帧"（用当前帧率折算）。
+  const usableMs = Math.min(elapsedMs, 250);
+  if (elapsedMs > usableMs) {
+    playback.dropped.stalledMs += elapsedMs - usableMs;
+    // 估算：按序列帧率折算。**四舍五入到整数**，因为最终要跟用户说"大约几帧"。
+    playback.dropped.stalledFrames += Math.round((elapsedMs - usableMs) / (1000 / sequenceFps()));
+  }
+  playback.carryMs += usableMs;
+  const frameMs = 1000 / sequenceFps();
+  // 欠账够一帧才走；**不够就攒着**（这就是 carryMs 存在的理由）。
+  const step = Math.floor(playback.carryMs / frameMs);
+  if (step > 0) playback.carryMs -= step * frameMs;
+  playback.dropped.ticks += 1;
+  if (step > 0) {
+    // **跨了不止一帧就是丢了 step-1 帧。**
+    // 只跨一帧是正常的逐帧播放；跨 n 帧说明中间 n-1 帧没画。
+    if (step > 1) playback.dropped.skipped += step - 1;
+    const next = state.frame + step;
+    if (next >= end - 1) {
+      // 末尾那一段：从当前帧到末帧之间的空隙同样是没画的帧。
+      playback.dropped.skipped += Math.max(0, (end - 1) - state.frame - 1);
+      await seekTo(end - 1);
+      playback.dropped.rendered += 1;
+      pause();
+      return;
+    }
+    await seekTo(next);
+    playback.dropped.rendered += 1;
+    // 音频跟着**帧号**对齐（不是"按播放键时各自起跑"）：每拍纠一次，容差见 syncAudioToFrame。
+    syncAudioToFrame(next, true);
+  }
+  playback.rafId = requestAnimationFrame(() => { void pumpPlayback(); });
+}
+
+/**
+ * 把丢帧统计说成一句人能读的话。
+ *
+ * **没有丢就说没有** —— 不许因为"看起来还行"就不报，也不许把 0 说成"流畅"
+ * （流畅与丢了几帧是两件事，前者是感受，后者是事实）。
+ */
+function describeDrops(stats) {
+  const total = stats.skipped + stats.stalledFrames;
+  if (total === 0) {
+    return "无丢帧（" + stats.rendered + " 帧全部逐帧画出）";
+  }
+  const parts = [];
+  if (stats.skipped > 0) parts.push("跳过 " + stats.skipped + " 帧");
+  if (stats.stalledFrames > 0) {
+    parts.push("卡顿丢弃约 " + stats.stalledFrames + " 帧（" + Math.round(stats.stalledMs) + "ms）");
+  }
+  return "丢帧 " + total + " 帧：" + parts.join("、") + "；实际画出 " + stats.rendered + " 帧";
+}
+
+/** 播放统计的快照（给状态栏与验收判定读）。**返回副本**，别把内部对象递出去。 */
+function playbackStats() {
+  const d = playback.dropped;
+  return {
+    skipped: d.skipped,
+    stalledFrames: d.stalledFrames,
+    stalledMs: d.stalledMs,
+    rendered: d.rendered,
+    ticks: d.ticks,
+    droppedTotal: d.skipped + d.stalledFrames,
+    // 丢帧率：分母是"本该画的帧数" = 画出的 + 丢掉的。
+    dropRatio: (d.rendered + d.skipped + d.stalledFrames) > 0
+      ? (d.skipped + d.stalledFrames) / (d.rendered + d.skipped + d.stalledFrames)
+      : 0,
+    text: describeDrops(d),
+  };
+}
+
+/** 清零统计。**开始播放时清** —— 统计是"这一次播放"的，不是历史累计。 */
+function resetPlaybackStats() {
+  playback.dropped = { skipped: 0, stalledMs: 0, stalledFrames: 0, rendered: 0, ticks: 0 };
+}
+
 // --- 播放头 -----------------------------------------------------------------------
 
 async function seekTo(frame) {
@@ -1076,6 +2158,9 @@ async function seekTo(frame) {
   state.frame = Math.max(0, Math.min(frame, Math.max(0, end - 1)));
   $("frame").value = String(state.frame);
   $("frameLabel").textContent = String(state.frame);
+  // 不播时把音频**对齐但不播** —— 拖动播放头之后再按播放，声音要从那个位置起，
+  // 而不是从上次停下的地方接着走。
+  if (!isPlaying()) syncAudioToFrame(state.frame, false);
   await state.engine.seek(state.frame);
 }
 
@@ -1256,6 +2341,11 @@ async function main() {
   mark("已上屏到 canvas（源模式：" + engine.sourceMode + "）");
   await bindAllSources();
   mark("视频源已绑定");
+  // 音频源**在第一次 seek 之前**挂好：`seekTo` 会顺手对齐音频，
+  // 那一步没元素就当"这部片子没有声音"——与"音轨没接上"在听感上完全一样。
+  await bindAudioSources();
+  applyAudioVolume();
+  mark("音频源已绑定");
   // 字幕要**在第一次 seek 之前**登记：绘制路径只认宿主手上的那份表，
   // 而"还没登记"与"这部片子没有字幕"在画面上完全一样。
   await loadProjectSubtitles();
@@ -1274,11 +2364,44 @@ async function main() {
   await seekTo(0);
   mark("首帧已上屏");
 
-  $("first").addEventListener("click", () => seekTo(engine.firstFrame()));
-  $("prev").addEventListener("click", () => seekTo(state.frame - 1));
-  $("next").addEventListener("click", () => seekTo(state.frame + 1));
-  $("last").addEventListener("click", () => seekTo(end - 1));
-  $("frame").addEventListener("input", (event) => seekTo(Number(event.target.value)));
+  $("first").addEventListener("click", () => { pause(); seekTo(engine.firstFrame()); });
+  $("prev").addEventListener("click", () => { pause(); seekTo(state.frame - 1); });
+  $("next").addEventListener("click", () => { pause(); seekTo(state.frame + 1); });
+  $("last").addEventListener("click", () => { pause(); seekTo(end - 1); });
+  $("play").addEventListener("click", togglePlay);
+  $("volume").addEventListener("input", (event) => {
+    audioState.volume = Math.max(0, Math.min(1, Number(event.target.value) / 100));
+    // 动过音量就等于"我要听声音"：顺手解除静音（否则用户会以为音量坏了）。
+    if (audioState.volume > 0) { audioState.muted = false; $("muteBtn").textContent = "🔊"; }
+    applyAudioVolume();
+  });
+  $("muteBtn").addEventListener("click", () => {
+    audioState.muted = !audioState.muted;
+    $("muteBtn").textContent = audioState.muted ? "🔇" : "🔊";
+    applyAudioVolume();
+  });
+  $("volume").value = String(Math.round(audioState.volume * 100));
+  // 拖动滑块 = 手动定位，播放要让位（否则手一松就被播放头拽走，那是"抢方向盘"）。
+  $("frame").addEventListener("input", (event) => { pause(); seekTo(Number(event.target.value)); });
+  $("fpsLabel").textContent = sequenceFps() + " fps";
+  // 空格播放/暂停。**只在没聚焦到输入控件时**生效 —— 否则在数字框里打空格会变成播放，
+  // 那种"快捷键抢输入"的行为用户没法自己发现原因。
+  window.addEventListener("keydown", (event) => {
+    const target = event.target;
+    const typing = target !== null && (target.tagName === "INPUT" || target.tagName === "SELECT"
+      || target.tagName === "TEXTAREA" || target.isContentEditable === true);
+    if (event.code === "Space" && !typing) {
+      event.preventDefault();  // 不拦的话浏览器会把空格当页面滚动
+      togglePlay();
+      return;
+    }
+    if (typing) return;
+    if (event.key === "m" || event.key === "M") { $("muteBtn").click(); return; }
+    if (event.key === "ArrowLeft") { pause(); seekTo(state.frame - 1); }
+    else if (event.key === "ArrowRight") { pause(); seekTo(state.frame + 1); }
+    else if (event.key === "Home") { pause(); seekTo(engine.firstFrame()); }
+    else if (event.key === "End") { pause(); seekTo(end - 1); }
+  });
   $("export").addEventListener("click", runExport);
   $("undoBtn").addEventListener("click", () => { runHistoryStep("undo").catch((error) => log(String(error))); });
   $("redoBtn").addEventListener("click", () => { runHistoryStep("redo").catch((error) => log(String(error))); });
@@ -1358,7 +2481,21 @@ window.dhampir = {
   runHistoryStep: runHistoryStep,
   // 判定回传：页面自己把结果送出去，而不是让驱动钻进来取。
   reportVerdict: reportVerdict,
+  // 音频：验收要能问"音轨接上了几路""现在是不是静音"。
+  audioSources: audioSources,
+  audioState: audioState,
+  bindAudioSources: bindAudioSources,
+  applyAudioVolume: applyAudioVolume,
+  // 播放：验收要能问"现在在播吗"，也要能自己起停（驱动点不了按钮）。
+  isPlaying: isPlaying,
+  play: play,
+  pause: pause,
+  togglePlay: togglePlay,
+  // 丢帧统计：验收要能读"这次播放丢了几帧"，而不是靠看画面猜。
+  playbackStats: playbackStats,
+  resetPlaybackStats: resetPlaybackStats,
   runTrimParity: runTrimParity,
+  runTrimDragVerdict: runTrimDragVerdict,
   runSubtitleVerdict: runSubtitleVerdict,
   loadProjectSubtitles: loadProjectSubtitles,
   loadLibrary: loadLibrary,

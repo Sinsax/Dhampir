@@ -205,17 +205,62 @@ export function findCli(explicit, env) {
   return null;
 }
 
+/**
+ * 从 Rust 源码里读一个 `pub const NAME: u32 = N;`。
+ *
+ * **读源码而不是抄一份常量表**：这份能力声明已经漂过一次（v2 → v3 时没跟上，
+ * 于是浏览器在真正出片之前就被自己的预检拦住，而错误信息只说"对端只认 v3"，
+ * 与真正的原因"这里写死了"离得很远）。再抄一份的话，下一次升版本还会这样。
+ *
+ * 读不到返回 null —— 调用方**如实失败**，不猜一个数。
+ */
+function readRustConst(relativePath, name) {
+  try {
+    const source = readFileSync(join(REPO_ROOT, relativePath), 'utf8');
+    const pattern = new RegExp('pub const ' + name + ':\\s*u32\\s*=\\s*(\\d+)');
+    const found = source.match(pattern);
+    return found === null ? null : Number(found[1]);
+  } catch (error) {
+    return null;
+  }
+}
+
+/** `dhampir-core` 登记表里的特效名。**它就是"实现了几种特效"的唯一来源。** */
+function readEffectKinds() {
+  try {
+    const source = readFileSync(join(REPO_ROOT, 'crates', 'dhampir-core', 'src', 'effects.rs'), 'utf8');
+    const block = source.match(/pub const REGISTRY[^=]*=\s*&\[([^\]]*)\]/);
+    if (block === null) return null;
+    // REGISTRY 里写的是常量**名**（GAUSSIAN_BLUR 之类），逐个回查它们的 kind 字符串。
+    const names = block[1].split(',').map((item) => item.trim()).filter((item) => item.length > 0);
+    const kinds = [];
+    for (const name of names) {
+      const spec = source.match(new RegExp('pub const ' + name + ':\\s*EffectSpec\\s*=\\s*EffectSpec\\s*\\{[^}]*?kind:\\s*"([^"]+)"'));
+      if (spec === null) return null;
+      kinds.push(spec[1]);
+    }
+    return kinds.length > 0 ? kinds : null;
+  } catch (error) {
+    return null;
+  }
+}
+
 /** 能力声明。**从"本实现实际能做到什么"出发**，不抄一份好看的清单。 */
 export function capabilities() {
+  // **契约版本必须跟着 Rust 走。** 两处写死过：一次是 2（v3 时代），
+  // 一次是 3（现在是 v4）—— 两次的表现都是"预检拦下了一次本来能成功的导出"，
+  // 而预检本身是对的（它只转达对端声明），错的是这份声明。
+  const contractVersion = readRustConst(join('crates', 'dhampir-timeline', 'src', 'layer.rs'), 'LAYER_SCHEMA_VERSION');
+  const blurMax = readRustConst(join('crates', 'dhampir-core', 'src', 'render', 'blur.rs'), 'MAX_RADIUS');
+  const effects = readEffectKinds();
   return {
-    // **这个数字必须跟着契约版本走。** 它写死成 2 的时候，浏览器在真出片之前
-    // 就被自己的预检拦住了（schema_unsupported_by_peer）—— 而那正是预检该干的事，
-    // 所以表现是"预检拦下了一次本来能成功的导出"。
-    timeline_versions: [3],
+    // 读不到就给空数组：**空数组会让预检拦下每一次导出**，那是响的；
+    // 猜一个版本号则是静默地放行一份可能读不懂的工程 —— 后者更坏。
+    timeline_versions: contractVersion === null ? [] : [contractVersion],
     // 混合模式只列实现的那四种 —— 与 BlendMode::is_implemented() 同一事实。
     blend_modes: ['normal', 'add', 'multiply', 'screen'],
-    effects: ['gaussian_blur'],
-    max_blur_radius: 16,
+    effects: effects === null ? [] : effects,
+    max_blur_radius: blurMax === null ? 0 : blurMax,
     // 接入 CLI 之后这两条才是真的：解码走 ffmpeg 顺序管道，编码走 libx264。
     // 在此之前这里是 false —— 那时确实做不到，不是谦虚。
     has_decoder: true,

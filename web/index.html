@@ -28,6 +28,13 @@
   .layer.adjustment { background: #4a3a6a; border-color: #7d63a8; }
   .layer.disabled { opacity: .45; }
   .layer .tr { position: absolute; left: 0; top: 0; bottom: 0; background: #d09a3c; opacity: .6; }
+  /* 左右缘的改时长手柄。**必须盖在 .tr 之上**（.tr 是过渡标记，占着左缘），
+     否则淡入标记会把左手柄吃掉。透明加宽是为了好抓（22px 高的条上细线抓不住）。 */
+  .layer .handle { position: absolute; top: 0; bottom: 0; width: 7px; cursor: ew-resize; z-index: 3; }
+  .layer .handle.l { left: -1px; }
+  .layer .handle.r { right: -1px; }
+  .layer:hover .handle { background: rgba(232, 196, 106, .85); }
+  .layer .handle:hover { background: #e8c46a; }
   .marker { position: absolute; top: 0; width: 2px; height: 10px; background: #d09a3c; }
   input[type=number] { width: 96px; background: #12131a; color: #e6e6e6; border: 1px solid #34374a; border-radius: 3px; padding: 2px 4px; }
   select { width: 96px; background: #12131a; color: #e6e6e6; border: 1px solid #34374a; border-radius: 3px; padding: 2px 4px; }
@@ -43,23 +50,38 @@
   #editBar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
   #editBar button { padding: 3px 7px; font-size: 11px; }
   #editBar label { font-size: 11px; gap: 4px; margin: 0; }
+  #play.playing { background: #7a5a2c; border-color: #c99b48; }
+  .muted { color: #8b90a0; }
+  .small { font-size: 11px; }
   .hint { color: #c9c9c9; }
   .bad { color: #ff8f8f; }
   .warn { color: #e8c46a; }
   .ok { color: #8fd18f; }
   video { display: none; }
+  audio { display: none; }
 </style>
 </head>
 <body>
 <div id="layout">
   <canvas id="preview" width="640" height="360"></canvas>
   <div id="transport">
-    <button id="first">|&lt;</button>
-    <button id="prev">−1</button>
+    <button id="first" title="回到首帧（Home）">|&lt;</button>
+    <button id="prev" title="上一帧（←）">−1</button>
+    <!-- 播放是**帧号驱动**的：素材元素是被 seek 出来的一帧，让它自己播就等于预览
+         有了第二个时钟，与出片那条路迟早分叉（那正是本工程最忌讳的事）。 -->
+    <button id="play" title="播放 / 暂停（空格）">▶</button>
     <input id="frame" type="range" min="0" max="89" value="0" style="flex:1">
-    <button id="next">+1</button>
-    <button id="last">&gt;|</button>
+    <button id="next" title="下一帧（→）">+1</button>
+    <button id="last" title="到末帧（End）">&gt;|</button>
     <span id="frameLabel">0</span>
+    <span id="fpsLabel" class="muted small"></span>
+    <!-- 丢帧统计。播放跟不上时**必须说出来**：画面在跳是看得见的，
+         跳了几帧、是解码不行还是刚切过标签页，看不见。 -->
+    <span id="playStats" class="muted small"></span>
+    <!-- 音频只有播放/定位/音量三样：用户明确说了音频不要特效。 -->
+    <button id="muteBtn" title="静音 / 取消静音（M）">🔊</button>
+    <input id="volume" type="range" min="0" max="100" value="80" style="width:80px"
+           title="音量（只有播放时才有声音）">
     <button id="export">导出视频</button>
   </div>
   <div id="trackArea">
@@ -95,6 +117,9 @@
   <div id="frameOnly" hidden data-from="0" data-to="0"></div>
 </div>
 <div id="videos"></div>
+<!-- 音轨的 <audio> 元素挂在这里。与 <video> 一样藏起来：它们只供播放取声音，
+     画面一律走 canvas。 -->
+<div id="audios"></div>
 <script>
 // **页面里的错要发得出去。**
 // 没有这段，页面里抛的错在外面只能表现为「什么都没发生」——

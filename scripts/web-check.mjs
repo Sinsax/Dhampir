@@ -67,6 +67,45 @@ const MEDIA = 'target/s3/proxy1080p.mp4';
  */
 const SUBTITLE_TOLERANCE = 1e-6;
 
+/**
+ * 把 fixture 的 `timeline.schema` 归一化到**当前契约版本**，供"页面那份必须覆盖 fixture"这条判据用。
+ *
+ * # 为什么需要这一步
+ *
+ * fixture 是**输入**，页面回传的是宿主**读进来又序列化出去**的工程。两者本来就不该逐字节相同：
+ * 宿主会补默认字段（那正是 `firstSubsetDifference` 只比"文件写了的键"的理由）。
+ * 而 `timeline.schema` 是同一个道理的另一种表现 —— 工程梯子（v2→v3→v4）**在读的时候就把
+ * 版本抬到当前**，于是 `3 != 4` 这条差异**永远成立**，与"编辑对不对"毫无关系。
+ *
+ * 夹具故意停在 v3（`check-local-backend.mjs` 钉着这一点，用来证明"升级牵动多少处"），
+ * 所以这里不能改夹具，只能在对照时把这一格对齐。
+ *
+ * # 为什么版本号是读出来的
+ *
+ * 写死 4 的话，下一次升 v5 时**这些判定会一起变红**，而红的地方与原因（升版本了）
+ * 离得很远。版本只有一个来源：`dhampir-timeline` 的 `LAYER_SCHEMA_VERSION`。
+ * 读不到就**不归一化**（如实保持原样、让判据按老样子红），不猜一个数。
+ */
+function currentTimelineSchema() {
+  try {
+    const source = readFileSync(join(REPO_ROOT, 'crates', 'dhampir-timeline', 'src', 'layer.rs'), 'utf8');
+    const match = source.match(/pub const LAYER_SCHEMA_VERSION:\s*u32\s*=\s*(\d+)/);
+    return match === null ? null : Number(match[1]);
+  } catch (error) {
+    return null;
+  }
+}
+
+/** fixture 的副本，`timeline.schema` 对齐到当前契约版本（读不到版本就原样返回）。 */
+function fixtureAsHostReadsIt(fixture) {
+  const version = currentTimelineSchema();
+  if (version === null) return fixture;
+  if (fixture === null || typeof fixture !== 'object' || fixture.timeline === undefined) return fixture;
+  const copy = JSON.parse(JSON.stringify(fixture));
+  copy.timeline.schema = version;
+  return copy;
+}
+
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -202,6 +241,8 @@ const server = createServer((req, res) => {
   if (path === '/' || path === '/index.html') file = join(WEB_DIR, 'index.html');
   else if (path === '/probe.html') file = join(WEB_DIR, 'probe.html');
   else if (path === '/synthetic.html') file = join(WEB_DIR, 'synthetic.html');
+  // 一次性诊断页：用来在**真实浏览器里**做 A/B，而不是靠对规范的印象下结论。
+  else if (path === '/decode-probe.html') file = join(WEB_DIR, 'decode-probe.html');
   else if (path.startsWith('/pkg/')) file = join(PKG_DIR, path.slice('/pkg/'.length));
   else if (path === '/sample-project.json') file = join(REPO_ROOT, 'fixtures', 'sample-project.json');
   // 工程文件形态（带资产表、v2 元素）。**页面默认要的是这一份** ——
@@ -293,6 +334,15 @@ const PROJECT_FOR_VERDICT = {
   'trim-parity': 'sample-project.doc',
   subtitle: 'sample-subtitle.doc',
   'undo-drag': 'sample-project.doc',
+  // trim-drag 用**音轨那份**：sample-project 的 v1 是无缝序列，没有任何元素左边有余量，
+  // 于是"入点左移"这一半根本验不到（撞 layer_overlap 是规则正确生效，不是手柄坏了）。
+  // audio-project 的 tag 段左边空 15 帧、source_in = 30，两个语义都能真验到。
+  'trim-drag': 'audio-project.doc',
+  playback: 'sample-project.doc',
+  'audio-track': 'audio-project.doc',
+  // perf 用**四份不同素材**那份：四路分辨率不同（1080p / 720p / 720p 稀疏 GOP / 4K），
+  // "贵在哪一路"必须能分开看。拿只有一路的工程量，得出的均值会掩盖最坏的那路。
+  perf: 'four-asset-project.doc',
 };
 const projectId = valueOf('--project', null)
   || (verdictName !== null && PROJECT_FOR_VERDICT[verdictName] !== undefined
@@ -940,7 +990,9 @@ function runUndoDragParity(value) {
   try { fixture = JSON.parse(original); } catch (error) {
     return { ok: false, detail: 'fixture 不是 JSON：' + String(error && error.message ? error.message : error) };
   }
-  const baseDifference = firstSubsetDifference(fixture, value.before, '$');
+  // 与"宿主读进来的那份"比：`timeline.schema` 会被工程梯子抬到当前版本，
+  // 拿夹具原样比的话这条判据**永远红**，且红得与编辑对不对毫无关系。
+  const baseDifference = firstSubsetDifference(fixtureAsHostReadsIt(fixture), value.before, '$');
   if (baseDifference !== null) {
     return { ok: false, detail: '页面那份工程与 fixture 对不上：' + baseDifference };
   }
@@ -1028,6 +1080,291 @@ function runUndoDragParity(value) {
       + drag.landed + ' 帧（别人的边界；半径 round(6 × ' + drag.end + ' / ' + drag.trackWidth + ') = '
       + radius + ' 帧）；同一条 move 由 CLI 复算后与「拖动后」逐字段相同；'
       + '撤销逐字段回到拖动前、重做原样放回来' + said,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 改时长判定（T2）：拖手柄真的改了时长，且改法与 CLI 的 trim 逐字段相同
+// ---------------------------------------------------------------------------
+
+/**
+ * 判据（T2）：**拖右手柄只动出点、拖左手柄动入点且 source_in 跟着走。**
+ *
+ * 页面回传三段工程（拖动前 / 拖出点后 / 拖入点后）与两条的实测数字。这里：
+ *   1. 起点对一次：页面那份必须**覆盖** fixture 写下的每个字段；
+ *   2. 出点：start 一字不动、**end 真的变了**、source_in 一字不动 —— 拖出点碰入点素材
+ *      是这一路最容易犯的错，而它看起来"就是改了个长度"；
+ *   3. 入点：start 变了、**source_in 必须变小**（往素材前面多要内容），
+ *      变大就是把素材放反了 —— 而两者都能让"长度看着对"，只有方向能分开；
+ *   4. 用 CLI 拿同一条 trim 复算，两边逐字段相同 —— 把"手柄只提交已有的 trim"
+ *      从口头承诺变成可复算的事实。
+ */
+function runTrimDragParity(value) {
+  const found = findCli();
+  if (found.cli === null) return { ok: false, detail: found.error + ' —— 没法对照' };
+  const out = value.out;
+  const inp = value.in;
+  if (out === null || typeof out !== 'object' || inp === null || typeof inp !== 'object') {
+    return { ok: false, detail: '页面没回传两条修剪的实测（out / in）' };
+  }
+  for (const key of ['from', 'to']) {
+    if (typeof out[key] !== 'number') return { ok: false, detail: '出点实测缺 ' + key };
+  }
+  for (const key of ['from', 'to', 'sourceInBefore', 'sourceInAfter']) {
+    if (typeof inp[key] !== 'number') return { ok: false, detail: '入点实测缺 ' + key };
+  }
+  const fixturePath = join(REPO_ROOT, 'fixtures', projectId + '.json');
+  if (!existsSync(fixturePath)) return { ok: false, detail: '对照用的工程不在：' + fixturePath };
+  const original = readFileSync(fixturePath, 'utf8');
+  let fixture = null;
+  try { fixture = JSON.parse(original); } catch (error) {
+    return { ok: false, detail: 'fixture 不是 JSON：' + String(error && error.message ? error.message : error) };
+  }
+  const baseDifference = firstSubsetDifference(fixtureAsHostReadsIt(fixture), value.before, '$');
+  if (baseDifference !== null) {
+    return { ok: false, detail: '页面那份工程与 fixture 对不上：' + baseDifference };
+  }
+  const picked = findLayerById(fixture, value.layer);
+  if (picked === null) return { ok: false, detail: 'fixture 里没有这个元素：' + value.layer };
+  const sourceIn0 = picked.layer.source ? picked.layer.source.source_in : null;
+
+  // ---- 出点 ----
+  if (out.from !== picked.layer.end) {
+    return { ok: false, detail: '拖动前出点是第 ' + picked.layer.end + ' 帧，页面说第 ' + out.from + ' 帧' };
+  }
+  if (out.to === out.from) return { ok: false, detail: '拖右手柄之后出点没变（都是第 ' + out.from + ' 帧）—— 什么也没验到' };
+  const afterOut = findLayerById(value.afterOut, value.layer);
+  if (afterOut === null) return { ok: false, detail: '「拖出点后」那份工程里没有 ' + value.layer + ' 了' };
+  if (afterOut.layer.start !== picked.layer.start) {
+    return { ok: false, detail: '拖出点把起点也改了：' + picked.layer.start + ' -> ' + afterOut.layer.start };
+  }
+  if (afterOut.layer.end !== out.to) {
+    return { ok: false, detail: '页面说出点落到第 ' + out.to + ' 帧，工程里却是第 ' + afterOut.layer.end + ' 帧' };
+  }
+  const sourceInOut = afterOut.layer.source ? afterOut.layer.source.source_in : null;
+  if (sourceIn0 !== null && sourceInOut !== sourceIn0) {
+    return { ok: false, detail: '拖出点改了 source_in：' + sourceIn0 + ' -> ' + sourceInOut + '（出点不该碰素材入点）' };
+  }
+  // 长度必须真的变了 —— 「出点动了但长度没动」不可能，所以这一条是防回传写错。
+  const lengthBefore = picked.layer.end - picked.layer.start;
+  const lengthAfterOut = afterOut.layer.end - afterOut.layer.start;
+  if (lengthAfterOut === lengthBefore) {
+    return { ok: false, detail: '长度没变（都是 ' + lengthBefore + ' 帧）—— 改时长的判据不成立' };
+  }
+  // 出点左移 => 变短；右移 => 变长。方向反了说明 edge 接反了。
+  const movedLeft = out.to < out.from;
+  const shrank = lengthAfterOut < lengthBefore;
+  if (movedLeft !== shrank) {
+    return { ok: false, detail: '出点' + (movedLeft ? '左' : '右') + '移了，长度却'
+      + (shrank ? '变短' : '变长') + '（' + lengthBefore + ' -> ' + lengthAfterOut + ' 帧）—— 方向反了' };
+  }
+
+  // ---- 入点 ----
+  const afterIn = findLayerById(value.afterIn, value.layer);
+  if (afterIn === null) return { ok: false, detail: '「拖入点后」那份工程里没有 ' + value.layer + ' 了' };
+  if (inp.from !== afterOut.layer.start) {
+    return { ok: false, detail: '拖入点前起点是第 ' + afterOut.layer.start + ' 帧，页面说第 ' + inp.from + ' 帧' };
+  }
+  if (inp.to === inp.from) return { ok: false, detail: '拖左手柄之后入点没变（都是第 ' + inp.from + ' 帧）—— 什么也没验到' };
+  if (afterIn.layer.start !== inp.to) {
+    return { ok: false, detail: '页面说入点落到第 ' + inp.to + ' 帧，工程里却是第 ' + afterIn.layer.start + ' 帧' };
+  }
+  const sourceInAfter = afterIn.layer.source ? afterIn.layer.source.source_in : null;
+  if (sourceInAfter === null) return { ok: false, detail: '拖入点之后元素没有 source 了' };
+  if (sourceInAfter === sourceInOut) {
+    return { ok: false, detail: '入点动了（' + inp.from + ' -> ' + inp.to + '）但 source_in 没变（还是 '
+      + sourceInOut + '）—— 那不是 trim 的语义，是把 start 直接写了一下' };
+  }
+  // **方向**：入点左移=往素材前面多要 => source_in 变小。
+  const inMovedLeft = afterIn.layer.start < inp.from;
+  const sourceInShrank = sourceInAfter < sourceInOut;
+  if (inMovedLeft !== sourceInShrank) {
+    return { ok: false, detail: '入点' + (inMovedLeft ? '左' : '右') + '移了，source_in 却'
+      + (sourceInShrank ? '变小' : '变大') + '（' + sourceInOut + ' -> ' + sourceInAfter
+      + '）—— 素材坐标的方向反了' };
+  }
+
+  // ---- CLI 复算：同一条 trim 打在同一份 fixture 上，两边逐字段相同 ----
+  const dir = join(REPO_ROOT, 'target', 'verdict');
+  mkdirSync(dir, { recursive: true });
+  const projectFile = join(dir, 'trim-drag.json');
+  writeFileSync(projectFile, original);
+  const op = { op: 'trim', layer: value.layer, edge: 'out', to: Number(out.to) };
+  const result = spawnSync(found.cli, ['edit', '--project', projectFile, '--write', '--op', JSON.stringify(op)], {
+    cwd: REPO_ROOT, encoding: 'utf8',
+  });
+  if (result.status !== 0) {
+    return { ok: false, detail: 'CLI 用同一条 trim 复算退出 ' + result.status + '：'
+      + (String(result.stderr || '').trim() || String(result.stdout || '').trim()) };
+  }
+  let cliAfter = null;
+  try { cliAfter = JSON.parse(readFileSync(projectFile, 'utf8')); } catch (error) {
+    return { ok: false, detail: 'CLI 写出来的工程不是 JSON：' + String(error && error.message ? error.message : error) };
+  }
+  const mirror = firstDifference(cliAfter, value.afterOut, '$');
+  if (mirror !== null) {
+    return { ok: false, detail: '同一条 trim：CLI 改出来的工程与页面「拖出点后」不同：' + mirror };
+  }
+
+  return {
+    ok: true,
+    detail: '拖右手柄：出点第 ' + out.from + ' -> ' + out.to + ' 帧（长度 ' + lengthBefore + ' -> '
+      + lengthAfterOut + ' 帧），起点与 source_in 一字未动；'
+      + '拖左手柄：入点第 ' + inp.from + ' -> ' + inp.to + ' 帧，source_in ' + sourceInOut + ' -> '
+      + sourceInAfter + '（方向正确：入点左移则往素材前面多要）；'
+      + '同一条 trim 由 CLI 复算后与页面「拖出点后」逐字段相同',
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 音轨判定（T4）：看得见、选得中、拖得动，且**不参与画面合成**
+// ---------------------------------------------------------------------------
+
+/**
+ * 判据（T4）：**音轨在编辑面上是一等公民，但在合成里不是。**
+ *
+ * 与 CLI 对照的是**移动**那一步（同一条 `move`，两边逐字段相同）—— 音轨与视频轨
+ * 在编辑操作上本来就走同一份实现，对照它才有意义。
+ *
+ * 另外两条只在这里判，因为它们说的是界面的形状与选定语义：
+ *   * 音轨**有自己的行**，标签写清是哪条轨道；
+ *   * 点一下**真的选中**（选中态落在正确的 trackIndex 上 —— 行序与轨道序不是同一个下标，
+ *     这一条同时把倒序铺之后"点错行"这类毛病兜住）。
+ */
+function runAudioTrackParity(value) {
+  const problems = [];
+  const layers = Array.isArray(value.layers) ? value.layers : [];
+  if (layers.length === 0) problems.push('页面说音轨上一个元素都没有');
+  if (typeof value.label !== 'string' || value.label.length === 0) problems.push('音轨那一行没有标签');
+  else if (!value.label.includes('audio')) problems.push('音轨的标签里没有 audio：' + JSON.stringify(value.label));
+  if (typeof value.selected !== 'string' || value.selected.length === 0) {
+    problems.push('页面没有回报"点中的是哪个元素"');
+  } else if (!layers.includes(value.selected)) {
+    problems.push('点中的 ' + value.selected + ' 不是音轨上的元素（音轨上是 ' + layers.join('/') + '）');
+  }
+  const moved = value.moved;
+  if (moved === null || typeof moved !== 'object') {
+    problems.push('页面没回传移动的实测');
+  } else if (Number(moved.from) === Number(moved.to)) {
+    problems.push('音轨元素拖了但起点没变（都是第 ' + moved.from + ' 帧）');
+  }
+  if (problems.length > 0) return { ok: false, detail: problems.join('；') };
+
+  // 工程对照：页面回传的 after 里，那个元素必须真的在音轨上、且起点就是它说的地方。
+  const after = findLayerById(value.after, moved.layer);
+  if (after === null) return { ok: false, detail: '「拖动后」那份工程里没有 ' + moved.layer + ' 了' };
+  const before = findLayerById(value.before, moved.layer);
+  if (before === null) return { ok: false, detail: '「拖动前」那份工程里没有 ' + moved.layer + ' 了' };
+  if (after.layer.start !== Number(moved.to)) {
+    return { ok: false, detail: '页面说落到第 ' + moved.to + ' 帧，工程里却是第 ' + after.layer.start + ' 帧' };
+  }
+  if (after.layer.end - after.layer.start !== before.layer.end - before.layer.start) {
+    return { ok: false, detail: '挪动改了长度：' + (before.layer.end - before.layer.start)
+      + ' -> ' + (after.layer.end - after.layer.start) + ' 帧' };
+  }
+
+  // CLI 复算：同一条 move 打在同一份 fixture 上。
+  const found = findCli();
+  if (found.cli === null) return { ok: false, detail: found.error + ' —— 没法对照' };
+  const fixturePath = join(REPO_ROOT, 'fixtures', projectId + '.json');
+  if (!existsSync(fixturePath)) return { ok: false, detail: '对照用的工程不在：' + fixturePath };
+  const original = readFileSync(fixturePath, 'utf8');
+  let fixture = null;
+  try { fixture = JSON.parse(original); } catch (error) {
+    return { ok: false, detail: 'fixture 不是 JSON：' + String(error && error.message ? error.message : error) };
+  }
+  const baseDifference = firstSubsetDifference(fixtureAsHostReadsIt(fixture), value.before, '$');
+  if (baseDifference !== null) {
+    return { ok: false, detail: '页面那份工程与 fixture 对不上：' + baseDifference };
+  }
+  const dir = join(REPO_ROOT, 'target', 'verdict');
+  mkdirSync(dir, { recursive: true });
+  const projectFile = join(dir, 'audio-track.json');
+  writeFileSync(projectFile, original);
+  const op = { op: 'move', layer: moved.layer, to: Number(moved.to) };
+  const result = spawnSync(found.cli, ['edit', '--project', projectFile, '--write', '--op', JSON.stringify(op)], {
+    cwd: REPO_ROOT, encoding: 'utf8',
+  });
+  if (result.status !== 0) {
+    return { ok: false, detail: 'CLI 用同一条 move 复算退出 ' + result.status + '：'
+      + (String(result.stderr || '').trim() || String(result.stdout || '').trim()) };
+  }
+  let cliAfter = null;
+  try { cliAfter = JSON.parse(readFileSync(projectFile, 'utf8')); } catch (error) {
+    return { ok: false, detail: 'CLI 写出来的工程不是 JSON：' + String(error && error.message ? error.message : error) };
+  }
+  const mirror = firstDifference(cliAfter, value.after, '$');
+  if (mirror !== null) {
+    return { ok: false, detail: '同一条 move：CLI 改出来的工程与页面「拖动后」不同：' + mirror };
+  }
+
+  const audio = value.audio === undefined || value.audio === null ? null : value.audio;
+  const audioNote = audio === null
+    ? '；**音频源与对齐没有回传** —— 这一趟没验到"播放时有声音"'
+    : '；音频源 ' + (Array.isArray(audio.assets) ? audio.assets.join('/') : '?') + ' 全部挂上，'
+      + '跳到第 ' + audio.probeFrame + ' 帧时 currentTime 对齐到 ' + Number(audio.wantSeconds).toFixed(3) + 's';
+  const audioProblem = audio === null ? ['页面没有回传音频源与对齐的实测'] : [];
+  if (audioProblem.length > 0) return { ok: false, detail: audioProblem.join('；') };
+
+  return {
+    ok: true,
+    detail: '音轨「' + value.trackId + '」有独立的行（标签 ' + JSON.stringify(value.label) + '）、'
+      + '元素 ' + layers.join('/') + ' 点得中（选中的是 ' + value.selected + '）；'
+      + '拖 ' + moved.layer + ' 从第 ' + moved.from + ' -> ' + moved.to + ' 帧且长度不变，'
+      + '同一条 move 由 CLI 复算后逐字段相同' + audioNote,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 播放判定（T3）：帧号由播放头推进，不是素材自己播
+// ---------------------------------------------------------------------------
+
+/**
+ * 判据（T3）：**帧号在播、速度对得上帧率、末帧自己停、手动定位能接管。**
+ *
+ * **故意不与 CLI 对照**：播放是纯宿主行为（"每秒把播放头推几帧"），契约里没有、也不该有
+ * 对应的字段 —— 硬凑一条 CLI 对照只会让判据看起来更严，实际上什么也没多验。
+ * 这里能站住的理由是**别的**：这些事实由页面回传，而页面自己没法把它们编得自洽
+ * （推进速度要与它自己报的 fps 和耗时吻合，末帧要与工程长度吻合）。
+ */
+function runPlaybackParity(value) {
+  const problems = [];
+  const fps = Number(value.fps);
+  const end = Number(value.end);
+  const advancedTo = Number(value.advancedTo);
+  const elapsedMs = Number(value.elapsedMs);
+  const expectedFrames = Number(value.expectedFrames);
+  if (!(fps > 0)) problems.push('页面报的序列帧率不是正数：' + value.fps);
+  if (!(end > 1)) problems.push('页面报的工程长度不是大于 1 的整数：' + value.end);
+  if (!(advancedTo > 0)) problems.push('播放之后帧号没往前走：' + value.advancedTo);
+  if (!(elapsedMs > 0)) problems.push('页面报的耗时不是正数：' + value.elapsedMs);
+  if (!(expectedFrames > 0)) problems.push('按帧率与耗时算出来的期望帧数不是正数：' + value.expectedFrames);
+  if (problems.length > 0) return { ok: false, detail: problems.join('；') };
+
+  // 推进速度：页面自己报的两个数必须互相吻合（宽区间，只拦"用的不是同一个帧率"）。
+  const ratio = expectedFrames > 0 ? advancedTo / expectedFrames : 0;
+  if (!(ratio > 0.2 && ratio < 5)) {
+    problems.push('推进速度与帧率不符：' + Math.round(elapsedMs) + 'ms 里 ' + fps + 'fps 该走约 '
+      + expectedFrames.toFixed(1) + ' 帧，实际到第 ' + advancedTo + ' 帧');
+  }
+  if (advancedTo >= end) {
+    problems.push('推进到的第 ' + advancedTo + ' 帧已经越过末帧 ' + (end - 1) + ' —— 那说明没在末帧停');
+  }
+  if (value.pausedByUser !== true) {
+    problems.push('拖动滑块之后播放没让位 —— 用户手动定位会被播放头拽走');
+  }
+  const stoppedAt = Number(value.stoppedAt);
+  if (stoppedAt !== end - 1) {
+    problems.push('播到末尾停在 ' + value.stoppedAt + ' 帧，而不是末帧 ' + (end - 1));
+  }
+  if (problems.length > 0) return { ok: false, detail: problems.join('；') };
+
+  return {
+    ok: true,
+    detail: '播放把帧号从 0 推到第 ' + advancedTo + ' 帧（' + Math.round(elapsedMs) + 'ms、'
+      + fps + 'fps，理论上限约 ' + expectedFrames.toFixed(1) + ' 帧，实测比值 '
+      + ratio.toFixed(2) + '）—— 说明推进用的是**序列帧率**而不是素材自己在播；'
+      + '拖滑块能接管（播放让位）；播到末帧第 ' + stoppedAt + ' 帧自己停住',
   };
 }
 
@@ -1409,6 +1746,64 @@ async function reportVerdict(name) {
     const parity = runUndoDragParity(value);
     console.log((parity.ok ? '  ✓ ' : '  - ') + parity.detail);
     if (!parity.ok) process.exitCode = 1;
+    return;
+  }
+  if (value.kind === 'trim-drag') {
+    const parity = runTrimDragParity(value);
+    console.log((parity.ok ? '  ✓ ' : '  - ') + parity.detail);
+    if (!parity.ok) process.exitCode = 1;
+    return;
+  }
+  if (value.kind === 'playback') {
+    const parity = runPlaybackParity(value);
+    console.log((parity.ok ? '  ✓ ' : '  - ') + parity.detail);
+    if (!parity.ok) process.exitCode = 1;
+    return;
+  }
+  if (value.kind === 'audio-track') {
+    const parity = runAudioTrackParity(value);
+    console.log((parity.ok ? '  ✓ ' : '  - ') + parity.detail);
+    if (!parity.ok) process.exitCode = 1;
+    return;
+  }
+  if (value.kind === 'perf') {
+    // **测量不是判定。** 这一支只把数字摊开，不设通过线 ——
+    // 设了一条线就会有人为了让它变绿去改预算，而不是去改渲染。
+    // 该看的只有一件事：中位耗时与帧率预算差多少（见下面那行"预算"）。
+    const budget = Number(value.frameMs) || 0;
+    console.log('  每帧预算 ' + budget.toFixed(2) + 'ms（序列帧率给的）');
+    console.log('  "解不动"的阈值 ' + (value.heavyPixels / 1e6).toFixed(1) + 'MP（只用于报告，不是开关）');
+    // 只报**浏览器实际解了多少像素**。属性要求那一栏故意不印：
+    // 它已经不设了（设了也没用，见 decode-cap-probe.mjs），印出来只会让人以为有开关。
+    console.log('  各素材实际解码尺寸：');
+    for (const item of value.decodeSizes || []) {
+      console.log('    ' + item.asset_id + '  ' + item.videoWidth + 'x' + item.videoHeight
+        + '  ' + (item.videoWidth * item.videoHeight / 1e6).toFixed(2) + 'MP');
+    }
+    console.log('  素材（每一路单独量，解码代价与解码像素数直接相关）：');
+    for (const source of value.sources || []) {
+      // **报的是解码尺寸（videoWidth），不是素材原始尺寸。** 两者不同才说明上限生效了 ——
+      // 只印原始尺寸的话，"上限到底有没有起作用"从报告里根本看不出来。
+      console.log('    ' + source.source + '  解码 ' + source.width + 'x' + source.height
+        + '  ' + (source.width * source.height / 1e6).toFixed(2) + 'MP'
+        + '  单次 seek 中位 ' + source.decodeMs + 'ms  最坏 ' + source.decodeMaxMs + 'ms');
+    }
+    console.log('  逐帧耗时（' + value.samples + ' 个采样点）：');
+    console.log('    解码 seek   中位 ' + value.seek.medianMs + 'ms  均 ' + value.seek.meanMs
+      + 'ms  范围 ' + value.seek.minMs + '-' + value.seek.maxMs + 'ms');
+    console.log('    链路开销    均 ' + value.overheadMeanMs + 'ms（除 seek 外的一切）');
+    console.log('    合计        中位 ' + value.total.medianMs + 'ms  均 ' + value.total.meanMs
+      + 'ms  最坏 ' + value.total.maxMs + 'ms');
+    const verdict = value.budgetOk
+      ? '跑得满（中位 ' + value.total.medianMs + 'ms <= 预算 ' + budget.toFixed(2) + 'ms）'
+      : '**跑不满**：中位 ' + value.total.medianMs + 'ms 是预算 ' + budget.toFixed(2) + 'ms 的 '
+        + (value.total.medianMs / budget).toFixed(1) + ' 倍';
+    console.log('  ' + verdict);
+    console.log('  逐帧明细：');
+    for (const row of value.rows || []) {
+      console.log('    帧 ' + row.frame + '  源 ' + row.sources + '  seek ' + row.seekMs
+        + 'ms  链路 ' + row.chainMs + 'ms  合计 ' + row.totalMs + 'ms');
+    }
     return;
   }
   console.log('  op：' + JSON.stringify(value.op));
