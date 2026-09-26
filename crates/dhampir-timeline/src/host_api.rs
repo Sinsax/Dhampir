@@ -752,6 +752,7 @@ mod tests {
             enabled: true,
             recorded: crate::layer::Recorded::default(),
             source: None,
+            loop_source: false,
             effects: vec![
                 crate::schema::Effect {
                     kind: "gaussian_blur".to_string(),

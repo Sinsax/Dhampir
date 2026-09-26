@@ -177,6 +177,24 @@ pub struct Layer {
     /// 没有它就不是实拍片段 —— 这正是调整图层能存在的原因。
 #[serde(default)]
     pub source: Option<SourceRef>,
+    /// **素材放完了要不要从头再来。**
+    ///
+    /// 默认为假，也就是老行为：素材不够长就是**越界错误**
+    /// （`source_range_exceeded`）。这个默认值是故意的 ——
+    /// 静默循环会把"我配错了素材长度"变成一个看不出来的错。
+    ///
+    /// # 为什么必须有这个字段
+    ///
+    /// 动图贴纸（GIF）是**短素材铺长区间**：实测一张 12 帧的 GIF
+    /// 要覆盖 224 个时间线帧（3.7 秒）。没有这个开关时只有两条路 ——
+    /// 谎报 `frame_count`（校验过、渲染读不存在的帧），
+    /// 或者把贴纸缩短（动图放完就消失，与 V-Trim 行为不同）。
+    /// 两条都是**用错的形状去套**，所以这里加一个正当的表达。
+    ///
+    /// 循环在**素材帧**上取模，不是时间线帧 —— 素材 10fps、时间线 60fps 时
+    /// 一个素材帧要停 6 个时间线帧，按时间线帧取模会把这 6 帧拆散。
+#[serde(default)]
+    pub loop_source: bool,
 #[serde(default)]
     pub effects: Vec<Effect>,
 #[serde(default)]
@@ -369,6 +387,8 @@ pub fn migrate_v1_to_v2(project: &Project) -> Result<TimelineV2, MigrateError> {
                     asset_id: clip.source.clone(),
                     source_in: clip.source_in,
                 }),
+                // v1 没有循环这个概念，迁移后就是**不循环**。
+                loop_source: false,
                 effects: clip.effects.clone(),
                 // v4 起 TransitionSpec 含 String，不再是 Copy —— 必须 clone。
                 transition_in: clip.transition_in.clone(),
@@ -469,6 +489,48 @@ pub fn source_frame_at(
     Ok(source_in.saturating_add(clamped))
 }
 
+/// 与 [`source_frame_at`] 同样的换算，但**可以循环**。
+///
+/// `loop_source` 为真时，走到素材末尾就**回到素材第 0 帧**接着播。
+///
+/// # 循环的语义：整张素材循环，不是"从 source_in 起的一段"循环
+///
+/// 想清楚这条很重要。有 `source_in = 3`、素材 6 帧时，两种可能的语义：
+///
+/// - **整张循环**（本函数）：`3,4,5,0,1,2,3,4,5,0,…`
+/// - 从 source_in 起一段循环：`3,4,5,6,7,8,3,4,…` —— 而 6/7/8 **超出素材**，
+///   那是坏帧号。
+///
+/// 第一版我写的是后者（`(raw - source_in).rem_euclid(count) + source_in`），
+/// 于是会算出素材里不存在的帧号。按"整张循环"才对：
+/// 素材是个循环的圈，`source_in` 只是**从圈的哪里开始进**。
+///
+/// 实测最常见的用法（贴纸动图）`source_in` 就是 0，两种语义重合；
+/// 数值上不重合时**只有整张循环不会越界**。
+///
+/// # `frame_count` 未知时
+///
+/// （`None` 或 0）**不循环** —— 不知道周期就谈不上取模。
+/// 此时退化成 `source_frame_at`（老行为）。
+pub fn source_frame_looped(
+    source_in: Frame,
+    local_frame: Frame,
+    timeline: &TimebaseDto,
+    asset: &TimebaseDto,
+    frame_count: Option<Frame>,
+    loop_source: bool,
+) -> Result<Frame, String> {
+    let raw = source_frame_at(source_in, local_frame, timeline, asset)?;
+    if !loop_source {
+        return Ok(raw);
+    }
+    let Some(count) = frame_count.filter(|count| *count > 0) else {
+        return Ok(raw);
+    };
+    // `rem_euclid` 而不是 `%`：负数取模在 Rust 里是负数，而我们要的是"回到圈里"。
+    Ok(raw.rem_euclid(count))
+}
+
 /// 素材帧号 → 秒。**用素材自己的时间基**，不是时间线的。
 ///
 /// 宿主靠它把"这一帧要 video 元素停在哪一秒"算出来。用错时间基的表现是
@@ -497,13 +559,26 @@ pub fn seconds_at_sequence_frame(sequence_frame: Frame, timebase: &TimebaseDto) 
     Some(sequence_frame as f64 * f64::from(timebase.den) / f64::from(timebase.num))
 }
 
-/// 「素材 id → 它的时间基」。给求值层用来做上面那个换算。
+/// 「素材 id → 它的时间基 + 帧数」。给求值层用来做上面那个换算。
 ///
 /// 用 BTreeMap 而不是 HashMap：工程文件里的迭代顺序要**逐字节稳定**
 /// （同一份数据序列化两次必须一样），而遍历顺序会影响任何"顺手聚合"的结果。
+///
+/// # `frame_count` 为什么在这里
+///
+/// 循环素材（`Layer::loop_source`）取模要**周期**，而周期就是帧数。
+/// 契约层算这个换算，就不能只知道时间基、不知道长度 ——
+/// 否则求值层得自己再拿一份帧数，两份真相迟早在某个动图上漂开。
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct AssetTimebases {
-    entries: BTreeMap<String, TimebaseDto>,
+    entries: BTreeMap<String, AssetTiming>,
+}
+
+/// 一个素材的时间信息。`frame_count` 可以不知道（那就不能循环）。
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct AssetTiming {
+    pub timebase: TimebaseDto,
+    pub frame_count: Option<Frame>,
 }
 
 impl AssetTimebases {
@@ -512,11 +587,26 @@ impl AssetTimebases {
     }
 
     pub fn insert(&mut self, asset_id: impl Into<String>, timebase: TimebaseDto) {
-        self.entries.insert(asset_id.into(), timebase);
+        self.entries.insert(asset_id.into(), AssetTiming { timebase, frame_count: None });
+    }
+
+    /// 连帧数一起登记。循环素材必须走这个 —— 见 `AssetTiming` 的说明。
+    pub fn insert_with_count(
+        &mut self,
+        asset_id: impl Into<String>,
+        timebase: TimebaseDto,
+        frame_count: Option<Frame>,
+    ) {
+        self.entries.insert(asset_id.into(), AssetTiming { timebase, frame_count });
     }
 
     pub fn get(&self, asset_id: &str) -> Option<&TimebaseDto> {
-        self.entries.get(asset_id)
+        self.entries.get(asset_id).map(|timing| &timing.timebase)
+    }
+
+    /// 帧数。登记时没给就是 `None`（不能循环）。
+    pub fn frame_count(&self, asset_id: &str) -> Option<Frame> {
+        self.entries.get(asset_id).and_then(|timing| timing.frame_count)
     }
 
     pub fn len(&self) -> usize {
@@ -567,6 +657,7 @@ mod tests {
             enabled: true,
             recorded: Recorded::default(),
             source: None,
+            loop_source: false,
             effects: Vec::new(),
             transition_in: None,
             keyframes: Vec::new(),
@@ -983,6 +1074,7 @@ mod v2_tests {
             enabled: true,
             recorded: Recorded::default(),
             source: None,
+            loop_source: false,
             effects: Vec::new(),
             transition_in: None,
             keyframes: Vec::new(),
@@ -1071,5 +1163,104 @@ mod v2_tests {
         tl.tracks.push(track("v", vec![layer("a", 10, 10)]));
         let issues = validate_timeline_v2(&tl, &[]);
         assert_eq!(codes(&issues), vec!["unsupported_schema"], "不该产生二次错误");
+    }
+
+    // -----------------------------------------------------------------------
+    // 循环素材（`Layer::loop_source`）
+    //
+    // 这一组是**真数据逼出来的**：一张 12 帧的 GIF 贴纸要铺 224 个时间线帧，
+    // 没有循环就只能谎报 `frame_count`（校验过、渲染读不存在的帧）。
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn 不循环时素材帧号一直往上走() {
+        // 老行为必须**逐位不变** —— 默认值就是不循环。
+        let tl = TimebaseDto { num: 60, den: 1 };
+        let asset = TimebaseDto { num: 10, den: 1 };
+        // 10fps 素材放进 60fps 时间线：1 素材帧 = 6 时间线帧
+        let got: Vec<Frame> = (0..12)
+            .map(|local| source_frame_looped(0, local, &tl, &asset, Some(12), false).unwrap())
+            .collect();
+        assert_eq!(got, vec![0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn 循环时超过素材长度就回到开头() {
+        let tl = TimebaseDto { num: 60, den: 1 };
+        let asset = TimebaseDto { num: 10, den: 1 };
+        // 12 帧的素材，取 0..80 个时间线帧 —— 够走到循环点再过一点
+        let got: Vec<Frame> = (0..80)
+            .map(|local| source_frame_looped(0, local, &tl, &asset, Some(12), true).unwrap())
+            .collect();
+        // 每 6 个时间线帧走一个素材帧，12 个素材帧 = 72 个时间线帧一个周期
+        assert_eq!(got[0], 0);
+        assert_eq!(got[6], 1);
+        assert_eq!(got[66], 11, "第 11 个素材帧");
+        assert_eq!(got[72], 0, "第 72 个时间线帧回到素材第 0 帧");
+        assert_eq!(got[78], 1, "然后继续");
+        // **这条是关键**：不循环的话 got[72] 会是 12（越界）。
+        assert!(got.iter().all(|f| *f < 12), "循环后绝不该出现超出 12 的素材帧：{got:?}");
+    }
+
+    #[test]
+    fn 循环的周期是素材帧不是时间线帧() {
+        // 素材 10fps、时间线 60fps。若按**时间线帧**取模（12），
+        // 则 6 个时间线帧才走一个素材帧、却 12 个时间线帧就回头 ——
+        // 表现是**一张 12 帧的动图只播了 2 帧就重来**。
+        let tl = TimebaseDto { num: 60, den: 1 };
+        let asset = TimebaseDto { num: 10, den: 1 };
+        let at = |local| source_frame_looped(0, local, &tl, &asset, Some(12), true).unwrap();
+        assert_eq!(at(11), 1, "第 11 个时间线帧还在第 1 个素材帧上");
+        assert_eq!(at(66), 11, "第 66 个时间线帧才到第 11 个素材帧");
+        assert_eq!(at(71), 11, "同一素材帧要停满 6 个时间线帧");
+        assert_eq!(at(72), 0, "第 72 个时间线帧才回头");
+    }
+
+    #[test]
+    fn 循环的是整张素材而不是从source_in起的一段() {
+        // 素材 6 帧、从第 3 帧进：
+        //   整张循环（对的）  -> 3,4,5,0,1,2,3,4
+        //   从 3 起一段循环（错的）-> 3,4,5,6,7,8,3,4  <- 6/7/8 素材里不存在
+        //
+        // **这条用例就是被后者坑出来的。** 我第一版实现写的是后者，
+        // 于是循环素材会算出越界帧号 —— 而校验放行（它只看 source_in），
+        // 表现是渲染时读到不存在的帧。
+        let tl = TimebaseDto { num: 1, den: 1 };
+        let asset = TimebaseDto { num: 1, den: 1 };
+        let got: Vec<Frame> = (0..8)
+            .map(|local| source_frame_looped(3, local, &tl, &asset, Some(6), true).unwrap())
+            .collect();
+        assert_eq!(got, vec![3, 4, 5, 0, 1, 2, 3, 4]);
+        // 关键不变量：循环后**永远落回素材范围内**。
+        assert!(got.iter().all(|f| (0..6).contains(f)), "不许出现越界帧号：{got:?}");
+    }
+
+    #[test]
+    fn 帧数未知时不循环() {
+        // 不知道周期就谈不上取模 —— 必须退化成老行为，
+        // 而不是自作主张按 0 或按 1 循环（那会画出一张静帧）。
+        let tl = TimebaseDto { num: 60, den: 1 };
+        let asset = TimebaseDto { num: 10, den: 1 };
+        let got = source_frame_looped(0, 100, &tl, &asset, None, true).unwrap();
+        assert_eq!(got, 16, "100 个时间线帧 / 6 = 素材第 16 帧");
+    }
+
+    #[test]
+    fn 帧数为零也不循环() {
+        // 0 是非法帧数。**不能拿它取模**（除零 panic），也不能当成"无限长"。
+        let tl = TimebaseDto { num: 60, den: 1 };
+        let asset = TimebaseDto { num: 10, den: 1 };
+        let got = source_frame_looped(0, 100, &tl, &asset, Some(0), true).unwrap();
+        assert_eq!(got, 16);
+    }
+
+    #[test]
+    fn 负数素材帧也能正确取模() {
+        // `rem_euclid` 才是"回到开头"的语义；Rust 的 `%` 会给出负数。
+        // 负的 source_in 在契约层是别的错，但换算函数本身不该 panic 或给负数。
+        let tl = TimebaseDto { num: 1, den: 1 };
+        let asset = TimebaseDto { num: 1, den: 1 };
+        let got = source_frame_looped(-2, 0, &tl, &asset, Some(5), true).unwrap();
+        assert_eq!(got, 3, "-2 在模 5 下应当落到 3");
     }
 }

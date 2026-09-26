@@ -437,6 +437,7 @@ mod tests {
                 asset_id: asset_id.to_string(),
                 source_in,
             }),
+            loop_source: false,
             effects: Vec::new(),
             transition_in: None,
             keyframes: Vec::new(),

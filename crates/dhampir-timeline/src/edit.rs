@@ -203,6 +203,9 @@ pub fn insert_reference(
             asset_id: request.asset_id.clone(),
             source_in: request.source_in,
         }),
+        // 新建的层默认**不循环**：静默循环会把"素材长度配错了"藏起来。
+        // 要循环得显式说。
+        loop_source: false,
         effects: Vec::new(),
         transition_in: None,
         keyframes: Vec::new(),
@@ -729,6 +732,7 @@ mod tests {
                 asset_id: "clip".to_string(),
                 source_in,
             }),
+            loop_source: false,
             effects: Vec::new(),
             transition_in: None,
             keyframes: Vec::new(),

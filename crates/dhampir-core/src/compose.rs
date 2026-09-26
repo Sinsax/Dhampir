@@ -23,7 +23,9 @@
 //! 这是个取舍，不是疏漏——要做真正的重叠溶解，得让契约知道素材长度或允许重叠，
 //! 那是 v2 的事。冻帧至少是**两端都能一模一样算出来**的。
 
-use dhampir_timeline::layer::{AssetTimebases, BlendMode, Layer as LayerV2, TimelineV2, source_frame_at};
+use dhampir_timeline::layer::{
+    AssetTimebases, BlendMode, Layer as LayerV2, TimelineV2, source_frame_looped,
+};
 use dhampir_timeline::schema::{
     Clip, Effect, Frame, Project, TimebaseDto, TrackKind, Transform, TransitionSpec,
 };
@@ -200,8 +202,15 @@ impl EvalContext<'_> {
         match self.assets.and_then(|table| table.get(&source.asset_id)) {
             // 时间基不合法时退回恒等而不是 panic：那是**契约层**该报的错
             // （invalid_timebase），渲染器没必要在这里死给你看。
-            Some(asset) => source_frame_at(source.source_in, local_frame, self.timeline, asset)
-                .unwrap_or(identity),
+            Some(asset) => source_frame_looped(
+                source.source_in,
+                local_frame,
+                self.timeline,
+                asset,
+                self.assets.and_then(|table| table.frame_count(&source.asset_id)),
+                element.loop_source,
+            )
+            .unwrap_or(identity),
             None => identity,
         }
     }
@@ -458,6 +467,7 @@ mod tests {
             enabled: true,
             recorded: Default::default(),
             source,
+            loop_source: false,
             effects: Vec::new(),
             transition_in: None,
             keyframes: Vec::new(),
@@ -884,6 +894,7 @@ mod tests {
             blend: BlendMode::Normal,
             enabled: true,
             recorded: Recorded::default(),
+            loop_source: false,
             source: None,
             effects: Vec::new(),
             transition_in: None::<TransitionSpec>,
@@ -925,6 +936,7 @@ mod tests {
             blend: BlendMode::Normal,
             enabled: true,
             recorded: Recorded::default(),
+            loop_source: false,
             source: None,
             effects: Vec::new(),
             transition_in: None::<TransitionSpec>,
@@ -953,6 +965,7 @@ mod tests {
             blend: BlendMode::Normal,
             enabled: true,
             recorded: Recorded::default(),
+            loop_source: false,
             source: Some(SourceRef { asset_id: "a.mp4".to_string(), source_in: 0 }),
             effects: vec![Effect {
                 kind: "gaussian_blur".to_string(),
@@ -989,6 +1002,7 @@ mod tests {
             blend: BlendMode::Screen,
             enabled: true,
             recorded: Recorded::default(),
+            loop_source: false,
             source: None, // 没有素材
             effects: vec![Effect {
                 kind: "gaussian_blur".to_string(),

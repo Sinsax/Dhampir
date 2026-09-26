@@ -542,6 +542,7 @@ fn sfx_doc() -> ProjectDoc {
         enabled: true,
         recorded: Default::default(),
         source: Some(SourceRef { asset_id: "tone.m4a".to_string(), source_in: 0 }),
+        loop_source: false,
         effects: Vec::new(),
         transition_in: None,
         keyframes: Vec::new(),

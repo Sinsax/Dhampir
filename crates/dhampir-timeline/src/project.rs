@@ -285,11 +285,19 @@ pub fn asset_reference_counts(doc: &ProjectDoc) -> BTreeMap<String, usize> {
 }
 
 impl ProjectDoc {
-    /// 资产 id → 时间基。求值层用它把时间线帧号换算成素材帧号。
+    /// 资产 id → 时间基（+ 帧数）。求值层用它把时间线帧号换算成素材帧号。
     ///
     /// **没登记时间基的资产不进表**：不进表 = 走恒等换算（素材帧率按时间线算），
     /// 这正是升级前的行为。**不要给它猜一个帧率** —— 猜错的表现是画面变速，
     /// 而那是"看起来完全正常"的那一类错。
+    ///
+    /// # 帧数也要一起登记
+    ///
+    /// 循环素材（`Layer::loop_source`）取模要**周期**，而周期就是 `frame_count`。
+    /// 早先这里只登记时间基，于是 `AssetTimebases::frame_count()` 永远是 `None`、
+    /// 循环静默失效 —— 表现是**校验放行、渲染时读越界帧**
+    /// （实测：`呆(贴纸)_1.gif` 32 帧的动图铺 241 帧，到第 193 个时间线帧就报
+    /// `source_decode_failed`）。两个入口登记的东西不一致是这类错的经典来源。
     pub fn asset_timebases(&self) -> AssetTimebases {
         let mut table = AssetTimebases::new();
         for asset in &self.assets {
@@ -297,7 +305,7 @@ impl ProjectDoc {
                 continue;
             }
             if let Some(timebase) = asset.timebase.clone() {
-                table.insert(asset.id.clone(), timebase);
+                table.insert_with_count(asset.id.clone(), timebase, asset.frame_count);
             }
         }
         table
@@ -440,7 +448,11 @@ pub fn validate_project_doc(doc: &ProjectDoc, effects: &[EffectSpec]) -> DocIssu
                 Some(&asset_index) => {
                     let asset = &doc.assets[asset_index];
                     // 只有**知道素材有多长**时才谈得上越界。
-                    if let Some(frame_count) = asset.frame_count {
+                    //
+                    // **`loop_source` 为真时根本不越界** —— 那正是这个开关的用途：
+                    // 短动图铺长区间。不在这里放行的话，动图贴纸永远过不了校验，
+                    // 于是只剩下"谎报 frame_count"这条歪路。
+                    if let Some(frame_count) = asset.frame_count.filter(|_| !layer.loop_source) {
                         // **先换算再比。** 以前是拿"时间线帧数"直接比"素材帧数" ——
                         // 素材帧率与时间线不一致时两边单位根本不同，这个检查是错的
                         // （60fps 素材放进 30fps 时间线时它会放行两倍的长度）。
@@ -683,6 +695,7 @@ mod tests {
                 asset_id: a.to_string(),
                 source_in,
             }),
+            loop_source: false,
             effects: Vec::new(),
             transition_in: None,
             keyframes: Vec::new(),
@@ -1004,5 +1017,47 @@ mod tests {
     fn 不是_json_要给人话的错() {
         let message = load_doc("这不是 JSON").expect_err("应当报错");
         assert!(message.contains("JSON"), "报错要能看懂：{message}");
+    }
+
+    // -----------------------------------------------------------------------
+    // `asset_timebases()` 要把**帧数**一起带过去
+    //
+    // 这一组是真机逼出来的：循环素材（贴纸动图）取模要周期，而周期是帧数。
+    // 早先这里只登记时间基，于是 `frame_count()` 永远 `None`、
+    // **循环静默失效** —— 校验放行（它看 `loop_source` 就跳过越界检查），
+    // 渲染时才炸（`source_decode_failed`：32 帧的动图要第 32 帧）。
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn 资产表要带帧数过去() {
+        // 没带过去的话，循环素材无从取模 —— 而那是**看不出来**的错：
+        // 工程合法、校验全绿，只在渲染时越界。
+        let mut a = asset("gif", Some(32));
+        a.timebase = Some(TimebaseDto { num: 10, den: 1 });
+        a.kind = AssetKind::ImageSequence;
+        let table = doc(vec![a], vec![layer_with("l", 0, 10, Some("gif"), 0)]).asset_timebases();
+        assert_eq!(table.get("gif"), Some(&TimebaseDto { num: 10, den: 1 }), "时间基要过去");
+        assert_eq!(table.frame_count("gif"), Some(32), "**帧数也要过去**，否则循环取不了模");
+    }
+
+    #[test]
+    fn 没登记时间基的资产仍然不进表() {
+        // 老行为不许变：不进表 = 恒等换算（素材帧率按时间线算）。
+        // 「不要给它猜一个帧率」是 `asset_timebases` 注释里就写着的纪律。
+        let table = doc(vec![asset("a", Some(50))], vec![layer_with("l", 0, 10, Some("a"), 0)])
+            .asset_timebases();
+        assert!(table.get("a").is_none(), "没有时间基就不该进表");
+        assert!(table.frame_count("a").is_none());
+    }
+
+    #[test]
+    fn 资产表里的帧数只反映真的登记了长度的那些() {
+        // `frame_count: None`（裸契约载入后就是这样）要如实是 `None` ——
+        // 编一个长度会让循环取模取到一个假周期。
+        let mut a = asset("gif", None);
+        a.timebase = Some(TimebaseDto { num: 10, den: 1 });
+        let table = doc(vec![a], vec![layer_with("l", 0, 10, Some("gif"), 0)]).asset_timebases();
+        assert_eq!(table.get("gif").is_some(), true, "有时间基就进表");
+        assert_eq!(table.frame_count("gif"), None, "没登记长度就如实是 None");
     }
 }

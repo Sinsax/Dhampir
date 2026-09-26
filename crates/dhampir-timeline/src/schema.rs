@@ -52,6 +52,14 @@ pub struct TimebaseDto {
     pub den: u32,
 }
 
+/// **没有时间基**时的占位。刻意不是 0/0 —— 那是非法的，
+/// 会让 `to_timebase()` 失败，从而在"忘了填"的时候**报错而不是悄悄按 0 帧率走**。
+impl Default for TimebaseDto {
+    fn default() -> Self {
+        Self { num: 0, den: 0 }
+    }
+}
+
 impl TimebaseDto {
     /// 转成真正的 Timebase，并做合法性检查。
     ///

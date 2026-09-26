@@ -70,6 +70,8 @@ export interface Layer {
   /** 全局唯一。v1 里只保证轨内唯一，v2 提到全局 —— 否则跨轨引用无从谈起。 */
   id: string;
   keyframes?: Keyframe[];
+  /** **素材放完了要不要从头再来。** */
+  loop_source?: boolean;
   markers?: Marker[];
   note?: string;
   opacity?: number;
