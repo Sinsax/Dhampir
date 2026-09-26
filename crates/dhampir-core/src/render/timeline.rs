@@ -281,6 +281,13 @@ pub fn effect_passes(effects: &[Effect]) -> Vec<(PassStage, Vec<usize>)> {
 ///
 /// `size` 是目标像素尺寸（暗角的椭圆坐标要用），`frame` 是**绝对帧号**
 /// （噪声要它才逐帧不同，且同一帧可复现）。
+///
+/// # 强度来自 `Effect.opacity`
+///
+/// 时间窗**不在这里算** —— 求值层已经把它折进 `opacity` 了
+/// （见 `compose::resolve_effects` 的说明）。所以这里只读 `opacity`，
+/// 而它已经是"这一帧这条特效该有多强"。一条特效一个通用字段，
+/// 而不是给四套管线各加一个 `envelope` 参数。
 pub fn color_mask_params(
     effects: &[Effect],
     size: (u32, u32),
@@ -306,6 +313,8 @@ pub fn color_mask_params(
         if spec.pipeline != EffectPipeline::ColorMask {
             continue;
         }
+        // 这一帧这条特效的整体强度（时间窗已折进来）。
+        let strength = effect.opacity.clamp(0.0, 1.0);
         let param = |name: &str| effect.params.get(name).copied().filter(|v| v.is_finite());
         match spec.kind {
             "flash" => {
@@ -314,7 +323,7 @@ pub fn color_mask_params(
                     let r = param("r").unwrap_or(1.0);
                     let g = param("g").unwrap_or(1.0);
                     let b = param("b").unwrap_or(1.0);
-                    let weight = amount.clamp(0.0, 1.0);
+                    let weight = amount.clamp(0.0, 1.0) * strength;
                     if weight > out.flash_amount {
                         // 只在**更强**时换颜色：两条闪白同时挂着时，
                         // 更强的那条说了算。弱的那条不该把颜色稀释成两者平均 ——
@@ -329,8 +338,11 @@ pub fn color_mask_params(
             "vignette" => {
                 if let Some(amount) = param("amount") {
                     // 取更强的那个：两条暗角叠加没有额外语义。
-                    if amount >= out.vignette_amount {
-                        out.vignette_amount = amount.clamp(0.0, 1.0);
+                    // **比较的是已乘过时间窗的强度**：不然一条时间窗已归零的暗角
+                    // 会把一条正在生效的挤掉（"更强"要按这一帧的实际强度算）。
+                    let weight = amount.clamp(0.0, 1.0) * strength;
+                    if weight >= out.vignette_amount {
+                        out.vignette_amount = weight;
                         out.vignette_radius = param("radius").unwrap_or(0.7);
                         // softness 兜一个下限：它是除数，0 会让边缘变成硬阶跃，
                         // 而那在预览与成片之间更容易被看出差异。
@@ -340,15 +352,16 @@ pub fn color_mask_params(
             }
             "noise" => {
                 if let Some(amount) = param("amount") {
-                    if amount >= out.noise_amount {
-                        out.noise_amount = amount.clamp(0.0, 1.0);
+                    let weight = amount.clamp(0.0, 1.0) * strength;
+                    if weight >= out.noise_amount {
+                        out.noise_amount = weight;
                         out.noise_seed = param("seed").unwrap_or(0.0);
                     }
                 }
             }
             "overlay" => {
                 if let Some(amount) = param("amount") {
-                    let weight = amount.clamp(0.0, 1.0);
+                    let weight = amount.clamp(0.0, 1.0) * strength;
                     let r = param("r").unwrap_or(0.0);
                     let g = param("g").unwrap_or(0.0);
                     let b = param("b").unwrap_or(0.0);
@@ -389,25 +402,32 @@ pub fn color_mask_params(
 ///
 /// `seconds` 与 `size` 是位移场的自变量：位移必须是
 /// `(像素坐标, 时间秒, seed)` 的纯函数，否则跳帧求值与顺序播放会不一致。
+///
+/// 强度同样来自 `Effect.opacity`（时间窗已由求值层折进去，见 `color_mask_params`）。
 pub fn warp_params(effects: &[Effect], size: (u32, u32), seconds: f32) -> crate::render::WarpParams {
     let mut out = crate::render::WarpParams::IDENTITY;
     out.width = size.0.max(1) as f32;
     out.height = size.1.max(1) as f32;
     out.seconds = seconds;
 
-    for effect in effects {
+    for effect in effects.iter() {
         let Some(spec) = crate::effects::spec_of(&effect.kind) else {
             continue;
         };
         if spec.pipeline != EffectPipeline::Warp {
             continue;
         }
+        // 这一帧这条特效的整体强度（时间窗已折进来）。
+        // **幅度乘它、频率不乘** —— 频率是"抖多快"，不是"抖多少"；
+        // 乘上去会让窗口边缘的频率突然变化，看起来像卡了一下。
+        let strength = effect.opacity.clamp(0.0, 1.0);
         let param = |name: &str| effect.params.get(name).copied().filter(|v| v.is_finite());
         match spec.kind {
             "shake" => {
                 if let Some(amount) = param("amount") {
-                    if amount >= out.shake_amount {
-                        out.shake_amount = amount.clamp(0.0, 1.0);
+                    let weight = amount.clamp(0.0, 1.0) * strength;
+                    if weight >= out.shake_amount {
+                        out.shake_amount = weight;
                         // 频率兜一个下限：0 会让位移变成静止的常量偏移，
                         // 看起来像"画面整体歪了"而不是"在抖"。
                         out.shake_frequency = param("frequency").unwrap_or(12.0).max(1e-3);
@@ -417,24 +437,27 @@ pub fn warp_params(effects: &[Effect], size: (u32, u32), seconds: f32) -> crate:
             }
             "zoom_bounce" => {
                 if let Some(amount) = param("amount") {
-                    if amount >= out.bounce_amount {
-                        out.bounce_amount = amount.clamp(0.0, 1.0);
+                    let weight = amount.clamp(0.0, 1.0) * strength;
+                    if weight >= out.bounce_amount {
+                        out.bounce_amount = weight;
                         out.bounce_frequency = param("frequency").unwrap_or(3.0).max(1e-3);
                     }
                 }
             }
             "pulse" => {
                 if let Some(amount) = param("amount") {
-                    if amount >= out.pulse_amount {
-                        out.pulse_amount = amount.clamp(0.0, 1.0);
+                    let weight = amount.clamp(0.0, 1.0) * strength;
+                    if weight >= out.pulse_amount {
+                        out.pulse_amount = weight;
                         out.pulse_frequency = param("frequency").unwrap_or(1.5).max(1e-3);
                     }
                 }
             }
             "split" => {
                 if let Some(amount) = param("amount") {
-                    if amount >= out.split_amount {
-                        out.split_amount = amount.clamp(0.0, 1.0);
+                    let weight = amount.clamp(0.0, 1.0) * strength;
+                    if weight >= out.split_amount {
+                        out.split_amount = weight;
                         out.split_offset = param("offset").unwrap_or(0.08);
                         // **度转弧度只在这一处发生**（与 hue / overlay 同一条纪律）。
                         out.split_skew = param("skew").unwrap_or(0.0).to_radians();

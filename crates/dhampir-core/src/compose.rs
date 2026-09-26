@@ -297,34 +297,54 @@ fn element_to_draw(
             scale: animated(element.transform.scale, "scale"),
             rotation_deg: animated(element.transform.rotation, "rotation"),
         },
-        effects: resolve_effects(element, local_frame),
+        effects: resolve_effects(element, local_frame, element.duration()),
         frozen_for_transition: frozen,
         blend: element.blend,
         is_adjustment: element.is_adjustment(),
     }
 }
 
-/// 求值这一帧的特效清单：**每条的参数都可被同层的关键帧驱动**。
+/// 求值这一帧的特效清单：**每条的参数都可被同层的关键帧驱动**，
+/// **并且每条的时间窗都已经折进它的 `opacity`**。
 ///
 /// `target` 形如 `effect.<下标>.<参数名>`（见 `Keyframe::target`），
 /// 只覆盖它指名的那一个键，其余键原样 —— 于是"模糊半径随帧变化"
 /// 不需要新特效类型，也不需要新管线。
 ///
-/// 没有可驱动参数时**返回原清单的克隆**：绝大多数帧走这条，不该为它多分配。
-fn resolve_effects(element: &LayerV2, local_frame: Frame) -> Vec<Effect> {
+/// # 时间窗为什么在**这里**折进去
+///
+/// 算一条特效的时间窗需要两样只有求值层才知道的东西：
+/// "这一帧是它所属图层的第几帧"（`local_frame`）与"那个图层多长"（`duration`）。
+/// 渲染器手上只有图层内偏移，让它回头去查契约等于把同一件事实现两遍。
+///
+/// 折进 `opacity` 之后，渲染器那边**完全不必知道时间窗的存在** ——
+/// 它照旧读 `opacity`，而那已经是"这一帧这条特效该有多强"。
+/// 一个通用字段喂四套管线，比给每条管线各加一个 `envelope` 参数干净。
+///
+/// **老工程逐字节不变**：那时每条都是 `Window::Always`，`envelope` 恒为 1.0。
+fn resolve_effects(element: &LayerV2, local_frame: Frame, duration: Frame) -> Vec<Effect> {
     let keys = &element.keyframes;
-    if keys.is_empty() || element.effects.is_empty() {
-        return element.effects.clone();
-    }
-    // 先看有没有任何一条是 effect 目标 —— 没有就连克隆都不必做参数替换。
     let has_effect_target = keys
         .iter()
         .any(|key| crate::timeline::schema::parse_effect_target(&key.target).is_some());
-    if !has_effect_target {
+    // 没有任何东西要改时**返回原清单的克隆**：绝大多数帧走这条，不该为它多分配。
+    if element.effects.is_empty() {
         return element.effects.clone();
     }
 
     let mut out = element.effects.clone();
+    for effect in out.iter_mut() {
+        // 1) 总强度：折进 opacity。窗口外它归零，于是这条特效**什么都不画**。
+        //
+        // 走 `Effect::strength` 而不是在这里现写一遍乘法 ——
+        // "这条特效这一帧多强"只能有**一个**定义，否则求值层与别处
+        // （比如 V-Trim 直接读强度时）会算出两个数。
+        effect.opacity = effect.strength(local_frame, duration, None);
+    }
+    if !has_effect_target {
+        return out;
+    }
+    // 2) 关键帧驱动的参数。
     for (index, effect) in out.iter_mut().enumerate() {
         for (param, value) in effect.params.iter_mut() {
             let target = format!("effect.{index}.{param}");
@@ -457,6 +477,97 @@ mod tests {
             keyframes: Vec::new(),
             transition_in: None,
         }
+    }
+
+    #[test]
+    fn 时间窗真的会改变求值出来的特效强度() {
+        // **这是 T9 那条"window 是纯函数"之外真正要紧的判据。**
+        //
+        // 我曾经把 `Window::envelope` 与 `Effect::strength` 写完就搁在那儿 ——
+        // 契约里有、工程文件里能写、文档里写着，而**渲染路径一次都没读过它**。
+        // 于是"瞬时闪一下"会变成"整段一直闪着"，且不报任何错。
+        // 这条用例钉的就是那个断点：窗口必须**真的**走到求值结果里。
+        use dhampir_timeline::schema::{Effect, Window};
+        use std::collections::BTreeMap;
+
+        let mut layer = element("e1", 0, 60, None);
+        layer.effects = vec![Effect {
+            kind: "flash".to_string(),
+            params: BTreeMap::new(),
+            window: Window::Transient { attack: 1, hold: 2, release: 3, fall_to_zero: true },
+            opacity: 1.0,
+        }];
+        let timeline = one_layer_v2(layer);
+
+        // 每一帧上这条特效的实际强度（`opacity` 已被折进时间窗）。
+        let strength_at = |frame: Frame| -> f32 {
+            evaluate_v2(&timeline, frame)
+                .layers
+                .iter()
+                .flat_map(|layer| layer.effects.iter())
+                .map(|effect| effect.opacity)
+                .next()
+                .expect("这一帧应当有一条特效")
+        };
+
+        // 窗口是 attack 1 / hold 2 / release 3 = 6 帧，段边界左闭右开：
+        // 上升 [0,1)、满值 [1,3)、回落 [3,6)、之后 0。
+        assert_eq!(strength_at(0), 0.0, "第 0 帧还在上升段起点");
+        assert_eq!(strength_at(1), 1.0, "hold 段满值");
+        assert_eq!(strength_at(3), 1.0, "回落段的起点仍是满值");
+        assert!(strength_at(4) < 1.0, "回落段该降下来，实得 {}", strength_at(4));
+        assert_eq!(strength_at(6), 0.0, "窗口走完之后必须归零");
+        assert_eq!(strength_at(30), 0.0, "之后一直归零 —— 而图层本身还有内容");
+
+        // 反向用例：没有窗口时强度**必须**恒为 1，否则老工程会被改掉。
+        let mut plain = element("e2", 0, 60, None);
+        plain.effects = vec![Effect {
+            kind: "flash".to_string(),
+            params: BTreeMap::new(),
+            window: Window::Always,
+            opacity: 1.0,
+        }];
+        let plain = one_layer_v2(plain);
+        for frame in [0, 1, 30, 59] {
+            let strength = evaluate_v2(&plain, frame)
+                .layers
+                .iter()
+                .flat_map(|layer| layer.effects.iter())
+                .map(|effect| effect.opacity)
+                .next()
+                .unwrap();
+            assert_eq!(strength, 1.0, "没有窗口时第 {frame} 帧的强度该是满值");
+        }
+    }
+
+    #[test]
+    fn 特效自己的不透明度与时间窗是相乘的() {
+        // 两个旋钮管两件事：`opacity` 是"这条特效整体多强"，
+        // `window` 是"什么时候生效"。相乘，而不是谁覆盖谁。
+        use dhampir_timeline::schema::{Effect, Window};
+        use std::collections::BTreeMap;
+
+        let mut layer = element("e1", 0, 60, None);
+        layer.effects = vec![Effect {
+            kind: "flash".to_string(),
+            params: BTreeMap::new(),
+            window: Window::Fade { fade_in: 4, fade_out: 4 },
+            opacity: 0.5,
+        }];
+        let timeline = one_layer_v2(layer);
+        let strength_at = |frame: Frame| -> f32 {
+            evaluate_v2(&timeline, frame)
+                .layers
+                .iter()
+                .flat_map(|layer| layer.effects.iter())
+                .map(|effect| effect.opacity)
+                .next()
+                .unwrap()
+        };
+        // 淡入一半（第 2 帧）：包络 0.5 × 自身 0.5 = 0.25。
+        assert!((strength_at(2) - 0.25).abs() < 1e-6, "实得 {}", strength_at(2));
+        // 中段：包络 1 × 自身 0.5 = 0.5。
+        assert!((strength_at(30) - 0.5).abs() < 1e-6, "实得 {}", strength_at(30));
     }
 
     #[test]

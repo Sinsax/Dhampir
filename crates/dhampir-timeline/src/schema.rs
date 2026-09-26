@@ -832,6 +832,165 @@ mod tests {
         default_keyframe_target()
     }
 
+    // ===== T9 的时间窗：验收要求"纯函数（同 t 同结果，跳帧可复现）" =====
+
+    #[test]
+    fn 缺省窗口是满强度() {
+        // 老工程每条特效都没有 window —— 必须恒为 1，否则"引入时间窗"
+        // 会把所有既有工程改掉。
+        assert_eq!(Window::default(), Window::Always);
+        for local in [0, 1, 50, 10_000] {
+            assert_eq!(Window::Always.envelope(local, 60), 1.0);
+        }
+    }
+
+    #[test]
+    fn 瞬时窗口是三段包络() {
+        // attack 2 / hold 3 / release 4，共 9 帧。
+        //
+        // 段边界（左闭右开）：上升 [0,2)、满值 [2,5)、回落 [5,9)、之后 0。
+        // 第 5 帧是**回落段的起点**，所以它仍是满值（`1 - 0/4`）。
+        let window = Window::Transient { attack: 2, hold: 3, release: 4, fall_to_zero: true };
+        let at = |local| window.envelope(local, 60);
+        // 上升段：从 0 线性涨到 1（第 0 帧是 0.0，第 1 帧是 0.5）。
+        assert_eq!(at(0), 0.0);
+        assert!((at(1) - 0.5).abs() < 1e-6, "实得 {}", at(1));
+        // 满值段。
+        assert_eq!(at(2), 1.0);
+        assert_eq!(at(4), 1.0);
+        // 回落段：第 5 帧是起点（满值），第 6 帧开始降。
+        assert_eq!(at(5), 1.0, "回落段的起点仍是满值");
+        assert!((at(6) - 0.75).abs() < 1e-6, "回落 1/4：实得 {}", at(6));
+        assert!((at(8) - 0.25).abs() < 1e-6, "回落 3/4：实得 {}", at(8));
+        // 结束之后归零（第 9 帧正好走完 2+3+4）。
+        assert_eq!(at(9), 0.0);
+        assert_eq!(at(100), 0.0, "窗口之后必须一直是 0，不然它就不是瞬时的");
+    }
+
+    #[test]
+    fn 瞬时窗口能选择不回落() {
+        // `fall_to_zero = false`：涨上去就保持。**它不等于 `Always`** ——
+        // `Always` 从第 0 帧就是满值，这个从 0 开始爬。
+        let window = Window::Transient { attack: 2, hold: 3, release: 4, fall_to_zero: false };
+        assert_eq!(window.envelope(0, 60), 0.0);
+        assert_eq!(window.envelope(1, 60), 0.5);
+        assert_eq!(window.envelope(4, 60), 1.0);
+        assert_eq!(window.envelope(9, 60), 1.0, "回落段走完之后保持满值");
+        assert_eq!(window.envelope(100, 60), 1.0, "永远不归零");
+    }
+
+    #[test]
+    fn 零长的瞬时窗口是合法的() {
+        // 全 0 会得到"瞬间满值再瞬间归零"。**合法输入**（不是错误）——
+        // 拒绝它会把"最难的那一帧"变成不可表达。
+        let window = Window::Transient { attack: 0, hold: 0, release: 0, fall_to_zero: true };
+        assert_eq!(window.envelope(0, 60), 0.0, "零窗口在第 0 帧就结束了");
+        assert_eq!(window.envelope(5, 60), 0.0);
+    }
+
+    #[test]
+    fn 淡入淡出窗口在中间是满值() {
+        let window = Window::Fade { fade_in: 10, fade_out: 10 };
+        let at = |local| window.envelope(local, 100);
+        assert_eq!(at(0), 0.0);
+        assert!((at(5) - 0.5).abs() < 1e-6, "淡入一半：实得 {}", at(5));
+        assert_eq!(at(10), 1.0);
+        assert_eq!(at(50), 1.0, "中段满值");
+        assert!(at(95) < 1.0 && at(95) > 0.0, "淡出一半：实得 {}", at(95));
+        assert_eq!(at(100), 0.0);
+    }
+
+    #[test]
+    fn 负数帧被当成第零帧() {
+        // 求值层不该给出负数，但真给了也不许出 NaN 或越界 ——
+        // 那会在画面上变成一个难查的亮点。
+        let window = Window::Fade { fade_in: 10, fade_out: 10 };
+        assert_eq!(window.envelope(-5, 100), window.envelope(0, 100));
+    }
+
+    #[test]
+    fn 包络永远落在零到一之间() {
+        // **扫一遍各种窗口的整个取值域**：包络跑到 [0,1] 之外会让强度
+        // 变成负的或超过满值，那在着色器里表现为"反相"或"过曝"。
+        let windows = [
+            Window::Always,
+            Window::Transient { attack: 1, hold: 1, release: 4, fall_to_zero: true },
+            Window::Transient { attack: 0, hold: 0, release: 0, fall_to_zero: true },
+            Window::Transient { attack: 5, hold: 0, release: 0, fall_to_zero: false },
+            Window::Fade { fade_in: 3, fade_out: 7 },
+            // 淡入淡出比时长还长：这是"图层太短"的常见情形，不许算出界。
+            Window::Fade { fade_in: 200, fade_out: 200 },
+        ];
+        for window in windows {
+            for local in -3..120 {
+                let value = window.envelope(local, 60);
+                assert!(
+                    (0.0..=1.0).contains(&value),
+                    "{window:?} 在第 {local} 帧给出 {value}，跑到 [0,1] 之外了"
+                );
+                assert!(value.is_finite(), "{window:?} 在第 {local} 帧给出非有限值");
+            }
+        }
+    }
+
+    #[test]
+    fn 时间窗是纯函数_同样的输入永远同样的输出() {
+        // **这是 T9 的验收判据**："同 t 同结果，跳帧可复现"。
+        //
+        // 反例是"用累积时间/随机数算包络"：那样顺序播放到第 N 帧
+        // 与直接跳到第 N 帧会得到不同的强度 —— 而那正是最难归因的一类差异
+        // （成片与预览不一致，但两边各自的逻辑都"看着对"）。
+        let window = Window::Transient { attack: 3, hold: 5, release: 7, fall_to_zero: true };
+        for local in 0..20 {
+            // 反复求、乱序求、掺入别的调用 —— 结果必须一模一样。
+            let first = window.envelope(local, 60);
+            let _ = window.envelope(999, 60);
+            let second = window.envelope(local, 60);
+            assert_eq!(first, second, "第 {local} 帧两次求值不一致");
+        }
+        // 正着走一遍与倒着走一遍，逐帧结果相同（回放/seek 的等价性）。
+        let forward: Vec<f32> = (0..20).map(|f| window.envelope(f, 60)).collect();
+        let backward: Vec<f32> = (0..20).rev().map(|f| window.envelope(f, 60)).rev().collect();
+        assert_eq!(forward, backward, "顺序求值与逆序求值结果不同");
+    }
+
+    #[test]
+    fn 特效的总强度是包络乘自身不透明度() {
+        let effect = Effect {
+            kind: "flash".to_string(),
+            params: BTreeMap::new(),
+            window: Window::Transient { attack: 2, hold: 0, release: 2, fall_to_zero: true },
+            opacity: 0.5,
+        };
+        // 第 0 帧包络 0 -> 总强度 0。
+        assert_eq!(effect.strength(0, 60, None), 0.0);
+        // 第 1 帧包络 0.5、自身 0.5 -> 0.25。
+        assert!((effect.strength(1, 60, None) - 0.25).abs() < 1e-6);
+        // 第 2 帧包络 1 -> 0.5。
+        assert!((effect.strength(2, 60, None) - 0.5).abs() < 1e-6);
+        // 关键帧驱动值**取代**自身不透明度（不是再乘一遍）。
+        assert!((effect.strength(2, 60, Some(0.8)) - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn 特效强度永远落在零到一之间() {
+        // 关键帧给的值可以是任何数（用户在曲线上拖出来的），
+        // 所以这一层必须兜住 —— 强度超过 1 会在着色器里变成过曝。
+        let effect = Effect {
+            kind: "flash".to_string(),
+            params: BTreeMap::new(),
+            window: Window::Always,
+            opacity: 1.0,
+        };
+        for driven in [-5.0, -0.1, 0.0, 0.5, 1.0, 1.5, 100.0, f32::INFINITY] {
+            let value = effect.strength(0, 60, Some(driven));
+            assert!(
+                (0.0..=1.0).contains(&value),
+                "驱动值 {driven} 给出强度 {value}，跑到 [0,1] 之外"
+            );
+        }
+    }
+
     fn minimal() -> Project {
         Project {
             schema: SCHEMA_VERSION,
