@@ -1604,4 +1604,53 @@ mod plan_tests {
         let zoom = 1.0 + params.bounce_amount + params.pulse_amount;
         assert!(zoom >= 0.05, "缩放掉到 {zoom}，会把采样点推到无穷远");
     }
+
+    #[test]
+    fn 缩放类特效会在多数帧上真的改变采样() {
+        // **这条是拿实测抓出来的教训写的单帧用例抓不住它。**
+        //
+        // 弹跳用 `abs(sin)`、脉冲用 `sin(...)`，它们在固定间隔上**恰好等于 0**
+        // （弹跳 t = k/(2f)、脉冲 t = k/f 的整数倍）。只测一帧的话，
+        // 恰好撞上零点会得到"缩放 == 1"，看起来像"这个特效没接上"，
+        // 而实际上它在别的帧上是好的。
+        //
+        // 这里扫一个周期：**至少有一帧的缩放必须明显偏离 1**。
+        for (kind, params, freq) in [
+            ("zoom_bounce", vec![("amount", 0.12), ("frequency", 3.0)], 3.0f32),
+            ("pulse", vec![("amount", 0.08), ("frequency", 1.5)], 1.5),
+        ] {
+            let effects = vec![effect(kind, &params)];
+            // 一个完整周期 = 1/f 秒，取 32 个采样点，秒的步长是周期/32。
+            let step = 1.0 / freq / 32.0;
+            let mut max_deviation: f32 = 0.0;
+            for i in 0..32 {
+                let seconds = step * i as f32;
+                let p = warp_params(&effects, (1920, 1080), seconds);
+                let zoom = 1.0 + p.bounce_amount + p.pulse_amount;
+                max_deviation = max_deviation.max((zoom - 1.0).abs());
+            }
+            assert!(
+                max_deviation > 0.01,
+                "{kind} 在一个周期内的缩放始终贴着 1.0（最大偏离 {max_deviation}）—— \
+                 这个特效实际上没接上着色器"
+            );
+        }
+    }
+
+    #[test]
+    fn 抖动不会整帧静止() {
+        // 抖动是两路正弦（纵横各一），频率不同 —— 着色器里用的是
+        // 6.2831853 与 4.7123890 两个**不成整数比**的系数，
+        // 所以两路不会同时过零：任何一帧至少有一路在动。
+        //
+        // 这里只能验到"幅度被传下去了"（相位在着色器里算，
+        // Rust 侧看不到两路 sin 的值）—— 所以这条断言的是**参数装配**，
+        // 真正的观感由 `缩放类特效会在多数帧上真的改变采样` 那类实测兜。
+        let effects = vec![effect("shake", &[("amount", 0.02), ("frequency", 5.0), ("seed", 1.0)])];
+        let p = warp_params(&effects, (1920, 1080), 0.0);
+        assert_eq!(p.shake_amount, 0.02);
+        assert_eq!(p.shake_frequency, 5.0);
+        assert_eq!(p.shake_seed, 1.0);
+        assert!(!p.is_identity(), "挂了抖动就不该是恒等");
+    }
 }
