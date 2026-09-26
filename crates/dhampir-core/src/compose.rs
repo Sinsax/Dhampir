@@ -88,6 +88,13 @@ fn previous_clip<'a>(track: &'a dhampir_timeline::schema::Track, clip: &Clip) ->
 /// 是让下游一行都不用改（`dhampir_core::compose::opacity_from` 继续存在）。
 pub use crate::timeline::curve::opacity_from;
 
+/// 按 `target` 取某一条关键帧曲线。**与 `opacity_from` 同一份逻辑** ——
+/// 后者是它的特化（`target = "opacity"`）。
+///
+/// 放在这里是为了让 `element_to_draw` 能一行取到，且下游不必知道
+/// 求值住在 timeline（那件事由 `curve.rs` 的模块头解释）。
+pub use crate::timeline::curve::channel_from;
+
 /// 关键帧求值（v1 的入口）。**逻辑只有一份**，在 `opacity_from` 里。
 pub fn opacity_at(clip: &Clip, local_frame: Frame) -> f32 {
     opacity_from(clip.opacity, &clip.keyframes, local_frame)
@@ -262,6 +269,15 @@ fn element_to_draw(
     frozen: bool,
     ctx: &EvalContext<'_>,
 ) -> Layer {
+    let keys = &element.keyframes;
+    // **元素自身的每个量各自一条曲线**：`opacity` 由调用方按转场权重叠过，
+    // 所以这里只取 x/y/scale/rotation —— 它们没有别的来源，静态值就是 fallback。
+    //
+    // 没有对应 keyframe 时 `channel_from` 返回 fallback（元素上的静态值），
+    // 于是老工程（键全是缺省的 "opacity"）结果逐字节不变。
+    let animated = |fallback: f32, target: &str| -> f32 {
+        crate::timeline::curve::channel_from(fallback, keys, target, local_frame)
+    };
     Layer {
         clip_id: element.id.clone(),
         // 调整图层**没有素材** —— 空串是如实的表达，不是占位符。
@@ -276,16 +292,48 @@ fn element_to_draw(
         opacity,
         // v2 的 rotation 是角度制，渲染器要的字段叫 rotation_deg。语义相同，只是名字。
         transform: Transform {
-            x: element.transform.x,
-            y: element.transform.y,
-            scale: element.transform.scale,
-            rotation_deg: element.transform.rotation,
+            x: animated(element.transform.x, "x"),
+            y: animated(element.transform.y, "y"),
+            scale: animated(element.transform.scale, "scale"),
+            rotation_deg: animated(element.transform.rotation, "rotation"),
         },
-        effects: element.effects.clone(),
+        effects: resolve_effects(element, local_frame),
         frozen_for_transition: frozen,
         blend: element.blend,
         is_adjustment: element.is_adjustment(),
     }
+}
+
+/// 求值这一帧的特效清单：**每条的参数都可被同层的关键帧驱动**。
+///
+/// `target` 形如 `effect.<下标>.<参数名>`（见 `Keyframe::target`），
+/// 只覆盖它指名的那一个键，其余键原样 —— 于是"模糊半径随帧变化"
+/// 不需要新特效类型，也不需要新管线。
+///
+/// 没有可驱动参数时**返回原清单的克隆**：绝大多数帧走这条，不该为它多分配。
+fn resolve_effects(element: &LayerV2, local_frame: Frame) -> Vec<Effect> {
+    let keys = &element.keyframes;
+    if keys.is_empty() || element.effects.is_empty() {
+        return element.effects.clone();
+    }
+    // 先看有没有任何一条是 effect 目标 —— 没有就连克隆都不必做参数替换。
+    let has_effect_target = keys
+        .iter()
+        .any(|key| crate::timeline::schema::parse_effect_target(&key.target).is_some());
+    if !has_effect_target {
+        return element.effects.clone();
+    }
+
+    let mut out = element.effects.clone();
+    for (index, effect) in out.iter_mut().enumerate() {
+        for (param, value) in effect.params.iter_mut() {
+            let target = format!("effect.{index}.{param}");
+            // 只挑**这个** target 的键。用它自己当前的值当 fallback，
+            // 于是"没有键驱动这个参数"与"键算出来就是原值"是同一个结果。
+            *value = crate::timeline::curve::channel_from(*value, keys, &target, local_frame);
+        }
+    }
+    out
 }
 
 /// 第一条有内容的帧。
@@ -346,6 +394,28 @@ mod tests {
         transition_kind, Easing, Keyframe, Project, SCHEMA_VERSION, TimebaseDto, Track, TrackKind,
         TransitionSpec,
     };
+
+    /// 缺省 target 的简写：讲不透明度曲线的用例别让 target 喧宾夺主。
+    fn kf_target() -> String {
+        dhampir_timeline::schema::default_keyframe_target()
+    }
+
+    /// 造一条只有一层的 v2 时间线，给动画用例用。
+    fn one_layer_v2(layer: dhampir_timeline::layer::Layer) -> TimelineV2 {
+        use dhampir_timeline::layer::{LAYER_SCHEMA_VERSION, TrackV2};
+        TimelineV2 {
+            schema: LAYER_SCHEMA_VERSION,
+            timebase: TimebaseDto { num: 30, den: 1 },
+            markers: Vec::new(),
+            tracks: vec![TrackV2 {
+                id: "v1".to_string(),
+                kind: TrackKind::Video,
+                layers: vec![layer],
+                subtitle: None,
+                danmaku: None,
+            }],
+        }
+    }
 
     fn clip(id: &str, track_at: Frame, duration: Frame) -> Clip {
         Clip {
@@ -415,8 +485,8 @@ mod tests {
         let mut c = clip("a", 0, 11);
         c.opacity = 0.25;
         c.keyframes = vec![
-            Keyframe { frame: 0, value: 0.0, easing: Easing::Linear },
-            Keyframe { frame: 10, value: 1.0, easing: Easing::Linear },
+            Keyframe { frame: 0, target: kf_target(), value: 0.0, easing: Easing::Linear },
+            Keyframe { frame: 10, target: kf_target(), value: 1.0, easing: Easing::Linear },
         ];
         assert_eq!(opacity_at(&c, 0), 0.0);
         assert_eq!(opacity_at(&c, 10), 1.0);
@@ -429,8 +499,8 @@ mod tests {
     fn 关键帧不需要有序() {
         let mut c = clip("a", 0, 11);
         c.keyframes = vec![
-            Keyframe { frame: 10, value: 1.0, easing: Easing::Linear },
-            Keyframe { frame: 0, value: 0.0, easing: Easing::Linear },
+            Keyframe { frame: 10, target: kf_target(), value: 1.0, easing: Easing::Linear },
+            Keyframe { frame: 0, target: kf_target(), value: 0.0, easing: Easing::Linear },
         ];
         assert!((opacity_at(&c, 5) - 0.5).abs() < 1e-6);
     }
@@ -439,8 +509,8 @@ mod tests {
     fn 缓动在后一个关键帧上生效() {
         let mut c = clip("a", 0, 11);
         c.keyframes = vec![
-            Keyframe { frame: 0, value: 0.0, easing: Easing::Linear },
-            Keyframe { frame: 10, value: 1.0, easing: Easing::EaseIn },
+            Keyframe { frame: 0, target: kf_target(), value: 0.0, easing: Easing::Linear },
+            Keyframe { frame: 10, target: kf_target(), value: 1.0, easing: Easing::EaseIn },
         ];
         assert!((opacity_at(&c, 5) - 0.25).abs() < 1e-6, "ease_in 是 t*t");
     }
@@ -449,8 +519,8 @@ mod tests {
     fn 同一帧上的两个关键帧不除零() {
         let mut c = clip("a", 0, 11);
         c.keyframes = vec![
-            Keyframe { frame: 5, value: 0.0, easing: Easing::Linear },
-            Keyframe { frame: 5, value: 1.0, easing: Easing::Linear },
+            Keyframe { frame: 5, target: kf_target(), value: 0.0, easing: Easing::Linear },
+            Keyframe { frame: 5, target: kf_target(), value: 1.0, easing: Easing::Linear },
         ];
         let value = opacity_at(&c, 5);
         assert!(value.is_finite(), "不能是 NaN/Inf：{value}");
@@ -495,8 +565,8 @@ mod tests {
     fn 转场权重与关键帧相乘() {
         let mut b = clip("b", 10, 10);
         b.keyframes = vec![
-            Keyframe { frame: 0, value: 0.0, easing: Easing::Linear },
-            Keyframe { frame: 9, value: 1.0, easing: Easing::Linear },
+            Keyframe { frame: 0, target: kf_target(), value: 0.0, easing: Easing::Linear },
+            Keyframe { frame: 9, target: kf_target(), value: 1.0, easing: Easing::Linear },
         ];
         b.transition_in = Some(TransitionSpec { kind: transition_kind::CROSS_DISSOLVE.to_string(), duration: 2 });
         let p = project(vec![video(vec![clip("a", 0, 10), b])]);
@@ -599,6 +669,108 @@ mod tests {
         assert_eq!(composite.layers.len(), 2, "转场中应当有冻帧层 + 当前层");
         assert!(composite.layers[0].frozen_for_transition);
         assert!(!composite.layers[1].frozen_for_transition);
+    }
+
+    #[test]
+    fn v2_关键帧能驱动_transform_的每个量() {
+        use dhampir_timeline::layer::{Layer as LayerV2, Recorded, TransformV2};
+        let layer = LayerV2 {
+            id: "cam".to_string(),
+            start: 0,
+            end: 100,
+            transform: TransformV2 { x: 0.0, y: 0.0, scale: 1.0, rotation: 0.0 },
+            opacity: 1.0,
+            blend: BlendMode::Normal,
+            enabled: true,
+            recorded: Recorded::default(),
+            source: None,
+            effects: Vec::new(),
+            transition_in: None::<TransitionSpec>,
+            keyframes: vec![
+                Keyframe { frame: 0, target: "scale".to_string(), value: 1.0, easing: Easing::Linear },
+                Keyframe { frame: 50, target: "scale".to_string(), value: 2.0, easing: Easing::Linear },
+                Keyframe { frame: 0, target: "x".to_string(), value: 0.0, easing: Easing::Linear },
+                Keyframe { frame: 50, target: "x".to_string(), value: 100.0, easing: Easing::Linear },
+            ],
+        };
+        let timeline = one_layer_v2(layer);
+
+        // 中点是各自曲线的中点 —— **两条曲线互不干扰**。
+        let mid = evaluate_v2(&timeline, 25);
+        assert!((mid.layers[0].transform.scale - 1.5).abs() < 1e-5, "scale 应当在推近");
+        assert!((mid.layers[0].transform.x - 50.0).abs() < 1e-5, "x 应当平移了一半");
+
+        // 没被任何键驱动的量保持静态值。
+        assert_eq!(mid.layers[0].transform.y, 0.0);
+        assert_eq!(mid.layers[0].transform.rotation_deg, 0.0);
+
+        // 到位之后停住，不外推。
+        let done = evaluate_v2(&timeline, 99);
+        assert_eq!(done.layers[0].transform.scale, 2.0);
+        assert_eq!(done.layers[0].transform.x, 100.0);
+    }
+
+    #[test]
+    fn v2_只驱动不透明度的老工程不动_transform() {
+        use dhampir_timeline::layer::{Layer as LayerV2, Recorded, TransformV2};
+        // 这是"老工程"的形态：只有一个缺省 target 的键。
+        // 它**不许**把 x/scale/rotation 拉走 —— 那是泛化最容易踩的错。
+        let layer = LayerV2 {
+            id: "old".to_string(),
+            start: 0,
+            end: 100,
+            transform: TransformV2 { x: 42.0, y: 7.0, scale: 0.5, rotation: 30.0 },
+            opacity: 0.8,
+            blend: BlendMode::Normal,
+            enabled: true,
+            recorded: Recorded::default(),
+            source: None,
+            effects: Vec::new(),
+            transition_in: None::<TransitionSpec>,
+            keyframes: vec![
+                Keyframe { frame: 0, target: kf_target(), value: 0.0, easing: Easing::Linear },
+                Keyframe { frame: 50, target: kf_target(), value: 1.0, easing: Easing::Linear },
+            ],
+        };
+        let mid = evaluate_v2(&one_layer_v2(layer), 25);
+        assert_eq!(mid.layers[0].transform.x, 42.0, "x 不该被 opacity 的键动");
+        assert_eq!(mid.layers[0].transform.scale, 0.5);
+        assert_eq!(mid.layers[0].transform.rotation_deg, 30.0);
+        assert!((mid.layers[0].opacity - 0.5).abs() < 1e-5, "不透明度仍由那条曲线驱动");
+    }
+
+    #[test]
+    fn v2_关键帧能驱动特效参数() {
+        use dhampir_timeline::layer::{Layer as LayerV2, Recorded, SourceRef, TransformV2};
+        // 「模糊从小涨到大」——**不需要**新的特效类型，只是参数被驱动。
+        let layer = LayerV2 {
+            id: "blur".to_string(),
+            start: 0,
+            end: 100,
+            transform: TransformV2::default(),
+            opacity: 1.0,
+            blend: BlendMode::Normal,
+            enabled: true,
+            recorded: Recorded::default(),
+            source: Some(SourceRef { asset_id: "a.mp4".to_string(), source_in: 0 }),
+            effects: vec![Effect {
+                kind: "gaussian_blur".to_string(),
+                params: [("radius".to_string(), 0.0)].into_iter().collect(),
+            }],
+            transition_in: None::<TransitionSpec>,
+            keyframes: vec![
+                Keyframe { frame: 0, target: "effect.0.radius".to_string(), value: 0.0, easing: Easing::Linear },
+                Keyframe { frame: 10, target: "effect.0.radius".to_string(), value: 8.0, easing: Easing::Linear },
+            ],
+        };
+        let timeline = one_layer_v2(layer);
+        let radius = evaluate_v2(&timeline, 5).layers[0].effects[0].params["radius"];
+        assert!((radius - 4.0).abs() < 1e-5, "半径应当在第 5 帧到中点，实得 {radius}");
+        assert_eq!(
+            evaluate_v2(&timeline, 99).layers[0].effects[0].params["radius"],
+            8.0,
+            "到位后停住"
+        );
     }
 
     #[test]

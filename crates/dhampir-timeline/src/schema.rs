@@ -187,13 +187,66 @@ pub struct Effect {
 
 /// 关键帧。frame 是**相对片段起点**的偏移，不是绝对帧号——
 /// 这样片段一挪，关键帧跟着走，不会静默错位。
+///
+/// # `target`：这个键在驱动**哪个**量
+///
+/// 在它成为字段之前，求值函数叫 `opacity_from` —— **结构上只算一个标量**：
+/// 既不问自己在驱动什么，也装不下第二条曲线。于是"运镜"（要同时驱动
+/// `scale` 与 `x/y`）在这份契约里**根本表达不出来**。
+///
+/// 取值：
+/// - `"opacity"`（缺省）/`"x"`/`"y"`/`"scale"`/`"rotation"` —— 驱动元素自身的量；
+/// - `"effect.<下标>.<参数名>"` —— 驱动**某条特效的参数**。
+///   例：`"effect.0.radius"` 让第 0 条特效的模糊半径随帧变化 ——
+///   "模糊从小涨到大再回落"这类**瞬时特效**因此不需要新的特效类型。
+///
+/// **缺省是 `"opacity"`**：老工程里没有这个键，语义必须与从前逐字节一致。
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Keyframe {
     pub frame: Frame,
+    #[serde(default = "default_keyframe_target")]
+    pub target: String,
     pub value: f32,
     #[serde(default)]
     pub easing: Easing,
+}
+
+/// 缺省驱动不透明度 —— 这是 `Keyframe` 有 `target` 之前的唯一用途。
+pub fn default_keyframe_target() -> String {
+    "opacity".to_string()
+}
+
+/// 元素自身可被关键帧驱动的量。**只列这一组**：其余一律走 `effect.<i>.<param>`。
+///
+/// 为什么不做成枚举：`target` 还要能装 `effect.0.radius` 这种**带下标**的串，
+/// 枚举装不下，而两套表示（枚举 + 字符串）迟早在某一处只认其中一种。
+/// 所以这里只提供**判定与解析**，真值仍是字符串。
+pub const TRANSFORM_TARGETS: [&str; 5] = ["opacity", "x", "y", "scale", "rotation"];
+
+/// `effect.<下标>.<参数名>` 的解析结果。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectTarget {
+    pub index: usize,
+    pub param: String,
+}
+
+/// 解析 `effect.<下标>.<参数名>`。不是这个形状就返回 None。
+///
+/// **参数名允许含点**：`effect.0.color.r` 会解析成下标 0、参数名 `color.r`
+/// （按**第一个**点切、末段整体当参数名），因为参数名本来就可能带点
+/// （见 `Effect::params` 的键名约定）。
+pub fn parse_effect_target(target: &str) -> Option<EffectTarget> {
+    let rest = target.strip_prefix("effect.")?;
+    let (index_text, param) = rest.split_once('.')?;
+    if param.is_empty() {
+        return None;
+    }
+    Some(EffectTarget {
+        index: index_text.parse().ok()?,
+        param: param.to_string(),
+    })
 }
 
 /// 缓动曲线。公式**写死在这里**，两端调同一个函数——
@@ -551,6 +604,11 @@ fn known_kinds(effects: &[EffectSpec]) -> String {
 mod tests {
     use super::*;
 
+    /// 缺省 target 的简写：这些用例讲的是不透明度曲线，别让 target 喧宾夺主。
+    fn opacity_target() -> String {
+        default_keyframe_target()
+    }
+
     fn minimal() -> Project {
         Project {
             schema: SCHEMA_VERSION,
@@ -652,8 +710,8 @@ mod tests {
         let mut project = minimal();
         // duration = 60，合法范围是 0..=59
         project.tracks[0].clips[0].keyframes = vec![
-            Keyframe { frame: 0, value: 0.0, easing: Easing::Linear },
-            Keyframe { frame: 59, value: 1.0, easing: Easing::EaseInOut },
+            Keyframe { frame: 0, target: opacity_target(), value: 0.0, easing: Easing::Linear },
+            Keyframe { frame: 59, target: opacity_target(), value: 1.0, easing: Easing::EaseInOut },
         ];
         assert!(validate_project(&project).is_empty(), "边界上的 0 与 59 都应当合法");
 

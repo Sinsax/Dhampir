@@ -54,6 +54,7 @@ export interface Generator {
 export interface Keyframe {
   easing?: Easing;
   frame: number;
+  target?: string;
   value: number;
 }
 

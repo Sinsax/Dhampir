@@ -33,6 +33,7 @@ export interface Effect {
 export interface Keyframe {
   easing?: Easing;
   frame: number;
+  target?: string;
   value: number;
 }
 

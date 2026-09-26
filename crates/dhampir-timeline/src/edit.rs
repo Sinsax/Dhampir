@@ -383,38 +383,53 @@ pub fn split(
     // 关键帧本来就是空的），老路径的行为逐字节不变。
     let keys = &original.keyframes;
     if !keys.is_empty() {
+        // **每个 target 各补一个接缝键**，不是整份 keyframes 补一个。
+        // 补错了会把别的曲线拉到现在这一帧上（例如给 scale 补一个取 opacity 值的键）。
+        let mut targets: Vec<&str> = keys.iter().map(|key| key.target.as_str()).collect();
+        targets.sort_unstable();
+        targets.dedup();
+
         let mut left_keys: Vec<Keyframe> = keys
             .iter()
             .filter(|key| key.frame < local)
             .cloned()
             .collect();
-        if !left_keys.iter().any(|key| key.frame == local - 1) {
-            left_keys.push(Keyframe {
-                frame: local - 1,
-                value: crate::curve::opacity_from(original.opacity, keys, local - 1),
-                easing: seam_easing(keys, local),
-            });
-        }
-        left_keys.sort_by_key(|key| key.frame);
-        left.keyframes = left_keys;
-
         let mut right_keys: Vec<Keyframe> = keys
             .iter()
             .filter(|key| key.frame >= local)
             .map(|key| {
                 // 整体左移 `local`：这样它们相对新起点仍是原来的相对位置。
-                let mut moved = *key;
+                let mut moved = key.clone();
                 moved.frame -= local;
                 moved
             })
             .collect();
-        if !right_keys.iter().any(|key| key.frame == 0) {
-            right_keys.push(Keyframe {
-                frame: 0,
-                value: crate::curve::opacity_from(original.opacity, keys, local),
-                easing: seam_easing(keys, local),
-            });
+
+        for target in targets {
+            if !left_keys
+                .iter()
+                .any(|key| key.frame == local - 1 && key.target == target)
+            {
+                left_keys.push(Keyframe {
+                    frame: local - 1,
+                    target: target.to_string(),
+                    value: crate::curve::channel_from(original.opacity, keys, target, local - 1),
+                    easing: seam_easing(keys, local),
+                });
+            }
+            if !right_keys.iter().any(|key| key.frame == 0 && key.target == target) {
+                right_keys.push(Keyframe {
+                    frame: 0,
+                    target: target.to_string(),
+                    value: crate::curve::channel_from(original.opacity, keys, target, local),
+                    easing: seam_easing(keys, local),
+                });
+            }
         }
+
+        left_keys.sort_by_key(|key| key.frame);
+        left.keyframes = left_keys;
+
         right_keys.sort_by_key(|key| key.frame);
         right.keyframes = right_keys;
     }
@@ -674,6 +689,11 @@ mod tests {
     use crate::project::{Asset, AssetKind, shell_from_timeline};
     use crate::schema::{Easing, Keyframe, TrackKind};
 
+    /// 缺省 target 的简写：这些用例讲的是不透明度曲线，别让 target 喧宾夺主。
+    fn opacity_target() -> String {
+        crate::schema::default_keyframe_target()
+    }
+
     fn tb(num: u32, den: u32) -> TimebaseDto {
         TimebaseDto { num, den }
     }
@@ -777,8 +797,8 @@ mod tests {
         // == 原曲线在那几帧的值。半段内部的偏差是有界的，这里**不作断言**。
         let mut original = doc(tb(30, 1), vec![layer("c", 0, 101, Some(0))]);
         let keys = vec![
-            Keyframe { frame: 0, value: 0.25, easing: Easing::EaseInOut },
-            Keyframe { frame: 100, value: 1.0, easing: Easing::EaseInOut },
+            Keyframe { frame: 0, target: opacity_target(), value: 0.25, easing: Easing::EaseInOut },
+            Keyframe { frame: 100, target: opacity_target(), value: 1.0, easing: Easing::EaseInOut },
         ];
         original.timeline.tracks[0].layers[0].keyframes = keys.clone();
         let opacity = original.timeline.tracks[0].layers[0].opacity;
@@ -811,9 +831,9 @@ mod tests {
     fn 切点正好落在键上时右半段不再插一个重复的() {
         let mut original = doc(tb(30, 1), vec![layer("c", 0, 21, Some(0))]);
         original.timeline.tracks[0].layers[0].keyframes = vec![
-            Keyframe { frame: 0, value: 0.0, easing: Easing::Linear },
-            Keyframe { frame: 10, value: 1.0, easing: Easing::Linear },
-            Keyframe { frame: 20, value: 0.5, easing: Easing::Linear },
+            Keyframe { frame: 0, target: opacity_target(), value: 0.0, easing: Easing::Linear },
+            Keyframe { frame: 10, target: opacity_target(), value: 1.0, easing: Easing::Linear },
+            Keyframe { frame: 20, target: opacity_target(), value: 0.5, easing: Easing::Linear },
         ];
         let outcome = split(&original, &[], "c", 10);
         assert!(outcome.is_ok(), "{:?}", outcome.issues);
