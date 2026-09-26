@@ -986,6 +986,15 @@ pub struct AudioStats {
     /// **这个数不为零必须看得见**：它是"增益调大了、该改小一点"的信号。
     /// 钳位本身是安全的（不会回绕成爆音），但它意味着那一瞬间的波形被削平了。
     pub clipped_samples: i64,
+    /// 发生叠加的地方（T13）：`"轨/层 与 轨/层 在第 N 帧叠上，共 M 个采样点"`。
+    ///
+    /// # 为什么这个也要报出来
+    ///
+    /// 叠加本身**不是错**（音效天生就压在背景音上），所以它不进问题清单。
+    /// 但"我没想到会叠"是常见的排错起点，而叠加**听感上完全正常** ——
+    /// 只听见音效、背景人声被盖住，听起来也像"有个声音"。
+    /// 所以它必须与 `clipped_samples` 一样**看得见**：不是报警，是让事实可见。
+    pub overlaps: Vec<String>,
 }
 
 /// 一次出片的结果。**问题清单不在这里判** —— 本模块只出事实，
@@ -1433,6 +1442,22 @@ pub fn build_audio_track(audio: &AudioPlan, pcm: &Path) -> Result<AudioStats, St
         // 背景音擦掉一段"，而擦掉是听不见的（静音加什么都还是原样，
         // 但补静音是**覆盖**不是相加）。这里直接不写。
         stats.source_samples_read += mixed;
+        // 把"哪里叠了、叠了多久"记下来。计划层已经算过 `overlaps`，
+        // 这里把**实际相加的采样点数**补上 —— 计划说"会叠"，实际说"叠了多少"。
+        //
+        // `overlaps` 里存的是 `轨[层]` 的路径形式（见 `audio::plan_audio`），
+        // 所以按路径匹配，不是按轨名 —— 同一轨上两层叠起来也是叠。
+        let path = format!("{}[{}]", segment.track, segment.layer);
+        if let Some(overlap) = audio
+            .overlaps
+            .iter()
+            .find(|o| o.first == path || o.second == path)
+        {
+            stats.overlaps.push(format!(
+                "{} 与 {} 在第 {} 帧叠上，相加了 {} 个采样点",
+                overlap.first, overlap.second, overlap.at, mixed
+            ));
+        }
     }
     file.flush()
         .map_err(|error| format!("收尾音频临时文件失败：{error}"))?;

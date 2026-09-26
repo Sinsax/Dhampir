@@ -468,6 +468,20 @@ fn 重叠的两段音频是相加而不是覆盖() {
         stats.clipped_samples, 0,
         "两路各 0.4 倍，加起来不该削顶"
     );
+    // 叠加**看得见**：`overlaps` 里要写清是谁叠了谁、叠在哪、叠了多少。
+    // 叠加本身不是错（所以不进问题清单），但它必须能被看见 ——
+    // 只听见音效、背景被盖住，听起来也像"有个声音"，光靠听是发现不了的。
+    assert_eq!(
+        stats.overlaps.len(),
+        1,
+        "叠加要上报，实得 {:?}",
+        stats.overlaps
+    );
+    assert!(
+        stats.overlaps[0].contains("a1[bed]") && stats.overlaps[0].contains("a2[shot]"),
+        "要写清是哪两段叠的，实得 {:?}",
+        stats.overlaps[0]
+    );
 
     let bytes_per_sample = AUDIO_CHANNELS as usize * 4;
     let pcm_bytes = std::fs::read(&pcm).expect("临时 PCM 要读得回来");
