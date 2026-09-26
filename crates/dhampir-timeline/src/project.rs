@@ -26,7 +26,10 @@ use crate::layer::{
     AssetTimebases, LAYER_SCHEMA_VERSION, LAYER_SCHEMA_VERSION_V2, LAYER_SCHEMA_VERSION_V3, TimelineV2,
     migrate_v1_to_v2, migrate_v2_to_v3, migrate_v3_to_v4, source_frame_at, validate_timeline_v2,
 };
-use crate::schema::{EffectSpec, Frame, Issue, Project, TimebaseDto, TrackKind};
+use crate::schema::{
+    parse_effect_target, EffectSpec, Frame, Issue, Project, TimebaseDto, TrackKind,
+    TRANSFORM_TARGETS,
+};
 
 /// 壳的版本。与契约版本**互相独立**：壳可以到 v3 而契约还在 v2。
 pub const PROJECT_SCHEMA_VERSION: u32 = 1;
@@ -591,6 +594,69 @@ pub fn validate_project_doc(doc: &ProjectDoc, effects: &[EffectSpec]) -> DocIssu
         }
     }
 
+    // ---- 关键帧的 target 必须指得到东西 ----
+    //
+    // **为什么这条必须有。** `target` 是一个自由字符串：写错了（`"rotatoin"`、
+    // `"scal"`）求值时**静默不生效** —— 曲线还在、工程还是合法的、
+    // 预览也不报错，只是那条动画**根本没动**。这正是最难查的一类问题：
+    // 用户看到"我明明打了关键帧，画面却不动"。
+    //
+    // 判定用 [`TRANSFORM_TARGETS`] 与 [`parse_effect_target`] —— 也就是
+    // "这个常量到底管什么"的那个答案。**从前它只被定义、从没被用过**，
+    // 于是它描述的规则和实际接受的输入是两回事。
+    for (track_index, track) in doc.timeline.tracks.iter().enumerate() {
+        for (layer_index, layer) in track.layers.iter().enumerate() {
+            let base = format!("timeline.tracks[{track_index}].layers[{layer_index}]");
+            for (key_index, keyframe) in layer.keyframes.iter().enumerate() {
+                let at = format!("{base}.keyframes[{key_index}].target");
+                let target = keyframe.target.as_str();
+                if TRANSFORM_TARGETS.contains(&target) {
+                    continue;
+                }
+                match parse_effect_target(target) {
+                    // `effect.<下标>.<参数名>`：下标必须指向**这一层真有**的那条特效，
+                    // 否则这个关键帧同样是空转的。
+                    Some(parsed) => {
+                        if parsed.index >= layer.effects.len() {
+                            errors.push(Issue::new(
+                                "keyframe_effect_index",
+                                &at,
+                                format!(
+                                    "关键帧指向 effect.{}，可这一层只有 {} 条特效",
+                                    parsed.index,
+                                    layer.effects.len()
+                                ),
+                            ));
+                        } else if !layer.effects[parsed.index]
+                            .params
+                            .contains_key(&parsed.param)
+                        {
+                            errors.push(Issue::new(
+                                "keyframe_effect_param",
+                                &at,
+                                format!(
+                                    "关键帧指向 effect.{}.{}，可这条特效没有「{}」这个参数 —— \
+                                     驱动一个不存在的参数不会报错，那条动画就是不动",
+                                    parsed.index, parsed.param, parsed.param
+                                ),
+                            ));
+                        }
+                    }
+                    None => errors.push(Issue::new(
+                        "unknown_keyframe_target",
+                        &at,
+                        format!(
+                            "「{target}」既不是可驱动的元素量（{}），\
+                             也不是 effect.<下标>.<参数名> 的形状 —— \
+                             这条曲线不会驱动任何东西",
+                            TRANSFORM_TARGETS.join(" / ")
+                        ),
+                    )),
+                }
+            }
+        }
+    }
+
     // ---- 契约层：错误原样冒泡，path 前缀由它自己给出 ----
     errors.extend(validate_timeline_v2(&doc.timeline, effects));
 
@@ -670,6 +736,99 @@ mod tests {
 
     fn codes(issues: &[Issue]) -> Vec<&str> {
         issues.iter().map(|i| i.code.as_str()).collect()
+    }
+
+    // ---- 关键帧 target 的判定 ----
+
+    /// 造一层带若干关键帧的工程。
+    fn doc_with_keyframes(targets: &[&str], effects: Vec<crate::schema::Effect>) -> ProjectDoc {
+        let mut layer = layer_with("l1", 0, 30, Some("a.mp4"), 0);
+        layer.effects = effects;
+        layer.keyframes = targets
+            .iter()
+            .map(|target| crate::schema::Keyframe {
+                frame: 0,
+                target: target.to_string(),
+                value: 1.0,
+                easing: crate::schema::Easing::Linear,
+            })
+            .collect();
+        doc(vec![asset("a.mp4", Some(100))], vec![layer])
+    }
+
+    /// 跑一次校验，只看错误码。
+    fn validate_codes(d: &ProjectDoc) -> Vec<String> {
+        validate_project_doc(d, &[])
+            .errors
+            .iter()
+            .map(|i| i.code.clone())
+            .collect()
+    }
+
+    #[test]
+    fn 拼错的关键帧目标要报错() {
+        // **这是"静默不动"的那一类。** 曲线在、工程合法、预览不报错，
+        // 只是那条动画根本没动 —— 用户看到的是"我打了关键帧，画面却不动"。
+        for typo in ["rotatoin", "scal", "Opacity", "effect", ""] {
+            let found = validate_codes(&doc_with_keyframes(&[typo], Vec::new()));
+            assert!(
+                found.contains(&"unknown_keyframe_target".to_string()),
+                "「{typo}」应当被判成未知目标，实得 {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn 合法的关键帧目标一个都不许报错() {
+        // 反向用例：把判定写得过严会让**所有**正常工程都报错。
+        for target in TRANSFORM_TARGETS {
+            let found = validate_codes(&doc_with_keyframes(&[target], Vec::new()));
+            assert!(
+                !found.contains(&"unknown_keyframe_target".to_string()),
+                "「{target}」是合法的元素量，不该报错，实得 {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn 指向不存在特效的关键帧要报错() {
+        // `effect.3.radius` 而这一层只有 0 条特效 —— 同样是空转。
+        let found = validate_codes(&doc_with_keyframes(&["effect.3.radius"], Vec::new()));
+        assert!(
+            found.contains(&"keyframe_effect_index".to_string()),
+            "实得 {found:?}"
+        );
+    }
+
+    #[test]
+    fn 指向不存在的参数要报错() {
+        // 有这条特效，但没这个参数。**这条比下标越界更隐蔽**：
+        // `effect.0.radisu` 看起来完全合理。
+        let effect = crate::schema::Effect {
+            kind: "gaussian_blur".to_string(),
+            params: [("radius".to_string(), 4.0)].into_iter().collect(),
+            ..Default::default()
+        };
+        let found = validate_codes(&doc_with_keyframes(&["effect.0.radisu"], vec![effect]));
+        assert!(
+            found.contains(&"keyframe_effect_param".to_string()),
+            "实得 {found:?}"
+        );
+    }
+
+    #[test]
+    fn 指向真实存在的特效参数要放行() {
+        let effect = crate::schema::Effect {
+            kind: "gaussian_blur".to_string(),
+            params: [("radius".to_string(), 4.0)].into_iter().collect(),
+            ..Default::default()
+        };
+        let found = validate_codes(&doc_with_keyframes(&["effect.0.radius"], vec![effect]));
+        assert!(
+            !found.contains(&"keyframe_effect_param".to_string())
+                && !found.contains(&"keyframe_effect_index".to_string()),
+            "合法引用不该报错，实得 {found:?}"
+        );
     }
 
     #[test]
