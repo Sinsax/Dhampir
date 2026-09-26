@@ -480,6 +480,23 @@ pub fn seconds_at_asset_frame(asset_frame: Frame, asset: &TimebaseDto) -> Option
     Some(asset_frame as f64 * f64::from(asset.den) / f64::from(asset.num))
 }
 
+/// 序列帧号 → 秒。**用序列自己的时间基**。
+///
+/// # 为什么需要它（而不是让渲染器按 30fps 猜）
+///
+/// Warp 的位移场（抖动 / 弹跳 / 脉冲）以"秒"为自变量。渲染器**不知道**工程时间基
+/// （那在 timeline 层，渲染器只吃 `Composite`），所以两个宿主各自换算一次。
+///
+/// 两边各写一遍这条除法，迟早在某个帧率上差一个系数 —— 而表现是
+/// "预览在抖、成片抖得慢一点"，那种差异**只在成片里看得出来**。
+/// 所以它住在契约层，两端调同一份。
+pub fn seconds_at_sequence_frame(sequence_frame: Frame, timebase: &TimebaseDto) -> Option<f64> {
+    if timebase.den == 0 {
+        return None;
+    }
+    Some(sequence_frame as f64 * f64::from(timebase.den) / f64::from(timebase.num))
+}
+
 /// 「素材 id → 它的时间基」。给求值层用来做上面那个换算。
 ///
 /// 用 BTreeMap 而不是 HashMap：工程文件里的迭代顺序要**逐字节稳定**
@@ -661,6 +678,18 @@ mod tests {
         assert!((at60 - 1.0).abs() < 1e-12, "{at60}");
         assert!((at30 - 2.0).abs() < 1e-12, "{at30}");
         assert!(seconds_at_asset_frame(0, &tb(0, 1)).is_none());
+    }
+
+    #[test]
+    fn 序列帧号换算成秒要用序列自己的时间基() {
+        // Warp 的位移场以秒为自变量，两个宿主各调这一条。
+        let at30 = seconds_at_sequence_frame(30, &tb(30, 1)).expect("合法");
+        assert!((at30 - 1.0).abs() < 1e-12, "30fps 下第 30 帧应当是 1 秒，实得 {at30}");
+        // **有理帧率**：30000/1001 下第 30000 帧是 1001 秒，不是一个近似值。
+        let at_smpte = seconds_at_sequence_frame(30000, &tb(30000, 1001)).expect("合法");
+        assert!((at_smpte - 1001.0).abs() < 1e-9, "实得 {at_smpte}");
+        // 分母为 0 的时间基是坏的：**报没有，不猜一个值**。
+        assert!(seconds_at_sequence_frame(1, &tb(30, 0)).is_none());
     }
 
     #[test]

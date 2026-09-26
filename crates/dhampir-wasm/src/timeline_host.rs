@@ -693,10 +693,20 @@ impl ProjectHost {
                 let assets = doc.asset_timebases();
                 let composite =
                     compose::evaluate_v2_with_assets(&doc.timeline, frame, Some(&assets));
-                (composite, doc.sequence_size())
+                // **序列时间**（秒）：Warp 的位移场以它为自变量。
+                // 与 native 侧调**同一个函数**（timeline 的 `seconds_at_sequence_frame`），
+                // 否则同一个工程在两个宿主的抖动相位会不一致。
+                // 取不到就退到 0 —— 那时相位是静止的，但**画面不会错**
+                // （位移幅度仍按 amount 生效）。
+                let seconds = dhampir_core::timeline::layer::seconds_at_sequence_frame(
+                    frame,
+                    &doc.timeline.timebase,
+                )
+                .unwrap_or(0.0) as f32;
+                (composite, doc.sequence_size(), seconds)
             })
         });
-        let Some((composite, sequence)) = loaded else {
+        let Some((composite, sequence, seconds)) = loaded else {
             return Err("还没有载入通过校验的工程".to_string());
         };
 
@@ -733,7 +743,7 @@ impl ProjectHost {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("dhampir project encoder"),
             });
-        renderer.render_frame(
+        renderer.render_frame_at(
             &ctx.device,
             &ctx.queue,
             &mut encoder,
@@ -742,6 +752,7 @@ impl ProjectHost {
             &composite,
             &mut resolver,
             wgpu::Color::TRANSPARENT,
+            seconds,
         );
         // **文字叠在底上，不清屏** —— 清屏是上面那一句的事（compose_overlay 绝不清屏，
         // 见那里的说明：同一帧清两次的症状是「底没了」，看起来像「字画错了」）。

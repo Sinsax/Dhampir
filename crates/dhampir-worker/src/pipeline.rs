@@ -56,7 +56,7 @@ use dhampir_core::gpu::NATIVE_BACKENDS;
 use dhampir_core::overlay::{SubtitleTable, evaluate_overlay};
 use dhampir_core::readback;
 use dhampir_core::render::{RenderSpace, SourceResolver, TimelineRenderer};
-use dhampir_core::timeline::layer::{AssetTimebases, TimelineV2};
+use dhampir_core::timeline::layer::{AssetTimebases, TimelineV2, seconds_at_sequence_frame};
 use dhampir_core::timeline::schema::{Frame, Issue, TimebaseDto};
 use dhampir_core::wgpu;
 
@@ -1427,7 +1427,7 @@ pub fn render_plan(
         let mut command = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("dhampir pipeline encoder"),
         });
-        let drawn = renderer.render_frame(
+        let drawn = renderer.render_frame_at(
             &ctx.device,
             &ctx.queue,
             &mut command,
@@ -1439,6 +1439,10 @@ pub fn render_plan(
             &composite,
             &mut sources,
             wgpu::Color::TRANSPARENT,
+            // **序列时间（秒）**：Warp 的位移场以它为自变量。
+            // 与浏览器侧用**同一个换算**（都在 timeline 的 `seconds_at_sequence_frame`），
+            // 否则同一个工程在两个宿主的抖动相位会不一致 —— 那正是"两端可比"要防的。
+            seconds_at_sequence_frame(frame, &plan.timeline.timebase).unwrap_or(0.0) as f32,
         );
         ctx.queue.submit([command.finish()]);
 
