@@ -362,9 +362,22 @@ clip.json  ───┘                 ▲
 
 ## 11. 落地记录（T8–T12，逐条附证据）
 
-**T8–T11 已完成并提交**（`6f77973`、`f63ac31`、`32b0097`、`6fc35aa`）。
+**T8–T13 已完成并提交**（`6f77973`、`f63ac31`、`32b0097`、`6fc35aa`、`374f9c1`、`33e14d4`）。
 五个算子族**够用**：V-Trim 那 8 个缺失特效全部落进了 `ColorMask` / `Warp`，
 没有出现"退回去按 kind 字符串派发"的需要。
+
+**收口读数**（本会话真跑，不是推断）：
+
+| 项 | 读数 |
+|---|---|
+| `cargo test --workspace` | **609 passed**（T7 收口时是 547） |
+| `cargo check --workspace --all-targets` | **0 warning** |
+| `dhampir-wasm` → `wasm32-unknown-unknown` | **0 error** |
+| `node scripts/run-guards.mjs` | **20 / 20 全绿** |
+| `check-dual-end` 最差 SSIM | **1.000000**（动过两个宿主的渲染调用路径之后仍然是） |
+| `check-effect-registry` | 13 个特效 / 4 条管线，全部与渲染实现一致 |
+| 整条出片腿（90 帧 + 音轨） | **收掉**：h264 640x360 / aac 48kHz / 3.000000 秒；产物的第 45 帧与单独渲染的那一帧 **PSNR 44.07 dB** |
+
 
 ### 11.1 T12 动图：实地核对后的**真实边界**（重要）
 
