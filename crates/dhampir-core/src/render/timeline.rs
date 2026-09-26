@@ -22,6 +22,8 @@ use dhampir_timeline::schema::{Effect, EffectPipeline};
 use crate::compose::Composite;
 use crate::render::blur::BlurRenderer;
 use crate::render::color_adjust::ColorAdjustRenderer;
+use crate::render::color_mask::ColorMaskRenderer;
+use crate::render::warp::WarpRenderer;
 use crate::render::compose::{Compositor, LayerDraw};
 use crate::wgpu;
 
@@ -199,11 +201,303 @@ pub fn color_params(effects: &[Effect]) -> crate::render::ColorAdjustParams {
     }
     out
 }
+/// 一条特效 pass 的执行序。**顺序是正确性知识，所以它是数据、有测试。**
+///
+/// # 为什么顺序不能靠"代码里那么写的"
+///
+/// 在这条成为函数之前，顺序活在 `Step::Adjust` 分支体里的一段注释 +
+/// 两个写死的代码块（"先色彩调整、再模糊"）。那段注释是对的，
+/// 但**加一条新管线就要重新论证一次顺序**，而重新论证过的人未必会去读那段注释。
+///
+/// 现在的规则：**按算子性质分三级**，级内顺序无关（各自可交换）。
+///
+/// 1. [`PassStage::PerPixel`]：逐像素。输出只看自己，最先做 ——
+///    "先决定这张图长什么样，再去动它"。
+/// 2. [`PassStage::Warp`]：坐标重映射。它改变"哪个像素在哪"，
+///    必须在逐像素调整**之后**（否则调的是被搬动过的像素，用户看到的是位移后的颜色）。
+/// 3. [`PassStage::Neighborhood`]：邻域。模糊会把边缘摊开，
+///    放最后是为了不让邻域噪声盖住前面两级的判定。
+///
+/// 为什么模糊不在 Warp 之前：Warp 的位移场是按**目标坐标**算的，
+/// 先模糊再位移会连位移场的边界一起糊掉，两端在边界处的差异会被放大。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PassStage {
+    /// 逐像素色彩调整与常量色叠加（ColorAdjust + ColorMask）。
+    PerPixel = 0,
+    /// 坐标重映射（Warp）。
+    Warp = 1,
+    /// 邻域算子（SeparableBlur）。
+    Neighborhood = 2,
+}
+
+impl PassStage {
+    /// 这条管线属于哪一级。**穷尽 match**：加了管线却不给分级会编译不过，
+    /// 而不是静默落进某一级（顺序错了只会表现为"看起来有点怪"，最难查）。
+    pub const fn of(pipeline: EffectPipeline) -> Self {
+        match pipeline {
+            EffectPipeline::ColorAdjust | EffectPipeline::ColorMask => Self::PerPixel,
+            EffectPipeline::Warp => Self::Warp,
+            EffectPipeline::SeparableBlur => Self::Neighborhood,
+        }
+    }
+}
+
+/// 特效的**执行批次**：按 `PassStage` 分组并在组内保持原有的相对次序。
+///
+/// 组内保持原序（稳定分区，不是排序）：用户挂了 `brightness` 又挂 `saturation` 时，
+/// 两者的相对次序应当与写下的次序一致 —— 虽然这两条数学上可交换，
+/// 但**把"可交换"当成"可以随便重排"是两回事**：将来加一条不可交换的
+/// 逐像素算子时，稳定分区能保住语义。
+pub fn effect_passes(effects: &[Effect]) -> Vec<(PassStage, Vec<usize>)> {
+    let mut groups: Vec<(PassStage, Vec<usize>)> = Vec::new();
+    for (index, effect) in effects.iter().enumerate() {
+        let Some(spec) = crate::effects::spec_of(&effect.kind) else {
+            continue;
+        };
+        let stage = PassStage::of(spec.pipeline);
+        match groups.iter_mut().find(|(s, _)| *s == stage) {
+            Some((_, indices)) => indices.push(index),
+            None => groups.push((stage, vec![index])),
+        }
+    }
+    // 按级的枚举值排 —— 级的定义就是执行序。
+    groups.sort_by_key(|(stage, _)| *stage);
+    groups
+}
+
+/// 把这一批 ColorMask 特效折叠成一组系数。
+///
+/// # 为什么"折叠"而不是"取第一个"
+///
+/// 与 `color_params` 同一条理由：用户可能同时挂闪白和暗角。
+/// 取第一个会让后一个被静默丢掉 —— 而"我明明挂了暗角"很难查。
+///
+/// # 逐项的合成方式
+///
+/// - 闪白与覆盖层是**同类**（都是"向一个颜色插值"），所以按
+///   `1 - (1-a)(1-b)` 合成强度（两次覆盖比一次覆盖更强，但不会超过 1）；
+/// - 暗角与噪声是**独立通道**，各取所见到的最大值（同种特效挂两条时，
+///   更强的那条说了算 —— 叠加两次暗角没有物理意义）。
+///
+/// `size` 是目标像素尺寸（暗角的椭圆坐标要用），`frame` 是**绝对帧号**
+/// （噪声要它才逐帧不同，且同一帧可复现）。
+pub fn color_mask_params(
+    effects: &[Effect],
+    size: (u32, u32),
+    frame: i64,
+) -> crate::render::ColorMaskParams {
+    use crate::render::OverlayShape;
+
+    let mut out = crate::render::ColorMaskParams::IDENTITY;
+    out.width = size.0.max(1) as f32;
+    out.height = size.1.max(1) as f32;
+    out.frame = frame as f32;
+
+    /// 两次覆盖的合成：比单次强，但不超过 1。
+    fn over(a: f32, b: f32) -> f32 {
+        (1.0 - (1.0 - a) * (1.0 - b)).clamp(0.0, 1.0)
+    }
+
+    for effect in effects {
+        // 认管线，不认名字 —— 与 color_params / blur_radius 同一套判据。
+        let Some(spec) = crate::effects::spec_of(&effect.kind) else {
+            continue;
+        };
+        if spec.pipeline != EffectPipeline::ColorMask {
+            continue;
+        }
+        let param = |name: &str| effect.params.get(name).copied().filter(|v| v.is_finite());
+        match spec.kind {
+            "flash" => {
+                if let Some(amount) = param("amount") {
+                    // 颜色缺省为白：闪白是最常见的用法，缺省成黑色会让人以为没生效。
+                    let r = param("r").unwrap_or(1.0);
+                    let g = param("g").unwrap_or(1.0);
+                    let b = param("b").unwrap_or(1.0);
+                    let weight = amount.clamp(0.0, 1.0);
+                    if weight > out.flash_amount {
+                        // 只在**更强**时换颜色：两条闪白同时挂着时，
+                        // 更强的那条说了算。弱的那条不该把颜色稀释成两者平均 ——
+                        // 那是"谁都看得出来不是用户想要的颜色"，且解释不清。
+                        out.flash_r = r.clamp(0.0, 1.0);
+                        out.flash_g = g.clamp(0.0, 1.0);
+                        out.flash_b = b.clamp(0.0, 1.0);
+                        out.flash_amount = weight;
+                    }
+                }
+            }
+            "vignette" => {
+                if let Some(amount) = param("amount") {
+                    // 取更强的那个：两条暗角叠加没有额外语义。
+                    if amount >= out.vignette_amount {
+                        out.vignette_amount = amount.clamp(0.0, 1.0);
+                        out.vignette_radius = param("radius").unwrap_or(0.7);
+                        // softness 兜一个下限：它是除数，0 会让边缘变成硬阶跃，
+                        // 而那在预览与成片之间更容易被看出差异。
+                        out.vignette_softness = param("softness").unwrap_or(0.35).max(1e-3);
+                    }
+                }
+            }
+            "noise" => {
+                if let Some(amount) = param("amount") {
+                    if amount >= out.noise_amount {
+                        out.noise_amount = amount.clamp(0.0, 1.0);
+                        out.noise_seed = param("seed").unwrap_or(0.0);
+                    }
+                }
+            }
+            "overlay" => {
+                if let Some(amount) = param("amount") {
+                    let weight = amount.clamp(0.0, 1.0);
+                    let r = param("r").unwrap_or(0.0);
+                    let g = param("g").unwrap_or(0.0);
+                    let b = param("b").unwrap_or(0.0);
+                    // 描画层：后一条覆盖前一条的颜色，强度按 over 合成。
+                    if weight > 0.0 {
+                        out.overlay_r = r;
+                        out.overlay_g = g;
+                        out.overlay_b = b;
+                        out.overlay_r2 = param("r2").unwrap_or(r);
+                        out.overlay_g2 = param("g2").unwrap_or(g);
+                        out.overlay_b2 = param("b2").unwrap_or(b);
+                        out.overlay_shape =
+                            OverlayShape::from_param(param("shape").unwrap_or(0.0)) as u32 as f32;
+                        // **度转弧度只在这一处发生**（与 hue 同一条纪律）：
+                        // 着色器收的是弧度，两边各转一遍会让 90 度变成 90 弧度。
+                        out.overlay_angle = param("angle").unwrap_or(0.0).to_radians();
+                    }
+                    out.overlay_amount = over(out.overlay_amount, weight);
+                }
+            }
+            // 走了 ColorMask 管线却不在这里 -> 登记表加了新特效但忘了接上。
+            // **不静默忽略**：那正是最坏的情形（用户能选中它，画面却不变）。
+            other => {
+                debug_assert!(false, "ColorMask 管线里的 {other} 没有在 color_mask_params 里接上");
+            }
+        }
+    }
+    out
+}
+
+/// 把这一批 Warp 特效折叠成一组系数。
+///
+/// # 合成方式
+///
+/// 四种都是"一个位移场"，语义上**可以叠加**（同时抖和弹跳是想要的），
+/// 所以各自的幅度取所见到的最大值（同种特效挂两条时更强的那条说了算），
+/// 而**不同类型的位移在着色器里相加** —— 那是它们的物理意义。
+///
+/// `seconds` 与 `size` 是位移场的自变量：位移必须是
+/// `(像素坐标, 时间秒, seed)` 的纯函数，否则跳帧求值与顺序播放会不一致。
+pub fn warp_params(effects: &[Effect], size: (u32, u32), seconds: f32) -> crate::render::WarpParams {
+    let mut out = crate::render::WarpParams::IDENTITY;
+    out.width = size.0.max(1) as f32;
+    out.height = size.1.max(1) as f32;
+    out.seconds = seconds;
+
+    for effect in effects {
+        let Some(spec) = crate::effects::spec_of(&effect.kind) else {
+            continue;
+        };
+        if spec.pipeline != EffectPipeline::Warp {
+            continue;
+        }
+        let param = |name: &str| effect.params.get(name).copied().filter(|v| v.is_finite());
+        match spec.kind {
+            "shake" => {
+                if let Some(amount) = param("amount") {
+                    if amount >= out.shake_amount {
+                        out.shake_amount = amount.clamp(0.0, 1.0);
+                        // 频率兜一个下限：0 会让位移变成静止的常量偏移，
+                        // 看起来像"画面整体歪了"而不是"在抖"。
+                        out.shake_frequency = param("frequency").unwrap_or(12.0).max(1e-3);
+                        out.shake_seed = param("seed").unwrap_or(0.0);
+                    }
+                }
+            }
+            "zoom_bounce" => {
+                if let Some(amount) = param("amount") {
+                    if amount >= out.bounce_amount {
+                        out.bounce_amount = amount.clamp(0.0, 1.0);
+                        out.bounce_frequency = param("frequency").unwrap_or(3.0).max(1e-3);
+                    }
+                }
+            }
+            "pulse" => {
+                if let Some(amount) = param("amount") {
+                    if amount >= out.pulse_amount {
+                        out.pulse_amount = amount.clamp(0.0, 1.0);
+                        out.pulse_frequency = param("frequency").unwrap_or(1.5).max(1e-3);
+                    }
+                }
+            }
+            "split" => {
+                if let Some(amount) = param("amount") {
+                    if amount >= out.split_amount {
+                        out.split_amount = amount.clamp(0.0, 1.0);
+                        out.split_offset = param("offset").unwrap_or(0.08);
+                        // **度转弧度只在这一处发生**（与 hue / overlay 同一条纪律）。
+                        out.split_skew = param("skew").unwrap_or(0.0).to_radians();
+                    }
+                }
+            }
+            other => {
+                debug_assert!(false, "Warp 管线里的 {other} 没有在 warp_params 里接上");
+            }
+        }
+    }
+    // **缩放不能是 0**：它是除数。三条缩放项合成后若接近 0（例如弹跳 -脉冲
+    // 恰好抵消），着色器会把采样点推到无穷远。夹一个下限，
+    // 代价是"极端参数下不再继续缩小"，那比 NaN 好。
+    let zoom = 1.0 + out.bounce_amount + out.pulse_amount;
+    if zoom < 0.05 {
+        // 把脉冲压到刚好让 zoom == 0.05。
+        out.pulse_amount = 0.05 - 1.0 - out.bounce_amount;
+    }
+    out
+}
+
+/// 分配一张中间纹理并记进表里，返回它的索引。
+///
+/// **模块级而不是某个方法里的局部 fn**：`apply_stage` 与主循环都要分配中间纹理，
+/// 而局部 fn 出了那个方法就不存在了。
+fn alloc_texture(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    extent: wgpu::Extent3d,
+    label: &'static str,
+    textures: &mut Vec<wgpu::Texture>,
+    views: &mut Vec<wgpu::TextureView>,
+) -> usize {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    views.push(texture.create_view(&wgpu::TextureViewDescriptor::default()));
+    textures.push(texture);
+    views.len() - 1
+}
+
+/// 只在"调用方没给时间"时用的兜底帧率。
+///
+/// **它不参与任何有正确性含义的量**：所有精确的东西（帧号、源内帧、半径换算）
+/// 都不读秒。只有 Warp 的位移场相位用它，而那个是观感。
+/// 精确相位请走 [`TimelineRenderer::render_frame_at`]。
+pub const DEFAULT_FRAME_RATE: f32 = 30.0;
+
 /// 时间线渲染器：合成 + 特效的调度。构造一次、每帧复用。
 pub struct TimelineRenderer {
     compositor: Compositor,
     blur: BlurRenderer,
     color_adjust: ColorAdjustRenderer,
+    color_mask: ColorMaskRenderer,
+    warp: WarpRenderer,
     format: wgpu::TextureFormat,
 }
 
@@ -247,8 +541,20 @@ impl TimelineRenderer {
             compositor: Compositor::new(device, format),
             blur: BlurRenderer::new(device, format),
             color_adjust: ColorAdjustRenderer::new(device, format),
+            color_mask: ColorMaskRenderer::new(device, format),
+            warp: WarpRenderer::new(device, format),
             format,
         }
+    }
+
+    /// ColorMask 管线是否已接上渲染器。（守卫与 UI 用它报"这个特效还画不出来"。）
+    pub const fn has_color_mask(&self) -> bool {
+        true
+    }
+
+    /// Warp 管线是否已接上渲染器。
+    pub const fn has_warp(&self) -> bool {
+        true
     }
 
     /// 借用里面的合成器：宿主侧要在**同一趟编码**里往目标上叠别的东西（T2.5 的文字行）。
@@ -275,6 +581,13 @@ impl TimelineRenderer {
     /// **它是薄包装**：真正的合成在 compose_layers 里。
     /// 分段合成（下一步）会直接调 compose_layers 并传中间纹理，
     /// 所以那个函数一出生就有两个调用方，不会成为「写了没人用」的代码。
+    /// # 时间
+    ///
+    /// **没有帧率参数**：这份实现不知道工程时间基（那在 timeline 层）。
+    /// Warp 的位移场需要"秒"，所以调用方要用 [`Self::render_frame_at`] 并给出秒；
+    /// 这个入口按 **30fps** 估算 —— 只用于"抖动看起来在抖"这种观感，
+    /// 而它**不影响任何有正确性含义的量**（那些都不读墙钟、也不读秒）。
+    /// 需要精确相位时用 `render_frame_at`。
     #[allow(clippy::too_many_arguments)]
     pub fn render_frame(
         &self,
@@ -286,6 +599,27 @@ impl TimelineRenderer {
         composite: &Composite,
         resolver: &mut dyn SourceResolver,
         clear: wgpu::Color,
+    ) -> usize {
+        let seconds = composite.frame as f32 / DEFAULT_FRAME_RATE;
+        self.render_frame_at(device, queue, encoder, target, space, composite, resolver, clear, seconds)
+    }
+
+    /// 与 [`Self::render_frame`] 相同，但**显式给出这一帧的时间（秒）**。
+    ///
+    /// 两端（浏览器 / 服务端）都该用它，把各自的时间基换算一次之后传进来 ——
+    /// 让渲染器自己去猜帧率会让同一个工程在两个宿主里抖出不同的相位。
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_frame_at(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        space: crate::render::RenderSpace,
+        composite: &Composite,
+        resolver: &mut dyn SourceResolver,
+        clear: wgpu::Color,
+        seconds: f32,
     ) -> usize {
         // **先看分段计划。** 没有调整图层就走原来那条单 pass 路（行为逐字节不变）；
         // 有的话要「先合成一段 -> 对结果跑特效 -> 再继续」，那需要中间纹理。
@@ -303,7 +637,7 @@ impl TimelineRenderer {
             );
         }
         self.render_segmented(
-            device, queue, encoder, target, space, composite, resolver, clear, &plan,
+            device, queue, encoder, target, space, composite, resolver, clear, &plan, seconds,
         )
     }
 
@@ -325,6 +659,7 @@ impl TimelineRenderer {
         resolver: &mut dyn SourceResolver,
         clear: wgpu::Color,
         plan: &[Step],
+        seconds: f32,
     ) -> usize {
         let extent = wgpu::Extent3d {
             width: space.target.0.max(1),
@@ -391,52 +726,31 @@ impl TimelineRenderer {
                 Step::Adjust { effects, .. } => {
                     let Some(from) = current else { continue };
 
-                    // ---- 1) 逐像素色彩调整，先做。 ----
+                    // **按管线分批跑，顺序由 `PassStage` 定**（见那里的注释）。
+                    // 这一段以前是"色彩一块、模糊一块"两段写死的代码，加一条管线
+                    // 就要重排一次顺序论证。现在加管线**不必碰这里**：
+                    // 分级写在对 `EffectPipeline` 的穷尽 match 里，漏了会编译不过。
                     //
-                    // 顺序有讲究：色彩调整是**逐像素**的，模糊是**邻域**的。
-                    // 先调整再模糊 = 糊一张调过色的图；先模糊再调整 = 给糊过的图调色。
-                    // 两者**不一样**（亮度是加性的，模糊会把边缘的加性偏移摊开）。
-                    // 定成先调整，是因为它更符合直觉：先决定这张图长什么样，再去糊它。
-                    // 这个顺序必须两端一致，所以它只写在这里这一处。
-                    let params = color_params(effects);
-                    if !params.is_identity() {
-                        let out = allocate(
-                            device, self.format, extent, "dhampir adjust color out",
-                            &mut textures, &mut views,
-                        );
-                        let source = views[from].clone();
-                        let to = views[out].clone();
-                        self.color_adjust.apply(device, queue, encoder, &source, &to, params);
-                        current = Some(out);
+                    // `from` 在每一趟之后更新，因为在两个 `continue` 之间它会被
+                    // 借用走；这里用带索引的视图表，索引才是真相。
+                    let mut cursor = from;
+                    for (stage, indices) in effect_passes(effects) {
+                        // 这一批只取属于它的那几条，交给对应的求值。
+                        let batch: Vec<Effect> = indices
+                            .iter()
+                            .filter_map(|index| effects.get(*index).cloned())
+                            .collect();
+                        let Some(next) = self.apply_stage(
+                            stage, &batch, cursor, extent, space, composite.frame, seconds,
+                            device, queue, encoder, &mut textures, &mut views,
+                        ) else {
+                            continue;
+                        };
+                        cursor = next;
                     }
-                    let Some(from) = current else { continue };
-
-                    // ---- 2) 邻域模糊，后做。 ----
-                    // **调整图层的模糊半径是文档像素**：它跑在目标尺寸的中间纹理上，
-                    // 所以目标尺寸一变，同一个半径看起来就不一样了 —— 必须按比例换算。
-                    // （每层的 gaussian_blur 不是这个情况：它跑在**源**纹理上，见 compose_layers。）
-                    let radius = radius_in_space(
-                        blur_radius(effects),
-                        dhampir_timeline::schema::EffectSpace::Document,
-                        space,
-                    );
-                    if radius == 0 {
-                        continue;
+                    if cursor != from {
+                        current = Some(cursor);
                     }
-                    // blur_separable 需要一张中间纹理与一张输出纹理（它自己是一横一纵两趟）。
-                    let middle = allocate(
-                        device, self.format, extent, "dhampir adjust middle", &mut textures, &mut views,
-                    );
-                    let out = allocate(
-                        device, self.format, extent, "dhampir adjust out", &mut textures, &mut views,
-                    );
-                    let source = views[from].clone();
-                    let mid = views[middle].clone();
-                    let to = views[out].clone();
-                    self.blur.blur_separable(
-                        device, queue, encoder, &source, &mid, &to, space.target, radius,
-                    );
-                    current = Some(out);
                 }
             }
         }
@@ -457,6 +771,102 @@ impl TimelineRenderer {
         );
         drop(textures);
         drawn
+    }
+
+    /// 跑**一级**特效，返回结果的纹理索引（这一级什么都没做就给 None）。
+    ///
+    /// 把"哪一级怎么跑"收在这个函数里，`Step::Adjust` 那边就只剩调度 ——
+    /// 加一条管线要改的是这里加一支，而不是回去重排主路径里的顺序论证。
+    #[allow(clippy::too_many_arguments)]
+    fn apply_stage(
+        &self,
+        stage: PassStage,
+        batch: &[Effect],
+        from: usize,
+        extent: wgpu::Extent3d,
+        space: crate::render::RenderSpace,
+        frame: i64,
+        seconds: f32,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        textures: &mut Vec<wgpu::Texture>,
+        views: &mut Vec<wgpu::TextureView>,
+    ) -> Option<usize> {
+        match stage {
+            PassStage::PerPixel => {
+                // 这一级里 ColorAdjust 与 ColorMask 都是逐像素，但**参数结构不同**，
+                // 所以各自一趟（顺序：先调整现有像素，再叠常量色 —— 反过来会让
+                // 叠加的颜色被后面的调整再改一遍，与"用户调的是原图"的直觉不符）。
+                let mut cursor = from;
+                let params = color_params(batch);
+                if !params.is_identity() {
+                    let out = alloc_texture(
+                        device, self.format, extent, "dhampir adjust color out",
+                        textures, views,
+                    );
+                    let source = views[cursor].clone();
+                    let to = views[out].clone();
+                    self.color_adjust.apply(device, queue, encoder, &source, &to, params);
+                    cursor = out;
+                }
+                // ColorMask 与 ColorAdjust 都是逐像素，但**参数结构不同**，各走一趟。
+                // 顺序：先调整现有像素，再叠常量色 —— 反过来会让叠加的颜色
+                // 被后面的调整再改一遍，与"用户调的是原图"的直觉不符。
+                let mask = color_mask_params(batch, space.target, frame);
+                if !mask.is_identity() {
+                    let out = alloc_texture(
+                        device, self.format, extent, "dhampir adjust mask out",
+                        textures, views,
+                    );
+                    let source = views[cursor].clone();
+                    let to = views[out].clone();
+                    self.color_mask.apply(device, queue, encoder, &source, &to, mask);
+                    cursor = out;
+                }
+                if cursor != from { Some(cursor) } else { None }
+            }
+            PassStage::Warp => {
+                let params = warp_params(batch, space.target, seconds);
+                if params.is_identity() {
+                    return None;
+                }
+                let out = alloc_texture(
+                    device, self.format, extent, "dhampir adjust warp out", textures, views,
+                );
+                let source = views[from].clone();
+                let to = views[out].clone();
+                self.warp.apply(device, queue, encoder, &source, &to, params);
+                Some(out)
+            }
+            PassStage::Neighborhood => {
+                // **调整图层的模糊半径是文档像素**：它跑在目标尺寸的中间纹理上，
+                // 所以目标尺寸一变，同一个半径看起来就不一样了 —— 必须按比例换算。
+                // （每层的 gaussian_blur 不是这个情况：它跑在**源**纹理上，见 compose_layers。）
+                let radius = radius_in_space(
+                    blur_radius(batch),
+                    dhampir_timeline::schema::EffectSpace::Document,
+                    space,
+                );
+                if radius == 0 {
+                    return None;
+                }
+                // blur_separable 需要一张中间纹理与一张输出纹理（它自己是一横一纵两趟）。
+                let middle = alloc_texture(
+                    device, self.format, extent, "dhampir adjust middle", textures, views,
+                );
+                let out = alloc_texture(
+                    device, self.format, extent, "dhampir adjust out", textures, views,
+                );
+                let source = views[from].clone();
+                let mid = views[middle].clone();
+                let to = views[out].clone();
+                self.blur.blur_separable(
+                    device, queue, encoder, &source, &mid, &to, space.target, radius,
+                );
+                Some(out)
+            }
+        }
     }
 
     /// 把这几层合成到 dest，返回**实际画了几层**。
@@ -652,6 +1062,8 @@ mod tests {
         Effect {
             kind: kind.to_string(),
             params: params.iter().map(|(key, value)| (key.to_string(), *value)).collect(),
+            window: dhampir_timeline::schema::Window::Always,
+            opacity: 1.0,
         }
     }
 
@@ -927,6 +1339,16 @@ mod plan_tests {
     use dhampir_timeline::layer::BlendMode;
     use dhampir_timeline::schema::{Effect, Transform};
 
+    /// 造一条特效，给 pass 分批的用例用。
+    fn effect(kind: &str, params: &[(&str, f32)]) -> Effect {
+        Effect {
+            kind: kind.to_string(),
+            params: params.iter().map(|(key, value)| (key.to_string(), *value)).collect(),
+            window: dhampir_timeline::schema::Window::Always,
+            opacity: 1.0,
+        }
+    }
+
     fn layer(id: &str, adjustment: bool) -> crate::compose::Layer {
         crate::compose::Layer {
             clip_id: id.to_string(),
@@ -935,7 +1357,12 @@ mod plan_tests {
             opacity: 1.0,
             transform: Transform { x: 0.0, y: 0.0, scale: 1.0, rotation_deg: 0.0 },
             effects: if adjustment {
-                vec![Effect { kind: "gaussian_blur".to_string(), params: Default::default() }]
+                vec![Effect {
+                    kind: "gaussian_blur".to_string(),
+                    params: Default::default(),
+                    window: dhampir_timeline::schema::Window::Always,
+                    opacity: 1.0,
+                }]
             } else {
                 Vec::new()
             },
@@ -1021,5 +1448,160 @@ mod plan_tests {
                 }
             }
         }
+    }
+
+    // ===== T9：pass 顺序是数据，有测试 =====
+
+    /// 各级的执行序必须是 逐像素 -> Warp -> 邻域。
+    ///
+    /// 这条**就是**原先写在 `Step::Adjust` 注释里的那段论证，
+    /// 只是从"读代码才能知道"变成了"跑测试才知道"。
+    #[test]
+    fn 级的执行序是逐像素_再_warp_再邻域() {
+        assert!(PassStage::PerPixel < PassStage::Warp);
+        assert!(PassStage::Warp < PassStage::Neighborhood);
+    }
+
+    #[test]
+    fn 每条管线都归到了某一级() {
+        // 穷尽 match 保证编译期不漏；这条钉的是**归属本身**别被改错。
+        // 改错的后果是顺序变了而没有任何东西会红 —— 画面只是"有点怪"。
+        use EffectPipeline::*;
+        assert_eq!(PassStage::of(ColorAdjust), PassStage::PerPixel);
+        assert_eq!(PassStage::of(ColorMask), PassStage::PerPixel);
+        assert_eq!(PassStage::of(Warp), PassStage::Warp);
+        assert_eq!(PassStage::of(SeparableBlur), PassStage::Neighborhood);
+    }
+
+    #[test]
+    fn 批次按级排序且组内保持原序() {
+        // 故意把顺序打乱成"模糊在前、亮度在后"：批次必须把逐像素提到前面，
+        // 但**组内**（这里只有一条亮度）次序不能被动过。
+        let effects = vec![
+            effect("gaussian_blur", &[("radius", 4.0)]),
+            effect("brightness", &[("amount", 0.2)]),
+            effect("saturation", &[("amount", 1.5)]),
+        ];
+        let passes = effect_passes(&effects);
+        assert_eq!(passes.len(), 2, "两级：逐像素与邻域");
+
+        let (first_stage, first_indices) = &passes[0];
+        assert_eq!(*first_stage, PassStage::PerPixel, "逐像素必须最先");
+        // 亮度与饱和度**保持它们写下的次序**（1 在 2 之前）。
+        assert_eq!(first_indices, &vec![1, 2]);
+
+        let (second_stage, second_indices) = &passes[1];
+        assert_eq!(*second_stage, PassStage::Neighborhood);
+        assert_eq!(second_indices, &vec![0]);
+    }
+
+    #[test]
+    fn 认不出的特效不进任何批次() {
+        // 没登记过的 kind **不静默当成某一级**：它进不了批次，
+        // 于是不会在渲染时被当成"某个已知特效"画错。
+        let effects = vec![effect("不存在的特效", &[("amount", 1.0)])];
+        assert!(effect_passes(&effects).is_empty());
+    }
+
+    #[test]
+    fn 加一条新管线的特效不必改调度() {
+        // 反向用例：证明 `effect_passes` 是**按注册表**派的，不是按 kind 名字。
+        // 拿一条真实登记的 ColorMask 特效（flash）验证它落进 PerPixel，
+        // 而 `Step::Adjust` 那边一行都不用动。
+        let effects = vec![effect("flash", &[("amount", 1.0)])];
+        let passes = effect_passes(&effects);
+        assert_eq!(passes.len(), 1);
+        assert_eq!(passes[0].0, PassStage::PerPixel);
+        assert_eq!(passes[0].1, vec![0]);
+    }
+
+    // ===== T10 / T11：两条新管线的求值 =====
+
+    #[test]
+    fn 没有_mask_特效时参数是恒等的() {
+        // 这条保证"没挂特效的帧"整条跳过 —— 恒等判据错了会让每一帧都多走一趟。
+        let params = color_mask_params(&[], (1920, 1080), 0);
+        assert!(params.is_identity(), "空清单应当是恒等");
+        // 认不出的 kind 也不该改变恒等性。
+        let unknown = vec![effect("不存在的特效", &[("amount", 1.0)])];
+        assert!(color_mask_params(&unknown, (1920, 1080), 0).is_identity());
+    }
+
+    #[test]
+    fn 闪白的颜色缺省是白() {
+        let effects = vec![effect("flash", &[("amount", 1.0)])];
+        let params = color_mask_params(&effects, (1920, 1080), 0);
+        assert!(!params.is_identity());
+        assert_eq!(params.flash_amount, 1.0);
+        assert_eq!((params.flash_r, params.flash_g, params.flash_b), (1.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn 两条闪白取更强的那条的颜色() {
+        // 更强的说了算，不做平均 —— 平均出来的颜色解释不清，且不是用户填的任何一个。
+        let effects = vec![
+            effect("flash", &[("amount", 0.2), ("r", 1.0), ("g", 0.0), ("b", 0.0)]),
+            effect("flash", &[("amount", 0.9), ("r", 0.0), ("g", 0.0), ("b", 1.0)]),
+        ];
+        let params = color_mask_params(&effects, (1920, 1080), 0);
+        assert_eq!(params.flash_amount, 0.9);
+        assert_eq!((params.flash_r, params.flash_g, params.flash_b), (0.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn 暗角的_softness_不会变成零() {
+        // softness 是着色器里的**除数**：传 0 会让边缘变成硬阶跃，
+        // 而硬阶跃在预览与成片之间更容易被看出差异。这里钉住它有下限。
+        let effects = vec![effect("vignette", &[("amount", 0.5), ("softness", 0.0)])];
+        let params = color_mask_params(&effects, (1920, 1080), 0);
+        assert!(params.vignette_softness > 0.0, "softness 不能是 0（它是除数）");
+    }
+
+    #[test]
+    fn 覆盖层的角度在这里就转成弧度() {
+        // **度转弧度只在一处发生**：两边各转一遍会让 90 度变成 90 弧度。
+        let effects = vec![effect("overlay", &[("amount", 1.0), ("angle", 180.0), ("shape", 1.0)])];
+        let params = color_mask_params(&effects, (1920, 1080), 0);
+        assert!(
+            (params.overlay_angle - std::f32::consts::PI).abs() < 1e-5,
+            "180 度应当变成 PI 弧度，实得 {}",
+            params.overlay_angle
+        );
+        assert_eq!(params.overlay_shape, 1.0, "shape=1 是线性渐变");
+    }
+
+    #[test]
+    fn 没有_warp_特效时参数是恒等的() {
+        assert!(warp_params(&[], (1920, 1080), 0.0).is_identity());
+    }
+
+    #[test]
+    fn 分屏的斜切在这里就转成弧度() {
+        let effects = vec![effect("split", &[("amount", 1.0), ("skew", 45.0)])];
+        let params = warp_params(&effects, (1920, 1080), 0.0);
+        assert!(
+            (params.split_skew - std::f32::consts::FRAC_PI_4).abs() < 1e-5,
+            "45 度应当是 PI/4，实得 {}",
+            params.split_skew
+        );
+    }
+
+    #[test]
+    fn 抖动的频率不会变成零() {
+        // 频率 0 会让位移变成一个静止的常量偏移 —— 看起来像"画面整体歪了"，
+        // 而不是"在抖"。兜一个下限。
+        let effects = vec![effect("shake", &[("amount", 0.1), ("frequency", 0.0)])];
+        let params = warp_params(&effects, (1920, 1080), 0.0);
+        assert!(params.shake_frequency > 0.0, "频率不能是 0");
+    }
+
+    #[test]
+    fn 缩放不会掉到零附近() {
+        // 缩放是着色器里的**除数**：三条缩放项抵消到 0 会把采样点推到无穷远。
+        // 这里钉住兜底真的生效。
+        let effects = vec![effect("pulse", &[("amount", 1.0), ("frequency", 1.0)])];
+        let params = warp_params(&effects, (1920, 1080), 0.25);
+        let zoom = 1.0 + params.bounce_amount + params.pulse_amount;
+        assert!(zoom >= 0.05, "缩放掉到 {zoom}，会把采样点推到无穷远");
     }
 }

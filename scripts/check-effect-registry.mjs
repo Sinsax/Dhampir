@@ -31,7 +31,7 @@ const EFFECTS_RS = join(REPO_ROOT, 'crates', 'dhampir-core', 'src', 'effects.rs'
 const TIMELINE_RS = join(REPO_ROOT, 'crates', 'dhampir-core', 'src', 'render', 'timeline.rs');
 
 /** 渲染器真的实现了的管线变体（写在这里，因为它是"渲染侧的事实"）。 */
-export const IMPLEMENTED_PIPELINES = ['SeparableBlur', 'ColorAdjust'];
+export const IMPLEMENTED_PIPELINES = ['SeparableBlur', 'ColorAdjust', 'ColorMask', 'Warp'];
 /** 合法的像素空间。 */
 export const VALID_SPACES = ['Source', 'Document'];
 /**
@@ -43,7 +43,11 @@ export const VALID_SPACES = ['Source', 'Document'];
 export function parseRegistry(text) {
   const block = text.match(/pub const REGISTRY[^=]*=\s*&\[([^\]]*)\]/);
   if (!block) return { entries: [], error: '没找到 REGISTRY 数组' };
-  const names = block[1].split(',').map((s) => s.trim()).filter((s) => s.length > 0);
+  // **先剥注释再切**：数组里可以有分段注释（`// ---- 某条管线 ----`），
+  // 不剥的话那些注释会被当成登记项名字，然后报"找不到它的 EffectSpec 定义"——
+  // 那个报错指向的是注释，不是真问题，会把人带到错的方向。
+  const stripped = block[1].replace(/\/\/[^\n]*/g, '');
+  const names = stripped.split(',').map((s) => s.trim()).filter((s) => s.length > 0);
   if (names.length === 0) return { entries: [], error: 'REGISTRY 是空的' };
 
   const entries = [];

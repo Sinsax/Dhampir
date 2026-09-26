@@ -756,6 +756,8 @@ mod tests {
             effects: vec![Effect {
                 kind: "gaussian_blur".to_string(),
                 params: [("radius".to_string(), 0.0)].into_iter().collect(),
+                window: dhampir_timeline::schema::Window::Always,
+                opacity: 1.0,
             }],
             transition_in: None::<TransitionSpec>,
             keyframes: vec![
@@ -790,6 +792,8 @@ mod tests {
             effects: vec![Effect {
                 kind: "gaussian_blur".to_string(),
                 params: std::collections::BTreeMap::new(),
+                window: dhampir_timeline::schema::Window::Always,
+                opacity: 1.0,
             }],
             transition_in: None::<TransitionSpec>,
             keyframes: Vec::new(),

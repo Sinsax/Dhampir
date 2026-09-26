@@ -756,10 +756,12 @@ mod tests {
                 crate::schema::Effect {
                     kind: "gaussian_blur".to_string(),
                     params: std::collections::BTreeMap::from([("radius".to_string(), 64.0_f32)]),
+                    ..Default::default()
                 },
                 crate::schema::Effect {
                     kind: "vignette".to_string(), // 对端没有这个特效
                     params: std::collections::BTreeMap::new(),
+                    ..Default::default()
                 },
             ],
             transition_in: None,

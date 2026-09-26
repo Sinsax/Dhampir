@@ -112,12 +112,17 @@
       ]
     },
     "Effect": {
-      "description": "特效：类型 + 参数。**不接受可上传的 shader**——那等于把两端一致性交给用户。",
+      "description": "特效：类型 + 参数。**不接受可上传的 shader**——那等于把两端一致性交给用户。\n\n# 三个字段各管一件事\n\n- `kind` / `params`：**算什么**（已有）\n- `window`：**哪几帧生效、强度怎么起落**（新增）—— 让\"第 30 帧闪一下白\"\n  不必发明一个新的特效类型\n- `opacity`：**整体混合多少**（新增）—— 与 `window` 相乘，且**可被关键帧驱动**\n\n`window` 与 `opacity` 分开而不是把强度塞进 `params`：\n它们是**所有**特效共有的量，而 `params` 是每个特效私有的。混在一起的话\n`params` 的键空间会被通用名污染（每个特效都得叫 `amount` 还是 `strength`？）。",
       "type": "object",
       "properties": {
         "kind": {
           "description": "类型串，对应 core 的特效注册表。",
           "type": "string"
+        },
+        "opacity": {
+          "description": "整体混合强度，与 `window` 的包络**相乘**。缺省 1.0。",
+          "type": "number",
+          "format": "float"
         },
         "params": {
           "description": "参数用 BTreeMap：同一份工程序列化出来必须**逐字节相同**，HashMap 做不到这点。",
@@ -127,6 +132,10 @@
             "format": "float"
           },
           "default": {}
+        },
+        "window": {
+          "description": "时间窗。缺省 `Always` = 老工程的行为（整个图层生命周期都生效）。",
+          "$ref": "#/$defs/Window"
         }
       },
       "required": [
@@ -267,6 +276,83 @@
       "required": [
         "kind",
         "duration"
+      ]
+    },
+    "Window": {
+      "description": "特效的**时间窗**：它在自己所属元素的生命周期内，于哪几帧生效、强度怎么变。\n\n# 为什么需要它（而不是\"特效一直生效\"）\n\nV-Trim 那套「闪白 0.25 秒」「抖动 0.3 秒」是**瞬时事件**：一个 flat 的\n事件列表里，每条自带 `time` 与时长。本仓的模型是\"图层 + 挂在图层上的特效\"，\n特效默认跟着图层整个生命周期走 —— 于是\"第 30 帧闪一下白\"**表达不出来**。\n\n补法不是给特效加 `start`/`end`（那会与图层的区间形成两套时间真相），\n而是加一条**纯函数包络**：特效仍在图层区间内，只是强度按这条曲线起落。\n\n# 为什么是纯 `t` 的函数\n\nV-Trim 的 `handheld_sway` 注释里写着这条纪律的由来：纯函数意味着\n**跳帧求值、并行求值、seek 到任意时刻，结果都一样**。有累积状态的话，\n预览跳到中间某帧与出片顺序播放会给出不同的图 —— 而那种差异只在成片里看得出来。",
+      "oneOf": [
+        {
+          "description": "一直生效（缺省）。强度恒为 1，除非被关键帧驱动。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "always"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "瞬时：上升 `attack` 帧、满值 `hold` 帧、回落 `release` 帧，**之后归零**。\n\n三段包络，覆盖\"闪一下\"的全部形态：\n- `flash` = attack 1 / hold 1 / release 4\n- `shake` = attack 1 / hold 4 / release 4\n- `blur`  = attack 2 / hold 3 / release 5\n\n全 0 时长会得到\"瞬间满值再瞬间归零\"，那是合法输入（不是错误），\n所以不在这里拒绝 —— 拒绝它会把\"最难的一帧\"变成不可表达。",
+          "type": "object",
+          "properties": {
+            "attack": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "fall_to_zero": {
+              "description": "是否在结束之后**回到 0**（缺省 true）。\nfalse 用于\"涨上去就一直保持\"——它不同于 `Always`：`Always` 从一开始就是满值。",
+              "type": "boolean",
+              "default": true
+            },
+            "hold": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "kind": {
+              "type": "string",
+              "const": "transient"
+            },
+            "release": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "attack",
+            "hold",
+            "release"
+          ]
+        },
+        {
+          "description": "图层区间内线性淡入淡出，中间满值。用于\"整段轻微变暗\"这类**持续**效果。",
+          "type": "object",
+          "properties": {
+            "fade_in": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "fade_out": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "kind": {
+              "type": "string",
+              "const": "fade"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "fade_in",
+            "fade_out"
+          ]
+        }
       ]
     }
   }

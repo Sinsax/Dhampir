@@ -740,6 +740,7 @@ mod tests {
         adjustment.effects.push(Effect {
             kind: "gaussian_blur".to_string(),
             params: std::collections::BTreeMap::new(),
+            ..Default::default()
         });
         assert!(adjustment.is_adjustment(), "没素材、有特效 → 调整图层");
 

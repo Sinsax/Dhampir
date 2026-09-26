@@ -175,6 +175,17 @@ impl Default for Transform {
 }
 
 /// 特效：类型 + 参数。**不接受可上传的 shader**——那等于把两端一致性交给用户。
+///
+/// # 三个字段各管一件事
+///
+/// - `kind` / `params`：**算什么**（已有）
+/// - `window`：**哪几帧生效、强度怎么起落**（新增）—— 让"第 30 帧闪一下白"
+///   不必发明一个新的特效类型
+/// - `opacity`：**整体混合多少**（新增）—— 与 `window` 相乘，且**可被关键帧驱动**
+///
+/// `window` 与 `opacity` 分开而不是把强度塞进 `params`：
+/// 它们是**所有**特效共有的量，而 `params` 是每个特效私有的。混在一起的话
+/// `params` 的键空间会被通用名污染（每个特效都得叫 `amount` 还是 `strength`？）。
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Effect {
@@ -183,6 +194,49 @@ pub struct Effect {
     /// 参数用 BTreeMap：同一份工程序列化出来必须**逐字节相同**，HashMap 做不到这点。
     #[serde(default)]
     pub params: BTreeMap<String, f32>,
+    /// 时间窗。缺省 `Always` = 老工程的行为（整个图层生命周期都生效）。
+    #[serde(default, skip_serializing_if = "is_always_window")]
+    pub window: Window,
+    /// 整体混合强度，与 `window` 的包络**相乘**。缺省 1.0。
+    #[serde(default = "default_opacity", skip_serializing_if = "is_one")]
+    pub opacity: f32,
+}
+
+/// `window` 是 `Always` 时不必写进文件 —— 老工程重写时不产生噪音。
+fn is_always_window(window: &Window) -> bool {
+    matches!(window, Window::Always)
+}
+
+fn is_one(value: &f32) -> bool {
+    (*value - 1.0).abs() < f32::EPSILON
+}
+
+impl Effect {
+    /// 这一帧这条特效的**总强度** = 时间窗包络 × 自身不透明度 ×（关键帧驱动值）。
+    ///
+    /// `keyframe_opacity` 由调用方从 `Keyframe.target == "effect.<i>.opacity"`
+    /// 求出来；没有那条曲线就传 `self.opacity`。
+    pub fn strength(&self, local: Frame, duration: Frame, keyframe_opacity: Option<f32>) -> f32 {
+        let base = keyframe_opacity.unwrap_or(self.opacity);
+        (self.window.envelope(local, duration) * base).clamp(0.0, 1.0)
+    }
+}
+
+/// 缺省：`Always` 窗口、满强度。**这是"老工程"的语义** ——
+/// 在 `window`/`opacity` 存在之前，特效就是整个图层生命周期都满强度生效的。
+///
+/// 提供 `Default` 是为了让构造点（测试夹具、宿主拼装）能写
+/// `Effect { kind, params, ..Default::default() }`，
+/// 而不是每加一个通用字段就去改十几处字面量 —— 那些改动会淹掉真正的改动。
+impl Default for Effect {
+    fn default() -> Self {
+        Self {
+            kind: String::new(),
+            params: BTreeMap::new(),
+            window: Window::Always,
+            opacity: 1.0,
+        }
+    }
 }
 
 /// 关键帧。frame 是**相对片段起点**的偏移，不是绝对帧号——
@@ -306,6 +360,113 @@ impl Issue {
     }
 }
 
+/// 特效的**时间窗**：它在自己所属元素的生命周期内，于哪几帧生效、强度怎么变。
+///
+/// # 为什么需要它（而不是"特效一直生效"）
+///
+/// V-Trim 那套「闪白 0.25 秒」「抖动 0.3 秒」是**瞬时事件**：一个 flat 的
+/// 事件列表里，每条自带 `time` 与时长。本仓的模型是"图层 + 挂在图层上的特效"，
+/// 特效默认跟着图层整个生命周期走 —— 于是"第 30 帧闪一下白"**表达不出来**。
+///
+/// 补法不是给特效加 `start`/`end`（那会与图层的区间形成两套时间真相），
+/// 而是加一条**纯函数包络**：特效仍在图层区间内，只是强度按这条曲线起落。
+///
+/// # 为什么是纯 `t` 的函数
+///
+/// V-Trim 的 `handheld_sway` 注释里写着这条纪律的由来：纯函数意味着
+/// **跳帧求值、并行求值、seek 到任意时刻，结果都一样**。有累积状态的话，
+/// 预览跳到中间某帧与出片顺序播放会给出不同的图 —— 而那种差异只在成片里看得出来。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Window {
+    /// 一直生效（缺省）。强度恒为 1，除非被关键帧驱动。
+    Always,
+    /// 瞬时：上升 `attack` 帧、满值 `hold` 帧、回落 `release` 帧，**之后归零**。
+    ///
+    /// 三段包络，覆盖"闪一下"的全部形态：
+    /// - `flash` = attack 1 / hold 1 / release 4
+    /// - `shake` = attack 1 / hold 4 / release 4
+    /// - `blur`  = attack 2 / hold 3 / release 5
+    ///
+    /// 全 0 时长会得到"瞬间满值再瞬间归零"，那是合法输入（不是错误），
+    /// 所以不在这里拒绝 —— 拒绝它会把"最难的一帧"变成不可表达。
+    Transient {
+        attack: Frame,
+        hold: Frame,
+        release: Frame,
+        /// 是否在结束之后**回到 0**（缺省 true）。
+        /// false 用于"涨上去就一直保持"——它不同于 `Always`：`Always` 从一开始就是满值。
+        #[serde(default = "yes")]
+        fall_to_zero: bool,
+    },
+    /// 图层区间内线性淡入淡出，中间满值。用于"整段轻微变暗"这类**持续**效果。
+    Fade {
+        fade_in: Frame,
+        fade_out: Frame,
+    },
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for Window {
+    fn default() -> Self {
+        Self::Always
+    }
+}
+
+impl Window {
+    /// 求这一帧的强度包络，落在 `[0, 1]`。
+    ///
+    /// `local` 是**相对所属元素起点**的帧偏移（与 `Keyframe.frame` 同一个口径）。
+    /// `duration` 是元素时长，`Fade` 要靠它算回落的起点。
+    ///
+    /// **纯函数**：同样的输入永远同样的输出，不读任何外部状态。
+    pub fn envelope(&self, local: Frame, duration: Frame) -> f32 {
+        let local = local.max(0);
+        match self {
+            Self::Always => 1.0,
+            Self::Transient { attack, hold, release, fall_to_zero } => {
+                let attack = (*attack).max(0);
+                let hold = (*hold).max(0);
+                let release = (*release).max(0);
+                if local < attack {
+                    // 上升段：attack 为 0 时这一支走不到（local < 0 不可能）。
+                    return local as f32 / attack as f32;
+                }
+                let after_attack = local - attack;
+                if after_attack < hold {
+                    return 1.0;
+                }
+                let into_release = after_attack - hold;
+                if into_release < release {
+                    return 1.0 - into_release as f32 / release as f32;
+                }
+                if *fall_to_zero { 0.0 } else { 1.0 }
+            }
+            Self::Fade { fade_in, fade_out } => {
+                let fade_in = (*fade_in).max(0);
+                let fade_out = (*fade_out).max(0);
+                if fade_in > 0 && local < fade_in {
+                    return local as f32 / fade_in as f32;
+                }
+                // 回落从"结束前 fade_out 帧"开始；元素太短时两者重叠，取剩下的那截。
+                let out_start = (duration - fade_out).max(0);
+                if fade_out > 0 && local >= out_start {
+                    let remaining = duration - local;
+                    if remaining <= 0 {
+                        return 0.0;
+                    }
+                    return (remaining as f32 / fade_out as f32).clamp(0.0, 1.0);
+                }
+                1.0
+            }
+        }
+    }
+}
+
 /// 特效跑在**哪个像素空间**上。
 ///
 /// # 为什么这件事必须是数据，不能只写在注释里
@@ -348,6 +509,17 @@ pub enum EffectPipeline {
     SeparableBlur,
     /// 逐像素色彩调整：亮度 / 对比度 / 饱和度 / 色调，一趟直写。
     ColorAdjust,
+    /// 逐像素**用常量色**叠加：闪白 / 暗角 / 噪声 / 纯色覆盖。
+    ///
+    /// 与 `ColorAdjust` 的差别：那些是"重新映射现有像素"，这些是"引入一个
+    /// 与输入无关的颜色分量"。数学上都是逐像素、与坐标系无关，
+    /// 但着色器的 uniform 完全不同，所以分成两条管线。
+    ColorMask,
+    /// **坐标重映射**：按一个位移场去取源像素（抖动 / 脉冲 / 挤压 / 缩放弹跳）。
+    ///
+    /// 与前三条的关键差别是它**读邻域**（像 SeparableBlur 那样），
+    /// 但不止一趟、且位移场可以是任意的 —— 所以单独一条。
+    Warp,
 }
 
 /// 一个特效的参数规格，由 core 的注册表提供。
@@ -364,12 +536,63 @@ pub struct EffectSpec {
     pub space: EffectSpace,
     /// 怎么渲染。渲染器按它派发。
     pub pipeline: EffectPipeline,
+    /// 这个特效作为**瞬时事件**插入时的默认时长。`None` = 它只该是持续的。
+    ///
+    /// 放在 `EffectSpec` 里而不是让 UI 自己写一张表：UI 那张表一定会与
+    /// 渲染侧对"这特效是不是瞬时的"的判断漂开，而漂了没有任何东西会红。
+    pub window_default: Option<WindowDefault>,
+}
+
+impl EffectSpec {
+    /// 这个特效能否作为瞬时事件使用。
+    pub const fn is_transient_capable(&self) -> bool {
+        self.window_default.is_some()
+    }
+}
+
+/// 瞬时特效的**默认时长**（帧）。
+///
+/// 与 `EffectSpec` 分开，是因为它描述的是"**这个特效在 UI 上点一下默认多长**"，
+/// 而 `EffectSpec` 描述的是渲染契约。V-Trim 那 15 个变体各自硬编码一个时长
+/// （`0.25s` / `0.3s` / `0.4s`），散在一张 `match` 表里；
+/// 收在这里之后，"加一个特效"不必再去改那张表。
+///
+/// 单位是**帧**而不是秒：铁律 1 要求时间一律整数帧，
+/// 而"0.25 秒在 30fps 下是 7.5 帧"这种事不该由每个特效各自换算。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowDefault {
+    pub attack: Frame,
+    pub hold: Frame,
+    pub release: Frame,
+}
+
+impl WindowDefault {
+    /// 给 UI 用的一次性默认窗口。
+    pub const fn transient(self) -> Window {
+        Window::Transient {
+            attack: self.attack,
+            hold: self.hold,
+            release: self.release,
+            fall_to_zero: true,
+        }
+    }
+
+    /// 总时长（帧）。UI 显示"这个特效持续多久"。
+    pub const fn total(self) -> Frame {
+        self.attack + self.hold + self.release
+    }
 }
 
 impl EffectSpec {
     /// 某个参数的上界。找不到就是 None（调用方不该猜一个默认上界）。
     pub fn param_max(&self, name: &str) -> Option<f32> {
         self.params.iter().find(|(n, _, _)| *n == name).map(|(_, _, max)| *max)
+    }
+
+    /// 某个参数的下界。
+    pub fn param_min(&self, name: &str) -> Option<f32> {
+        self.params.iter().find(|(n, _, _)| *n == name).map(|(_, min, _)| *min)
     }
 }
 
@@ -641,6 +864,7 @@ mod tests {
         params: &[("radius", 0.0, 64.0)],
         space: EffectSpace::Document,
         pipeline: EffectPipeline::SeparableBlur,
+        window_default: None,
     };
 
     #[test]
@@ -735,6 +959,7 @@ mod tests {
         project.tracks[0].clips[0].effects = vec![Effect {
             kind: "gaussian_blur".to_string(),
             params: BTreeMap::from([("radius".to_string(), 8.0)]),
+            ..Default::default()
         }];
         assert!(validate_project_with_effects(&project, &[BLUR]).is_empty());
 
@@ -768,6 +993,7 @@ mod tests {
         project.tracks[0].clips[0].effects = vec![Effect {
             kind: "随便什么".to_string(),
             params: BTreeMap::new(),
+            ..Default::default()
         }];
         assert!(validate_project(&project).is_empty());
     }
@@ -884,6 +1110,7 @@ mod tests {
                 ("alpha".to_string(), 1.0),
                 ("radius".to_string(), 8.0),
             ]),
+            ..Default::default()
         }];
         let text = serde_json::to_string(&project).expect("应当能序列化");
         let back: Project = serde_json::from_str(&text).expect("应当能反序列化");

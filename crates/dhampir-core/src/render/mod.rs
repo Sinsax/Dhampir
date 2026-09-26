@@ -16,6 +16,8 @@
 mod blit;
 mod blur;
 mod color_adjust;
+mod color_mask;
+mod warp;
 mod compose;
 mod overlay;
 mod probe;
@@ -49,6 +51,10 @@ pub use corpus::{
 pub use blit::{BLIT_WGSL, BlitRenderer};
 pub use blur::{BLUR_WGSL, BlurRenderer, MAX_RADIUS as BLUR_MAX_RADIUS, TAPS as BLUR_TAPS, gaussian_weights_1d};
 pub use color_adjust::{COLOR_ADJUST_WGSL, ColorAdjustParams, ColorAdjustRenderer};
+pub use color_mask::{
+    COLOR_MASK_WGSL, ColorMaskParams, ColorMaskRenderer, OverlayShape,
+};
+pub use warp::{WARP_WGSL, WarpParams, WarpRenderer};
 pub use compose::{COMPOSE_WGSL, Compositor, LayerDraw, RenderSpace, inverse_affine};
 pub use overlay::{
     InkBounds, InkReport, OverlayItem, OverlayReport, compose_overlay, ink_report,

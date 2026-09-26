@@ -21,8 +21,12 @@ export type Easing = "linear" | "ease_in" | "ease_out" | "ease_in_out";
 export interface Effect {
   /** 类型串，对应 core 的特效注册表。 */
   kind: string;
+  /** 整体混合强度，与 `window` 的包络**相乘**。缺省 1.0。 */
+  opacity?: number;
   /** 参数用 BTreeMap：同一份工程序列化出来必须**逐字节相同**，HashMap 做不到这点。 */
   params?: Record<string, number>;
+  /** 时间窗。缺省 `Always` = 老工程的行为（整个图层生命周期都生效）。 */
+  window?: Window;
 }
 
 export interface Keyframe {
@@ -112,3 +116,5 @@ export interface TransitionSpec {
   /** 类型串，对应 core 的转场注册表。 */
   kind: string;
 }
+
+export type Window = Record<string, never>;

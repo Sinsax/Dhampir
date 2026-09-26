@@ -4,7 +4,7 @@
 //! 分成两份的话，UI 上控件的取值范围和后端实际接受的取值范围迟早对不上——
 //! 而那种不一致表现为"用户能拖到某个值，导出时才报错"。
 
-use dhampir_timeline::schema::{EffectPipeline, EffectSpace, EffectSpec};
+use dhampir_timeline::schema::{EffectPipeline, EffectSpace, EffectSpec, WindowDefault};
 
 /// 高斯模糊。radius 是像素半径。
 ///
@@ -14,8 +14,7 @@ use dhampir_timeline::schema::{EffectPipeline, EffectSpace, EffectSpec};
 /// 有一条测试把两者钉在一起。
 pub const GAUSSIAN_BLUR: EffectSpec = EffectSpec {
     kind: "gaussian_blur",
-    params: &[("radius", 0.0, crate::render::BLUR_MAX_RADIUS as f32)],
-    // **这个 space 是「默认空间」，不是唯一真相。**
+    params: &[("radius", 0.0, crate::render::BLUR_MAX_RADIUS as f32)],    // **这个 space 是「默认空间」，不是唯一真相。**
     //
     // 同一个 kind 在两个空间里都会出现：实拍片段上的 gaussian_blur 跑在源纹理上
     // （源像素，不换算），调整图层上的同名特效跑在目标尺寸上（文档像素，要换算）。
@@ -30,6 +29,8 @@ pub const GAUSSIAN_BLUR: EffectSpec = EffectSpec {
     // 而"该缩没缩"长得像"模糊得不够"—— 后者正是本项目最要避免的**静默偏差**。
     space: EffectSpace::Document,
     pipeline: EffectPipeline::SeparableBlur,
+    // 瞬时模糊（V-Trim 的 blur 事件）：涨 2 帧、满 3 帧、落 5 帧 ≈ 0.33 秒 @30fps。
+    window_default: Some(WindowDefault { attack: 2, hold: 3, release: 5 }),
 };
 
 /// 四个逐像素色彩调整。**同一条管线**，所以这里登记四次、渲染只写一次。
@@ -48,6 +49,7 @@ pub const BRIGHTNESS: EffectSpec = EffectSpec {
     // 不涉及"文档像素"这个概念（ColorAdjust 管线根本不调半径换算）。
     space: EffectSpace::Source,
     pipeline: EffectPipeline::ColorAdjust,
+    window_default: None,
 };
 /// 对比度：绕 0.5 中灰缩放。1.0 = 不变。
 pub const CONTRAST: EffectSpec = EffectSpec {
@@ -55,6 +57,7 @@ pub const CONTRAST: EffectSpec = EffectSpec {
     params: &[("amount", 0.0, 4.0)],
     space: EffectSpace::Source,
     pipeline: EffectPipeline::ColorAdjust,
+    window_default: None,
 };
 /// 饱和度：向亮度插值。1.0 = 不变，0.0 = 完全灰度。
 pub const SATURATION: EffectSpec = EffectSpec {
@@ -62,6 +65,7 @@ pub const SATURATION: EffectSpec = EffectSpec {
     params: &[("amount", 0.0, 4.0)],
     space: EffectSpace::Source,
     pipeline: EffectPipeline::ColorAdjust,
+    window_default: None,
 };
 /// 色调：色相旋转，单位**度**（不是弧度）。
 ///
@@ -73,9 +77,140 @@ pub const HUE: EffectSpec = EffectSpec {
     params: &[("degrees", -180.0, 180.0)],
     space: EffectSpace::Source,
     pipeline: EffectPipeline::ColorAdjust,
+    window_default: None,
 };
 /// 全部已登记的特效。
-pub const REGISTRY: &[EffectSpec] = &[GAUSSIAN_BLUR, BRIGHTNESS, CONTRAST, SATURATION, HUE];
+///
+/// **顺序不重要**（查找是线性的），但分组成段便于读。
+pub const REGISTRY: &[EffectSpec] = &[
+    // ---- 已有 ----
+    GAUSSIAN_BLUR,
+    BRIGHTNESS,
+    CONTRAST,
+    SATURATION,
+    HUE,
+    // ---- ColorMask（T10）----
+    FLASH,
+    VIGNETTE,
+    NOISE,
+    OVERLAY,
+    // ---- Warp（T11）----
+    SHAKE,
+    ZOOM_BOUNCE,
+    PULSE,
+    SPLIT,
+];
+
+// ===== ColorMask 管线（T10）：用常量色叠加的逐像素算子 =====
+//
+// 与 ColorAdjust 的区别见 EffectPipeline::ColorMask 的注释。这四个都是
+// V-Trim 里真有的事件（flash / vignette / noise / overlay），不是凭空加的。
+//
+// **颜色一律拆成 r/g/b/a 四个参数**，不引第二个 map：
+// `params` 是 `BTreeMap<String, f32>`，一个字段一个含义，靠键名约定
+// （`"color"` 装四个数）迟早会在某一端被解析错，而那种错不会报错、只会画错颜色。
+
+/// 闪白（可带色）。`amount` 是覆盖强度，颜色由 r/g/b 给。
+///
+/// V-Trim 的 flash 默认白色、0.25 秒。这里用同一个默认窗。
+pub const FLASH: EffectSpec = EffectSpec {
+    kind: "flash",
+    params: &[
+        ("amount", 0.0, 1.0),
+        ("r", 0.0, 1.0),
+        ("g", 0.0, 1.0),
+        ("b", 0.0, 1.0),
+    ],
+    space: EffectSpace::Source,
+    pipeline: EffectPipeline::ColorMask,
+    window_default: Some(WindowDefault { attack: 1, hold: 1, release: 4 }),
+};
+
+/// 暗角：从中心到边缘逐渐压暗。`amount` 是边缘处的压暗量。
+pub const VIGNETTE: EffectSpec = EffectSpec {
+    kind: "vignette",
+    params: &[("amount", 0.0, 1.0), ("radius", 0.1, 2.0), ("softness", 0.0, 1.0)],
+    space: EffectSpace::Document,
+    pipeline: EffectPipeline::ColorMask,
+    window_default: Some(WindowDefault { attack: 2, hold: 4, release: 6 }),
+};
+
+/// 噪声。`amount` 是叠加强度，`seed` 决定这一份噪声长什么样（**可复现**）。
+///
+/// 噪声**必须是帧号的函数**（见 `Window` 的注释）：用系统随机会让预览与成片
+/// 逐帧不同，而那正是本项目最要避免的"看起来成功、其实没验"。
+pub const NOISE: EffectSpec = EffectSpec {
+    kind: "noise",
+    params: &[("amount", 0.0, 1.0), ("seed", 0.0, 4096.0)],
+    space: EffectSpace::Source,
+    pipeline: EffectPipeline::ColorMask,
+    window_default: Some(WindowDefault { attack: 1, hold: 4, release: 4 }),
+};
+
+/// 纯色/渐变覆盖层。`shape` 0=纯色 1=线性渐变 2=径向渐变。
+///
+/// 渐变的第二个颜色用 `r2/g2/b2` —— 与主色同一套命名，不发明新规则。
+pub const OVERLAY: EffectSpec = EffectSpec {
+    kind: "overlay",
+    params: &[
+        ("amount", 0.0, 1.0),
+        ("r", 0.0, 1.0),
+        ("g", 0.0, 1.0),
+        ("b", 0.0, 1.0),
+        ("r2", 0.0, 1.0),
+        ("g2", 0.0, 1.0),
+        ("b2", 0.0, 1.0),
+        ("shape", 0.0, 2.0),
+        ("angle", 0.0, 360.0),
+    ],
+    space: EffectSpace::Document,
+    pipeline: EffectPipeline::ColorMask,
+    window_default: None,
+};
+
+// ===== Warp 管线（T11）：坐标重映射 =====
+//
+// 单位一律用**归一化量**（相对画面尺寸的比例），不用像素：
+// 像素在预览（640x360）与成片（1920x1080）里含义不同，两端就不一致了 ——
+// 这条理由与 SubtitleStyle 用 font_ratio 而不是字号像素是同一条。
+
+/// 抖动：高频小幅位移。`amount` 是位移幅度（画面宽度的比例），`frequency` 是每秒振荡次数。
+pub const SHAKE: EffectSpec = EffectSpec {
+    kind: "shake",
+    params: &[("amount", 0.0, 0.2), ("frequency", 1.0, 60.0), ("seed", 0.0, 4096.0)],
+    space: EffectSpace::Document,
+    pipeline: EffectPipeline::Warp,
+    window_default: Some(WindowDefault { attack: 1, hold: 4, release: 4 }),
+};
+
+/// 缩放弹跳：`amount` 是最大放大倍数（0.1 = 放大 10%）。
+pub const ZOOM_BOUNCE: EffectSpec = EffectSpec {
+    kind: "zoom_bounce",
+    params: &[("amount", 0.0, 1.0), ("frequency", 0.5, 30.0)],
+    space: EffectSpace::Document,
+    pipeline: EffectPipeline::Warp,
+    window_default: Some(WindowDefault { attack: 2, hold: 4, release: 6 }),
+};
+
+/// 脉冲：低频呼吸式缩放，比 zoom_bounce 缓和。
+pub const PULSE: EffectSpec = EffectSpec {
+    kind: "pulse",
+    params: &[("amount", 0.0, 1.0), ("frequency", 0.5, 30.0)],
+    space: EffectSpace::Document,
+    pipeline: EffectPipeline::Warp,
+    window_default: Some(WindowDefault { attack: 3, hold: 4, release: 5 }),
+};
+
+/// 分屏：把画面沿中线切成两半，各自横移并倾斜。
+///
+/// `offset` 是两半分开的距离（画面宽度的比例），`skew` 是倾斜（度）。
+pub const SPLIT: EffectSpec = EffectSpec {
+    kind: "split",
+    params: &[("offset", 0.0, 0.5), ("skew", -45.0, 45.0), ("amount", 0.0, 1.0)],
+    space: EffectSpace::Document,
+    pipeline: EffectPipeline::Warp,
+    window_default: Some(WindowDefault { attack: 1, hold: 4, release: 4 }),
+};
 
 /// 按类型串查登记项。
 pub fn spec_of(kind: &str) -> Option<&'static EffectSpec> {
@@ -112,7 +247,60 @@ mod tests {
     fn 登记表能查到也能列出来() {
         assert!(spec_of("gaussian_blur").is_some());
         assert!(spec_of("不存在的特效").is_none());
-        assert_eq!(kinds(), vec!["brightness", "contrast", "gaussian_blur", "hue", "saturation"]);
+        assert_eq!(
+            kinds(),
+            vec![
+                "brightness",
+                "contrast",
+                "flash",
+                "gaussian_blur",
+                "hue",
+                "noise",
+                "overlay",
+                "pulse",
+                "saturation",
+                "shake",
+                "split",
+                "vignette",
+                "zoom_bounce",
+            ]
+        );
+    }
+
+    #[test]
+    fn 瞬时特效都要给默认时长() {
+        // 这条守的是"加了特效但忘了说它能不能当瞬时事件用"。
+        // 没有 window_default 的特效在 UI 上插不进"第 30 帧闪一下"那类事件，
+        // 而那正是 V-Trim polish 的主要用法 —— 漏了会表现为"这个特效点不出来"。
+        for spec in REGISTRY {
+            if spec.is_transient_capable() {
+                let window = spec.window_default.expect("刚判过有");
+                assert!(
+                    window.total() > 0,
+                    "{} 的默认窗口总时长为 0，插进时间线等于看不见",
+                    spec.kind
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn 每条管线都至少有一个特效在用() {
+        // 反向用例的价值在于**钉住"这批特效确实各自有归属"**：
+        // 任何一条没有 pipeline 的 kind 都进不了 REGISTRY（类型上就要求有），
+        // 所以这里改钉"四种管线各至少有一个使用者"——
+        // 若哪天某条管线空了，说明它被合并或被删，那件事该被看见。
+        for pipeline in [
+            EffectPipeline::SeparableBlur,
+            EffectPipeline::ColorAdjust,
+            EffectPipeline::ColorMask,
+            EffectPipeline::Warp,
+        ] {
+            assert!(
+                REGISTRY.iter().any(|spec| spec.pipeline == pipeline),
+                "{pipeline:?} 没有任何特效在用 —— 它要么该删，要么是漏登记了"
+            );
+        }
     }
 
     #[test]
@@ -151,6 +339,51 @@ mod tests {
                     assert!(
                         matches!(spec.space, EffectSpace::Source),
                         "{} 是逐像素算子，空间应当声明为 Source",
+                        spec.kind
+                    );
+                }
+                EffectPipeline::ColorMask => {
+                    // 用常量色叠加的算子**必须**给出 amount —— 它是这一趟的强度，
+                    // 没有它这条特效画出来与不画一样，而用户会以为"特效没生效"。
+                    assert!(
+                        spec.param_max("amount").is_some(),
+                        "{} 走 ColorMask 却没有 amount 参数",
+                        spec.kind
+                    );
+                    // **不许把强度塞进 params 之外**：即便有 amount，
+                    // 它也不能越出 [0,1] —— 那是"覆盖多少"的定义域。
+                    let (min, max) = spec
+                        .params
+                        .iter()
+                        .find(|(name, _, _)| *name == "amount")
+                        .map(|(_, min, max)| (*min, *max))
+                        .expect("上面刚断言过有 amount");
+                    assert!(
+                        min >= 0.0 && max <= 1.0,
+                        "{} 的 amount 范围 [{min}, {max}] 越出 [0, 1]",
+                        spec.kind
+                    );
+                }
+                EffectPipeline::Warp => {
+                    // 坐标重映射**必须**有 amount：它决定位移多大。
+                    // 没有它这条管线会退化成恒等映射（每帧重画一遍什么都不改）。
+                    assert!(
+                        spec.param_max("amount").is_some(),
+                        "{} 走 Warp 却没有 amount 参数",
+                        spec.kind
+                    );
+                    // 位移量用**归一化**比例（画面宽度的几分之几），不许用像素：
+                    // 像素在预览 640x360 与成片 1920x1080 里含义不同 —— 
+                    // 与 SubtitleStyle 用 font_ratio 是同一条理由。
+                    let (_, max) = spec
+                        .params
+                        .iter()
+                        .find(|(name, _, _)| *name == "amount")
+                        .map(|(_, min, max)| (*min, *max))
+                        .expect("上面刚断言过有 amount");
+                    assert!(
+                        max <= 1.0,
+                        "{} 的 amount 上界 {max} 不像是归一化比例（应当 <= 1.0）",
                         spec.kind
                     );
                 }
@@ -210,6 +443,8 @@ mod tests {
                     effects: vec![Effect {
                         kind: "gaussian_blur".to_string(),
                         params: BTreeMap::from([("radius".to_string(), 8.0)]),
+                        window: dhampir_timeline::schema::Window::Always,
+                        opacity: 1.0,
                     }],
                     keyframes: Vec::new(),
                     transition_in: None,

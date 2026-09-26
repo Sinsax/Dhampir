@@ -37,7 +37,7 @@ impl SourceResolver for OneSource {
 fn blur_effect(radius: f32) -> Effect {
     let mut params = BTreeMap::new();
     params.insert("radius".to_string(), radius);
-    Effect { kind: "gaussian_blur".to_string(), params }
+    Effect { kind: "gaussian_blur".to_string(), params, ..Default::default() }
 }
 
 fn layer(clip_id: &str, opacity: f32, scale: f32, effects: Vec<Effect>) -> Layer {
