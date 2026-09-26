@@ -417,6 +417,33 @@ mod tests {
         }
     }
 
+    /// 造一条 v2 元素：只给关心的字段，其余按契约缺省。
+    ///
+    /// `Layer` 自己没有 `Default`（它是契约类型，加一个会在别处被误用成
+    /// "零值元素"），所以测试里这份"缺省"由本地函数提供 ——
+    /// 它只影响用例的可读性，不污染契约。
+    fn element(
+        id: &str,
+        start: Frame,
+        end: Frame,
+        source: Option<dhampir_timeline::layer::SourceRef>,
+    ) -> dhampir_timeline::layer::Layer {
+        dhampir_timeline::layer::Layer {
+            id: id.to_string(),
+            start,
+            end,
+            transform: Default::default(),
+            opacity: 1.0,
+            blend: BlendMode::Normal,
+            enabled: true,
+            recorded: Default::default(),
+            source,
+            effects: Vec::new(),
+            transition_in: None,
+            keyframes: Vec::new(),
+        }
+    }
+
     fn clip(id: &str, track_at: Frame, duration: Frame) -> Clip {
         Clip {
             id: id.to_string(),
@@ -430,6 +457,69 @@ mod tests {
             keyframes: Vec::new(),
             transition_in: None,
         }
+    }
+
+    #[test]
+    fn 动图的逐帧定位走的是与视频同一套换算() {
+        // T12 的**核心断言**：动图不必发明第二条渲染路径。
+        //
+        // `AssetKind::ImageSequence` 只是登记表里的一个标记（它带来校验规则），
+        // 而"这一帧该取第几张"由 `frame_count` + `timebase` 那套算出来 ——
+        // 与视频**完全同一份代码**。所以这里用一条 video 轨 + 一个 12fps 的
+        // 动图素材，验证时间线帧号确实被换算成了不同的素材帧。
+        use dhampir_timeline::layer::{AssetTimebases, SourceRef};
+
+        let timeline = one_layer_v2(element(
+            "sticker",
+            0,
+            30,
+            Some(SourceRef { asset_id: "anim.gif".to_string(), source_in: 0 }),
+        ));
+
+        // 时间线 30fps，动图 12fps：走 1 秒（30 帧）应当走完 12 张。
+        let mut assets = AssetTimebases::new();
+        assets.insert("anim.gif".to_string(), TimebaseDto { num: 12, den: 1 });
+
+        let at = |frame: Frame| {
+            evaluate_v2_with_assets(&timeline, frame, Some(&assets))
+                .layers
+                .first()
+                .map(|layer| layer.source_frame)
+        };
+
+        assert_eq!(at(0), Some(0), "第 0 帧取第 0 张");
+        assert_eq!(at(10), Some(4), "时间线 10 帧 = 1/3 秒 = 动图第 4 张");
+        assert_eq!(at(20), Some(8));
+        // 区间是**左闭右开** `[0, 30)`：第 30 帧已经不在这一层里了。
+        assert_eq!(at(29), Some(11), "最后一帧是第 29 帧");
+        assert_eq!(at(30), None, "右端不含 —— 第 30 帧不属于这一层");
+
+        // **关键**：相邻时间线帧上，动图的素材帧不总是相同 ——
+        // 若这条不成立，"动图"其实就是一张静态图（它会一直停在第一帧）。
+        let distinct: std::collections::BTreeSet<_> = (0..30).filter_map(at).collect();
+        assert!(
+            distinct.len() >= 3,
+            "30 帧里只取到 {} 个不同的素材帧，动图等于没动",
+            distinct.len()
+        );
+    }
+
+    #[test]
+    fn 没有素材时间基时动图退回恒等换算() {
+        // 契约层没登记时间基时**不猜帧率**（那是 `asset_timebases` 注释里的纪律）：
+        // 退回"素材帧 == 时间线帧"。表现是动图按时间线的帧率放，
+        // 而不是按它自己的 —— 那是个可见的近似，比猜一个数好。
+        use dhampir_timeline::layer::SourceRef;
+
+        let timeline = one_layer_v2(element(
+            "sticker",
+            0,
+            30,
+            Some(SourceRef { asset_id: "anim.gif".to_string(), source_in: 5 }),
+        ));
+
+        let composite = evaluate_v2_with_assets(&timeline, 10, None);
+        assert_eq!(composite.layers[0].source_frame, 15, "5 + 10，恒等换算");
     }
 
     fn video(clips: Vec<Clip>) -> Track {

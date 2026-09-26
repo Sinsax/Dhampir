@@ -22,7 +22,7 @@ export interface Asset {
   width?: number | null;
 }
 
-export type AssetKind = "video" | "audio" | "image" | "subtitle";
+export type AssetKind = "video" | "audio" | "image" | "image_sequence" | "subtitle";
 
 export type BlendMode = "normal" | "add" | "multiply" | "screen" | "darken" | "lighten" | "overlay" | "soft_light" | "difference";
 

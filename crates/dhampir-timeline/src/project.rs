@@ -61,6 +61,30 @@ pub enum AssetKind {
     Video,
     Audio,
     Image,
+    /// 动图（GIF / APNG / 动画 WebP）。
+    ///
+    /// # 为什么与 `Image` 分开
+    ///
+    /// 静态图的"素材内定位"是**没有意义**的：它永远同一张。动图有 ——
+    /// 第 0 帧与第 40 帧是两张不同的画。
+    ///
+    /// 分开之后，校验层能对两者提不同的要求：
+    /// 动图**必须**给出 `frame_count`（否则不知道该播到哪一帧、也不知道怎么循环），
+    /// 静态图给了也无所谓（多余信息，不报错）。
+    ///
+    /// 渲染侧**不需要**为它写第二条路径：`frame_count` + `timebase` 这套
+    /// 定位机制与视频共用，所以"取动图的第 N 帧"就是"取素材的第 N 帧"。
+    ///
+    /// # 目前的完成度（**别把它当成已通**）
+    ///
+    /// - **契约与求值层：已通**。逐帧定位复用视频那一套，有测试钉着。
+    /// - **浏览器宿主：已通**（`<img>` / `ImageBitmap` 自己按动画时序给帧）。
+    /// - **原生宿主：未通**。解码器是 `ffmpeg` 一把梭当帧序列读，
+    ///   而它对动图是**按标称帧率把帧铺开**的：实测一个 2 帧的 GIF 解出 20 帧，
+    ///   于是作者填的 `frame_count` 与实际帧数对不上，表现是"动图停在前几帧"且**不报错**。
+    ///
+    /// 详见 `plan/p9-polish-parity-design.md` §11.1。
+    ImageSequence,
     /// 字幕（SRT / ASS）。**它也是一种素材** —— 位置同样由 uri 给，
     /// 于是"字幕"不必发明第二套引用机制：轨道引用它，与引用一段视频没有区别。
     Subtitle,
@@ -490,6 +514,33 @@ pub fn validate_project_doc(doc: &ProjectDoc, effects: &[EffectSpec]) -> DocIssu
     // 这两条是**新的轨类型带来的新契约**：字幕轨只能引用字幕素材，
     // 弹幕轨必须带参数。不查的话，把一段 mp4 挂到字幕轨上会一路静默到渲染，
     // 而那时的表现是"什么都没有"。
+    for (asset_index, asset) in doc.assets.iter().enumerate() {
+        // 动图必须有帧数：没有它就不知道"这一帧该取第几张"，
+        // 也不知道循环从哪里回卷 —— 而表现是**它一直停在第一帧**，
+        // 看起来像"动图没动"，查起来要翻到素材登记表才发现。
+        if asset.kind == AssetKind::ImageSequence && asset.frame_count.is_none() {
+            errors.push(Issue::new(
+                "image_sequence_needs_frame_count",
+                &format!("assets[{asset_index}].frame_count"),
+                format!(
+                    "动图素材 {} 必须给出 frame_count（它决定这一帧取第几张、以及循环点）",
+                    asset.id
+                ),
+            ));
+        }
+        // 帧数给了就必须是正的：0 或负数会让"取哪一帧"变成一个空集合。
+        if asset.kind == AssetKind::ImageSequence
+            && let Some(count) = asset.frame_count
+            && count <= 0
+        {
+            errors.push(Issue::new(
+                "image_sequence_bad_frame_count",
+                &format!("assets[{asset_index}].frame_count"),
+                format!("动图素材 {} 的 frame_count 必须是正数，实得 {count}", asset.id),
+            ));
+        }
+    }
+
     for (track_index, track) in doc.timeline.tracks.iter().enumerate() {
         let path = format!("tracks[{track_index}]");
         match track.kind {
@@ -619,6 +670,66 @@ mod tests {
 
     fn codes(issues: &[Issue]) -> Vec<&str> {
         issues.iter().map(|i| i.code.as_str()).collect()
+    }
+
+    #[test]
+    fn 动图没有帧数要报错() {
+        // 没有 frame_count 就不知道"这一帧取第几张"，也不知道循环点在哪。
+        // 不报的话表现是**它一直停在第一帧** —— 看起来像"动图没动"，
+        // 而查起来要翻到素材登记表才发现。
+        let mut anim = asset("anim", None);
+        anim.kind = AssetKind::ImageSequence;
+        let d = doc(vec![anim], vec![layer_with("l1", 0, 30, Some("anim"), 0)]);
+        let issues = validate_project_doc(&d, &[]);
+        assert!(
+            codes(&issues.errors).contains(&"image_sequence_needs_frame_count"),
+            "应当报动图缺帧数，实得 {:?}",
+            codes(&issues.errors)
+        );
+        // path 要指到那个字段，光说"有问题"没法定位。
+        assert!(
+            issues
+                .errors
+                .iter()
+                .any(|i| i.path.contains("assets[0].frame_count")),
+            "path 要指到 frame_count：{:?}",
+            issues.errors.iter().map(|i| &i.path).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn 动图的帧数必须是正数() {
+        let mut anim = asset("anim", Some(0));
+        anim.kind = AssetKind::ImageSequence;
+        let d = doc(vec![anim], vec![layer_with("l1", 0, 30, Some("anim"), 0)]);
+        let issues = validate_project_doc(&d, &[]);
+        assert!(
+            codes(&issues.errors).contains(&"image_sequence_bad_frame_count"),
+            "帧数 0 要报错，实得 {:?}",
+            codes(&issues.errors)
+        );
+    }
+
+    #[test]
+    fn 静态图没有帧数不算错() {
+        // **静态图的"素材内定位"没有意义**：它永远同一张。
+        // 对它提 frame_count 的要求会是假报错 —— 而假报错比不报更糟，
+        // 因为下一个人会把这条校验删掉。
+        let mut still = asset("logo", None);
+        still.kind = AssetKind::Image;
+        let d = doc(vec![still], vec![layer_with("l1", 0, 30, Some("logo"), 0)]);
+        let issues = validate_project_doc(&d, &[]);
+        assert!(issues.is_ok(), "静态图不该被要求给帧数：{:?}", codes(&issues.errors));
+    }
+
+    #[test]
+    fn 动图给了合法帧数就通过() {
+        let mut anim = asset("anim", Some(12));
+        anim.kind = AssetKind::ImageSequence;
+        // 12 帧的素材，取 0..12 正好取完（左闭右开）。
+        let d = doc(vec![anim], vec![layer_with("l1", 0, 12, Some("anim"), 0)]);
+        let issues = validate_project_doc(&d, &[]);
+        assert!(issues.is_ok(), "合法的动图工程不该报错：{:?}", codes(&issues.errors));
     }
 
     #[test]

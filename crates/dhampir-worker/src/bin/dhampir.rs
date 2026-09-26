@@ -1536,6 +1536,14 @@ fn infer_kind(path: &Path) -> AssetKind {
     match extension.as_deref() {
         Some("srt") | Some("ass") | Some("ssa") | Some("vtt") => AssetKind::Subtitle,
         Some("wav") | Some("mp3") | Some("aac") | Some("m4a") | Some("flac") => AssetKind::Audio,
+        // 动图按扩展名认：这几种**按规范就是多帧容器**。
+        Some("gif") | Some("apng") => AssetKind::ImageSequence,
+        // **webp 两可**：它既可能是单帧图，也可能是动画 WebP。
+        // 扩展名看不出来，所以这里不猜 —— 猜错的代价单向：
+        // 把静态图当动图会要求它给 frame_count（那张图本来就没有），
+        // 把动图当静态图的表现是"它停在第一帧"，而那是**静默**的。
+        //
+        // 归静态图，需要动图时由调用方显式改登记表里的 kind（见 README 的登记流程）。
         Some("png") | Some("jpg") | Some("jpeg") | Some("webp") | Some("bmp") => AssetKind::Image,
         _ => AssetKind::Video,
     }
