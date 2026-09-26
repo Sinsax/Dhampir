@@ -370,13 +370,21 @@ clip.json  ───┘                 ▲
 
 | 项 | 读数 |
 |---|---|
-| `cargo test --workspace` | **609 passed**（T7 收口时是 547） |
+| `cargo test --workspace` | **626 passed**（T7 收口时是 547） |
 | `cargo check --workspace --all-targets` | **0 warning** |
 | `dhampir-wasm` → `wasm32-unknown-unknown` | **0 error** |
 | `node scripts/run-guards.mjs` | **20 / 20 全绿** |
 | `check-dual-end` 最差 SSIM | **1.000000**（动过两个宿主的渲染调用路径之后仍然是） |
 | `check-effect-registry` | 13 个特效 / 4 条管线，全部与渲染实现一致 |
 | 整条出片腿（90 帧 + 音轨） | **收掉**：h264 640x360 / aac 48kHz / 3.000000 秒；产物的第 45 帧与单独渲染的那一帧 **PSNR 44.07 dB** |
+
+**收口时另外抓到并修掉三个"写了没接上"**（详见 §11.2）——
+它们都不是"没写"，而是**契约、序列化、文档都齐了，只有执行路径没读它**：
+
+1. `Effect.window` 是死的 → "瞬时闪一下"会变成"整段一直闪着"。**修完拿真 GPU 逐帧核过**：12 帧全部与包络公式吻合。
+2. `TRANSFORM_TARGETS` 只有定义处 → 关键帧 `target` 拼错静默不生效。**修完补了 5 条用例**（含反向）。
+3. `AudioPlan.overlaps` 算完就丢 → "削顶看得见、叠加看不见"。**修完在真出片输出里能看到**。
+
 
 
 ### 11.1 T12 动图：实地核对后的**真实边界**（重要）
