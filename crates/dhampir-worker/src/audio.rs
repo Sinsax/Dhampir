@@ -106,7 +106,11 @@ pub fn samples_in_range(
 ///
 /// 两套坐标都在这里，因为"同源求值"这句话要能核对：
 /// `timeline_start..timeline_end` 是输出坐标，`source_start_sample` 是素材坐标。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// **不派生 `Eq`**：`gain` 是 `f32`（T13 引入）。与 `AudioPlan` 同一条理由 ——
+/// 判等用 `PartialEq` 就够，强行造 `Eq`（比如把增益比成位模式）
+/// 会让 `NaN != NaN` 这类事变成"两段看起来一样却不相等"。
+#[derive(Debug, Clone, PartialEq)]
 pub struct AudioSegment {
     /// 音轨 id 与图层 id。**只用于报错与去重**，不参与运算。
     pub track: String,
@@ -128,6 +132,25 @@ pub struct AudioSegment {
     ///
     /// **是"起始点"，不是"起点"** —— 这个采集点之前的声音不会被这一趟用到。
     pub source_start_sample: i64,
+    /// 这一段的增益（线性倍数，1.0 = 原样）。
+    ///
+    /// # 为什么带增益而不是"混音时再乘"
+    ///
+    /// 音效（SFX）天生需要它：一个"叮"压在背景人声上时，两段相加会削顶。
+    /// 削顶是**听着像坏了的**那种错（爆音），而不是"稍微响了一点"。
+    /// 把倍数放在**计划**里，它就与采样点、时长一样是可单测的纯数据；
+    /// 放到混音那一层就变成"只有跑了 ffmpeg 才知道对不对"。
+    pub gain: f32,
+}
+
+impl AudioSegment {
+    /// 这一段的时长（秒）。**给诊断用**：报错时"这一段多长"是最常问的一句。
+    pub fn seconds(&self, sample_rate: u32) -> f64 {
+        if sample_rate == 0 {
+            return 0.0;
+        }
+        self.output_samples as f64 / f64::from(sample_rate)
+    }
 }
 
 impl AudioSegment {
@@ -164,7 +187,12 @@ pub struct AudioPlan {
     pub start_sample: i64,
     pub total_samples: i64,
     pub segments: Vec<AudioSegment>,
-    /// 装载阶段就发现的问题（音轨缺素材、音轨上没有素材的图层、同区段重叠）。
+    /// 哪些段在时间线上叠在一起（会被**相加**，不是二选一）。
+    ///
+    /// 它不参与"能不能成功"的判定 —— 音效叠在背景音上是正常的（那是 SFX 的定义）。
+    /// 记下来是因为**加法会削顶**，而削顶要看得见才知道该不该调增益。
+    pub overlaps: Vec<AudioOverlap>,
+    /// 装载阶段就发现的问题（音轨缺素材、音轨上没有素材的图层）。
     /// 非空 = 这次出片**不许成功** —— 与其它问题清单同一条纪律。
     pub issues: Vec<Issue>,
 }
@@ -183,6 +211,7 @@ impl AudioPlan {
             start_sample,
             total_samples: samples_in_range(from, to, timebase, AUDIO_SAMPLE_RATE)?,
             segments: Vec::new(),
+            overlaps: Vec::new(),
             issues: Vec::new(),
         })
     }
@@ -299,6 +328,10 @@ pub fn plan_audio(
                 output_start_sample,
                 output_samples,
                 source_start_sample,
+                // 契约里还没有"每层增益"这个字段，所以一律 1.0。
+                // **写出来而不是省略**：混音那一层要靠它，而"忘了设"与"设成 1"
+                // 在类型上应当是同一种东西。
+                gain: 1.0,
             });
         }
     }
@@ -307,25 +340,44 @@ pub fn plan_audio(
     plan.segments
         .sort_by(|a, b| (&a.timeline_start, &a.track, &a.layer).cmp(&(&b.timeline_start, &b.track, &b.layer)));
 
-    // 同区段重叠 = 要混音，而**混音没实现**。
-    // 这里选择"判失败"而不是"取第一条"：后者会产出一份**听着像对的**错产物，
-    // 而"看起来成功、其实不对"正是这个仓库要消灭的东西。
+    // 同区段重叠 = 要混音。
+    //
+    // **曾经这里是"判失败"**，理由是"静默取一条会产出一份听着像对的错产物"。
+    // 那个理由至今成立 —— 所以这里仍然不许静默丢；但现在改成**真的混**，
+    // 因为音效（SFX）天生就是叠在背景音上的：一个"叮"不与任何人声重叠才是怪事。
+    // 判失败等于"音效这个功能永远做不了"。
+    //
+    // 混音本身在 `pipeline::build_audio_track`（那里才碰文件与字节）。
+    // 这里只把"这一段要与谁相加"标出来，于是它是纯数据、可单测。
     for pair in plan.segments.windows(2) {
         let (a, b) = (&pair[0], &pair[1]);
         if b.timeline_start < a.timeline_end {
-            plan.issues.push(Issue::new(
-                "audio_overlap",
-                &format!("{}[{}]+{}[{}]", a.track, a.layer, b.track, b.layer),
-                format!(
-                    "两段音频在时间线上重叠（[{}..{}) 与 [{}..{})) —— 多轨混音尚未实现，\
-                     静默取一条会产出一份听着像对的错产物",
-                    a.timeline_start, a.timeline_end, b.timeline_start, b.timeline_end
-                ),
-            ));
+            // 重叠仍然要**记一笔**：混音是加法，加多了会削顶，
+            // 而削顶是"听着像坏了"的那类错。记下来让人能看见它发生了。
+            plan.overlaps.push(AudioOverlap {
+                first: format!("{}[{}]", a.track, a.layer),
+                second: format!("{}[{}]", b.track, b.layer),
+                at: b.timeline_start,
+                samples: a.timeline_end.min(b.timeline_end) - b.timeline_start,
+            });
         }
     }
 
     Ok(plan)
+}
+
+/// 两段音频在时间线上叠在一起 —— **会被相加**，记下来供诊断。
+///
+/// 它**不是**错误：音效就是叠上去的。它是"这里做了加法"的一条记录，
+/// 因为加法可能削顶，而削顶只有看见了才知道该不该调增益。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioOverlap {
+    pub first: String,
+    pub second: String,
+    /// 从时间线的哪一帧开始叠。
+    pub at: Frame,
+    /// 叠了多少帧。
+    pub samples: Frame,
 }
 
 /// 视频那一侧给某一帧取的是素材的哪一帧 —— 音频用它来核对"同一个时间点"。
@@ -680,7 +732,11 @@ mod tests {
     }
 
     #[test]
-    fn 两段重叠是判失败而不是随便取一条() {
+    fn 两段重叠是相加而不是判失败() {
+        // **这条在 T13 变了。** 从前重叠判失败（"静默取一条会产出一份听着像对的
+        // 错产物"）—— 那个理由至今成立，所以这里仍然不许静默丢；
+        // 但改成**真的混**，因为音效（SFX）天生就叠在背景音上：
+        // 判失败等于"音效这个功能永远做不了"。
         let mut timeline = one_clip(0, 60, 0, "tone", tb(30, 1));
         timeline.tracks.push(TrackV2 {
             id: "a2".to_string(),
@@ -697,8 +753,40 @@ mod tests {
             89,
         )
         .unwrap();
-        assert!(!plan.issues.is_empty());
-        assert!(plan.issues.iter().any(|issue| issue.code == "audio_overlap"));
+        // 不再报错：叠加是正常操作。
+        assert!(
+            plan.issues.is_empty(),
+            "重叠不该再判失败：{:?}",
+            plan.issues.iter().map(|i| &i.code).collect::<Vec<_>>()
+        );
+        // 但**要记下来**：加法会削顶，削顶要看得见才知道该不该调增益。
+        assert_eq!(plan.overlaps.len(), 1, "重叠要记一笔，实得 {:?}", plan.overlaps);
+        assert_eq!(plan.overlaps[0].at, 30);
+        // 两段都还在计划里（不许静默丢掉任何一段）。
+        assert_eq!(plan.segments.len(), 2);
+    }
+
+    #[test]
+    fn 不重叠的段不产生叠加记录() {
+        // 反向用例：把"记一笔"写成无条件的，会让每份多轨工程都报一堆假重叠。
+        let mut timeline = one_clip(0, 30, 0, "tone", tb(30, 1));
+        timeline.tracks.push(TrackV2 {
+            id: "a2".to_string(),
+            kind: TrackKind::Audio,
+            layers: vec![clip_layer("other", 30, 60, "tone", 0)],
+            subtitle: None,
+            danmaku: None,
+        });
+        let plan = plan_audio(
+            &timeline,
+            &sources(&[("tone", "tone.m4a")]),
+            &asset_tb("tone", 30, 1),
+            0,
+            59,
+        )
+        .unwrap();
+        assert!(plan.overlaps.is_empty(), "首尾相接不是重叠：{:?}", plan.overlaps);
+        assert_eq!(plan.segments.len(), 2);
     }
 
     #[test]

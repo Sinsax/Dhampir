@@ -977,6 +977,15 @@ pub struct AudioStats {
     /// 它是"这一段到底用了多少素材"的数：拿它与 `expected_samples - gap_samples`
     /// 比一比，就知道有没有素材白读了或者读漏了。
     pub source_samples_read: i64,
+    /// 与已有内容**相加**的采样点数（音效叠加，T13）。
+    ///
+    /// 0 = 这一趟没有叠加，音轨是纯顺序写出来的 —— 与引入音效之前走的是同一条路。
+    pub mixed_samples: i64,
+    /// 相加之后被**钳位**的采样点数。
+    ///
+    /// **这个数不为零必须看得见**：它是"增益调大了、该改小一点"的信号。
+    /// 钳位本身是安全的（不会回绕成爆音），但它意味着那一瞬间的波形被削平了。
+    pub clipped_samples: i64,
 }
 
 /// 一次出片的结果。**问题清单不在这里判** —— 本模块只出事实，
@@ -1180,6 +1189,18 @@ fn write_silence(
 /// 每段的代价是"从素材头解到这段末尾"（而不是只解这一段），
 /// 这个代价量在 `plan/t6-evidence.md` 里 —— 别把它当成"不要钱"。
 fn extract_segment(segment: &AudioSegment, out: &mut impl Write) -> Result<i64, String> {
+    extract_segment_samples(segment, |chunk| out.write_all(chunk).map_err(|e| e.to_string()))
+}
+
+/// 与 [`extract_segment`] 相同，但把每块 PCM 交给回调而不是自己写文件。
+///
+/// **抽出来是为了混音**：混音那一趟要把这一段与已经写在盘上的内容**相加**，
+/// 而"相加"没法用一个顺序 write 表达（它要读回、相加、再写回）。
+/// 让这一段只负责"产出采样"，读回与相加交给调用方，两边就都不必知道对方的细节。
+fn extract_segment_samples(
+    segment: &AudioSegment,
+    mut sink: impl FnMut(&[u8]) -> Result<(), String>,
+) -> Result<i64, String> {
     let bytes_per_sample = audio_bytes_per_sample(AUDIO_CHANNELS);
     let start = segment.source_start_sample.max(0);
     let end = start.saturating_add(segment.output_samples);
@@ -1234,18 +1255,112 @@ fn extract_segment(segment: &AudioSegment, out: &mut impl Write) -> Result<i64, 
         if got == 0 {
             break; // 素材到此为止 —— 调用方负责补静音。
         }
-        out.write_all(&buffer[..got * bytes_per_sample])
-            .map_err(|error| format!("写音频临时文件失败：{error}"))?;
+        sink(&buffer[..got * bytes_per_sample])?;
         written += got as i64;
     }
     let _ = child.wait();
     Ok(written)
 }
 
+/// 把一段 PCM **按增益相加**进已经写在盘上的那一块。
+///
+/// # 为什么必须读回来加，而不是"两趟各写一遍"
+///
+/// 两趟顺序 write 会把后面那一趟**覆盖**前面那一趟 —— 那是"只听见音效、
+/// 背景人声没了"。听感上完全正常（确实有声音），所以**没人会去查**。
+///
+/// # 采样格式是 `f32le`（**不是 i16**）
+///
+/// 这一条曾经写错过：按 i16 去解 f32 的字节会得到一堆垃圾数，
+/// 表现是**每一段都在疯狂削顶**（实测 48000 个采样点里削了 12059 个），
+/// 而"钳位"看起来又像是在正常工作 —— 于是错得很像对的。
+/// 判据是 [`crate::audio::AUDIO_PCM_FORMAT`]，它只有一个来源。
+///
+/// # 削顶处理
+///
+/// 相加后超出 `[-1, 1]` 的**钳位**而不是回绕。回绕会把一个响亮的音效变成
+/// 一声爆裂的噪声，那比"稍微糊一下"难听得多的多。
+///
+/// 返回 `(相加的采样点数, 被钳位的采样点数)` —— **钳位那个数不为零必须看得见**：
+/// 它是"该调增益了"的信号。
+fn mix_segment_into(
+    file: &mut std::fs::File,
+    segment: &AudioSegment,
+    offset_bytes: u64,
+    bytes_per_sample: usize,
+) -> Result<(i64, i64), String> {
+    use std::io::{Seek, SeekFrom};
+
+    /// 一个 f32 采样点占几个字节。**从格式推出来，不写死 4**（见上面的说明）。
+    const F32_BYTES: usize = std::mem::size_of::<f32>();
+
+    if bytes_per_sample != F32_BYTES * 2 {
+        // 立体声 = 两个 f32。不是这个形状说明上游换了格式而这个函数没跟上 ——
+        // **当场报出来**，比按错的字节宽度去算要诚实得多。
+        return Err(format!(
+            "混音只支持 f32le 立体声（每采样 {F32_BYTES} 字节 × 2 声道），\
+             而这一趟的每采样字节数是 {bytes_per_sample} —— 与 AUDIO_PCM_FORMAT 对不上了"
+        ));
+    }
+
+    let mut written = 0i64;
+    let mut clipped = 0i64;
+    let mut position = offset_bytes;
+
+    // 一次读回一块、相加、再写回。块大小按帧算，所以总是整数个采样点。
+    let mut existing = vec![0u8; AUDIO_CHUNK_SAMPLES * bytes_per_sample];
+    extract_segment_samples(segment, |chunk| {
+        let samples = chunk.len() / bytes_per_sample;
+        let span = &mut existing[..chunk.len()];
+        file.seek(SeekFrom::Start(position))
+            .map_err(|error| format!("定位音频临时文件失败：{error}"))?;
+        std::io::Read::read_exact(file, span)
+            .map_err(|error| format!("读回音频临时文件失败：{error}"))?;
+
+        // 逐**声道**采样点相加：一个采样点 = 2 个 f32（左右声道）。
+        for index in 0..samples * 2 {
+            let at = index * F32_BYTES;
+            let base = f32::from_le_bytes([span[at], span[at + 1], span[at + 2], span[at + 3]]);
+            let add = f32::from_le_bytes([chunk[at], chunk[at + 1], chunk[at + 2], chunk[at + 3]]);
+            // 增益在**加法之前**乘在加数上：乘在结果上会把背景音也放大。
+            let sum = base + add * segment.gain;
+            // 钳到 [-1, 1]：这是 f32 归一化采样的满幅。
+            let clamped = sum.clamp(-1.0, 1.0);
+            if (clamped - sum).abs() > f32::EPSILON {
+                clipped += 1;
+            }
+            let bytes = clamped.to_le_bytes();
+            span[at..at + F32_BYTES].copy_from_slice(&bytes);
+        }
+
+        file.seek(SeekFrom::Start(position))
+            .map_err(|error| format!("定位音频临时文件失败：{error}"))?;
+        file.write_all(span)
+            .map_err(|error| format!("写回混音结果失败：{error}"))?;
+        position += chunk.len() as u64;
+        written += samples as i64;
+        Ok(())
+    })?;
+
+    Ok((written, clipped))
+}
+
 /// 把 AudioPlan 摊成一整条 PCM 轨（临时文件）。
 ///
 /// **总长严格等于 `audio.total_samples`**：段与段之间补静音、素材不够长也补静音。
 /// 于是"音轨时长 == 视频时长"是**写出来的**，不是事后对齐出来的。
+///
+/// # 两趟，而不是一趟（T13）
+///
+/// 1. **底轨**：互不重叠的那些段按时间顺序写下去，空档补静音。
+///    全是顺序 write —— 这一趟与引入音效之前**逐字节相同**。
+/// 2. **叠加**：与已有内容重叠的段**读回来相加**（音效）。
+///
+/// 分成两趟是因为它们的正确写法不同：底轨是"排好队写下去"，
+/// 叠加是"读回来加"。一趟里混着做，就要在顺序写的过程中插读回，
+/// 而那个交错的正确性很难用测试钉住。
+///
+/// **一趟都没有的时候**（`segments` 为空）仍然是"整条静音"，与从前一致。
 pub fn build_audio_track(audio: &AudioPlan, pcm: &Path) -> Result<AudioStats, String> {
     let bytes_per_sample = audio_bytes_per_sample(audio.info.channels);
     let mut stats = AudioStats {
@@ -1255,11 +1370,29 @@ pub fn build_audio_track(audio: &AudioPlan, pcm: &Path) -> Result<AudioStats, St
         expected_samples: audio.total_samples,
         ..Default::default()
     };
-    let mut file = std::fs::File::create(pcm)
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(pcm)
         .map_err(|error| format!("建不了音频临时文件（{}）：{error}", pcm.display()))?;
+
+    // ---- 第一趟：分出来哪些是"底轨"、哪些是"叠加" ----
+    //
+    // 判据是**这个段与它前面已放置的段有没有重叠**，而不是"它是不是音效"。
+    // 靠 kind 判会让"两段背景乐不小心叠了"变成静默覆盖；
+    // 靠几何判则无论来源如何都得到同一个正确答案：**重叠就是相加**。
+    let mut placed_end = 0i64;
+    let mut layered: Vec<&AudioSegment> = Vec::new();
     let mut cursor = 0i64;
 
     for segment in &audio.segments {
+        if segment.output_start_sample < placed_end {
+            // 与前面叠上了 —— 留给第二趟相加。
+            layered.push(segment);
+            continue;
+        }
         // 段之前的位置：时间线上本来就没声音，补静音。
         if segment.output_start_sample > cursor {
             let gap = segment.output_start_sample - cursor;
@@ -1272,12 +1405,34 @@ pub fn build_audio_track(audio: &AudioPlan, pcm: &Path) -> Result<AudioStats, St
         // 素材不够长 -> 这一段的后半是补的静音。**这个数不为零必须看得见。**
         stats.padded_samples += segment.output_samples - written;
         cursor += segment.output_samples;
+        placed_end = cursor;
     }
     // 尾巴上的空档。
     if cursor < audio.total_samples {
         let tail = audio.total_samples - cursor;
         write_silence(&mut file, tail, bytes_per_sample)?;
         stats.gap_samples += tail;
+    }
+    file.flush()
+        .map_err(|error| format!("收尾音频临时文件失败：{error}"))?;
+
+    // ---- 第二趟：叠加 ----
+    //
+    // 没挂音效时 `layered` 是空的，**这一整段不执行** —— 于是"没有叠加"的
+    // 那条路与本改动之前逐字节相同。
+    for segment in layered {
+        let offset = if segment.output_start_sample > 0 {
+            segment.output_start_sample as u64 * bytes_per_sample as u64
+        } else {
+            0
+        };
+        let (mixed, clipped) = mix_segment_into(&mut file, segment, offset, bytes_per_sample)?;
+        stats.mixed_samples += mixed;
+        stats.clipped_samples += clipped;
+        // 叠加的段素材不够长时，**不补静音**：补静音等于"把已经在那儿的
+        // 背景音擦掉一段"，而擦掉是听不见的（静音加什么都还是原样，
+        // 但补静音是**覆盖**不是相加）。这里直接不写。
+        stats.source_samples_read += mixed;
     }
     file.flush()
         .map_err(|error| format!("收尾音频临时文件失败：{error}"))?;

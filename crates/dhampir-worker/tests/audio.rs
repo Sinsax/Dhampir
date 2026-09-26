@@ -409,3 +409,152 @@ fn 音轨接上去了而且时长与视频对得上() {
         "但时长仍然算得出来（音轨有没有与片子多长是两个问题）"
     );
 }
+
+/// T13：**重叠的音效是相加，不是覆盖**。
+///
+/// # 这条为什么必须真跑
+///
+/// 覆盖与相加在听感上都能"听见声音"，区别只在**背景音还在不在**。
+/// 纯逻辑测试只能验到"计划里两段都在"；而"写下去的时候后一段把前一段擦了"
+/// 是发生在**字节层**的错，只有解出 PCM 逐采样点比才看得见。
+///
+/// 做法：两条同频率、同相位的正弦叠加 —— 频率相同则和的幅度**正好是两倍**，
+/// 于是"相加"有一个干净的判据，不必去拟合波形。
+#[test]
+#[ignore = "真机：要 PATH 上的 ffmpeg"]
+fn 重叠的两段音频是相加而不是覆盖() {
+    let work = repo_root().join("target/t13");
+    std::fs::create_dir_all(&work).expect("建不了 target/t13");
+
+    // 一段 2 秒的 440Hz，**幅度放到一半**：两条相加正好回到满幅，不会削顶。
+    // 这样"相加"与"钳位"两件事不会缠在一起（钳位有它自己的用例）。
+    let tone = work.join("tone.m4a");
+    run(
+        "ffmpeg",
+        &[
+            "-v", "error", "-f", "lavfi", "-i",
+            "sine=frequency=440:sample_rate=48000:duration=2:beep_factor=1",
+            "-af", "volume=0.4",
+            "-ac", "2", "-c:a", "aac", "-b:a", "192k", "-y",
+            &tone.display().to_string(),
+        ],
+    );
+
+    // 工程：一条 3 秒的视频轨 + 两条**互相重叠**的音轨。
+    // a1[bed] 覆盖 [0, 60)，a2[shot] 覆盖 [30, 60) —— 后半段叠在一起。
+    let doc = sfx_doc();
+    let sources = sources_with(&tone, &tone);
+    let plan = plan_audio(&doc.timeline, &sources, &doc.asset_timebases(), 0, 59)
+        .expect("音效工程也要摊得出计划");
+
+    // 计划层：不许报错（重叠是正常的），但必须记下叠加。
+    assert!(
+        plan.issues.is_empty(),
+        "音效叠加不该判失败：{:?}",
+        plan.issues.iter().map(|i| &i.code).collect::<Vec<_>>()
+    );
+    assert_eq!(plan.overlaps.len(), 1, "两条音轨在后半段重叠，要记一笔");
+    assert_eq!(plan.segments.len(), 2, "两段都必须在计划里，不许静默丢");
+
+    let pcm = work.join("audio.f32");
+    let stats = build_audio_track(&plan, &pcm).expect("音轨要拼得出来");
+
+    // 有叠加发生。
+    assert!(
+        stats.mixed_samples > 0,
+        "没有任何采样点被相加 —— 说明重叠那段还是走顺序写（覆盖）"
+    );
+    assert_eq!(
+        stats.clipped_samples, 0,
+        "两路各 0.4 倍，加起来不该削顶"
+    );
+
+    let bytes_per_sample = AUDIO_CHANNELS as usize * 4;
+    let pcm_bytes = std::fs::read(&pcm).expect("临时 PCM 要读得回来");
+
+    // **判据：用 RMS（均方根），不用峰值。**
+    //
+    // 峰值对**相位**敏感：两条 sine 各自解出来，相位不保证对齐，
+    // 于是"叠加"的那一刻可能正巧落在两者的波谷之间 —— 峰值反而更低。
+    // 第一版就是这么误报的：独奏段峰值 0.1077、叠加段 0.0709，
+    // 看起来像"被覆盖了"，而实际 RMS 正好翻倍（见下）。
+    //
+    // RMS 是**能量**，与相位无关：两个等幅、不相关的源相加，
+    // 功率翻倍 —— 那是"相加"的定义性质。
+    let solo_rms = rms(&pcm_bytes, 12_000, 36_000, bytes_per_sample);
+    let mixed_rms = rms(&pcm_bytes, 60_000, 36_000, bytes_per_sample);
+    eprintln!("独奏段 RMS {solo_rms:.6} / 叠加段 RMS {mixed_rms:.6}");
+    assert!(solo_rms > 0.0, "独奏段不该是静音（否则后面那条是假绿）");
+    // 放宽到 1.5 倍：素材是**有损** AAC，两段的编码噪声不相关，
+    // 所以理论上的 2.0 会有可见的偏差；而"覆盖"会给出 ~1.0。
+    assert!(
+        mixed_rms > solo_rms * 1.5,
+        "叠加段 RMS {mixed_rms:.6} 没有明显高于独奏段 {solo_rms:.6} —— \
+         后一段把前一段**覆盖**掉了（覆盖时这个比值约等于 1.0），而正确行为是相加（约等于 2.0）"
+    );
+}
+
+/// 一段的均方根（只有左声道参与统计）。
+///
+/// **不用峰值**：峰值对相位敏感，而两条独立解出的正弦相位不保证对齐 ——
+/// 那会让"相加"在某个窗口里看起来比"独奏"还低（实测踩过这个坑）。
+/// RMS 是能量，与相位无关，正是"相加"该被判据的量。
+fn rms(bytes: &[u8], from_sample: i64, samples: i64, bytes_per_sample: usize) -> f64 {
+    let start = from_sample as usize * bytes_per_sample;
+    let mut total = 0.0f64;
+    for index in 0..samples as usize {
+        let at = start + index * bytes_per_sample;
+        // f32 轨道（audio.f32 是 32 位浮点，见 AUDIO_PCM_FORMAT）。
+        let value = f32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+        total += f64::from(value) * f64::from(value);
+    }
+    (total / samples as f64).sqrt()
+}
+
+/// 造一份"背景音 + 音效叠上去"的工程：两条音轨在后半段重叠。
+fn sfx_doc() -> ProjectDoc {
+    use dhampir_core::timeline::layer::{
+        LAYER_SCHEMA_VERSION, Layer, SourceRef, TimelineV2, TrackV2,
+    };
+    use dhampir_core::timeline::schema::{TimebaseDto, TrackKind};
+
+    let audio_layer = |id: &str, start, end| Layer {
+        id: id.to_string(),
+        start,
+        end,
+        transform: Default::default(),
+        opacity: 1.0,
+        blend: Default::default(),
+        enabled: true,
+        recorded: Default::default(),
+        source: Some(SourceRef { asset_id: "tone.m4a".to_string(), source_in: 0 }),
+        effects: Vec::new(),
+        transition_in: None,
+        keyframes: Vec::new(),
+    };
+
+    // 用与 audio-project 同一份骨架，只换 timeline —— assets 表沿用它的。
+    let mut doc = fixture("audio-project.doc.json");
+    doc.timeline = TimelineV2 {
+        schema: LAYER_SCHEMA_VERSION,
+        timebase: TimebaseDto { num: 30, den: 1 },
+        markers: Vec::new(),
+        tracks: vec![
+            TrackV2 {
+                id: "a1".to_string(),
+                kind: TrackKind::Audio,
+                layers: vec![audio_layer("bed", 0, 60)],
+                subtitle: None,
+                danmaku: None,
+            },
+            TrackV2 {
+                id: "a2".to_string(),
+                kind: TrackKind::Audio,
+                layers: vec![audio_layer("shot", 30, 60)],
+                subtitle: None,
+                danmaku: None,
+            },
+        ],
+    };
+    doc
+}
