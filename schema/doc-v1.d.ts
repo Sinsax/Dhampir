@@ -164,6 +164,8 @@ export interface SubtitleStyle {
   rise_in_px?: number;
   /** 退场时向上浮的距离（文档像素）。V-Trim 是 `8`。 */
   rise_out_px?: number;
+  /** **换行安全宽**（占画布宽的比例）。默认 0 = 沿用老行为。 */
+  safe_width_ratio?: number;
   /** 描边颜色。`outline` 为假时忽略。 */
   stroke_color?: number[];
   /** **描边宽度** = 目标高度 * 这个比例，单位是**外侧宽度**（见下）。 */

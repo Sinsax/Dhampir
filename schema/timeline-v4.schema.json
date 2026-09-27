@@ -508,6 +508,12 @@
           "format": "float",
           "default": 0.0
         },
+        "safe_width_ratio": {
+          "description": "**换行安全宽**（占画布宽的比例）。默认 0 = 沿用老行为。\n\n# 为什么不是复用 `bottom_margin`\n\n本仓先前拿 `bottom_margin` 当左右边距用（那个字段本来是\"距底边多远\"）。\n默认值 0.06 凑出来是 **88%**，而 V-Trim 写死的是 **87.5%**\n（`wrapCaptionParts(cap.parts, CW * 0.875, …)`）—— 两个数**碰巧接近但不是同一个**，\n于是在刚好卡边界的行上会断在不同的地方。当时复用是\"不动契约\"的权宜，\n现在把它说清楚。\n\n默认 **0 = 沿用老行为**（继续复用 `bottom_margin`），所以既有工程逐字节不变；\n转译器按 V-Trim 显式写 0.875。",
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
         "stroke_color": {
           "description": "描边颜色。`outline` 为假时忽略。",
           "type": "array",

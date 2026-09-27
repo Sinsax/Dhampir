@@ -331,6 +331,20 @@ pub struct SubtitleStyle {
     /// 单行字幕看不出差别，**两行**的字间距会差 0.3em（72px 字号下是 21.6px）。
     #[serde(default)]
     pub line_height: f32,
+    /// **换行安全宽**（占画布宽的比例）。默认 0 = 沿用老行为。
+    ///
+    /// # 为什么不是复用 `bottom_margin`
+    ///
+    /// 本仓先前拿 `bottom_margin` 当左右边距用（那个字段本来是"距底边多远"）。
+    /// 默认值 0.06 凑出来是 **88%**，而 V-Trim 写死的是 **87.5%**
+    /// （`wrapCaptionParts(cap.parts, CW * 0.875, …)`）—— 两个数**碰巧接近但不是同一个**，
+    /// 于是在刚好卡边界的行上会断在不同的地方。当时复用是"不动契约"的权宜，
+    /// 现在把它说清楚。
+    ///
+    /// 默认 **0 = 沿用老行为**（继续复用 `bottom_margin`），所以既有工程逐字节不变；
+    /// 转译器按 V-Trim 显式写 0.875。
+    #[serde(default)]
+    pub safe_width_ratio: f32,
 }
 
 fn default_font_weight() -> u32 { 400 }
@@ -367,6 +381,8 @@ impl Default for SubtitleStyle {
             font_family: None,
             font_weight: default_font_weight(),
             line_height: 0.0,
+            // 0 = 沿用老行为（左右边距复用 `bottom_margin`），既有工程逐字节不变。
+            safe_width_ratio: 0.0,
         }
     }
 }
@@ -753,22 +769,34 @@ pub fn text_envelope(
     let mut opacity = 1.0_f32;
     let mut offset = 0.0_f32;
 
+    // # 两段是 **if / else if**，不是两段各算一次
+    //
+    // V-Trim 原文（`templates/index.html` 的 `getActiveSubs`）：
+    //
+    //     if (t - s.start < fadeIn) { … }
+    //     else if (s.end - t < fadeOut) { … }
+    //
+    // 也就是**互斥**的。我先前写成两段独立判断、都命中时取较小者 —— 对于
+    // **短于 fadeIn+fadeOut 的 cue**，那会让它同时淡入又淡出，
+    // 而参照只会淡入。症状是"短字幕看起来比参照暗"，且只在短 cue 上出现。
     if fade_in_ms > 0 && local_ms < fade_in_ms {
         let p = local_ms as f32 / fade_in_ms as f32;
         let eased = pow2_out(p.clamp(0.0, 1.0));
         opacity = eased;
-        // 从下方浮上来：opacity 为 0 时在最下面。
+        // 从下方浮上来。**乘的是 `(1 - opacity)`，不是 `(1 - p)`** ——
+        // 参照写的就是 `20 * (1 - opacity)`。两条曲线不同：p=0.5 时
+        // pow2_out(0.5)=0.75，于是 20*(1-0.75)=5.0，而 20*(1-0.5)=10.0。
         offset = rise_in_px * (1.0 - eased);
-    }
-
-    if fade_out_ms > 0 {
+    } else if fade_out_ms > 0 {
         let remaining = span_ms.saturating_sub(local_ms);
         if remaining < fade_out_ms {
             let p = remaining as f32 / fade_out_ms as f32;
-            let eased = pow2_in(p.clamp(0.0, 1.0));
-            // 两段同时命中时取较小者 —— 不能让"淡入未完又淡出"算出 > 1。
-            opacity = opacity.min(eased);
-            offset += -rise_out_px * (1.0 - eased);
+            let clamped = p.clamp(0.0, 1.0);
+            opacity = pow2_in(clamped);
+            // 而这一段乘的是 **`(1 - p)`**（未缓动的原始比例）——
+            // 与上面那条口径**不同**，是参照本身就不对称，不是笔误。
+            // 写成 `(1 - pow2_in(p))` 在 p=0.5 处是 -6.0px，而参照是 -4.0px。
+            offset = -rise_out_px * (1.0 - clamped);
         }
     }
 
@@ -1429,6 +1457,45 @@ mod v2_tests {
     /// （实测：`amount` 从 0 改成 0.2 —— 1080p 下 216 像素 —— 出帧逐像素相同）。
     ///
     /// 所以它必须是**错误**。三个分支各钉一件事，少一个都会漏掉一类。
+    /// **淡入与淡出是互斥的**（参照写的是 `if … else if …`）。
+    ///
+    /// 短于 `fade_in + fade_out` 的 cue 上，两段会同时"够得着"：
+    /// 参照只会走淡入那一条，而我先前两段都算、取较小者 —— 症状是
+    /// **短字幕比参照暗**，且只在短 cue 上出现。
+    #[test]
+    fn 文字包络的淡入淡出是互斥的() {
+        // 400ms 的 cue、350 淡入 + 180 淡出 -> 在 local=250 处两段都够得着。
+        let (opacity, offset) = text_envelope(250, 400, 350, 180, 20.0, 8.0);
+        let fade_in_only = pow2_out(250.0 / 350.0);
+        assert!(
+            (opacity - fade_in_only).abs() < 1e-6,
+            "参照只走淡入：期望 {fade_in_only}，实得 {opacity}"
+        );
+        assert!(
+            (offset - 20.0 * (1.0 - fade_in_only)).abs() < 1e-6,
+            "上浮量也走淡入那条：实得 {offset}"
+        );
+        // 反过来说：如果两段都算，这里会得到 min(0.918, pow2_in(0.833)) = 0.694
+        // —— 与上式差得远，所以这条用例能红。
+        assert!(opacity > 0.9, "取了两段的较小者就会掉到 0.69 附近，实得 {opacity}");
+    }
+
+    /// **退场用的乘数是 `(1 - p)`，不是 `(1 - opacity)`。**
+    ///
+    /// 参照：`yOff = -8 * (1 - p)`，其中 `p` 是**未缓动**的原始比例；
+    /// 而淡入那一条乘的是 `(1 - opacity)`。两段口径**故意不对称**。
+    /// 我先前两段都写成 `(1 - 缓动后的值)`，于是退场位移偏大 50%。
+    #[test]
+    fn 文字包络的退场位移用原始比例() {
+        // 6000ms 的 cue，走到剩余 90ms（fade_out 180 的中點，p = 0.5）。
+        let (opacity, offset) = text_envelope(5910, 6000, 350, 180, 20.0, 8.0);
+        assert!((opacity - pow2_in(0.5)).abs() < 1e-6, "不透明度用 pow2_in：实得 {opacity}");
+        assert!(
+            (offset - (-8.0 * (1.0 - 0.5))).abs() < 1e-6,
+            "位移要用 (1 - p) = 0.5 -> -4.0；写成 (1 - opacity) 会得到 -6.0。实得 {offset}"
+        );
+    }
+
     #[test]
     fn 调整级特效挂在有素材的图层上要报错() {
         let specs = [
@@ -1676,17 +1743,29 @@ mod v2_tests {
         assert_eq!(dy_start, 0.0);
     }
 
+    /// **这条用例的前身是错的。**
+    ///
+    /// 它原来叫「淡入淡出重叠时取更小的那个_绝不大于一」，断言短 cue 的中点会被
+    /// 压到 0.6 以下 —— 那是照着"两段独立判断、取较小者"那个**错误实现**写的。
+    /// 参照根本不是那样（`if … else if …`，两段互斥，见
+    /// `文字包络的淡入淡出是互斥的`），所以"压下来"这件事本身不存在。
+    ///
+    /// 留下来的、真正该守的是**值域**：无论输入多怪都不能给出 [0,1] 之外的值 ——
+    /// 越界的不透明度在下游是"字比背景还亮"这类看不出来的错。
     #[test]
-    fn 淡入淡出重叠时取更小的那个_绝不大于一() {
-        // 一条很短的+很长的淡入淡出：两段都命中。
-        // 不取较小者的话会算出"淡入还没完就开始淡出"的抖动。
-        for local in 0..120_u64 {
-            let (opacity, _) = text_envelope(local, 100, 80, 80, 20.0, 8.0);
-            assert!((0.0..=1.0).contains(&opacity), "第 {local}ms 算出越界值 {opacity}");
+    fn 文字包络永远落在合法范围里() {
+        for span in [0_u64, 1, 7, 100, 1000, 6000] {
+            for local in 0..=span.min(200) {
+                for (fade_in, fade_out) in [(0, 0), (350, 180), (80, 80), (1000, 3)] {
+                    let (opacity, offset) = text_envelope(local, span, fade_in, fade_out, 20.0, 8.0);
+                    assert!(
+                        (0.0..=1.0).contains(&opacity),
+                        "span={span} local={local} fade=({fade_in},{fade_out}) 算出越界不透明度 {opacity}"
+                    );
+                    assert!(offset.is_finite(), "位移必须是有限数，实得 {offset}");
+                }
+            }
         }
-        // 中点两段都逼近，应当明显小于 1。
-        let (mid, _) = text_envelope(50, 100, 80, 80, 20.0, 8.0);
-        assert!(mid < 0.6, "重叠段的中点应当被压下来，实得 {mid}");
     }
 
     #[test]
