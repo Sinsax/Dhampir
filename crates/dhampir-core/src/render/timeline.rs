@@ -543,6 +543,28 @@ impl SourceResolver for FixedSource<'_> {
     }
 }
 
+/// **两张**纹理的提供者：按 source 名字("a"/"b")挑一张。
+///
+/// 专门给"调整图层按不透明度混回原图"那一步用 —— 那一步要把
+/// `原图*(1-t) + 结果*t` 画出来，而 `FixedSource` 只有一张纹理。
+/// 复用一个图层把结果以 `t` 画在原图之上就够了，不需要新的着色器。
+struct PairSource<'a> {
+    a: &'a wgpu::TextureView,
+    b: &'a wgpu::TextureView,
+    size: (u32, u32),
+}
+
+impl SourceResolver for PairSource<'_> {
+    fn texture_for(
+        &mut self,
+        source: &str,
+        _source_frame: i64,
+    ) -> Option<(wgpu::TextureView, (u32, u32))> {
+        let view = if source == "b" { self.b } else { self.a };
+        Some((view.clone(), self.size))
+    }
+}
+
 /// 一次「原样搬运」用的图层：没有变换、完全不透明。
 fn identity_layer() -> crate::compose::Layer {
     crate::compose::Layer {
@@ -746,7 +768,7 @@ impl TimelineRenderer {
                     );
                     current = Some(dest);
                 }
-                Step::Adjust { effects, .. } => {
+                Step::Adjust { effects, opacity, .. } => {
                     let Some(from) = current else { continue };
 
                     // **按管线分批跑，顺序由 `PassStage` 定**（见那里的注释）。
@@ -770,6 +792,47 @@ impl TimelineRenderer {
                             continue;
                         };
                         cursor = next;
+                    }
+                    // -----------------------------------------------------------------
+                    // 按**这一帧上这层的不透明度**把结果混回原图
+                    // -----------------------------------------------------------------
+                    //
+                    // 这是"效果强度"的通用旋钮。V-Trim 的 `flash` / `noise` /
+                    // `hue_shift` / `vignette` 都是逐帧变化的强度（0.04s 升到峰值、
+                    // 再线性落回），所以这个混合不是可有可无的装饰。
+                    //
+                    // 因为**原图是不透明的**，把结果以 `opacity` 画在原图之上
+                    // 恰好就是 `原图*(1-t) + 结果*t` —— 不需要新的着色器。
+                    if cursor != from && *opacity < 1.0 {
+                        if *opacity <= 0.0 {
+                            // 完全不透明的是原图，等于没这一层。
+                            cursor = from;
+                        } else {
+                            let a_view = views[from].clone();
+                            let b_view = views[cursor].clone();
+                            let dest = alloc_texture(
+                                device, self.format, extent,
+                                "dhampir adjust blend out", &mut textures, &mut views,
+                            );
+                            let dest_view = views[dest].clone();
+                            let mut resolver = PairSource {
+                                a: &a_view,
+                                b: &b_view,
+                                size: space.target,
+                            };
+                            let mut under = identity_layer();
+                            under.source = "a".to_string();
+                            let mut over = identity_layer();
+                            over.source = "b".to_string();
+                            over.opacity = *opacity;
+                            let blend_layers = [under, over];
+                            self.compose_layers(
+                                device, queue, encoder, &dest_view, space,
+                                &blend_layers, &mut resolver,
+                                Some(wgpu::Color::TRANSPARENT),
+                            );
+                            cursor = dest;
+                        }
                     }
                     if cursor != from {
                         current = Some(cursor);
@@ -1321,9 +1384,25 @@ pub enum Step {
     /// 把这几层依次画到当前底上（下标指向原清单）。
     Draw(Vec<usize>),
     /// 对**当前已经画好的结果**跑这一层（调整图层）的特效。
+    ///
+    /// # `opacity` 为什么必须在这里
+    ///
+    /// 这一条是**补上的**：先前 `Adjust` 只带 `effects`，于是调整图层的
+    /// `opacity`（以及它的关键帧）**被整个忽略** —— 通过校验、出现在 JSON 里、
+    /// 求值层也算出来了，渲染时没人读。
+    ///
+    /// 而它正是"效果强度"的通用旋钮：V-Trim 的 `flash` / `noise` / `hue_shift` /
+    /// `vignette` 都是**逐帧变化的强度**（0.04s 升到峰值再线性落回），
+    /// 没有它就只能整段满强度，那与参照差得很远。
+    ///
+    /// 语义：把特效结果与**原图**按 `opacity` 线性混合 ——
+    /// 也就是"这个调整图层有多少分量"。因为原图是不透明的，用 alpha 混合画上去
+    /// 恰好就是 `原图*(1-t) + 结果*t`。对逐像素效果（色彩、遮罩）这是精确的；
+    /// 对模糊这类邻域算子它是"糊与不糊的混合"而不是"半径变小"，属于近似。
     Adjust {
         layer: usize,
         effects: Vec<dhampir_timeline::schema::Effect>,
+        opacity: f32,
     },
 }
 
@@ -1345,6 +1424,8 @@ pub fn plan_steps(layers: &[crate::compose::Layer]) -> Vec<Step> {
             steps.push(Step::Adjust {
                 layer: index,
                 effects: layer.effects.clone(),
+                // **这一帧上这层的不透明度**（关键帧已经在求值层算好了）。
+                opacity: layer.opacity.clamp(0.0, 1.0),
             });
         } else {
             pending.push(index);
@@ -1408,7 +1489,7 @@ mod plan_tests {
         assert_eq!(steps.len(), 3);
         assert_eq!(steps[0], Step::Draw(vec![0, 1]));
         match &steps[1] {
-            Step::Adjust { layer: index, effects } => {
+            Step::Adjust { layer: index, effects, .. } => {
                 assert_eq!(*index, 2);
                 assert_eq!(effects.len(), 1, "调整图层的特效要跟着计划走");
             }
