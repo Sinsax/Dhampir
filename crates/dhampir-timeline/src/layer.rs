@@ -170,6 +170,25 @@ pub struct Layer {
     pub blend: BlendMode,
 #[serde(default = "yes")]
     pub enabled: bool,
+    /// **音频增益**（线性倍数，1.0 = 原样）。
+    ///
+    /// # 为什么它不在 `opacity` 里
+    ///
+    /// `opacity` 是"这一层**怎么画**"，`gain` 是"这一层**怎么响**" ——
+    /// 两个不同的量。混在 `opacity` 上会让"把画面调淡"顺手把声音也调小，
+    /// 而那是**两个独立的意图**（V-Trim 就是这么用的：音效有画面没有透明度）。
+    ///
+    /// # 它一直是个死字段的反面
+    ///
+    /// 混音器**早就会乘增益**（`AudioSegment.gain`，T13 引入），
+    /// 但契约里没有这个字段，于是 `plan_audio` 只能写死 `1.0` ——
+    /// 运行时支持、契约不支持，表现在成片里就是"V-Trim 配的音量全丢"。
+    /// 这一条是**白捡的**：加个字段，混音器那行不用动。
+    ///
+    /// 只有音轨层用它；视频层上写它等于没写（渲染器不看），但也不报错 ——
+    /// 与 `opacity` 刻意不同：它不是"画不出来"，是"与画无关"。
+#[serde(default = "one")]
+    pub gain: f32,
 #[serde(default, flatten)]
     pub recorded: Recorded,
 
@@ -249,12 +268,45 @@ pub struct SubtitleStyle {
     /// 是否加描边（压住亮背景）。
     #[serde(default = "yes")]
     pub outline: bool,
+    /// **描边宽度** = 目标高度 * 这个比例。
+    ///
+    /// V-Trim 写的是 `12px #403c3b`（1080p 下），即 `12/1080`。
+    /// 单位取比例而不是像素：像素在预览（640x360）与成片（1920x1080）
+    /// 里含义不同，两端就不一致了 —— 与 `font_ratio` 同一条理由。
+    #[serde(default = "subtitle_stroke_ratio")]
+    pub stroke_ratio: f32,
+    /// 描边颜色。`outline` 为假时忽略。
+    #[serde(default = "subtitle_stroke_color")]
+    pub stroke_color: [u8; 4],
+    /// **淡入时长（毫秒）。** 0 = 硬出现。
+    ///
+    /// V-Trim 的 `getActiveSubs()`：`fadeIn = 0.35`，透明度走 `pow2_out`，
+    /// 同时从下方 `+20px` 浮上来。
+    #[serde(default)]
+    pub fade_in_ms: u64,
+    /// **淡出时长（毫秒）。** 0 = 硬消失。
+    #[serde(default)]
+    pub fade_out_ms: u64,
+    /// 入场时从下方浮上来的距离（**文档像素**）。V-Trim 是 `20`。
+    #[serde(default)]
+    pub rise_in_px: f32,
+    /// 退场时向上浮的距离（文档像素）。V-Trim 是 `8`。
+    #[serde(default)]
+    pub rise_out_px: f32,
 }
 
 fn subtitle_font_ratio() -> f32 { 0.055 }
 fn subtitle_bottom_margin() -> f32 { 0.06 }
 fn subtitle_max_lines() -> u32 { 2 }
 fn subtitle_color() -> [u8; 4] { [255, 255, 255, 255] }
+/// **默认 0.0 = "宽度从字号推"**（升级前的老行为，`border_px(font_px)`）。
+///
+/// 这里踩过一个坑：我第一版把默认值写成 `12/1080`（V-Trim 的实际值），
+/// 于是**所有既有工程**的描边在 640×360 预览里从 `border_px(20)=1px`
+/// 变成 `12/1080*360=4px` —— 逐字节不变的判据当场就破了。
+/// 契约默认值不是"我觉得合理的值"，是"**让老工程一字不变**的值"。
+fn subtitle_stroke_ratio() -> f32 { 0.0 }
+fn subtitle_stroke_color() -> [u8; 4] { [0x40, 0x3c, 0x3b, 255] }
 
 impl Default for SubtitleStyle {
     fn default() -> Self {
@@ -264,6 +316,14 @@ impl Default for SubtitleStyle {
             max_lines: subtitle_max_lines(),
             color: subtitle_color(),
             outline: true,
+            stroke_ratio: subtitle_stroke_ratio(),
+            stroke_color: subtitle_stroke_color(),
+            // **默认全 0**：既有工程的行为是"硬出现/硬消失"，
+            // 默认值必须让它**逐字节不变**（`schema` 不必升版本）。
+            fade_in_ms: 0,
+            fade_out_ms: 0,
+            rise_in_px: 0.0,
+            rise_out_px: 0.0,
         }
     }
 }
@@ -283,11 +343,47 @@ pub struct DanmakuSpec {
     /// 字号 = 目标高度 * 这个比例。
     #[serde(default = "danmaku_font_ratio")]
     pub font_ratio: f32,
+    /// **文字颜色，RGBA。**
+    ///
+    /// 这个字段以前**故意没有**（`overlay.rs` 的模块文档写着"颜色与描边两者共用，
+    /// 要分开就得动契约"）。后果不是"少一个选项"：V-Trim 的字幕是暖色
+    /// `#dcbda0`、弹幕是白色 `#ffffff` —— 共用一份时**必然有一个错**。
+    #[serde(default = "danmaku_color")]
+    pub color: [u8; 4],
+    /// **基础不透明度。** V-Trim 用 `0.9`（不是 1.0）。
+    ///
+    /// 弹幕压在画面上，全不透明会太抢 —— 这是**弹幕与字幕的一处固有差别**，
+    /// 不是"再给个字幕也有的旋钮"。
+    #[serde(default = "danmaku_opacity")]
+    pub opacity: f32,
+    /// 淡入时长（毫秒）。V-Trim 的 `getActiveDms()` 是 `0.3`。
+    #[serde(default)]
+    pub fade_in_ms: u64,
+    /// 淡出时长（毫秒）。V-Trim 是 `0.2`。
+    #[serde(default)]
+    pub fade_out_ms: u64,
+    /// 是否加描边。V-Trim 弹幕是 `2px #000`。
+    #[serde(default = "yes")]
+    pub outline: bool,
+    /// 描边宽度 = 目标高度 * 这个比例（V-Trim 是 `2/1080`）。
+    #[serde(default = "danmaku_stroke_ratio")]
+    pub stroke_ratio: f32,
+    /// 描边颜色。
+    #[serde(default = "danmaku_stroke_color")]
+    pub stroke_color: [u8; 4],
 }
 
 fn danmaku_lanes() -> u32 { 8 }
 fn danmaku_duration() -> u64 { 8000 }
 fn danmaku_font_ratio() -> f32 { 0.04 }
+fn danmaku_color() -> [u8; 4] { [255, 255, 255, 255] }
+/// V-Trim 的弹幕基础不透明度。**默认取 V-Trim 的值而不是 1.0**：
+/// 这是弹幕该有的样子，而不是"某个工程的偏好"。
+fn danmaku_opacity() -> f32 { 0.9 }
+/// 默认 0.0 = "宽度从字号推"（与 `SubtitleStyle::stroke_ratio` 同一条理由：
+/// 契约默认值必须是"让老工程一字不变"的那个）。
+fn danmaku_stroke_ratio() -> f32 { 0.0 }
+fn danmaku_stroke_color() -> [u8; 4] { [0, 0, 0, 255] }
 
 impl Default for DanmakuSpec {
     fn default() -> Self {
@@ -296,6 +392,13 @@ impl Default for DanmakuSpec {
             lanes: danmaku_lanes(),
             duration_ms: danmaku_duration(),
             font_ratio: danmaku_font_ratio(),
+            color: danmaku_color(),
+            opacity: danmaku_opacity(),
+            fade_in_ms: 0,
+            fade_out_ms: 0,
+            outline: true,
+            stroke_ratio: danmaku_stroke_ratio(),
+            stroke_color: danmaku_stroke_color(),
         }
     }
 }
@@ -381,6 +484,7 @@ pub fn migrate_v1_to_v2(project: &Project) -> Result<TimelineV2, MigrateError> {
                 opacity: clip.opacity,
                 blend: BlendMode::Normal,
                 enabled: true,
+                gain: 1.0,
                 recorded: Recorded::default(),
                 // v1 的 source 是个裸字符串；它本来就是"资产 id"，这里如实搬过来。
                 source: Some(SourceRef {
@@ -531,6 +635,70 @@ pub fn source_frame_looped(
     Ok(raw.rem_euclid(count))
 }
 
+/// 一条字幕/弹幕**这一帧**的不透明度与纵向偏移。
+///
+/// # 为什么它住在契约层（而不是各宿主自己算）
+///
+/// 与 [`crate::schema::Effect::strength`] 同一条理由：**"这一帧多透明"只能有一个定义**。
+/// 两端各写一遍，迟早在某个边界上差一点点 —— 而"两端各自的都对"这件事
+/// 让人查不出来（预览里淡入看着正常、成片里快了一帧）。
+///
+/// # 口径（抄 V-Trim 的 `getActiveSubs` / `getActiveDms`）
+///
+/// ```text
+/// 淡入：local < fade_in   -> p = local/fade_in，              opacity = pow2_out(p)
+///                                                纵向 = rise_in * (1 - opacity)
+/// 淡出：span - local < fade_out -> p = (span-local)/fade_out，opacity = pow2_in(p)
+///                                                纵向 = -rise_out * (1 - p)
+/// 其余：opacity = 1，纵向 = 0
+/// ```
+///
+/// **两段都可能同时命中**（很短的一条 + 很长的淡入淡出）—— 这时取**较小**的
+/// 那一个透明度、并把两段位移相加。不这么做的话，"淡入还没完就开始淡出"
+/// 会算出一个比 1 还大的透明度或者跳一下。
+///
+/// 返回 `(不透明度, 纵向偏移像素)`。偏移为正表示**向下**。
+pub fn text_envelope(
+    local_ms: u64,
+    span_ms: u64,
+    fade_in_ms: u64,
+    fade_out_ms: u64,
+    rise_in_px: f32,
+    rise_out_px: f32,
+) -> (f32, f32) {
+    if span_ms == 0 {
+        return (1.0, 0.0);
+    }
+    let mut opacity = 1.0_f32;
+    let mut offset = 0.0_f32;
+
+    if fade_in_ms > 0 && local_ms < fade_in_ms {
+        let p = local_ms as f32 / fade_in_ms as f32;
+        let eased = pow2_out(p.clamp(0.0, 1.0));
+        opacity = eased;
+        // 从下方浮上来：opacity 为 0 时在最下面。
+        offset = rise_in_px * (1.0 - eased);
+    }
+
+    if fade_out_ms > 0 {
+        let remaining = span_ms.saturating_sub(local_ms);
+        if remaining < fade_out_ms {
+            let p = remaining as f32 / fade_out_ms as f32;
+            let eased = pow2_in(p.clamp(0.0, 1.0));
+            // 两段同时命中时取较小者 —— 不能让"淡入未完又淡出"算出 > 1。
+            opacity = opacity.min(eased);
+            offset += -rise_out_px * (1.0 - eased);
+        }
+    }
+
+    (opacity.clamp(0.0, 1.0), offset)
+}
+
+/// `pow2_out`：`1 - (1-p)^2`。V-Trim 的 `E.pow2_out`。
+fn pow2_out(p: f32) -> f32 { 1.0 - (1.0 - p) * (1.0 - p) }
+/// `pow2_in`：`p^2`。V-Trim 的 `E.pow2_in`。
+fn pow2_in(p: f32) -> f32 { p * p }
+
 /// 素材帧号 → 秒。**用素材自己的时间基**，不是时间线的。
 ///
 /// 宿主靠它把"这一帧要 video 元素停在哪一秒"算出来。用错时间基的表现是
@@ -655,6 +823,7 @@ mod tests {
             opacity: 1.0,
             blend: BlendMode::Normal,
             enabled: true,
+            gain: 1.0,
             recorded: Recorded::default(),
             source: None,
             loop_source: false,
@@ -987,6 +1156,16 @@ pub fn validate_timeline_v2(timeline: &TimelineV2, effects: &[EffectSpec]) -> Ve
                     format!("不透明度必须在 0..=1：{}", layer.opacity),
                 ));
             }
+            // 音频增益：有限且 **>= 0**。**不设上限** —— 放大是合法意图；
+            // 真正越界的是 NaN 与负数：NaN 让所有比较为假（静默穿过去），
+            // 负数会把相位翻过来。两种都"听起来像有个声音"，查不出来。
+            if !layer.gain.is_finite() || layer.gain < 0.0 {
+                issues.push(Issue::new(
+                    "gain_out_of_range",
+                    &format!("{path}.gain"),
+                    format!("音频增益必须是 >= 0 的有限数：{}", layer.gain),
+                ));
+            }
             if !layer.transform.scale.is_finite() || layer.transform.scale <= 0.0 {
                 issues.push(Issue::new(
                     "scale_not_positive",
@@ -1072,6 +1251,7 @@ mod v2_tests {
             opacity: 1.0,
             blend: BlendMode::Normal,
             enabled: true,
+            gain: 1.0,
             recorded: Recorded::default(),
             source: None,
             loop_source: false,
@@ -1262,5 +1442,90 @@ mod v2_tests {
         let asset = TimebaseDto { num: 1, den: 1 };
         let got = source_frame_looped(-2, 0, &tl, &asset, Some(5), true).unwrap();
         assert_eq!(got, 3, "-2 在模 5 下应当落到 3");
+    }
+
+    // -----------------------------------------------------------------------
+    // 字幕/弹幕的淡入淡出（`text_envelope`）
+    //
+    // 时间函数住在契约层，两端调同一份 —— 与 `Effect::strength` 同一条理由：
+    // "这一帧多透明"只能有一个定义。
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn 没有淡入淡出时永远是满不透明且不位移() {
+        // 老的默认值（fade 都是 0）必须让既有工程**逐字节不变**。
+        for local in [0_u64, 1, 500, 1999, 2000] {
+            let (opacity, dy) = text_envelope(local, 2000, 0, 0, 20.0, 8.0);
+            assert_eq!(opacity, 1.0, "第 {local}ms 应当满不透明");
+            assert_eq!(dy, 0.0, "第 {local}ms 不应当位移");
+        }
+    }
+
+    #[test]
+    fn 淡入是从透明到不透且从下方浮上来() {
+        // V-Trim: fadeIn 0.35s、rise 20px、pow2_out(p)
+        let (o0, dy0) = text_envelope(0, 2000, 350, 0, 20.0, 0.0);
+        assert_eq!(o0, 0.0, "淡入起点是全透明");
+        assert_eq!(dy0, 20.0, "全透明时在最下方（+20px）");
+
+        let (o_mid, dy_mid) = text_envelope(175, 2000, 350, 0, 20.0, 0.0);
+        // pow2_out(0.5) = 0.75
+        assert!((o_mid - 0.75).abs() < 1e-6, "半个窗口处应当是 pow2_out(0.5)=0.75，实得 {o_mid}");
+        assert!((dy_mid - 20.0 * 0.25).abs() < 1e-6, "位移应当与不透明度同步，实得 {dy_mid}");
+
+        let (o_end, dy_end) = text_envelope(350, 2000, 350, 0, 20.0, 0.0);
+        assert_eq!(o_end, 1.0, "淡入结束是满不透明");
+        assert_eq!(dy_end, 0.0, "淡入结束回到原位");
+    }
+
+    #[test]
+    fn 淡出是从不透到透明往上走() {
+        // span 2000、fadeOut 200：最后 200ms 在淡出。
+        // V-Trim: opacity = pow2_in(p)，yOff = -8*(1-p)
+        let (o_end, _) = text_envelope(2000, 2000, 0, 200, 0.0, 8.0);
+        assert_eq!(o_end, 0.0, "淡出终点是全透明");
+
+        let (o_mid, dy_mid) = text_envelope(1900, 2000, 0, 200, 0.0, 8.0);
+        // remaining=100，p=0.5，pow2_in(0.5)=0.25
+        assert!((o_mid - 0.25).abs() < 1e-6, "实得 {o_mid}");
+        let _ = dy_mid;
+
+        let (o_start, dy_start) = text_envelope(1800, 2000, 0, 200, 0.0, 8.0);
+        assert_eq!(o_start, 1.0, "淡出起点仍是满不透明");
+        assert_eq!(dy_start, 0.0);
+    }
+
+    #[test]
+    fn 淡入淡出重叠时取更小的那个_绝不大于一() {
+        // 一条很短的+很长的淡入淡出：两段都命中。
+        // 不取较小者的话会算出"淡入还没完就开始淡出"的抖动。
+        for local in 0..120_u64 {
+            let (opacity, _) = text_envelope(local, 100, 80, 80, 20.0, 8.0);
+            assert!((0.0..=1.0).contains(&opacity), "第 {local}ms 算出越界值 {opacity}");
+        }
+        // 中点两段都逼近，应当明显小于 1。
+        let (mid, _) = text_envelope(50, 100, 80, 80, 20.0, 8.0);
+        assert!(mid < 0.6, "重叠段的中点应当被压下来，实得 {mid}");
+    }
+
+    #[test]
+    fn 零长区间不崩且给满不透明() {
+        let (opacity, dy) = text_envelope(0, 0, 350, 200, 20.0, 8.0);
+        assert_eq!((opacity, dy), (1.0, 0.0));
+    }
+
+    #[test]
+    fn 淡入淡出是纯函数_同样的输入永远同样的输出() {
+        // 跳帧播放（预览会 seek）不能给出不同的透明度。
+        let forward: Vec<(f32, f32)> = (0..200)
+            .map(|local| text_envelope(local, 2000, 350, 200, 20.0, 8.0))
+            .collect();
+        let backward: Vec<(f32, f32)> = (0..200)
+            .rev()
+            .map(|local| text_envelope(local, 2000, 350, 200, 20.0, 8.0))
+            .collect();
+        for (index, (a, b)) in forward.iter().zip(backward.iter().rev()).enumerate() {
+            assert_eq!(a, b, "第 {index} 帧正着算与倒着算必须一样");
+        }
     }
 }

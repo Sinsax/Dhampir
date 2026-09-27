@@ -94,8 +94,17 @@ pub struct TextRasterKey {
     pub font_px: u32,
     /// 样式色，RGBA。alpha 是样式自己的不透明度。
     pub color: [u8; 4],
-    /// 要不要描边。宽度由 [`border_px`] 从字号推出来。
+    /// 要不要描边。宽度由 `stroke_px` 说了算。
     pub outline: bool,
+    /// **描边宽度（目标像素）。** 由 `stroke_ratio * 目标高` 换算而来
+    /// （换算在 `overlay::evaluate_overlay` 里做，因为只有它知道目标尺寸）。
+    ///
+    /// 以前宽度是从字号推的（`border_px(font_px)`）—— 那是"V-Trim 的 12px
+    /// 与 2px 差不多能对上"的巧合，不是契约。V-Trim 的字幕 `12px`、
+    /// 弹幕 `2px`，两者字号也不同，从字号推必然对不上。
+    pub stroke_px: u32,
+    /// 描边颜色。V-Trim 字幕是 `#403c3b`、弹幕是 `#000`。
+    pub stroke_color: [u8; 4],
     /// 字体文件。由宿主给（CLI 的 --font-file）—— 本仓不内嵌字体、也不猜系统字体。
     pub font_file: PathBuf,
     /// 位图宽（像素），见 [`bitmap_size`]。
@@ -274,6 +283,14 @@ fn filter_value(value: &str) -> String {
     escaped
 }
 
+/// RGBA -> ffmpeg 认的 `0xRRGGBB`（**丢掉 alpha**）。
+///
+/// 描边色不需要 alpha：它压在文字底下，半透明的描边看起来像"字边上脏了一圈"，
+/// 而 V-Trim 给的也是不透明的颜色（`#403c3b` / `#000`）。
+fn border_color_value(color: [u8; 4]) -> String {
+    format!("0x{:02X}{:02X}{:02X}", color[0], color[1], color[2])
+}
+
 /// 送给 ffmpeg 的参数（**不含程序名**）。
 ///
 /// 抽成纯函数是为了能单测它 —— 尤其是「文本**不进命令行**」这条：
@@ -297,10 +314,22 @@ pub fn drawtext_args(key: &TextRasterKey, text_file: &Path) -> Vec<String> {
         key.font_px,
     );
     if key.outline {
-        drawtext.push_str(&format!(
-            ":borderw={}:bordercolor=black",
-            border_px(key.font_px)
-        ));
+        if key.stroke_px > 0 {
+            // **契约给了宽度与颜色。**
+            drawtext.push_str(&format!(
+                ":borderw={}:bordercolor={}",
+                key.stroke_px,
+                border_color_value(key.stroke_color)
+            ));
+        } else {
+            // **老路径：宽度从字号推、颜色写死 `black`。**
+            //
+            // 这一条不是"兼容遗留"，是**契约默认值必须让既有工程逐字节不变**：
+            // `stroke_ratio` 的默认值是 0，于是所有老工程都走这里，
+            // 而它们升级前渲染出来的就是 `borderw=border_px(font_px):bordercolor=black`。
+            // 让颜色也走 `stroke_color` 会在默认值上把黑描边变成别的颜色。
+            drawtext.push_str(&format!(":borderw={}:bordercolor=black", border_px(key.font_px)));
+        }
     }
 
     vec![
@@ -517,6 +546,8 @@ mod tests {
             font_px: 32,
             color: [255, 240, 200, 255],
             outline: false,
+            stroke_px: 0,
+            stroke_color: [0, 0, 0, 255],
             font_file: PathBuf::from("C:/fake/font.ttf"),
             width: 100,
             height,
@@ -740,7 +771,38 @@ mod tests {
             joined.contains("borderw=3"),
             "字号 48 的描边是 3 像素：{joined}"
         );
-        assert!(joined.contains("bordercolor=black"));
+        // **默认走老路径**：`stroke_px == 0` → 宽度从字号推、颜色写死 black。
+        // 这是"既有工程逐字节不变"的那条分支（`stroke_ratio` 的默认值是 0）。
+        assert!(joined.contains("bordercolor=black"), "实得：{joined}");
+    }
+
+    #[test]
+    fn 描边宽度与颜色都来自契约() {
+        // **以前两者都是推出来的**：宽度从字号推（`border_px`）、颜色写死 black。
+        // 而 V-Trim 的字幕是 `12px #403c3b`、弹幕是 `2px #000` —— 两组数
+        // 在"从字号推"的规则下**对不上**，颜色更是只能有一个。
+        let mut styled = key("字", 48);
+        styled.outline = true;
+        styled.stroke_px = 12;
+        styled.stroke_color = [0x40, 0x3c, 0x3b, 255];
+        let joined = drawtext_args(&styled, Path::new("t.txt")).join(" ");
+        assert!(joined.contains("borderw=12"), "宽度要用契约给的 12，实得：{joined}");
+        assert!(
+            joined.contains("bordercolor=0x403C3B"),
+            "颜色要用契约给的 #403c3b，实得：{joined}"
+        );
+
+        // `stroke_px == 0` 时退回"从字号推 + 颜色 black"—— 老工程没写这个字段，
+        // 行为必须逐字节不变（升级后的默认值就是 0）。
+        let mut legacy = key("字", 48);
+        legacy.outline = true;
+        legacy.font_px = 48;
+        let legacy_args = drawtext_args(&legacy, Path::new("t.txt")).join(" ");
+        assert!(legacy_args.contains("borderw=3"), "老行为：字号 48 -> 3 像素，实得：{legacy_args}");
+        assert!(
+            legacy_args.contains("bordercolor=black"),
+            "老行为：默认颜色是 black（不是 0x000000），实得：{legacy_args}"
+        );
     }
 
     #[test]
@@ -877,6 +939,8 @@ mod tests {
             font_px,
             color: [255, 240, 200, 255],
             outline: true,
+            stroke_px: 0,
+            stroke_color: [0, 0, 0, 255],
             font_file: font.clone(),
             width,
             height,
@@ -933,6 +997,8 @@ mod tests {
             font_px,
             color: [255, 255, 255, 255],
             outline: false,
+            stroke_px: 0,
+            stroke_color: [0, 0, 0, 255],
             font_file: font,
             width,
             height,
@@ -970,6 +1036,8 @@ mod tests {
             font_px,
             color: [255, 255, 255, 255],
             outline: false,
+            stroke_px: 0,
+            stroke_color: [0, 0, 0, 255],
             font_file: font.clone(),
             width,
             height,

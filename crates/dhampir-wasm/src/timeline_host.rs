@@ -877,9 +877,12 @@ fn frame_overlay(doc: &ProjectDoc, frame: i64) -> Option<host_api::OverlayView> 
             items: overlay
                 .items
                 .iter()
+                // **带上淡入淡出**（`opacity` / `dy_px` 由契约层算好）。
                 .map(|item| host_api::TextItemView {
                     text: item.text.clone(),
                     rect: item.rect.into(),
+                    opacity: item.opacity,
+                    dy_px: item.dy_px,
                 })
                 .collect(),
             // 弹幕的矩形是**这一帧**的滚动位置（core 已经按帧算好）——
@@ -893,10 +896,13 @@ fn frame_overlay(doc: &ProjectDoc, frame: i64) -> Option<host_api::OverlayView> 
                     lane: item.lane,
                     enter: item.enter,
                     exit: item.exit,
+                    opacity: item.opacity,
+                    dy_px: item.dy_px,
                 })
                 .collect(),
-            color: overlay.color,
-            outline: overlay.outline,
+            // **两类各一套画法**（字幕暖色、弹幕白色）。
+            subtitle_style: text_style_view(&overlay.subtitle_style),
+            danmaku_style: text_style_view(&overlay.danmaku_style),
             dropped_lines: overlay.dropped_lines,
             dropped_danmaku: overlay.dropped_danmaku,
         })
@@ -1644,32 +1650,29 @@ pub fn dhampir_project_text_frame(frame: i32) -> String {
                 format!("字幕素材 {asset_id} 没有交给宿主：先调 dhampir_project_set_subtitles"),
             ));
         }
-        let (items, danmaku_items, color, outline, dropped_lines, dropped_danmaku) = match &overlay {
-            Some(overlay) => (
-                overlay
-                    .items
-                    .iter()
-                    .map(|item| text_item_json(&item.text, item.rect))
-                    .collect::<Vec<_>>(),
-                overlay
-                    .danmaku
-                    .iter()
-                    .map(|item| danmaku_item_json(item))
-                    .collect::<Vec<_>>(),
-                serde_json::json!(overlay.color),
-                serde_json::json!(overlay.outline),
-                overlay.dropped_lines,
-                overlay.dropped_danmaku,
-            ),
-            None => (
-                Vec::new(),
-                Vec::new(),
-                serde_json::Value::Null,
-                serde_json::Value::Null,
-                0,
-                0,
-            ),
-        };
+        let (items, danmaku_items, subtitle_style, danmaku_style, dropped_lines, dropped_danmaku) =
+            match &overlay {
+                Some(overlay) => (
+                    overlay.items.iter().map(text_item_json).collect::<Vec<_>>(),
+                    overlay
+                        .danmaku
+                        .iter()
+                        .map(|item| danmaku_item_json(item))
+                        .collect::<Vec<_>>(),
+                    text_style_json(&overlay.subtitle_style),
+                    text_style_json(&overlay.danmaku_style),
+                    overlay.dropped_lines,
+                    overlay.dropped_danmaku,
+                ),
+                None => (
+                    Vec::new(),
+                    Vec::new(),
+                    serde_json::Value::Null,
+                    serde_json::Value::Null,
+                    0,
+                    0,
+                ),
+            };
         // 有行、却算不出落点的那些：**数出来**。静默少一行，看起来与「这一行本来就没有」一样。
         // 字幕与弹幕各数各的：落点算不出来的原因不同（字幕是行盒没高度/目标尺寸为 0，
         // 弹幕还多一种 —— 泳道排到画面外），混成一个数就分不清该去查哪一边。
@@ -1693,8 +1696,10 @@ pub fn dhampir_project_text_frame(frame: i32) -> String {
             "danmaku": danmaku_items,
             "placements": lines.iter().map(placement_json).collect::<Vec<_>>(),
             "danmaku_placements": danmaku_lines.iter().map(placement_json).collect::<Vec<_>>(),
-            "color": color,
-            "outline": outline,
+            // **两类各一套画法**（字幕暖色、弹幕白色）—— 逐字段同名于
+            // `host_api::TextStyleView`，所以比对时不需要映射表。
+            "subtitle_style": subtitle_style,
+            "danmaku_style": danmaku_style,
             "dropped_lines": dropped_lines,
             "dropped_danmaku": dropped_danmaku,
             "unplaced_lines": unplaced,
@@ -1719,7 +1724,18 @@ pub fn dhampir_project_text_frame(frame: i32) -> String {
 /// **字幕行与弹幕条目共用这一份**（逐字段同名），弹幕多三个键 `lane` / `enter` / `exit`。
 /// 不用两份构造函数：两份就会各自演化，而「JS 侧按同一套键名读两处」正是这里要的。
 fn placement_json(line: &TextLineSpec) -> serde_json::Value {
-    let mut value = text_item_json(&line.text, line.rect);
+    // 这里是**落点清单**（给 JS 照着栅格化），不是"这一帧的文字清单" ——
+    // 所以它自己拼 `{text, rect}`，不共用 `text_item_json`
+    // （那份带 `opacity`/`dy_px`，是给"这一帧画什么"用的，两件事）。
+    let mut value = serde_json::json!({
+        "text": line.text,
+        "rect": {
+            "x": line.rect.x,
+            "y": line.rect.y,
+            "width": line.rect.width,
+            "height": line.rect.height,
+        },
+    });
     value["x"] = serde_json::json!(line.placement.x);
     value["y"] = serde_json::json!(line.placement.y);
     value["bitmap_width"] = serde_json::json!(line.placement.bitmap_width);
@@ -1738,15 +1754,18 @@ fn placement_json(line: &TextLineSpec) -> serde_json::Value {
 }
 
 /// `{text, rect}` —— 与 CLI 的 `cmd_subtitle` 同一形状（逐字段同名）。
-fn text_item_json(text: &str, rect: NormalizedRect) -> serde_json::Value {
+fn text_item_json(item: &dhampir_core::overlay::TextItem) -> serde_json::Value {
     serde_json::json!({
-        "text": text,
+        "text": item.text,
         "rect": {
-            "x": rect.x,
-            "y": rect.y,
-            "width": rect.width,
-            "height": rect.height,
+            "x": item.rect.x,
+            "y": item.rect.y,
+            "width": item.rect.width,
+            "height": item.rect.height,
         },
+        // 淡入淡出：两端都要能对账"这一帧多透明、偏了多少"。
+        "opacity": item.opacity,
+        "dy_px": item.dy_px,
     })
 }
 
@@ -1756,11 +1775,49 @@ fn text_item_json(text: &str, rect: NormalizedRect) -> serde_json::Value {
 /// `lane`/`enter`/`exit` 一定要给：只比矩形的话，**泳道被分配错了**（两条换了位置）
 /// 在单帧里可能完全看不出来 —— 而那正是两端最容易漂的地方。
 fn danmaku_item_json(item: &DanmakuTextItem) -> serde_json::Value {
-    let mut value = text_item_json(&item.text, item.rect);
+    // 与字幕条目**逐字段同名**（`text`/`rect`/`opacity`/`dy_px`），
+    // 再多三个弹幕独有的键。这里自己拼而不是复用 `text_item_json`：
+    // 那个函数收的是 `&TextItem`，两种条目是**不同的类型**。
+    let mut value = serde_json::json!({
+        "text": item.text,
+        "rect": {
+            "x": item.rect.x,
+            "y": item.rect.y,
+            "width": item.rect.width,
+            "height": item.rect.height,
+        },
+        "opacity": item.opacity,
+        "dy_px": item.dy_px,
+    });
     value["lane"] = serde_json::json!(item.lane);
     value["enter"] = serde_json::json!(item.enter);
     value["exit"] = serde_json::json!(item.exit);
     value
+}
+
+/// `{color, outline, stroke_px, stroke_color}` —— 与 `host_api::TextStyleView`
+/// 和 CLI 的 `--text-frame` **逐字段同名**。
+///
+/// 构造放在这里而不是 `host_api`：**依赖是单向的**（core → timeline），
+/// `dhampir-timeline` 看不见 `dhampir_core::overlay`。
+fn text_style_view(style: &dhampir_core::overlay::TextStyle) -> host_api::TextStyleView {
+    host_api::TextStyleView {
+        color: style.color,
+        outline: style.outline,
+        stroke_px: style.stroke_px,
+        stroke_color: style.stroke_color,
+    }
+}
+
+/// `{color, outline, stroke_px, stroke_color}` —— 与 `host_api::TextStyleView`
+/// 和 CLI 的 `--text-frame` **逐字段同名**。
+fn text_style_json(style: &dhampir_core::overlay::TextStyle) -> serde_json::Value {
+    serde_json::json!({
+        "color": style.color,
+        "outline": style.outline,
+        "stroke_px": style.stroke_px,
+        "stroke_color": style.stroke_color,
+    })
 }
 
 /// 这一行画出来看得见吗（有非空白字符）。

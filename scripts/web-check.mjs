@@ -1511,10 +1511,11 @@ function compareSubtitleManifest(frame, cli, manifest) {
       problems.push(where + '：' + key + ' 不同（CLI ' + cli[key] + '、页面 ' + manifest[key] + '）');
     }
   }
-  problems.push(...compareNumberList(where + '：字色', cli.color, manifest.color));
-  if (cli.outline !== manifest.outline) {
-    problems.push(where + '：描边不同（CLI ' + cli.outline + '、页面 ' + manifest.outline + '）');
-  }
+  // **两类各一套画法**（字幕暖色、弹幕白色 + 各自的描边）。
+  // 以前是一份共用的 `color`/`outline` —— 共用时"字幕是暖色、弹幕是白色"
+  // 这件事**必然错一个**，而两边的字都看得见，所以看不出问题。
+  problems.push(...compareTextStyle(where + '：字幕样式', cli.subtitle_style, manifest.subtitle_style));
+  problems.push(...compareTextStyle(where + '：弹幕样式', cli.danmaku_style, manifest.danmaku_style));
 
   const left = Array.isArray(cli.items) ? cli.items : [];
   const right = Array.isArray(manifest.items) ? manifest.items : [];
@@ -1542,7 +1543,40 @@ function compareSubtitleManifest(frame, cli, manifest) {
           + '（CLI ' + a[key] + '、页面 ' + b[key] + '）');
       }
     }
+    // **淡入淡出也要逐字段对账**：它是"这一帧多透明、偏了多少"，
+    // 而两端各算一遍就会在边界帧上差一点 —— 那种差只在成片里看得出来。
+    for (const key of ['opacity', 'dy_px']) {
+      const one = left[index][key];
+      const two = right[index][key];
+      if (typeof one !== 'number' || typeof two !== 'number') {
+        problems.push(label + '：' + key + ' 不是数（CLI ' + one + '、页面 ' + two + '）');
+      } else if (Math.abs(one - two) > SUBTITLE_TOLERANCE) {
+        problems.push(label + '：' + key + ' 差 ' + Math.abs(one - two) + '（CLI ' + one + '、页面 ' + two + '）');
+      }
+    }
   }
+  return problems;
+}
+
+/**
+ * 比一套文字画法：`{color, outline, stroke_px, stroke_color}`。
+ *
+ * `stroke_px` 按容差比（它是浮点），其余严格比。
+ */
+function compareTextStyle(where, cli, manifest) {
+  const problems = [];
+  if (cli === undefined || manifest === undefined) {
+    problems.push(where + '：一端没有这套样式');
+    return problems;
+  }
+  problems.push(...compareNumberList(where + '：颜色', cli.color, manifest.color));
+  if (cli.outline !== manifest.outline) {
+    problems.push(where + '：描边开关不同（CLI ' + cli.outline + '、页面 ' + manifest.outline + '）');
+  }
+  if (Math.abs((cli.stroke_px ?? 0) - (manifest.stroke_px ?? 0)) > SUBTITLE_TOLERANCE) {
+    problems.push(where + '：描边宽度不同（CLI ' + cli.stroke_px + '、页面 ' + manifest.stroke_px + '）');
+  }
+  problems.push(...compareNumberList(where + '：描边色', cli.stroke_color, manifest.stroke_color));
   return problems;
 }
 
@@ -1596,6 +1630,16 @@ function compareSubtitleDanmaku(frame, cli, manifest) {
       } else if (Math.abs(a[key] - b[key]) > SUBTITLE_TOLERANCE) {
         problems.push(label + '：rect.' + key + ' 差 ' + Math.abs(a[key] - b[key])
           + '（CLI ' + a[key] + '、页面 ' + b[key] + '）');
+      }
+    }
+    // 弹幕的淡入淡出：**基础不透明度也在这里**（V-Trim 用 0.9，不是 1）。
+    for (const key of ['opacity', 'dy_px']) {
+      const one = left[index][key];
+      const two = right[index][key];
+      if (typeof one !== 'number' || typeof two !== 'number') {
+        problems.push(label + '：' + key + ' 不是数（CLI ' + one + '、页面 ' + two + '）');
+      } else if (Math.abs(one - two) > SUBTITLE_TOLERANCE) {
+        problems.push(label + '：' + key + ' 差 ' + Math.abs(one - two) + '（CLI ' + one + '、页面 ' + two + '）');
       }
     }
   }

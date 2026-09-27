@@ -57,7 +57,7 @@ function cssColor(rgba) {
  * （alpha 只随覆盖度走）。于是这里**直接照着那份结果落笔**：填 style.color、描黑边，
  * 而不是在 JS 里再写一遍逐像素公式（那就是第二份实现，迟早与 tint 漂开）。
  */
-function rasterizeLine(line, color, outline) {
+function rasterizeLine(line, style) {
   const canvas = document.createElement("canvas");
   canvas.width = line.bitmap_width;
   canvas.height = line.bitmap_height;
@@ -70,16 +70,32 @@ function rasterizeLine(line, color, outline) {
   ctx.miterLimit = 2;
   const x = canvas.width / 2;
   const y = canvas.height / 2;
-  if (outline === true && line.border_px > 0) {
+  // **描边宽度优先用契约给的**（`stroke_px`），0 才退回"从字号推"——
+  // 与 CLI 侧 `text_raster.rs` 的同一条分支判据，两边必须一致，
+  // 否则预览与成片的描边粗细不同（而那看起来像"字重不一样"）。
+  const strokePx = style.stroke_px > 0 ? Math.round(style.stroke_px) : line.border_px;
+  if (style.outline === true && strokePx > 0) {
     // 边宽取两倍：drawtext 的 borderw 是**向外**扩一圈，而 canvas 的描边压在字上。
     // 先描边后填字，内半边被字盖掉，剩下的外半边就是那一圈。
-    ctx.lineWidth = line.border_px * 2;
-    ctx.strokeStyle = "black";
+    ctx.lineWidth = strokePx * 2;
+    ctx.strokeStyle = strokeColorCss(line, style);
     ctx.strokeText(line.text, x, y);
   }
-  ctx.fillStyle = cssColor(color);
+  ctx.fillStyle = cssColor(style.color);
   ctx.fillText(line.text, x, y);
   return canvas;
+}
+
+/**
+ * 描边颜色：**契约给了就用契约的**，没给（`stroke_px == 0`，老工程）就用 `black`
+ * —— 与 CLI 侧那条老路径同色。两边不一致的话，预览的描边颜色与成片不同，
+ * 而那是"看起来只是有点脏"的一类错。
+ */
+function strokeColorCss(line, style) {
+  if (style.stroke_px > 0 && Array.isArray(style.stroke_color)) {
+    return cssColor(style.stroke_color);
+  }
+  return "black";
 }
 
 export class Engine {
@@ -505,10 +521,11 @@ export class Engine {
     // 「宿主的清单 == 这一帧」时才肯判（见 Rust 侧的 text_probe）。
     this.textManifest = manifest;
     const token = (this.textToken += 1);
+    // **两类各一套画法**（字幕暖色、弹幕白色 + 各自的描边）——
+    // 以前是一份共用的，而共用时"字幕是暖色、弹幕是白色"这件事**必然错一个**。
     const placed = await this.rasterizePlacements(
       manifest.placements,
-      manifest.color,
-      manifest.outline,
+      manifest.subtitle_style,
       token,
       (index, bitmap) => this.mod.dhampir_project_set_text_bitmap(index, bitmap),
     );
@@ -516,8 +533,7 @@ export class Engine {
     if (placed === false) return manifest;
     await this.rasterizePlacements(
       manifest.danmaku_placements,
-      manifest.color,
-      manifest.outline,
+      manifest.danmaku_style,
       token,
       (index, bitmap) => this.mod.dhampir_project_set_danmaku_bitmap(index, bitmap),
     );
@@ -529,8 +545,10 @@ export class Engine {
    *
    * `submit` 决定交到哪个位图集合 —— 两套编号各自从 0 起，所以这里只认下标，
    * 不认"这份清单是字幕还是弹幕"。
+   *
+   * `style` 是 `{color, outline, stroke_px, stroke_color}`，**来自契约**。
    */
-  async rasterizePlacements(placements, color, outline, token, submit) {
+  async rasterizePlacements(placements, style, token, submit) {
     for (let index = 0; index < placements.length; index += 1) {
       const line = placements[index];
       // 全是空白字符的行**不做位图**：宿主不判它（栅格化出来本来就是空的），
@@ -541,7 +559,7 @@ export class Engine {
         // **直排 alpha**：宿主用 copy_external_image_to_texture 上传，并且声明
         // premultiplied_alpha = false。两边必须一致 —— 说错不会报错，只会让字的边缘发暗，
         // 而那看起来像"字体没渲染好"，不像"叠加算错了"。
-        bitmap = await createImageBitmap(rasterizeLine(line, color, outline), {
+        bitmap = await createImageBitmap(rasterizeLine(line, style), {
           premultiplyAlpha: "none",
         });
       } catch (error) {

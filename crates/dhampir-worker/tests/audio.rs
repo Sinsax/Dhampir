@@ -541,6 +541,7 @@ fn sfx_doc() -> ProjectDoc {
         blend: Default::default(),
         enabled: true,
         recorded: Default::default(),
+        gain: 1.0,
         source: Some(SourceRef { asset_id: "tone.m4a".to_string(), source_in: 0 }),
         loop_source: false,
         effects: Vec::new(),

@@ -690,6 +690,7 @@ mod tests {
             opacity: 1.0,
             blend: BlendMode::Normal,
             enabled: true,
+            gain: 1.0,
             recorded: Recorded::default(),
             source: asset.map(|a| crate::layer::SourceRef {
                 asset_id: a.to_string(),

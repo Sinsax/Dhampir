@@ -314,16 +314,39 @@ impl From<crate::text_layout::NormalizedRect> for RectView {
 }
 
 /// 要画的一行字：内容 + 它占的行盒（归一化，相对文档坐标系）。
+/// 一类文字的画法：颜色 + 描边。**字幕与弹幕各一套**。
+///
+/// # 为什么这里没有 `From<核心层的 TextStyle>`
+///
+/// **依赖是单向的**：`dhampir-core` 依赖 `dhampir-timeline`，反过来不行
+/// （见 `scripts/check-dep-graph.mjs`）。所以这个视图结构自己带全字段，
+/// 由**调用方**（wasm 宿主 / worker 的 CLI）逐字段构造 ——
+/// 那几个 crate 才同时看得见 core 与 timeline。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TextStyleView {
+    pub color: [u8; 4],
+    pub outline: bool,
+    /// 描边宽度（**目标像素**）。0 = "从字号推"（老行为）。
+    pub stroke_px: f32,
+    pub stroke_color: [u8; 4],
+}
+
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextItemView {
     pub text: String,
     pub rect: RectView,
+    /// 这一帧的不透明度（淡入淡出）。**契约层算好的**，宿主只照用。
+    pub opacity: f32,
+    /// 这一帧的纵向偏移（文档像素，正为向下）。
+    pub dy_px: f32,
 }
 
 impl From<crate::text_layout::TextLine> for TextItemView {
     fn from(line: crate::text_layout::TextLine) -> Self {
-        Self { text: line.text, rect: RectView::from(line.rect) }
+        // 只服务"没有淡入淡出"的老调用方：满不透明、不位移。
+        Self { text: line.text, rect: RectView::from(line.rect), opacity: 1.0, dy_px: 0.0 }
     }
 }
 
@@ -345,6 +368,10 @@ pub struct DanmakuItemView {
     pub enter: Frame,
     /// 最后一次出现的帧（**闭**区间终点）。
     pub exit: Frame,
+    /// 这一帧的不透明度（**已含弹幕的基础不透明度**）。
+    pub opacity: f32,
+    /// 这一帧的纵向偏移（文档像素）。
+    pub dy_px: f32,
 }
 
 /// 某一帧的文字覆盖层：这一帧还要画哪几行字、哪几条弹幕。
@@ -373,10 +400,14 @@ pub struct OverlayView {
     pub items: Vec<TextItemView>,
     /// 同一帧里活着的弹幕条，按轨道顺序、轨内按分配顺序。
     pub danmaku: Vec<DanmakuItemView>,
-    /// 文字颜色，RGBA。来自轨道样式。**弹幕也用它**。
-    pub color: [u8; 4],
-    /// 是否描边。来自轨道样式。**弹幕也用它**。
-    pub outline: bool,
+    /// **字幕**的画法。
+    ///
+    /// 与 `danmaku_style` 分开：V-Trim 的字幕是暖色 `#dcbda0`、弹幕是白色
+    /// `#ffffff` —— 共用一个字段时**必然有一个错**，而"两边的字都看得见"
+    /// 让人以为没问题。
+    pub subtitle_style: TextStyleView,
+    /// **弹幕**的画法。
+    pub danmaku_style: TextStyleView,
     /// 因为超过 `max_lines` 被丢弃的**行数**（所有字幕轨加起来）。
     pub dropped_lines: usize,
     /// 因为泳道排不下被丢弃的**弹幕条数**（所有弹幕轨加起来）。
@@ -582,6 +613,8 @@ mod tests {
                 items: vec![TextItemView {
                     text: "第一行中文".to_string(),
                     rect: RectView { x: 0.25, y: 0.8, width: 0.5, height: 0.066 },
+                    opacity: 1.0,
+                    dy_px: 0.0,
                 }],
                 danmaku: vec![DanmakuItemView {
                     text: "飘过".to_string(),
@@ -589,9 +622,21 @@ mod tests {
                     lane: 0,
                     enter: 10,
                     exit: 250,
+                    opacity: 0.9,
+                    dy_px: 0.0,
                 }],
-                color: [255, 240, 200, 255],
-                outline: false,
+                subtitle_style: TextStyleView {
+                    color: [255, 240, 200, 255],
+                    outline: false,
+                    stroke_px: 0.0,
+                    stroke_color: [0, 0, 0, 255],
+                },
+                danmaku_style: TextStyleView {
+                    color: [255, 255, 255, 255],
+                    outline: true,
+                    stroke_px: 0.0,
+                    stroke_color: [0, 0, 0, 255],
+                },
                 dropped_lines: 3,
                 dropped_danmaku: 2,
             }),
@@ -602,14 +647,14 @@ mod tests {
         let overlay = &value["overlay"];
         assert_eq!(
             keys(overlay),
-            sorted(&["items", "danmaku", "color", "outline", "dropped_lines", "dropped_danmaku"])
+            sorted(&["items", "danmaku", "subtitle_style", "danmaku_style", "dropped_lines", "dropped_danmaku"])
         );
-        assert_eq!(keys(&overlay["items"][0]), sorted(&["text", "rect"]));
+        assert_eq!(keys(&overlay["items"][0]), sorted(&["text", "rect", "opacity", "dy_px"]));
         assert_eq!(keys(&overlay["items"][0]["rect"]), sorted(&["x", "y", "width", "height"]));
         // 弹幕那一条：泳道与在屏区间必须在，否则「泳道分配错了」在单帧里查不出来。
         assert_eq!(
             keys(&overlay["danmaku"][0]),
-            sorted(&["text", "rect", "lane", "enter", "exit"])
+            sorted(&["text", "rect", "lane", "enter", "exit", "opacity", "dy_px"])
         );
         assert_eq!(keys(&overlay["danmaku"][0]["rect"]), sorted(&["x", "y", "width", "height"]));
         assert_eq!(overlay["danmaku"][0]["lane"], serde_json::json!(0));
@@ -633,10 +678,22 @@ mod tests {
                 items: vec![TextItemView {
                     text: "x".to_string(),
                     rect: RectView { x: 0.0, y: 0.0, width: 1.0, height: 0.1 },
+                    opacity: 1.0,
+                    dy_px: 0.0,
                 }],
                 danmaku: Vec::new(),
-                color: [255, 255, 255, 255],
-                outline: true,
+                subtitle_style: TextStyleView {
+                    color: [255, 255, 255, 255],
+                    outline: true,
+                    stroke_px: 0.0,
+                    stroke_color: [0, 0, 0, 255],
+                },
+                danmaku_style: TextStyleView {
+                    color: [255, 255, 255, 255],
+                    outline: true,
+                    stroke_px: 0.0,
+                    stroke_color: [0, 0, 0, 255],
+                },
                 dropped_lines: 0,
                 dropped_danmaku: 0,
             }),
@@ -663,9 +720,21 @@ mod tests {
                     lane: 1,
                     enter: 0,
                     exit: 30,
-                }],
-                color: [255, 255, 255, 255],
-                outline: true,
+                    opacity: 1.0,
+                    dy_px: 0.0,
+                }],                subtitle_style: TextStyleView {
+                    color: [255, 255, 255, 255],
+                    outline: true,
+                    stroke_px: 0.0,
+                    stroke_color: [0, 0, 0, 255],
+                },
+                danmaku_style: TextStyleView {
+                    color: [255, 255, 255, 255],
+                    outline: true,
+                    stroke_px: 0.0,
+                    stroke_color: [0, 0, 0, 255],
+                },
+
                 dropped_lines: 0,
                 dropped_danmaku: 0,
             }),
@@ -750,6 +819,7 @@ mod tests {
             opacity: 1.0,
             blend: BlendMode::Overlay, // 对端不支持
             enabled: true,
+            gain: 1.0,
             recorded: crate::layer::Recorded::default(),
             source: None,
             loop_source: false,

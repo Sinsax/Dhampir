@@ -29,12 +29,26 @@ export type BlendMode = "normal" | "add" | "multiply" | "screen" | "darken" | "l
 export interface DanmakuSpec {
   /** 指向弹幕素材（AssetKind::Subtitle，内容是 ASS）。 */
   asset_id: string;
+  /** **文字颜色，RGBA。** */
+  color?: number[];
   /** 一条弹幕从右滚到左要多久（毫秒）。 */
   duration_ms?: number;
+  /** 淡入时长（毫秒）。V-Trim 的 `getActiveDms()` 是 `0.3`。 */
+  fade_in_ms?: number;
+  /** 淡出时长（毫秒）。V-Trim 是 `0.2`。 */
+  fade_out_ms?: number;
   /** 字号 = 目标高度 * 这个比例。 */
   font_ratio?: number;
   /** 泳道数。排不下就**丢该条并计数**，不叠在一起。 */
   lanes?: number;
+  /** **基础不透明度。** V-Trim 用 `0.9`（不是 1.0）。 */
+  opacity?: number;
+  /** 是否加描边。V-Trim 弹幕是 `2px #000`。 */
+  outline?: boolean;
+  /** 描边颜色。 */
+  stroke_color?: number[];
+  /** 描边宽度 = 目标高度 * 这个比例（V-Trim 是 `2/1080`）。 */
+  stroke_ratio?: number;
 }
 
 export type Easing = "linear" | "ease_in" | "ease_out" | "ease_in_out";
@@ -67,6 +81,8 @@ export interface Layer {
   effects?: Effect[];
   enabled?: boolean;
   end: number;
+  /** **音频增益**（线性倍数，1.0 = 原样）。 */
+  gain?: number;
   /** 全局唯一。v1 里只保证轨内唯一，v2 提到全局 —— 否则跨轨引用无从谈起。 */
   id: string;
   keyframes?: Keyframe[];
@@ -118,12 +134,24 @@ export interface SubtitleStyle {
   bottom_margin?: number;
   /** 文字颜色，RGBA。 */
   color?: number[];
+  /** **淡入时长（毫秒）。** 0 = 硬出现。 */
+  fade_in_ms?: number;
+  /** **淡出时长（毫秒）。** 0 = 硬消失。 */
+  fade_out_ms?: number;
   /** 字号 = 目标高度 * 这个比例。 */
   font_ratio?: number;
   /** 最多几行（超出的行丢掉 —— 字幕不该盖住半屏）。 */
   max_lines?: number;
   /** 是否加描边（压住亮背景）。 */
   outline?: boolean;
+  /** 入场时从下方浮上来的距离（**文档像素**）。V-Trim 是 `20`。 */
+  rise_in_px?: number;
+  /** 退场时向上浮的距离（文档像素）。V-Trim 是 `8`。 */
+  rise_out_px?: number;
+  /** 描边颜色。`outline` 为假时忽略。 */
+  stroke_color?: number[];
+  /** **描边宽度** = 目标高度 * 这个比例。 */
+  stroke_ratio?: number;
 }
 
 export interface TimebaseDto {

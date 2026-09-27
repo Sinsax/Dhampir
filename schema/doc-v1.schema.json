@@ -192,11 +192,43 @@
           "description": "指向弹幕素材（AssetKind::Subtitle，内容是 ASS）。",
           "type": "string"
         },
+        "color": {
+          "description": "**文字颜色，RGBA。**\n\n这个字段以前**故意没有**（`overlay.rs` 的模块文档写着\"颜色与描边两者共用，\n要分开就得动契约\"）。后果不是\"少一个选项\"：V-Trim 的字幕是暖色\n`#dcbda0`、弹幕是白色 `#ffffff` —— 共用一份时**必然有一个错**。",
+          "type": "array",
+          "default": [
+            255,
+            255,
+            255,
+            255
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0
+          },
+          "maxItems": 4,
+          "minItems": 4
+        },
         "duration_ms": {
           "description": "一条弹幕从右滚到左要多久（毫秒）。",
           "type": "integer",
           "format": "uint64",
           "default": 8000,
+          "minimum": 0
+        },
+        "fade_in_ms": {
+          "description": "淡入时长（毫秒）。V-Trim 的 `getActiveDms()` 是 `0.3`。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
+          "minimum": 0
+        },
+        "fade_out_ms": {
+          "description": "淡出时长（毫秒）。V-Trim 是 `0.2`。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
           "minimum": 0
         },
         "font_ratio": {
@@ -211,6 +243,41 @@
           "format": "uint32",
           "default": 8,
           "minimum": 0
+        },
+        "opacity": {
+          "description": "**基础不透明度。** V-Trim 用 `0.9`（不是 1.0）。\n\n弹幕压在画面上，全不透明会太抢 —— 这是**弹幕与字幕的一处固有差别**，\n不是\"再给个字幕也有的旋钮\"。",
+          "type": "number",
+          "format": "float",
+          "default": 0.8999999761581421
+        },
+        "outline": {
+          "description": "是否加描边。V-Trim 弹幕是 `2px #000`。",
+          "type": "boolean",
+          "default": true
+        },
+        "stroke_color": {
+          "description": "描边颜色。",
+          "type": "array",
+          "default": [
+            0,
+            0,
+            0,
+            255
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0
+          },
+          "maxItems": 4,
+          "minItems": 4
+        },
+        "stroke_ratio": {
+          "description": "描边宽度 = 目标高度 * 这个比例（V-Trim 是 `2/1080`）。",
+          "type": "number",
+          "format": "float",
+          "default": 0.0
         }
       },
       "required": [
@@ -320,6 +387,12 @@
         "end": {
           "type": "integer",
           "format": "int64"
+        },
+        "gain": {
+          "description": "**音频增益**（线性倍数，1.0 = 原样）。\n\n# 为什么它不在 `opacity` 里\n\n`opacity` 是\"这一层**怎么画**\"，`gain` 是\"这一层**怎么响**\" ——\n两个不同的量。混在 `opacity` 上会让\"把画面调淡\"顺手把声音也调小，\n而那是**两个独立的意图**（V-Trim 就是这么用的：音效有画面没有透明度）。\n\n# 它一直是个死字段的反面\n\n混音器**早就会乘增益**（`AudioSegment.gain`，T13 引入），\n但契约里没有这个字段，于是 `plan_audio` 只能写死 `1.0` ——\n运行时支持、契约不支持，表现在成片里就是\"V-Trim 配的音量全丢\"。\n这一条是**白捡的**：加个字段，混音器那行不用动。\n\n只有音轨层用它；视频层上写它等于没写（渲染器不看），但也不报错 ——\n与 `opacity` 刻意不同：它不是\"画不出来\"，是\"与画无关\"。",
+          "type": "number",
+          "format": "float",
+          "default": 1.0
         },
         "id": {
           "description": "全局唯一。v1 里只保证轨内唯一，v2 提到全局 —— 否则跨轨引用无从谈起。",
@@ -528,6 +601,20 @@
           "maxItems": 4,
           "minItems": 4
         },
+        "fade_in_ms": {
+          "description": "**淡入时长（毫秒）。** 0 = 硬出现。\n\nV-Trim 的 `getActiveSubs()`：`fadeIn = 0.35`，透明度走 `pow2_out`，\n同时从下方 `+20px` 浮上来。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
+          "minimum": 0
+        },
+        "fade_out_ms": {
+          "description": "**淡出时长（毫秒）。** 0 = 硬消失。",
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
+          "minimum": 0
+        },
         "font_ratio": {
           "description": "字号 = 目标高度 * 这个比例。",
           "type": "number",
@@ -545,6 +632,42 @@
           "description": "是否加描边（压住亮背景）。",
           "type": "boolean",
           "default": true
+        },
+        "rise_in_px": {
+          "description": "入场时从下方浮上来的距离（**文档像素**）。V-Trim 是 `20`。",
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
+        "rise_out_px": {
+          "description": "退场时向上浮的距离（文档像素）。V-Trim 是 `8`。",
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
+        "stroke_color": {
+          "description": "描边颜色。`outline` 为假时忽略。",
+          "type": "array",
+          "default": [
+            64,
+            60,
+            59,
+            255
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0
+          },
+          "maxItems": 4,
+          "minItems": 4
+        },
+        "stroke_ratio": {
+          "description": "**描边宽度** = 目标高度 * 这个比例。\n\nV-Trim 写的是 `12px #403c3b`（1080p 下），即 `12/1080`。\n单位取比例而不是像素：像素在预览（640x360）与成片（1920x1080）\n里含义不同，两端就不一致了 —— 与 `font_ratio` 同一条理由。",
+          "type": "number",
+          "format": "float",
+          "default": 0.0
         }
       }
     },

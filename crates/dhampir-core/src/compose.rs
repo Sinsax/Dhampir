@@ -466,6 +466,7 @@ mod tests {
             blend: BlendMode::Normal,
             enabled: true,
             recorded: Default::default(),
+            gain: 1.0,
             source,
             loop_source: false,
             effects: Vec::new(),
@@ -894,6 +895,7 @@ mod tests {
             blend: BlendMode::Normal,
             enabled: true,
             recorded: Recorded::default(),
+            gain: 1.0,
             loop_source: false,
             source: None,
             effects: Vec::new(),
@@ -936,6 +938,7 @@ mod tests {
             blend: BlendMode::Normal,
             enabled: true,
             recorded: Recorded::default(),
+            gain: 1.0,
             loop_source: false,
             source: None,
             effects: Vec::new(),
@@ -965,6 +968,7 @@ mod tests {
             blend: BlendMode::Normal,
             enabled: true,
             recorded: Recorded::default(),
+            gain: 1.0,
             loop_source: false,
             source: Some(SourceRef { asset_id: "a.mp4".to_string(), source_in: 0 }),
             effects: vec![Effect {
@@ -1002,6 +1006,7 @@ mod tests {
             blend: BlendMode::Screen,
             enabled: true,
             recorded: Recorded::default(),
+            gain: 1.0,
             loop_source: false,
             source: None, // 没有素材
             effects: vec![Effect {

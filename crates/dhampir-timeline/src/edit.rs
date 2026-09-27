@@ -198,6 +198,7 @@ pub fn insert_reference(
         opacity: 1.0,
         blend: crate::layer::BlendMode::Normal,
         enabled: true,
+        gain: 1.0,
         recorded: crate::layer::Recorded::default(),
         source: Some(crate::layer::SourceRef {
             asset_id: request.asset_id.clone(),
@@ -727,6 +728,7 @@ mod tests {
             opacity: 1.0,
             blend: BlendMode::Normal,
             enabled: true,
+            gain: 1.0,
             recorded: Recorded::default(),
             source: source_in.map(|source_in| SourceRef {
                 asset_id: "clip".to_string(),

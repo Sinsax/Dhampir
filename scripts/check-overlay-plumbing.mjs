@@ -357,7 +357,9 @@ function runSelfTest() {
   ].join('\n');
   const okCli = 'let overlay = evaluate_overlay(&doc.timeline, frame, sequence, Some(&table));\n';
   const okEngine = [
-    'bitmap = await createImageBitmap(rasterizeLine(line, manifest.color, manifest.outline), {',
+    // 两条判据：**两类样式各传各的**（`manifest.subtitle_style` / `manifest.danmaku_style`）、
+    // 且栅格化的入参是**一套样式**而不是散开的 `color, outline`。
+    'bitmap = await createImageBitmap(rasterizeLine(line, style), {',
     '  premultiplyAlpha: "none",',
     '});',
     '',

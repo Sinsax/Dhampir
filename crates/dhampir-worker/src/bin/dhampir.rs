@@ -1894,12 +1894,12 @@ fn cmd_subtitle(args: &Args) -> Result<ExitCode, CommandError> {
 
     let sequence = doc.sequence_size();
     let overlay = evaluate_overlay(&doc.timeline, frame, sequence, Some(&table));
-    let (items, danmaku, color, outline, dropped_lines, dropped_danmaku) = match overlay {
+    let (items, danmaku, subtitle_style, danmaku_style, dropped_lines, dropped_danmaku) = match overlay {
         Some(overlay) => (
             overlay.items.iter().map(text_item_json).collect::<Vec<_>>(),
             overlay.danmaku.iter().map(danmaku_item_json).collect::<Vec<_>>(),
-            serde_json::json!(overlay.color),
-            serde_json::json!(overlay.outline),
+            text_style_json(&overlay.subtitle_style),
+            text_style_json(&overlay.danmaku_style),
             overlay.dropped_lines,
             overlay.dropped_danmaku,
         ),
@@ -1919,12 +1919,24 @@ fn cmd_subtitle(args: &Args) -> Result<ExitCode, CommandError> {
         "subtitle_assets": table.len(),
         "items": items,
         "danmaku": danmaku,
-        "color": color,
-        "outline": outline,
+        // **两类各一套画法**（以前是一份共用的，见 `TextStyle` 的说明）。
+        // 逐字段同名于 `host_api::TextStyleView` 与 wasm 的 `dhampir_project_text_frame`。
+        "subtitle_style": subtitle_style,
+        "danmaku_style": danmaku_style,
         "dropped_lines": dropped_lines,
         "dropped_danmaku": dropped_danmaku,
     }))?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// `{color, outline, stroke_px, stroke_color}` —— 三处同名。
+fn text_style_json(style: &dhampir_core::overlay::TextStyle) -> serde_json::Value {
+    serde_json::json!({
+        "color": style.color,
+        "outline": style.outline,
+        "stroke_px": style.stroke_px,
+        "stroke_color": style.stroke_color,
+    })
 }
 
 /// `{text, rect}` —— 与预览宿主的 `text_item_json`、`host_api::TextItemView` 同一形状。
@@ -1940,6 +1952,9 @@ fn text_item_json(item: &dhampir_core::overlay::TextItem) -> serde_json::Value {
             "width": item.rect.width,
             "height": item.rect.height,
         },
+        // 淡入淡出：两端都要能对账"这一帧多透明、偏了多少"。
+        "opacity": item.opacity,
+        "dy_px": item.dy_px,
     })
 }
 
@@ -1955,6 +1970,8 @@ fn danmaku_item_json(item: &dhampir_core::overlay::DanmakuTextItem) -> serde_jso
     let mut value = text_item_json(&dhampir_core::overlay::TextItem {
         text: item.text.clone(),
         rect: item.rect,
+        opacity: item.opacity,
+        dy_px: item.dy_px,
     });
     value["lane"] = serde_json::json!(item.lane);
     value["enter"] = serde_json::json!(item.enter);

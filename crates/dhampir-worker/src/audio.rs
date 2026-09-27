@@ -328,10 +328,8 @@ pub fn plan_audio(
                 output_start_sample,
                 output_samples,
                 source_start_sample,
-                // 契约里还没有"每层增益"这个字段，所以一律 1.0。
-                // **写出来而不是省略**：混音那一层要靠它，而"忘了设"与"设成 1"
-                // 在类型上应当是同一种东西。
-                gain: 1.0,
+                // 契约里每层增益就在 `Layer.gain` 上（默认 1.0）。
+                gain: layer.gain,
             });
         }
     }
@@ -433,6 +431,7 @@ mod tests {
             blend: Default::default(),
             enabled: true,
             recorded: Default::default(),
+            gain: 1.0,
             source: Some(SourceRef {
                 asset_id: asset_id.to_string(),
                 source_in,

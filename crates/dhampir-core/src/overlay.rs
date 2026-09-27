@@ -48,16 +48,21 @@ use dhampir_timeline::subtitle::{Cue, frame_at_ms};
 use dhampir_timeline::text_layout::{NormalizedRect, layout};
 use std::collections::BTreeMap;
 
-/// 一行要画的文字：内容 + 它占的**行盒**（归一化，相对文档坐标系）。
+/// 一行要画的文字：内容 + 它占的**行盒**（归一化，相对文档坐标系）+ 这一帧的淡入淡出。
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextItem {
     pub text: String,
     pub rect: NormalizedRect,
+    /// 这一帧的不透明度（淡入淡出算出来的）。**由契约层的 [`text_envelope`] 给**，
+    /// 宿主只照用 —— 见那个函数的说明。
+    pub opacity: f32,
+    /// 这一帧的纵向偏移（**文档像素**，正为向下）。同样是契约层算好的。
+    pub dy_px: f32,
 }
 
-/// 一条要画的弹幕：内容 + **这一帧**的矩形 + 泳道与在屏区间。
+/// 一条要画的弹幕：内容 + **这一帧**的矩形 + 泳道与在屏区间 + 这一帧的淡入淡出。
 ///
-/// 矩形与另外三个字段放一起，是为了让「两端给出同一张表」这件事**能逐字段对账**：
+/// 矩形与另外几个字段放一起，是为了让「两端给出同一张表」这件事**能逐字段对账**：
 /// 只比矩形的话，泳道被分配错了（两条换了位置）在单帧里可能看不出来。
 #[derive(Debug, Clone, PartialEq)]
 pub struct DanmakuTextItem {
@@ -67,6 +72,34 @@ pub struct DanmakuTextItem {
     pub lane: u32,
     pub enter: Frame,
     pub exit: Frame,
+    /// 这一帧的不透明度（含 `DanmakuSpec.opacity` 这个基础值）。
+    pub opacity: f32,
+    /// 这一帧的纵向偏移（文档像素）。
+    pub dy_px: f32,
+}
+
+/// 一类文字的画法（颜色 + 描边）。
+///
+/// # 为什么字幕与弹幕**各一套**
+///
+/// 这个结构以前是没有的：`TextOverlay` 上只有一份 `color` + `outline` 给两者共用，
+/// 模块文档还写明了"要分开就得动契约"。而 V-Trim 的字幕是暖色 `#dcbda0`、
+/// 弹幕是白色 `#ffffff` —— 共用一份时**必然有一个错**，
+/// 而"两边的字都能看见"这件事让人以为没问题。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextStyle {
+    pub color: [u8; 4],
+    pub outline: bool,
+    /// 描边宽度（**文档像素**；由 `stroke_ratio * 目标高` 换算而来，
+    /// 换算在 `evaluate_overlay` 里做，因为只有它知道目标尺寸）。
+    pub stroke_px: f32,
+    pub stroke_color: [u8; 4],
+}
+
+impl Default for TextStyle {
+    fn default() -> Self {
+        Self { color: [255, 255, 255, 255], outline: true, stroke_px: 0.0, stroke_color: [0, 0, 0, 255] }
+    }
 }
 
 /// 某一帧的文字覆盖层。
@@ -80,10 +113,10 @@ pub struct TextOverlay {
     /// 弹幕按自己的宽度左对齐），宿主据此选不同的画法。混在一起就得在每个元素上带一个
     /// 种类标签，而那与"这里是纯结构"的定位冲突。
     pub danmaku: Vec<DanmakuTextItem>,
-    /// 文字颜色，RGBA。来自轨道样式。**弹幕也用它**（见模块文档）。
-    pub color: [u8; 4],
-    /// 是否描边。来自轨道样式。
-    pub outline: bool,
+    /// **字幕**的画法。与弹幕的那一套分开（见 `TextStyle` 的说明）。
+    pub subtitle_style: TextStyle,
+    /// **弹幕**的画法。
+    pub danmaku_style: TextStyle,
     /// 因为超过 max_lines 被丢弃的**行数**（所有字幕轨加起来）。
     ///
     /// 与 text_layout 的口径一致：丢弃必须计数，否则「字幕只显示了一半」
@@ -131,11 +164,13 @@ pub fn evaluate_overlay(
     let mut danmaku: Vec<DanmakuTextItem> = Vec::new();
     let mut dropped_lines = 0_usize;
     let mut dropped_danmaku = 0_usize;
-    // 默认值只是为了「一条轨都没命中」时结构上仍是确定的；命中时会被轨道样式覆盖。
-    let mut color = [255_u8, 255, 255, 255];
-    let mut outline = true;
+    // 两类文字**各一套**画法（见 `TextStyle` 的说明：以前共用一份，必错一个）。
+    let mut subtitle_style = TextStyle::default();
+    let mut danmaku_style = TextStyle::default();
     let mut styled = false;
     let mut danmaku_styled = false;
+    // 描边宽度是"目标高 * 比例" —— 换算需要目标尺寸，所以在这里做一次。
+    let target_h = sequence.1 as f32;
 
     for track in &timeline.tracks {
         if track.kind != TrackKind::Subtitle {
@@ -165,14 +200,34 @@ pub fn evaluate_overlay(
             if !cue_visible_at(cue, frame, &timebase) {
                 continue;
             }
+            // 这一帧在 cue 内的位置（毫秒）与 cue 总长（毫秒）。
+            let (Some(local_ms), Some(span_ms)) = (
+                ms_at_frame_milli(frame, &timebase).map(|now| now.saturating_sub(cue.start_ms)),
+                cue.end_ms.checked_sub(cue.start_ms),
+            ) else {
+                continue;
+            };
+            // **淡入淡出由契约层算**（`text_envelope`），宿主只照用。
+            let (opacity, dy_px) = dhampir_timeline::layer::text_envelope(
+                local_ms,
+                span_ms,
+                style.fade_in_ms,
+                style.fade_out_ms,
+                style.rise_in_px,
+                style.rise_out_px,
+            );
             let laid: dhampir_timeline::text_layout::TextLayout =
                 layout(&cue.text, &style, sequence);
             dropped_lines += laid.dropped_lines;
             for line in laid.lines {
-                items.push(TextItem { text: line.text, rect: line.rect });
+                items.push(TextItem { text: line.text, rect: line.rect, opacity, dy_px });
             }
-            color = style.color;
-            outline = style.outline;
+            subtitle_style = TextStyle {
+                color: style.color,
+                outline: style.outline,
+                stroke_px: style.stroke_ratio * target_h,
+                stroke_color: style.stroke_color,
+            };
             styled = true;
         }
     }
@@ -209,14 +264,34 @@ pub fn evaluate_overlay(
             let Some(rect) = rect_at(&item, frame, spec, sequence) else {
                 continue;
             };
+            // 在屏区间是**闭**的，所以总长要多算一帧的时长。
+            let span_ms = ms_between_frames(item.enter, item.exit.saturating_add(1), &timebase);
+            let local_ms = ms_between_frames(item.enter, frame, &timebase);
+            let (fade, dy_px) = dhampir_timeline::layer::text_envelope(
+                local_ms,
+                span_ms,
+                spec.fade_in_ms,
+                spec.fade_out_ms,
+                0.0,
+                0.0,
+            );
+            // **基础不透明度乘在淡入淡出之上** —— V-Trim 的弹幕是 `0.9 * fade`。
             danmaku.push(DanmakuTextItem {
                 text: item.text,
                 rect,
                 lane: item.lane,
                 enter: item.enter,
                 exit: item.exit,
+                opacity: spec.opacity.clamp(0.0, 1.0) * fade,
+                dy_px,
             });
         }
+        danmaku_style = TextStyle {
+            color: spec.color,
+            outline: spec.outline,
+            stroke_px: spec.stroke_ratio * target_h,
+            stroke_color: spec.stroke_color,
+        };
         danmaku_styled = true;
     }
 
@@ -226,7 +301,38 @@ pub fn evaluate_overlay(
     if !has_subtitle && !has_danmaku {
         return None;
     }
-    Some(TextOverlay { items, danmaku, color, outline, dropped_lines, dropped_danmaku })
+    Some(TextOverlay {
+        items,
+        danmaku,
+        subtitle_style,
+        danmaku_style,
+        dropped_lines,
+        dropped_danmaku,
+    })
+}
+
+/// 两个帧号之间相差多少毫秒（`to - from`，负数取 0）。
+///
+/// **用同一份时间基换算**（`ms_at_frame`），不在这里重写一遍除法 ——
+/// 重写一遍就是给"两处算法慢慢分叉"另一个机会。
+fn ms_between_frames(from: Frame, to: Frame, timebase: &TimebaseDto) -> u64 {
+    if to <= from {
+        return 0;
+    }
+    // 单帧毫秒 = den/num * 1000；乘以帧数，全程整数化以免累积浮点误差。
+    let num = timebase.num.max(1) as u128;
+    let den = timebase.den as u128;
+    let frames = (to - from) as u128;
+    let ms = frames.saturating_mul(den).saturating_mul(1000) / num;
+    ms.min(u64::MAX as u128) as u64
+}
+
+/// 这一帧从时间线起点算起过了多少毫秒。
+fn ms_at_frame_milli(frame: Frame, timebase: &TimebaseDto) -> Option<u64> {
+    if frame < 0 {
+        return Some(0);
+    }
+    Some(ms_between_frames(0, frame, timebase))
 }
 
 /// 这条字幕在这一帧显示吗。
@@ -403,6 +509,63 @@ mod tests {
         table
     }
 
+    /// **字幕轨 + 弹幕轨同时存在**，且两者的颜色刻意不同。
+    ///
+    /// 这是拆开 `TextOverlay.color` 的那条用例的前提：共用一个字段时，
+    /// 这两个颜色**不可能同时成立**。
+    fn both_timeline() -> TimelineV2 {
+        timeline(
+            r#"{
+                "schema": 3,
+                "timebase": { "num": 30, "den": 1 },
+                "tracks": [
+                    {
+                        "id": "sub",
+                        "kind": "subtitle",
+                        "layers": [{
+                            "id": "cue",
+                            "start": 0,
+                            "end": 120,
+                            "source": { "asset_id": "sub.srt", "source_in": 0 }
+                        }],
+                        "subtitle": {
+                            "font_ratio": 0.055,
+                            "bottom_margin": 0.06,
+                            "max_lines": 2,
+                            "color": [255, 240, 200, 255],
+                            "outline": false
+                        }
+                    },
+                    {
+                        "id": "dm",
+                        "kind": "danmaku",
+                        "layers": [{
+                            "id": "shots",
+                            "start": 0,
+                            "end": 120,
+                            "source": { "asset_id": "dm.ass", "source_in": 0 }
+                        }],
+                        "danmaku": {
+                            "asset_id": "dm.ass",
+                            "lanes": 4,
+                            "duration_ms": 2000,
+                            "font_ratio": 0.04,
+                            "color": [0, 255, 0, 255]
+                        }
+                    }
+                ]
+            }"#,
+        )
+    }
+
+    fn both_table() -> SubtitleTable {
+        let mut table = SubtitleTable::new();
+        table.insert("sub.srt".to_string(), cues());
+        // 弹幕复用同一批 cue：这条用例只看颜色，不看文本内容。
+        table.insert("dm.ass".to_string(), cues());
+        table
+    }
+
     #[test]
     fn 没有字幕表时没有覆盖层() {
         assert!(evaluate_overlay(&subtitle_timeline(), 15, SEQUENCE, None).is_none());
@@ -442,8 +605,48 @@ mod tests {
     #[test]
     fn 颜色与描边来自轨道样式() {
         let overlay = evaluate_overlay(&subtitle_timeline(), 15, SEQUENCE, Some(&table())).unwrap();
-        assert_eq!(overlay.color, [255, 240, 200, 255]);
-        assert!(!overlay.outline, "轨道样式写了不描边");
+        assert_eq!(overlay.subtitle_style.color, [255, 240, 200, 255]);
+        assert!(!overlay.subtitle_style.outline, "轨道样式写了不描边");
+    }
+
+    #[test]
+    fn 没写描边比例的工程描边宽度与升级前一致() {
+        // **这条钉的是"既有工程逐字节不变"。**
+        //
+        // `subtitle_timeline()` 没写 `stroke_ratio`，于是它取默认值 0；
+        // 而 `stroke_px` 算出来必须是 **0**（= "别用契约的值，让栅格器按字号推"）。
+        //
+        // 我第一版把默认值写成 `12/1080`（V-Trim 的实际值），于是这里会算出
+        // `12/1080 * 360 = 4`，而老行为是 `border_px(20) = 1` —— 描边粗了 4 倍，
+        // 既有工程的产物全变。默认值是**契约的一部分**，不是风格偏好。
+        let overlay = evaluate_overlay(&subtitle_timeline(), 15, SEQUENCE, Some(&table())).unwrap();
+        assert_eq!(overlay.subtitle_style.stroke_px, 0.0, "默认必须是 0（走字号推的老路径）");
+
+        // 显式写一个比例时才算，且按**目标高**换算。
+        let mut styled = subtitle_timeline();
+        if let Some(style) = styled.tracks[0].subtitle.as_mut() {
+            style.stroke_ratio = 12.0 / 1080.0;
+        }
+        let overlay = evaluate_overlay(&styled, 15, SEQUENCE, Some(&table())).unwrap();
+        let expected = 12.0 / 1080.0 * SEQUENCE.1 as f32;
+        assert!(
+            (overlay.subtitle_style.stroke_px - expected).abs() < 1e-4,
+            "写了的比例要按目标高换算：期望 {expected}，实得 {}",
+            overlay.subtitle_style.stroke_px
+        );
+    }
+
+    #[test]
+    fn 字幕与弹幕各有一套颜色() {
+        // **这是拆开 `color` 的理由**：V-Trim 的字幕是暖色、弹幕是白色，
+        // 共用一份时必然有一个错 —— 而"两边的字都看得见"让人以为没问题。
+        let overlay = evaluate_overlay(&both_timeline(), 15, SEQUENCE, Some(&both_table())).unwrap();
+        assert_eq!(overlay.subtitle_style.color, [255, 240, 200, 255], "字幕用字幕的颜色");
+        assert_eq!(overlay.danmaku_style.color, [0, 255, 0, 255], "弹幕用弹幕的颜色");
+        assert_ne!(
+            overlay.subtitle_style.color, overlay.danmaku_style.color,
+            "两者必须能不同 —— 这正是共用一个字段时做不到的事"
+        );
     }
 
     #[test]

@@ -122,6 +122,37 @@ pub fn blit(
     x: i32,
     y: i32,
 ) -> Result<BlitReport, String> {
+    blit_scaled(image, bitmap, x, y, 255)
+}
+
+/// 同 [`blit`]，但整张位图的 alpha 再乘一个系数（`0..=255`）。
+///
+/// 字幕/弹幕的**淡入淡出**走这条路：契约层算出"这一帧多透明"，
+/// 宿主把它交给叠图这一步 —— 而不是把透明度烘进位图缓存
+/// （那样每一帧都要重新栅格化一次，而栅格化是起一次 ffmpeg 进程）。
+///
+/// `scale == 255` 时逐值退化成 [`blit`]，所以老工程逐字节不变。
+pub fn blit_scaled(
+    image: &mut Rgba8Image,
+    bitmap: &TextBitmap,
+    x: i32,
+    y: i32,
+    scale: u32,
+) -> Result<BlitReport, String> {
+    if scale == 0 {
+        // 全透明：一个像素都不写，但**帧缓冲大小仍然要校验**
+        // （那是调用方的错，不该因为"这一帧恰好全透明"就静默放过）。
+        let expected = image.width as usize * image.height as usize * 4;
+        if image.pixels.len() != expected {
+            return Err(format!(
+                "帧缓冲大小对不上：{}x{} 要 {expected} 字节，实际 {}",
+                image.width,
+                image.height,
+                image.pixels.len()
+            ));
+        }
+        return Ok(BlitReport::default());
+    }
     let expected = image.width as usize * image.height as usize * 4;
     if image.pixels.len() != expected {
         return Err(format!(
@@ -139,7 +170,14 @@ pub fn blit(
         let target_y = y + row as i32;
         for column in 0..bitmap.width {
             let source = ((row as usize) * (bitmap.width as usize) + column as usize) * 4;
-            let alpha = bitmap.pixels[source + 3] as u32;
+            let raw_alpha = bitmap.pixels[source + 3] as u32;
+            if raw_alpha == 0 {
+                continue;
+            }
+            // 淡入淡出的系数**乘在 alpha 上**（而不是乘 RGB）：
+            // 乘 RGB 会让"半透明的白字"变成"不透明的灰字"，
+            // 而它在亮背景上是看不见的 —— 正是要避免的那种错。
+            let alpha = mul_alpha(raw_alpha, scale);
             if alpha == 0 {
                 continue;
             }
@@ -311,11 +349,19 @@ fn paint_one(
     target: (u32, u32),
     text: &str,
     rect: dhampir_core::timeline::text_layout::NormalizedRect,
-    color: [u8; 4],
-    outline: bool,
+    style: &dhampir_core::overlay::TextStyle,
+    // 这一帧的不透明度（淡入淡出算出来的，**契约层给的**）。
+    opacity: f32,
+    // 这一帧的纵向偏移（文档像素，正为向下）。
+    dy_px: f32,
     judge_clip: bool,
     log: &mut IssueLog,
 ) -> Painted {
+    // **全透明直接不画**：不是优化，是正确性 —— `blit` 会把 alpha=0 当"没有墨"
+    // 跳过，但先返回 `Nothing` 能让"这一帧没有这一行"在计数上也如实。
+    if opacity <= 0.0 {
+        return Painted::Nothing;
+    }
     let Some(placement) = place_line(rect, target) else {
         return Painted::Nothing;
     };
@@ -335,8 +381,13 @@ fn paint_one(
     let key = TextRasterKey {
         text: text.to_string(),
         font_px: placement.font_px,
-        color,
-        outline,
+        color: style.color,
+        outline: style.outline,
+        // `style.stroke_px` 已经是**目标像素**（`evaluate_overlay` 用 `stroke_ratio * 目标高`
+        // 算的），而位图恒等于目标宽（见 `LinePlacement::bitmap_width`）
+        // —— 所以两者同一套单位，不用再缩一次。
+        stroke_px: style.stroke_px.round() as u32,
+        stroke_color: style.stroke_color,
         font_file: font_file.to_path_buf(),
         width: placement.bitmap_width,
         height: placement.bitmap_height,
@@ -348,7 +399,16 @@ fn paint_one(
             return Painted::Failed;
         }
     };
-    let report = match blit(image, &bitmap, placement.x, placement.y) {
+    // 纵向偏移（淡入上浮/退场下移）：**只挪落点**，不重算布局 ——
+    // 位置是"布局给的行盒 + 这一帧的动画偏移"，两件事分开才说得清。
+    let offset_y = dy_px.round() as i32;
+    let report = match blit_scaled(
+        image,
+        &bitmap,
+        placement.x,
+        placement.y + offset_y,
+        (opacity.clamp(0.0, 1.0) * 255.0).round() as u32,
+    ) {
         Ok(report) => report,
         Err(error) => {
             log.record("subtitle_blit_failed", &path, error);
@@ -391,8 +451,9 @@ fn paint_lines(
             target,
             &item.text,
             item.rect,
-            overlay.color,
-            overlay.outline,
+            &overlay.subtitle_style,
+            item.opacity,
+            item.dy_px,
             true,
             log,
         ) {
@@ -415,8 +476,9 @@ fn paint_lines(
             target,
             &item.text,
             item.rect,
-            overlay.color,
-            overlay.outline,
+            &overlay.danmaku_style,
+            item.opacity,
+            item.dy_px,
             // **不判切线**：滚动中越界是常态（见模块文档）。画面外的墨像素由 `blit`
             // 丢掉，但那既不进问题清单、也不计数 —— 计数只数"画了几条"。
             false,
@@ -508,11 +570,19 @@ mod tests {
                 .map(|(text, rect)| TextItem {
                     text: (*text).to_string(),
                     rect: *rect,
+                    // 老行为：满不透明、不位移（淡入淡出默认关）。
+                    opacity: 1.0,
+                    dy_px: 0.0,
                 })
                 .collect(),
             danmaku: Vec::new(),
-            color: [255, 255, 255, 255],
-            outline: true,
+            subtitle_style: dhampir_core::overlay::TextStyle {
+                color: [255, 255, 255, 255],
+                outline: true,
+                stroke_px: 0.0,
+                stroke_color: [0, 0, 0, 255],
+            },
+            danmaku_style: dhampir_core::overlay::TextStyle::default(),
             dropped_lines: dropped,
             dropped_danmaku: 0,
         }
@@ -531,10 +601,17 @@ mod tests {
                     // 在屏区间在这一点上无关紧要（画法只看这一帧的矩形），给一对确定值。
                     enter: 0,
                     exit: 100,
+                    opacity: 1.0,
+                    dy_px: 0.0,
                 })
                 .collect(),
-            color: [255, 255, 255, 255],
-            outline: true,
+            subtitle_style: dhampir_core::overlay::TextStyle::default(),
+            danmaku_style: dhampir_core::overlay::TextStyle {
+                color: [255, 255, 255, 255],
+                outline: true,
+                stroke_px: 0.0,
+                stroke_color: [0, 0, 0, 255],
+            },
             dropped_lines: 0,
             dropped_danmaku,
         }
@@ -942,6 +1019,8 @@ mod tests {
             lane: 0,
             enter: 0,
             exit: 100,
+            opacity: 1.0,
+            dy_px: 0.0,
         });
         items.dropped_danmaku = 3;
         paint_lines(
