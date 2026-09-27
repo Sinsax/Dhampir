@@ -100,7 +100,7 @@ dhampir render --project out/vtrim/t.json --from 0 --to 5811 --out out/dhampir.m
 
 | 曲线 | 为什么不能手写 |
 |---|---|
-| **手持摇摆** | 4 个通道 × 每条 2 个正弦分量，共 6 个频率/相位参数，手写关键帧必然失真 |
+| **手持摇摆** | 4 个通道 × 每条 2 个正弦分量，共 6 个频率/相位参数，手写关键帧必然失真。`amp` 是状态机上的 **0~1 连续量**（与 zoom 同一套 td/缓动），不是布尔 |
 | **贴纸弹入** | 用 `back_out(p, 3)`（`s=3`），而契约的 `Easing::BackOut` 是经典 1.70158 —— 峰值 1.10 vs 1.25，**装不下这个参数** |
 | **贴纸四段相位** | 四段的边界与那条"够不到的淡出"（见 4.3）必须一起复现 |
 
@@ -157,7 +157,7 @@ dhampir render --project out/vtrim/t.json --from 0 --to 5811 --out out/dhampir.m
 
 | V-Trim | 本仓 |
 |---|---|
-| `shake`（canvas）`getShake`：固定 0.2s 的**四级阶梯** | ⚠️ **尚未对齐**（见第六节） |
+| `shake`（canvas）`getShake`：固定 0.2s 的**四级阶梯** | **四级阶梯逐帧写进视频层的 x/y**（窗口写死 0.2s、`off = intensity \|\| 14` 直接当像素） |
 | `flash` / `vignette` / `noise` / `overlay` | `ColorMask` 管线，挂在**调整图层** |
 | `blur` | `SeparableBlur` |
 | `hue_shift` / `color_shift` | `ColorAdjust` / `ColorMask` |
@@ -202,7 +202,7 @@ dhampir render --project out/vtrim/t.json --from 0 --to 5811 --out out/dhampir.m
 
 | # | 差异 | 影响 | 状态 |
 |---|---|---|---|
-| 1 | **`shake` 移植错了版本** | 本样例 `intensity=0.4` 像素，影响小；但幅度大的项目会明显不对 | 见下 |
+| 1 | **转译器只接了 6/14 种事件类型** | 见下表；未接的会 `drop` 报出来，不静默丢 | **下一轮补** |
 | 2 | 字幕**折行缩字**未实现 | 参照装不下会缩字号（下限 0.7、最多 3 行）；本仓直接丢行 | 未做 |
 | 3 | `max_lines` 默认 2（参照 3） | 长字幕的断行位置可能不同 | 未做 |
 | 4 | **高亮词 `.hl`** 未实现 | `clip.srt` 有 `<span class="hl">` 时颜色不生效 | 未做（本样例没有） |
@@ -213,17 +213,29 @@ dhampir render --project out/vtrim/t.json --from 0 --to 5811 --out out/dhampir.m
 | 9 | 封面（`polish cover`） | 另一条输出通道（静态图），本仓不做 | 有意不做 |
 | 10 | 预览侧的**事件联动脉冲** | 字幕 `scale 1.25 / y -20`，**只在预览**、不在出片 | 未做（不影响出片） |
 
-### 第 1 条细说：`shake` 抄了哪一份
+### 事件类型的覆盖（第 1 条）
+
+参照的 fx 全集（`templates/index.html:1382`）是 14 种。转译器**已接 6 种**：
+
+| 已接 | 未接 |
+|---|---|
+| `camera` `shake` `sticker` `sfx` `overlay` `zoom_bounce` | `flash` `blur` `stutter` `split` `vignette` `hue_shift` `noise` `pulse` `color_shift` |
+
+**未接的 9 种底座全都支持**（`ColorMask` / `SeparableBlur` / `ColorAdjust` / `Warp`），
+所以这是**机械活**：加一个 `case` + 一次 `placeAdjustment`。
+
+### `shake` 的两份（**已对齐**，留作教训）
 
 参照有**两份** `shake`，形状完全不同：
 
 | 出处 | 用途 | 形状 |
 |---|---|---|
 | `index.html:538` `shake(tl,…)` | **GSAP DOM 预览** | `n = dur/0.05` 个 0.025s 的交替偏移 |
-| `index.html:1578` `getShake(t, items)` | **canvas 出片** | **固定 0.2s 的四级阶梯**，与事件 duration 无关 |
+| `index.html:1575` `getShake(t, items)` | **canvas 出片** | **固定 0.2s 的四级阶梯**，与事件 duration 无关 |
+
+**转译器一开始抄了预览那一份**（连续波形）。出片要的是阶梯：
 
 ```js
-// 出片那一份（getShake）
 if (t >= sh.time && t < sh.time + 0.2) {
   var off = sh.ev.intensity || 14;          // 直接当**像素**用
   var dt = t - sh.time;
@@ -235,11 +247,11 @@ if (t >= sh.time && t < sh.time + 0.2) {
 }
 ```
 
-**转译器目前按预览那一份做成了连续波形 —— 这是错的，下一轮要改。**
-这条同时是"**同一个名字在两条腿上可能是两种东西**"的样本：转译时
-**认的是出片那条腿**，不是预览。
+现在按**逐帧**写进**视频层**的 `x`/`y`（`renderFrame` 里 `ctx.translate(shake.x, shake.y)`
+在 video 那段 `ctx.save()` 之内 —— 字幕/弹幕/贴纸**不跟着抖**）。
 
----
+**教训**：同一个名字在两条腿上可能是两种东西。**认的是出片那条腿。**
+`scripts/check-vtrim-translator.mjs` 现在把阶梯逐档钉住了（含每一档的边界两侧）。
 
 ## 七、怎么扩：加一个新的 V-Trim 事件类型
 

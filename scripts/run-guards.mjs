@@ -117,6 +117,7 @@ export const GUARDS = [
   { script: 'check-m2-record.mjs', args: ['--record', 'records/m2'] },
   { script: 'check-media-status.mjs', args: [] },
   { script: 'check-effect-registry.mjs', args: [] },
+  { script: 'check-vtrim-translator.mjs', args: [] },
   { script: 'check-local-backend.mjs', args: [] },
   // 同源代理那条路：它坏了不会有别的守卫变红（check-local-backend 直接打后端，
   // 不经过转发），而产品路径的最后一跳正是从它上面走的。
