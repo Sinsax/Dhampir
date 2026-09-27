@@ -73,6 +73,18 @@ pub struct DanmakuItem {
     /// 实测需要它：V-Trim 的 `danmaku.json` 里同一条轨上的
     /// `还能续约吗` 是 `#E33FFF`，其余是白色。
     pub color: Option<[u8; 4]>,
+    /// **起滚的帧**（= `enter` + 淡入帧数）。
+    ///
+    /// 与 [`Self::enter`] 分开：V-Trim 的滚动是 `progress = (el - fadeIn) / travel`
+    /// —— **淡入期间 x 钉在右边缘**（`x = CW`），淡入走完才开始滚。
+    /// 把这两件事合成一个就会让弹幕"一进场就在滚"。
+    pub scroll_start: Frame,
+    /// **滚完要多少帧**（`travel`）。滚到左边就**停住**（V-Trim 的 `min(progress,1)`）。
+    ///
+    /// 为什么不在这里存毫秒：`rect_at` 是**不拿时间基**的纯函数
+    /// （两端拿同一份素材、同一组帧号就必须算出同一个矩形）。
+    /// 毫秒→帧的换算在 [`layout`] 里做掉，那是唯一拿得到时间基的地方。
+    pub travel_frames: i64,
 }
 
 /// 泳道分配的结果。**丢掉的条数是结论的一部分**，不是日志。
@@ -108,13 +120,25 @@ pub fn layout(cues: &[Cue], spec: &DanmakuSpec, timebase: &TimebaseDto) -> Danma
             result.dropped += 1;
             continue;
         };
-        let Some(exit) = frame_at_ms(cue.start_ms.saturating_add(spec.duration_ms), timebase) else {
+        // # 在屏窗口 = **cue 自己的** [start, end)，不是 `start + travel`
+        //
+        // V-Trim 的 `getActiveDms` 第一行就是 `if (t < d.start || t >= d.end) continue;`
+        // —— `travel` 只决定**滚多快**（`progress = (el - fadeIn) / travel`）。
+        //
+        // 这条先前写错了：`exit` 取的是 `start + spec.duration_ms`（travel），
+        // 于是一条 cue 窗口 5 秒、travel 10.4 秒的弹幕会在屏上**待 10.4 秒**。
+        // 实测 55s 那一帧：V-Trim 什么都没有，本仓还挂着品红的「还能续约吗」。
+        let Some(end_exclusive) = frame_at_ms(cue.end_ms, timebase) else {
             result.dropped += 1;
             continue;
         };
-        // 时长为 0（或时间基碎到算不出前进）仍然让它占**一帧**：一条都不出现
-        // 看起来和"素材里没有这一条"一样。
-        let exit = exit.max(enter);
+        // 闭区间：`end` 是开边界，最后在屏的一帧是它前一帧。
+        // 时长为 0（或时间基碎到算不出前进）仍然让它占**一帧**。
+        let exit = end_exclusive.saturating_sub(1).max(enter);
+        // 淡入走完才起滚（V-Trim 的 `el - fadeIn`）。
+        let fade_frames = frames_for_ms(spec.fade_in_ms, cue.start_ms, timebase);
+        let scroll_start = enter.saturating_add(fade_frames);
+        let travel_frames = frames_for_ms(spec.duration_ms, cue.start_ms, timebase);
         let mut chosen = None;
         for (index, free) in free_at.iter_mut().enumerate() {
             if *free < enter {
@@ -132,12 +156,29 @@ pub fn layout(cues: &[Cue], spec: &DanmakuSpec, timebase: &TimebaseDto) -> Danma
                     exit,
                     // 这条 cue 自带的颜色（`parse_ass` 从 `\c` 抽出来的）。
                     color: cue.style.color,
+                    scroll_start,
+                    travel_frames,
                 });
             }
             None => result.dropped += 1,
         }
     }
     result
+}
+
+/// 一段**时长**（毫秒）换成帧数。
+///
+/// 用 `frame_at_ms(base + ms) - frame_at_ms(base)` 而不是自己乘：
+/// 时间基是**有理数**（`1001/30000` 这种），自己乘会在长时长上累积误差，
+/// 而"同一段时长在时间轴不同位置换出不同帧数"是两端最容易漂的地方。
+fn frames_for_ms(ms: u64, base_ms: u64, timebase: &TimebaseDto) -> i64 {
+    let (Some(from), Some(to)) = (
+        frame_at_ms(base_ms, timebase),
+        frame_at_ms(base_ms.saturating_add(ms), timebase),
+    ) else {
+        return 0;
+    };
+    to.saturating_sub(from).max(0)
 }
 
 /// 这一帧这条弹幕占的归一化矩形（相对**文档坐标系**）。
@@ -171,10 +212,25 @@ pub fn rect_at(
     if !width.is_finite() {
         return None;
     }
-    let span = item.exit.saturating_sub(item.enter);
+    let span = item.travel_frames;
+    // # 滚动进度由 **travel** 决定，不由"在屏区间"决定
+    //
+    // 这两件事先前被混成一个：`exit` 曾经等于 `enter + duration_ms`，
+    // 于是滚动正好铺满在屏区间 —— **看起来自洽**。
+    //
+    // 但 V-Trim 是分开的（`templates/index.html` 的 `getActiveDms`）：
+    //
+    //     if (t < d.start || t >= d.end) continue;          // 在屏窗口 = cue 自己的
+    //     var progress = max(0, (el - fadeIn) / travel);    // travel 只决定滚多快
+    //     var x = CW - min(progress, 1) * (CW + textW);     // 滚到左边就停
+    //
+    // 混起来之后，一条 cue 窗口 5 秒、travel 10.4 秒的弹幕会在屏上**待 10.4 秒**
+    // —— 实测 55s 那一帧：V-Trim 什么都没有，本仓还挂着一条品红的
+    // 「还能续约吗」（它的 cue 早在 50.03s 就结束了）。
     let progress = if span > 0 {
-        ((frame - item.enter) as f32 / span as f32).clamp(0.0, 1.0)
+        ((frame - item.scroll_start) as f32 / span as f32).clamp(0.0, 1.0)
     } else {
+        // travel 为 0（没写时长）：钉在右边缘。滚不动好过"瞬移"。
         0.0
     };
     let x = 1.0 + (-width - 1.0) * progress;
@@ -301,11 +357,24 @@ mod tests {
         TimebaseDto { num, den }
     }
 
-    /// 一条弹幕条：起点给毫秒，`End` 照 ASS 的规矩落在后面（反正不参与在屏时长）。
+    /// 一条弹幕条：起点给毫秒，`End` 默认落在 1 秒后。
+    ///
+    /// **`End` 参与在屏窗口**（V-Trim 的 `getActiveDms` 用 `[start, end)`）——
+    /// 这条注释先前写的是"反正不参与在屏时长"，而那个前提是错的。
     fn cue(start_ms: u64, text: &str) -> Cue {
         Cue {
             start_ms,
             end_ms: start_ms + 1000,
+            text: text.to_string(),
+            style: CueStyle::default(),
+        }
+    }
+
+    /// 同上，但显式给 `End`（要测窗口长度时用）。
+    fn cue_span(start_ms: u64, end_ms: u64, text: &str) -> Cue {
+        Cue {
+            start_ms,
+            end_ms,
             text: text.to_string(),
             style: CueStyle::default(),
         }
@@ -330,14 +399,30 @@ mod tests {
     }
 
     #[test]
-    fn 在屏时长来自_spec_而不是素材的_end() {
-        // 30fps、duration 8000ms：起点 0 -> 进入第 0 帧，离开第 240 帧。
-        // 素材的 End 写的是 5 秒（第 150 帧），**不该**生效。
-        let cues = vec![cue(0, "久一点")];
+    fn 在屏窗口来自素材的_end_而不是_spec_的时长() {
+        // **这条先前是反着写的，而且写错了。**
+        //
+        // 老版本叫「在屏时长来自 spec 而不是素材的 end」，断言 `exit == 240`
+        // （= `start + spec.duration_ms`），还写着"素材的 End 不该生效"。
+        //
+        // V-Trim 的源码正相反（`templates/index.html` 的 `getActiveDms` 第一行）：
+        //
+        //     if (t < d.start || t >= d.end) continue;
+        //
+        // **在屏窗口是 cue 自己的 [start, end)**；`travel` 只决定滚多快。
+        // 老写法让"cue 窗口 5 秒、travel 10.4 秒"的弹幕在屏上待 10.4 秒 ——
+        // 实测 55s 那一帧 V-Trim 什么都没有，本仓还挂着一条。
+        //
+        // 30fps：素材 End=5000ms（第 150 帧）是开边界，最后在屏的是第 149 帧。
+        // 而 spec 的 8000ms **不该**拉长窗口。
+        let cues = vec![cue_span(0, 5000, "久一点")];
         let laid = layout(&cues, &spec(8, 8000), &tb(30, 1));
         assert_eq!(laid.items.len(), 1);
         assert_eq!(laid.items[0].enter, 0);
-        assert_eq!(laid.items[0].exit, 240);
+        assert_eq!(laid.items[0].exit, 149, "在屏窗口取 cue 的 end（开边界减一）");
+        // 而 travel 仍然来自 spec：8 秒 @30fps = 240 帧。
+        assert_eq!(laid.items[0].travel_frames, 240, "滚动时长仍然来自 spec");
+        assert!(laid.items[0].exit < laid.items[0].travel_frames, "窗口比 travel 短是常态");
         assert_eq!(laid.dropped, 0);
     }
 
@@ -365,12 +450,13 @@ mod tests {
 
     #[test]
     fn 闭区间边界不许共用() {
-        // 第一条占 [0, 240]。第二条正好在第 240 帧进入 —— 同一条泳道会在第 240 帧
-        // 同时出现两条（第一条的最后帧也是 240），所以要换泳道。
-        let cues = vec![cue(0, "先"), cue(8000, "后")];
+        // 第一条占 [0, 29]（cue 的 End=1000ms，开边界 -> 最后在屏第 29 帧）。
+        // 第二条正好在第 30 帧进入？不 —— 让第二条**在第 29 帧进入**，
+        // 那样两条在第 29 帧同时在屏，必须换泳道。
+        let cues = vec![cue(0, "先"), cue(967, "后")];
         let laid = layout(&cues, &spec(2, 8000), &tb(30, 1));
-        assert_eq!(laid.items[0].exit, 240);
-        assert_eq!(laid.items[1].enter, 240, "第 240 帧两条都在屏上");
+        assert_eq!(laid.items[0].exit, 29, "在屏窗口来自 cue 的 End（开边界减一）");
+        assert_eq!(laid.items[1].enter, 29, "第 29 帧两条都在屏上");
         assert_eq!(laid.items[1].lane, 1, "边界帧不能共用泳道，否则两条叠在一起");
     }
 
@@ -400,7 +486,7 @@ mod tests {
 
     #[test]
     fn 进入帧在右边缘离开帧移出左边() {
-        let item = DanmakuItem { text: "abc".to_string(), lane: 0, enter: 0, exit: 100 , color: None};
+        let item = DanmakuItem { text: "abc".to_string(), lane: 0, enter: 0, exit: 100 , color: None, scroll_start: 0, travel_frames: 100};
         let start = rect_at(&item, 0, &spec(8, 8000), SEQUENCE).expect("能算");
         assert_eq!(start.x, 1.0, "进入的那一帧左边缘在画面右边缘");
         let end = rect_at(&item, 100, &spec(8, 8000), SEQUENCE).expect("能算");
@@ -414,16 +500,17 @@ mod tests {
     #[test]
     fn 区间外的帧被夹到两端() {
         // 首末两帧之外（调用方过滤前）也给出确定答案，而不是外推。
-        let item = DanmakuItem { text: "abc".to_string(), lane: 2, enter: 10, exit: 20 , color: None};
+        let item = DanmakuItem { text: "abc".to_string(), lane: 2, enter: 10, exit: 20 , color: None, scroll_start: 0, travel_frames: 100};
         let before = rect_at(&item, 0, &spec(8, 8000), SEQUENCE).expect("能算");
-        let after = rect_at(&item, 99, &spec(8, 8000), SEQUENCE).expect("能算");
+        // 用**真正越界**的帧（travel 是 100 帧）：进度夹到 1，整条刚好移出左边。
+        let after = rect_at(&item, 200, &spec(8, 8000), SEQUENCE).expect("能算");
         assert_eq!(before.x, 1.0);
         assert!((after.x - (-after.width)).abs() < 1e-6);
     }
 
     #[test]
     fn 纵向由泳道决定且在最上面起算() {
-        let item = DanmakuItem { text: "x".to_string(), lane: 3, enter: 0, exit: 10 , color: None};
+        let item = DanmakuItem { text: "x".to_string(), lane: 3, enter: 0, exit: 10 , color: None, scroll_start: 0, travel_frames: 100};
         let rect = rect_at(&item, 0, &spec(8, 8000), SEQUENCE).expect("能算");
         // font_ratio 默认 0.04 -> 行盒高 0.048；第 3 条泳道在 3 倍处。
         let height = 0.04 * LINE_HEIGHT_EM;
@@ -435,7 +522,7 @@ mod tests {
     fn 泳道带可以配起算点与间距() {
         // **默认（两个都是 0）必须复现老行为** —— 既有工程一字不变。
         let plain = spec(8, 8000);
-        let item = DanmakuItem { text: "x".to_string(), lane: 2, enter: 0, exit: 10, color: None };
+        let item = DanmakuItem { text: "x".to_string(), lane: 2, enter: 0, exit: 10, color: None, scroll_start: 0, travel_frames: 100 };
         let base = rect_at(&item, 0, &plain, SEQUENCE).expect("能算");
         assert!((base.y - 2.0 * (0.04 * LINE_HEIGHT_EM)).abs() < 1e-6, "默认是 0 起、间距取行盒高");
 
@@ -457,7 +544,7 @@ mod tests {
         let mut zero = spec(8, 8000);
         zero.lane_top_ratio = 0.1;
         zero.lane_spacing_ratio = 0.0;
-        let item = DanmakuItem { text: "x".to_string(), lane: 1, enter: 0, exit: 10, color: None };
+        let item = DanmakuItem { text: "x".to_string(), lane: 1, enter: 0, exit: 10, color: None, scroll_start: 0, travel_frames: 100 };
         let rect = rect_at(&item, 0, &zero, SEQUENCE).expect("能算");
         let want = 0.1 + 1.0 * (0.04 * LINE_HEIGHT_EM);
         assert!((rect.y - want).abs() < 1e-6, "期望 {want}，实得 {}", rect.y);
@@ -465,7 +552,7 @@ mod tests {
 
     #[test]
     fn 归一化宽度依赖宽高比而不是渲染尺寸() {
-        let item = DanmakuItem { text: "半角abc".to_string(), lane: 0, enter: 0, exit: 10 , color: None};
+        let item = DanmakuItem { text: "半角abc".to_string(), lane: 0, enter: 0, exit: 10 , color: None, scroll_start: 0, travel_frames: 100};
         let a = rect_at(&item, 0, &spec(8, 8000), (640, 360)).expect("能算");
         let b = rect_at(&item, 0, &spec(8, 8000), (1280, 720)).expect("能算");
         let c = rect_at(&item, 0, &spec(8, 8000), (640, 480)).expect("能算");
@@ -475,7 +562,7 @@ mod tests {
 
     #[test]
     fn 零尺寸或零字号没有可画的() {
-        let item = DanmakuItem { text: "x".to_string(), lane: 0, enter: 0, exit: 10 , color: None};
+        let item = DanmakuItem { text: "x".to_string(), lane: 0, enter: 0, exit: 10 , color: None, scroll_start: 0, travel_frames: 100};
         assert!(rect_at(&item, 0, &spec(8, 8000), (0, 360)).is_none());
         assert!(rect_at(&item, 0, &spec(8, 8000), (640, 0)).is_none());
         let mut zero_font = spec(8, 8000);
@@ -528,8 +615,10 @@ mod tests {
 
     #[test]
     fn 横滚从右边缘到移出左边且纵向不动() {
-        // 30fps、duration 1000ms：enter = 0、exit = 30。
-        let laid = layout(&[cue(0, "abc")], &spec(8, 1000), &tb(30, 1));
+        // 30fps，travel 1000ms（30 帧）。**在屏窗口拉长到 2 秒**：
+        // 窗口比 travel 长的时候才会"滚到左边就停住"（V-Trim 的 min(progress,1)），
+        // 而这正是最该被钉住的那一种 —— 窗口与 travel 相等时两者分不开。
+        let laid = layout(&[cue_span(0, 2000, "abc")], &spec(8, 1000), &tb(30, 1));
         let text =
             to_ass_danmaku(&laid.items, &spec(8, 1000), 0, &tb(30, 1), SEQUENCE, &AssStyle::default())
                 .expect("能写");
@@ -542,7 +631,15 @@ mod tests {
         // 纵向落点就是 rect_at 的 y 换成像素 —— 同一份数学，不是另写一遍。
         let rect = rect_at(&laid.items[0], 0, &spec(8, 1000), SEQUENCE).expect("能算");
         assert_eq!(y1, (rect.y * SEQUENCE.1 as f32).round() as i64);
-        assert_eq!(x2, (rect_at(&laid.items[0], 30, &spec(8, 1000), SEQUENCE).expect("能算").x * 640.0).round() as i64);
+        assert_eq!(
+            x2,
+            (rect_at(&laid.items[0], laid.items[0].exit, &spec(8, 1000), SEQUENCE)
+                .expect("能算")
+                .x
+                * 640.0)
+                .round() as i64,
+            "\\move 的终点就是最后一帧在屏的落点"
+        );
     }
 
     #[test]
@@ -565,14 +662,15 @@ mod tests {
     #[test]
     fn 时间重定基到这一趟的第零帧() {
         // 30fps。起点 1000ms 是第 30 帧；base = 30 时它应该写成 0:00:00.00。
-        // 终点取"最后一帧的下一个起点"：第 61 帧 = 2033ms（向下取整），减 base 得 1033ms。
+        // **在屏窗口是 cue 的 [1000, 2000)**：End 是开边界，最后在屏的是第 59 帧。
+        // 终点取"最后一帧的下一个起点"：第 60 帧 = 2000ms，减 base 得 1000ms。
         let spec = spec(8, 1000);
         let laid = layout(&[cue(1000, "甲")], &spec, &tb(30, 1));
-        assert_eq!((laid.items[0].enter, laid.items[0].exit), (30, 60));
+        assert_eq!((laid.items[0].enter, laid.items[0].exit), (30, 59));
         let text = to_ass_danmaku(&laid.items, &spec, 30, &tb(30, 1), SEQUENCE, &AssStyle::default())
             .expect("能写");
         let line = dialogue_of(&text);
-        assert!(line.starts_with("Dialogue: 0,0:00:00.00,0:00:01.03,Default,"), "{line}");
+        assert!(line.starts_with("Dialogue: 0,0:00:00.00,0:00:01.00,Default,"), "{line}");
     }
 
     #[test]
