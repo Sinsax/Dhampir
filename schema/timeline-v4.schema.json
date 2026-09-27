@@ -100,6 +100,18 @@
           "format": "float",
           "default": 0.03999999910593033
         },
+        "lane_spacing_ratio": {
+          "description": "**相邻泳道的间距**（归一化）。默认 0 = 取行盒高（`font_ratio * LINE_HEIGHT_EM`）。\n\n必须是 0 或正数；负数会让泳道往上叠。",
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
+        "lane_top_ratio": {
+          "description": "**0 号泳道的顶边**（归一化，相对目标高）。默认 0 = 贴着画面最上面。\n\n与 [`Self::lane_spacing_ratio`] 一起把\"弹幕带\"这块区域说清楚。\n实测需要可配：V-Trim 的带从 **0.0781** 开始（1080p 下约 84px），\n而本仓老规则是 0 起 —— 差值是肉眼可见的一整条文字行。",
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
         "lanes": {
           "description": "泳道数。排不下就**丢该条并计数**，不叠在一起。",
           "type": "integer",

@@ -371,6 +371,18 @@ pub struct DanmakuSpec {
     /// 描边颜色。
     #[serde(default = "danmaku_stroke_color")]
     pub stroke_color: [u8; 4],
+    /// **0 号泳道的顶边**（归一化，相对目标高）。默认 0 = 贴着画面最上面。
+    ///
+    /// 与 [`Self::lane_spacing_ratio`] 一起把"弹幕带"这块区域说清楚。
+    /// 实测需要可配：V-Trim 的带从 **0.0781** 开始（1080p 下约 84px），
+    /// 而本仓老规则是 0 起 —— 差值是肉眼可见的一整条文字行。
+    #[serde(default)]
+    pub lane_top_ratio: f32,
+    /// **相邻泳道的间距**（归一化）。默认 0 = 取行盒高（`font_ratio * LINE_HEIGHT_EM`）。
+    ///
+    /// 必须是 0 或正数；负数会让泳道往上叠。
+    #[serde(default)]
+    pub lane_spacing_ratio: f32,
 }
 
 fn danmaku_lanes() -> u32 { 8 }
@@ -399,6 +411,9 @@ impl Default for DanmakuSpec {
             outline: true,
             stroke_ratio: danmaku_stroke_ratio(),
             stroke_color: danmaku_stroke_color(),
+            // **默认都 0 = 复现老行为**（0 号泳道贴顶、间距取行盒高）。
+            lane_top_ratio: 0.0,
+            lane_spacing_ratio: 0.0,
         }
     }
 }

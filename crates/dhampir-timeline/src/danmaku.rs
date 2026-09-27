@@ -178,7 +178,21 @@ pub fn rect_at(
         0.0
     };
     let x = 1.0 + (-width - 1.0) * progress;
-    let y = item.lane as f32 * height;
+    // # 泳道带：`lane_top_ratio` + `lane * lane_spacing_ratio`
+    //
+    // 默认（两个都是 0）就是老规则：**0 号泳道贴着画面最上面**、
+    // 间距取行盒高（`font_ratio * LINE_HEIGHT_EM`）—— 既有工程的产物一字不变。
+    //
+    // 实测需要可配：V-Trim 的弹幕带从 **0.0781** 开始、间距 **0.0521**
+    // （它的 `TRACK_YS = [300, 500, 700…]` 在 1920 宽的日志坐标里，
+    // 换算是 `y / 3840`）。本仓老规则是 0 起、间距 0.048 ——
+    // 差值是**肉眼可见的一整条**（1080p 下约 84px）。
+    let spacing = if spec.lane_spacing_ratio > 0.0 {
+        spec.lane_spacing_ratio
+    } else {
+        height
+    };
+    let y = spec.lane_top_ratio + item.lane as f32 * spacing;
     Some(NormalizedRect { x, y, width, height })
 }
 
@@ -415,6 +429,38 @@ mod tests {
         let height = 0.04 * LINE_HEIGHT_EM;
         assert!((rect.height - height).abs() < 1e-6);
         assert!((rect.y - 3.0 * height).abs() < 1e-6, "0 号泳道在最上面，往下顺排");
+    }
+
+    #[test]
+    fn 泳道带可以配起算点与间距() {
+        // **默认（两个都是 0）必须复现老行为** —— 既有工程一字不变。
+        let plain = spec(8, 8000);
+        let item = DanmakuItem { text: "x".to_string(), lane: 2, enter: 0, exit: 10, color: None };
+        let base = rect_at(&item, 0, &plain, SEQUENCE).expect("能算");
+        assert!((base.y - 2.0 * (0.04 * LINE_HEIGHT_EM)).abs() < 1e-6, "默认是 0 起、间距取行盒高");
+
+        // 配了之后按配的算（V-Trim 的实测值：0.0781 起、0.0521 间距）。
+        let mut banded = spec(8, 8000);
+        banded.lane_top_ratio = 300.0 / 3840.0;
+        banded.lane_spacing_ratio = 200.0 / 3840.0;
+        let shifted = rect_at(&item, 0, &banded, SEQUENCE).expect("能算");
+        let want = 300.0 / 3840.0 + 2.0 * (200.0 / 3840.0);
+        assert!((shifted.y - want).abs() < 1e-6, "期望 {want}，实得 {}", shifted.y);
+        assert!(shifted.y > base.y, "配了起算点之后应当更低");
+        // **行盒高不受影响**：带的位置与字号是两件事。
+        assert!((shifted.height - base.height).abs() < 1e-6);
+    }
+
+    #[test]
+    fn 泳道间距为零时退回行盒高而不是叠在一起() {
+        // 间距写 0 的语义是"用行盒高"，不是"所有泳道都重叠在第 0 行"。
+        let mut zero = spec(8, 8000);
+        zero.lane_top_ratio = 0.1;
+        zero.lane_spacing_ratio = 0.0;
+        let item = DanmakuItem { text: "x".to_string(), lane: 1, enter: 0, exit: 10, color: None };
+        let rect = rect_at(&item, 0, &zero, SEQUENCE).expect("能算");
+        let want = 0.1 + 1.0 * (0.04 * LINE_HEIGHT_EM);
+        assert!((rect.y - want).abs() < 1e-6, "期望 {want}，实得 {}", rect.y);
     }
 
     #[test]

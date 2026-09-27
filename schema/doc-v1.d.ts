@@ -39,6 +39,10 @@ export interface DanmakuSpec {
   fade_out_ms?: number;
   /** 字号 = 目标高度 * 这个比例。 */
   font_ratio?: number;
+  /** **相邻泳道的间距**（归一化）。默认 0 = 取行盒高（`font_ratio * LINE_HEIGHT_EM`）。 */
+  lane_spacing_ratio?: number;
+  /** **0 号泳道的顶边**（归一化，相对目标高）。默认 0 = 贴着画面最上面。 */
+  lane_top_ratio?: number;
   /** 泳道数。排不下就**丢该条并计数**，不叠在一起。 */
   lanes?: number;
   /** **基础不透明度。** V-Trim 用 `0.9`（不是 1.0）。 */
