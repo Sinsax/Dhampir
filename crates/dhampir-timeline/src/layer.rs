@@ -1289,6 +1289,34 @@ pub fn validate_timeline_v2(timeline: &TimelineV2, effects: &[EffectSpec]) -> Ve
                                     }
                                 }
                             }
+                            // # 「挂在有素材的图层上」= 这条特效不会被执行
+                            //
+                            // 渲染器把图层切成两种步骤（`core::render::plan_steps`）：
+                            // **有素材的**进 `Draw`，**没素材、有特效的**（调整图层）才进 `Adjust`。
+                            // 而 `Draw` 只认一条特效 —— 跑在**源纹理**上的 `SeparableBlur`
+                            // （`gaussian_blur`）。
+                            //
+                            // 于是「把 shake 挂在 main-0 上」这件事的结果是：
+                            // 通过校验、出现在 JSON 里、被求值层算出来、**然后被整条丢掉**。
+                            // 实测确认过：`shake` / `zoom_bounce` / `pulse` 三条挂在普通图层上时，
+                            // 把 `amount` 从 0 改成 0.2（1080p 下 216 像素）出帧**逐像素相同**。
+                            //
+                            // 这是本仓第 5 次「写好了没接上」，而且是最大的一次（一整条管线级）。
+                            // 所以这里把它变成**错误**：静默丢掉才是那个真正的缺陷。
+                            if layer.source.is_some()
+                                && spec.pipeline != crate::schema::EffectPipeline::SeparableBlur
+                            {
+                                issues.push(Issue::new(
+                                    "effect_would_be_ignored",
+                                    &effect_path,
+                                    format!(
+                                        "`{}` 走的是 {:?} 管线，而**有素材的图层只会执行 SeparableBlur**（跑在源纹理上）\
+                                         —— 这条特效不会被画出来。要作用于整幅画面（含它下面的一切），\
+                                         请把它放到一条**没有素材、只有特效**的图层上（那就是调整图层）",
+                                        effect.kind, spec.pipeline
+                                    ),
+                                ));
+                            }
                         }
                     }
                 }
@@ -1321,7 +1349,7 @@ pub fn unimplemented_blends(timeline: &TimelineV2) -> Vec<(String, BlendMode)> {
 #[cfg(test)]
 mod v2_tests {
     use super::*;
-    use crate::schema::TimebaseDto;
+    use crate::schema::{EffectPipeline, TimebaseDto};
 
     fn layer(id: &str, start: Frame, end: Frame) -> Layer {
         Layer {
@@ -1364,6 +1392,77 @@ mod v2_tests {
 
     fn codes(issues: &[Issue]) -> Vec<&str> {
         issues.iter().map(|i| i.code.as_str()).collect()
+    }
+
+    /// 造一条特效规格（登记表在 core，这里只造"校对用的那一份"）。
+    fn spec_for(kind: &'static str, pipeline: EffectPipeline) -> EffectSpec {
+        EffectSpec {
+            kind,
+            params: &[],
+            space: crate::schema::EffectSpace::Document,
+            pipeline,
+            window_default: None,
+        }
+    }
+
+    fn named_layer(id: &str, start: Frame, end: Frame, asset: Option<&str>) -> Layer {
+        let mut value = layer(id, start, end);
+        value.source = asset.map(|asset_id| SourceRef {
+            asset_id: asset_id.to_string(),
+            source_in: 0,
+        });
+        value
+    }
+
+    fn with_effect(mut value: Layer, kind: &str) -> Layer {
+        value.effects = vec![crate::schema::Effect {
+            kind: kind.to_string(),
+            ..Default::default()
+        }];
+        value
+    }
+
+    /// **有素材的图层只会执行 `SeparableBlur`** —— 别的管线挂上去等于没挂。
+    ///
+    /// 这条用例钉的是那个**静默**：`shake` 挂在实拍片段上时，
+    /// 通过校验、出现在 JSON 里、被求值层算出来，**然后被整条丢掉**
+    /// （实测：`amount` 从 0 改成 0.2 —— 1080p 下 216 像素 —— 出帧逐像素相同）。
+    ///
+    /// 所以它必须是**错误**。三个分支各钉一件事，少一个都会漏掉一类。
+    #[test]
+    fn 调整级特效挂在有素材的图层上要报错() {
+        let specs = [
+            spec_for("shake", EffectPipeline::Warp),
+            spec_for("gaussian_blur", EffectPipeline::SeparableBlur),
+        ];
+
+        // 1) 有素材 + Warp 管线 -> 报错
+        let bad = timeline(vec![track(
+            "v",
+            vec![with_effect(named_layer("a", 0, 100, Some("clip")), "shake")],
+        )]);
+        let issues = validate_timeline_v2(&bad, &specs);
+        assert_eq!(codes(&issues), vec!["effect_would_be_ignored"], "实得：{issues:?}");
+
+        // 2) 有素材 + SeparableBlur -> **不报**（它跑在源纹理上，是能执行的）
+        let ok_blur = timeline(vec![track(
+            "v",
+            vec![with_effect(named_layer("a", 0, 100, Some("clip")), "gaussian_blur")],
+        )]);
+        assert!(
+            validate_timeline_v2(&ok_blur, &specs).is_empty(),
+            "gaussian_blur 挂在实拍片段上是**合法**的（它跑在源纹理上）"
+        );
+
+        // 3) 没有素材（= 调整图层）+ Warp -> **不报**（这正是它该在的地方）
+        let ok_adjust = timeline(vec![track(
+            "v",
+            vec![with_effect(named_layer("a", 0, 100, None), "shake")],
+        )]);
+        assert!(
+            validate_timeline_v2(&ok_adjust, &specs).is_empty(),
+            "调整图层上的 Warp 特效是合法的"
+        );
     }
 
     #[test]

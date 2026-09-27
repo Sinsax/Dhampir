@@ -128,6 +128,7 @@ fn render_all(name: &str, out: &str) -> Rendered {
         font_file: None,
         font_bold_file: None,
         font_dir: None,
+        chunk_workers: 1,
         // 这一条与声音无关：量的是解码池子。
         audio: AudioMode::Silent,
         output: &output,

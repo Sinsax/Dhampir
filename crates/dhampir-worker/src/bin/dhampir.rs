@@ -174,6 +174,8 @@ struct Args {
     font_bold_file: Option<String>,
     /// 字体目录（可选）：按契约里的 `font_family` 名字在里面找。
     font_dir: Option<String>,
+    /// 分块并行：`1` = 不分块（默认）、`0` = 自动、`n` = 指定 n。
+    chunk_workers: Option<usize>,
     subtitle_out: Option<String>,
     format: Option<SidecarFormat>,
     /// `--track` / `--layer`：`clip insert` 放哪条轨 / 其余动作动哪个片段。
@@ -241,7 +243,7 @@ impl SidecarFormat {
 }
 
 /// 认得的**带值**选项。不在表里的一律报错。
-const KNOWN_VALUE_FLAGS: [&str; 24] = [
+const KNOWN_VALUE_FLAGS: [&str; 25] = [
     "--project",
     "--asset",
     "--out",
@@ -258,6 +260,7 @@ const KNOWN_VALUE_FLAGS: [&str; 24] = [
     "--font-file",
     "--font-bold-file",
     "--font-dir",
+    "--chunk-workers",
     // clip / sequence / batch 用的（见 EDIT_FAMILY）。
     "--track",
     "--layer",
@@ -546,6 +549,14 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--font-file" => args.font_file = Some(value),
             "--font-bold-file" => args.font_bold_file = Some(value),
             "--font-dir" => args.font_dir = Some(value),
+            // **这里的 0 是有意义的**（自动），所以不能用 `parse_uint`（它把 0 当错）。
+            "--chunk-workers" => {
+                args.chunk_workers = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|_| format!("--chunk-workers 要一个非负整数，得到 {value}"))?,
+                )
+            }
             "--subtitle-out" => args.subtitle_out = Some(value),
             "--format" => {
                 let parsed = SidecarFormat::from_flag(&value).ok_or_else(|| {
@@ -1216,6 +1227,8 @@ fn cmd_frame(args: &Args) -> Result<ExitCode, CommandError> {
     // 粗体与字体目录是可选的：没给就是 None（见 RenderPlan 那两个字段的说明）。
     let font_bold_file = args.font_bold_file.as_deref().map(Path::new);
     let font_dir = args.font_dir.as_deref().map(Path::new);
+    // 默认 `1`：不分块。要速度就显式给 `--chunk-workers 0`（自动）或一个具体数。
+    let chunk_workers = args.chunk_workers.unwrap_or(1);
     let font_file = match resolve_font(args) {
         Ok(font) => font,
         Err(code) => return Ok(code),
@@ -1247,6 +1260,7 @@ fn cmd_frame(args: &Args) -> Result<ExitCode, CommandError> {
         font_file,
         font_bold_file,
         font_dir,
+        chunk_workers,
         // frame 出的是 PNG：没有容器可放音轨。
         audio: AudioMode::Silent,
         output: &output,
@@ -1357,6 +1371,8 @@ fn cmd_render(args: &Args) -> Result<ExitCode, CommandError> {
     // 粗体与字体目录是可选的：没给就是 None（见 RenderPlan 那两个字段的说明）。
     let font_bold_file = args.font_bold_file.as_deref().map(Path::new);
     let font_dir = args.font_dir.as_deref().map(Path::new);
+    // 默认 `1`：不分块。要速度就显式给 `--chunk-workers 0`（自动）或一个具体数。
+    let chunk_workers = args.chunk_workers.unwrap_or(1);
     let font_file = match resolve_font(args) {
         Ok(font) => font,
         Err(code) => return Ok(code),
@@ -1449,6 +1465,7 @@ fn cmd_render(args: &Args) -> Result<ExitCode, CommandError> {
         font_file,
         font_bold_file,
         font_dir,
+        chunk_workers,
         audio: audio_mode,
         output: &output,
     };
@@ -2468,7 +2485,7 @@ mod tests {
         // 所以这里是一张**显式**的"谁认它 + 一条完整的合法命令行"的表。
         // 它必须盖住整张 KNOWN_VALUE_FLAGS：新加一个选项却不在这儿声明谁认它、
         // 怎么用，这条就红。**这比原来那版强**——原来那版只需要选项能被 `edit` 收下。
-        let probe: [(&str, &[&str]); 24] = [
+        let probe: [(&str, &[&str]); 25] = [
             ("--project", &["probe", "--project", "1"]),
             ("--asset", &["info", "--asset", "1"]),
             ("--out", &["render", "--out", "1"]),
@@ -2485,6 +2502,7 @@ mod tests {
             ("--font-file", &["frame", "--font-file", "1"]),
             ("--font-bold-file", &["frame", "--font-bold-file", "1"]),
             ("--font-dir", &["frame", "--font-dir", "1"]),
+            ("--chunk-workers", &["render", "--chunk-workers", "1"]),
             (
                 "--track",
                 &[

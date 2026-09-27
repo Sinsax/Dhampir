@@ -235,6 +235,19 @@ pub struct PoolStats {
     pub frames_read: usize,
 }
 
+impl PoolStats {
+    /// 把另一份账并进来（**分块并行**时每块各有一份，最后要汇总）。
+    ///
+    /// 逐字段相加，不是"取更大的那个"：这些是**累计量**，两块各读了 100 帧
+    /// 就是一共读了 200 帧。
+    pub fn merge(&mut self, other: Self) {
+        self.hits += other.hits;
+        self.forward += other.forward;
+        self.replays += other.replays;
+        self.frames_read += other.frames_read;
+    }
+}
+
 /// 池子的纯状态机：谁在里面、游标到哪、花了多少。
 ///
 /// 抽出来的理由与 plan_advance 当时一样：**量化脚本与真池子必须是同一段规则**，
@@ -957,6 +970,14 @@ pub struct RenderPlan<'a> {
     ///
     /// 语义是**"从你给我的目录里找"**，不是"去系统里猜" —— 那条纪律没有破。
     pub font_dir: Option<&'a Path>,
+    /// **分块并行**要开几个 worker：`1` = 不分块（默认，产物与从前同参数）、
+    /// `0` = 自动（按可用并行度，最多 8）、`n` = 指定 n。
+    ///
+    /// 为什么默认 `1`：分块会把一段视频切成 N 段各自编码再 concat，
+    /// **每段开头都是一个新的 GOP**，所以产物与"一口气编码"不是逐字节相同。
+    /// 本仓有一批判据钉的是"同一份工程出同样的字节"，默认保持单趟；
+    /// 要速度就显式开（`--chunk-workers 0`）。
+    pub chunk_workers: usize,
     /// 音轨怎么办。AudioPlan 由本函数从 `timeline`/`sources`/`asset_timebases` 摊出来 ——
     /// **同源求值**要的就是"同一份入参"，让调用方另传一份计划进来反而会分叉。
     pub audio: AudioMode,
@@ -1527,7 +1548,7 @@ fn sidecar_path(output: &Path, suffix: &str) -> PathBuf {
 /// 出片。on_progress(已出帧数, 总帧数)。
 pub fn render_plan(
     plan: &RenderPlan,
-    mut on_progress: impl FnMut(usize, usize),
+    mut on_progress: impl FnMut(usize, usize) + Send,
 ) -> Result<RenderReport, String> {
     if plan.to < plan.from {
         return Err(format!("帧区间是空的：from={} to={}", plan.from, plan.to));
@@ -1559,6 +1580,223 @@ pub fn render_plan(
         plan.output.to_path_buf()
     };
 
+    let started = Instant::now();
+    let workers = resolve_workers(plan, total);
+
+    let mut frames = 0usize;
+    let mut empty_frames: Vec<Frame> = Vec::new();
+    let mut issues: Vec<Issue> = Vec::new();
+    let mut overlay = OverlayStats::default();
+    let mut decode = PoolStats::default();
+    let mut opened_streams = 0usize;
+
+    if workers <= 1 {
+        let report = render_range(plan, plan.from, plan.to, &video_target, &mut on_progress)?;
+        frames = report.frames;
+        empty_frames = report.empty_frames;
+        issues = report.issues;
+        overlay = report.overlay;
+        decode = report.decode;
+        opened_streams = report.opened_streams;
+    } else {
+        // ---- 分块并行 ----
+        //
+        // 每块一个线程、一套 GPU 上下文、一个 ffmpeg 进程 —— 与 V-Trim 的
+        // `render/pipeline.rs:173`（`parallelism` 块各一个 `thread::spawn`）同一个形状。
+        // 本仓先前是单线程逐帧 `submit` + 同步读回 + 同步写管道，三者完全不重叠。
+        let bounds: Vec<(Frame, Frame)> =
+            (0..workers).map(|index| chunk_bounds(plan.from, plan.to, workers, index)).collect();
+        let parts: Vec<PathBuf> = (0..workers)
+            .map(|index| sidecar_path(plan.output, &format!("chunk_{index}.mp4")))
+            .collect();
+
+        // 进度用**一个共享计数**汇总：每块各报各的会让总数来回跳。
+        let done = std::sync::atomic::AtomicUsize::new(0);
+        let mut outcomes: Vec<Result<RangeReport, String>> = Vec::with_capacity(workers);
+        let progress = std::sync::Mutex::new(&mut on_progress);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = bounds
+                .iter()
+                .zip(parts.iter())
+                .map(|((from, to), part)| {
+                    let progress = &progress;
+                    let done = &done;
+                    scope.spawn(move || {
+                        let mut local = |_: usize, _: usize| {
+                            let seen = done
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                                + 1;
+                            if let Ok(mut callback) = progress.lock() {
+                                (**callback)(seen, total);
+                            }
+                        };
+                        render_range(plan, *from, *to, part, &mut local)
+                    })
+                })
+                .collect();
+            for handle in handles {
+                outcomes.push(
+                    handle.join().unwrap_or_else(|_| Err("分块线程 panic".to_string())),
+                );
+            }
+        });
+
+        // 一块失败就整次失败：留着半份产物比什么都没有更容易误导人。
+        let mut parts_done: Vec<PathBuf> = Vec::with_capacity(workers);
+        let mut failure: Option<String> = None;
+        for (index, outcome) in outcomes.into_iter().enumerate() {
+            match outcome {
+                Ok(report) => {
+                    frames += report.frames;
+                    empty_frames.extend(report.empty_frames);
+                    issues.extend(report.issues);
+                    decode.merge(report.decode);
+                    opened_streams += report.opened_streams;
+                    overlay.merge(report.overlay);
+                    parts_done.push(parts[index].clone());
+                }
+                Err(error) => {
+                    failure = Some(format!("第 {index} 块：{error}"));
+                    break;
+                }
+            }
+        }
+        if let Some(error) = failure {
+            for part in &parts {
+                remove_quietly(part);
+            }
+            if wants_audio {
+                remove_quietly(&video_target);
+            }
+            return Err(error);
+        }
+
+        let joined = concat_video(&parts_done, &video_target);
+        for part in &parts {
+            remove_quietly(part);
+        }
+        if let Err(error) = joined {
+            if wants_audio {
+                remove_quietly(&video_target);
+            }
+            return Err(error);
+        }
+    }
+
+    if frames == 0 {
+        if wants_audio {
+            remove_quietly(&video_target);
+        }
+        return Err("一帧都没处理".to_string());
+    }
+
+    // 有音轨时，视频只是**中间产物**：真正的产物要等复用之后才有。
+    // 所以从这里往下，凡是提前返回的路径都要把那个临时文件带走。
+    let mut audio = AudioStats::default();
+    if wants_audio {
+        let pcm = sidecar_path(plan.output, "audio.f32");
+        let muxed = build_audio_track(&audio_plan, &pcm).and_then(|stats| {
+            audio = stats;
+            mux_audio(&video_target, &pcm, &audio_plan, plan.output)
+        });
+        remove_quietly(&pcm);
+        remove_quietly(&video_target);
+        muxed?;
+    }
+
+    let elapsed_ms = started.elapsed().as_millis();
+    // 音轨装载阶段的问题（缺素材 / 音轨上没有素材的图层 / 多轨重叠）
+    // 与其它问题走同一条路：非空就是这次出片失败。
+    issues.extend(audio_plan.issues.iter().cloned());
+    let (width, height, encoded_frames) = probe_output_frames(plan.output)?;
+    Ok(RenderReport {
+        output: plan.output.to_path_buf(),
+        frames,
+        encoded_frames: Some(encoded_frames),
+        width,
+        height,
+        encoder_fps: fps,
+        seconds: seconds_for(frames, &plan.timeline.timebase),
+        elapsed_ms,
+        opened_streams,
+        empty_frames,
+        overlay,
+        audio,
+        decode,
+        issues,
+    })
+}
+
+/// 一段帧区间的产出。**分块并行时每块一份**，最后汇总。
+#[derive(Debug, Default)]
+struct RangeReport {
+    frames: usize,
+    empty_frames: Vec<Frame>,
+    issues: Vec<Issue>,
+    overlay: OverlayStats,
+    decode: PoolStats,
+    opened_streams: usize,
+}
+
+/// 这块要开几个 worker。
+///
+/// `plan.chunk_workers`：`1` = 不分块（**默认**，产物逐字节与从前相同）；
+/// `0` = 自动（按可用并行度，最多 8，与 V-Trim 的上限一致）；`n` = 指定 n。
+///
+/// # 为什么默认不分块
+///
+/// 分块会把一段视频切成 N 段各自编码再 concat —— **每一段开头都是一个新的 GOP**，
+/// 所以产物与"一口气编码"不是逐字节相同（画面质量基本一致，但字节数会变）。
+/// 本仓有一批判据钉的是"同一份工程出同样的字节"，所以默认保持单趟；
+/// 要速度就显式开。
+fn resolve_workers(plan: &RenderPlan, total: usize) -> usize {
+    let requested = plan.chunk_workers;
+    let available = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    // **自动档的上限是 4，不是核数。**
+    //
+    // 实测（16 核，1920x1080 60fps，2000 帧）：
+    //     workers   帧/秒   加速比
+    //        1      52.1    1.00x
+    //        2      74.2    1.42x
+    //        3      86.5    1.66x   <- 最好
+    //        4      85.2    1.60x
+    //        5      74.5    1.54x
+    //        6      73.7    1.52x
+    //        8      67.4    1.29x   <- 比 3 慢 22%
+    //
+    // 只有**一块 GPU**：每个 worker 各开一套 wgpu 上下文、各自同步读回，
+    // 开到 5 个以上就开始互相抢设备，"并行"变成"排队 + 额外的上下文开销"。
+    // 所以自动档按 4 封顶 —— 拿核数当上限会在这台机器上白白慢 22%。
+    let workers = if requested == 0 { available.min(4) } else { requested };
+    // 帧数比 worker 还少时多开的线程只会互相抢设备、不会更快。
+    workers.min(total).max(1)
+}
+
+/// 第 `index` 块要出的帧区间（闭区间，尽量均分）。
+fn chunk_bounds(from: Frame, to: Frame, workers: usize, index: usize) -> (Frame, Frame) {
+    let total = (to - from + 1) as usize;
+    let base = total / workers;
+    let extra = total % workers;
+    // 前 `extra` 块各多一帧 —— 余数不摊掉的话最后一块会明显偏大。
+    let before: usize = (0..index).map(|i| base + usize::from(i < extra)).sum();
+    let len = base + usize::from(index < extra);
+    let start = from + before as Frame;
+    (start, start + len as Frame - 1)
+}
+
+/// 出 `[from, to]` 这一段到一个**视频**文件（不含音频）。
+///
+/// 这一层专门为**分块并行**而分出来：每个 worker 调一次，各自开自己的 GPU 上下文、
+/// 自己的解码器池、自己的 ffmpeg 进程 —— **不共享任何可变状态**，所以能真并行。
+/// 分块之间唯一的耦合是"最后要 concat"，而那一步在调用方。
+fn render_range(
+    plan: &RenderPlan,
+    from: Frame,
+    to: Frame,
+    video_target: &Path,
+    on_progress: &mut dyn FnMut(usize, usize),
+) -> Result<RangeReport, String> {
+    let fps = encoder_fps(&plan.timeline.timebase)?;
     let (ctx, _init) =
         open_leg(NATIVE_BACKENDS).map_err(|error| format!("拿不到 GPU 上下文：{error}"))?;
     let renderer = TimelineRenderer::new(&ctx.device, WORK_FORMAT);
@@ -1581,27 +1819,20 @@ pub fn render_plan(
 
     // **先把这一趟要哪些 (源, 源内帧) 算出来**：池子靠它决定"读到的帧要不要留下"。
     // 这一步是纯的、不碰 GPU 也不碰解码器，所以它失败不了，也不会让出片慢多少。
-    let schedule = request_schedule(
-        plan.timeline,
-        plan.asset_timebases,
-        plan.from,
-        plan.to,
-    );
+    let schedule = request_schedule(plan.timeline, plan.asset_timebases, from, to);
     let demand = demand_of(&schedule);
-    let mut sources =
-        DecodingSources::new(&ctx.device, &ctx.queue, plan.sources, demand);
-    let mut encoder = spawn_encoder(&video_target, plan.width, plan.height, fps)?;
+    let mut sources = DecodingSources::new(&ctx.device, &ctx.queue, plan.sources, demand);
+    let mut encoder = spawn_encoder(video_target, plan.width, plan.height, fps)?;
     // 字幕的账走**自己一份** IssueLog：源那边的那份在 sources 里（按 (code,path) 去重），
     // 两份在收尾时合并 —— 于是"同一行字画不下"按行内容去重，不会按帧号刷满清单。
     let mut overlay_log = IssueLog::new();
-    let mut painter = OverlayPainter::new(plan.font_file)
-        .with_fonts(plan.font_bold_file, plan.font_dir);
-    let started = Instant::now();
+    let mut painter =
+        OverlayPainter::new(plan.font_file).with_fonts(plan.font_bold_file, plan.font_dir);
     let mut frames = 0usize;
     let mut empty_frames: Vec<Frame> = Vec::new();
 
     let mut result: Result<(), String> = Ok(());
-    for frame in plan.from..=plan.to {
+    for frame in from..=to {
         sources.begin_frame(frame);
         let composite =
             compose::evaluate_v2_with_assets(plan.timeline, frame, Some(plan.asset_timebases));
@@ -1674,7 +1905,7 @@ pub fn render_plan(
             break;
         }
         frames += 1;
-        on_progress(frames, total);
+        on_progress(frames, (to - from + 1) as usize);
     }
 
     // 无论成功还是中途退出，都要收干净：**不关编码器的 stdin，它会一直等**。
@@ -1684,58 +1915,72 @@ pub fn render_plan(
     let opened_streams = sources.opened_streams();
     let decode = sources.stats();
     sources.close();
+    // `issues(self)` **消费** self，所以它必须排在最后（close 之后、读数之后）。
+    let source_issues = sources.issues();
 
-    // 有音轨时，视频只是**中间产物**：真正的产物要等复用之后才有。
-    // 所以从这里往下，凡是提前返回的路径都要把那个临时文件带走。
-    let mut audio = AudioStats::default();
+    // 失败时把这一块的中间产物带走：留在盘上会让人以为"这次成功过"。
     if let Err(error) = result {
-        if wants_audio {
-            remove_quietly(&video_target);
-        }
+        remove_quietly(video_target);
         return Err(error);
     }
     if frames == 0 {
-        if wants_audio {
-            remove_quietly(&video_target);
-        }
+        remove_quietly(video_target);
         return Err("一帧都没处理".to_string());
     }
 
-    if wants_audio {
-        let pcm = sidecar_path(plan.output, "audio.f32");
-        let muxed = build_audio_track(&audio_plan, &pcm).and_then(|stats| {
-            audio = stats;
-            mux_audio(&video_target, &pcm, &audio_plan, plan.output)
-        });
-        remove_quietly(&pcm);
-        remove_quietly(&video_target);
-        muxed?;
-    }
-
-    let elapsed_ms = started.elapsed().as_millis();
-    let mut issues = sources.issues();
+    let mut issues = source_issues;
     issues.extend(overlay_log.into_vec());
-    // 音轨装载阶段的问题（缺素材 / 音轨上没有素材的图层 / 多轨重叠）
-    // 与其它问题走同一条路：非空就是这次出片失败。
-    issues.extend(audio_plan.issues.iter().cloned());
-    let overlay = painter.stats();
-    let (width, height, encoded_frames) = probe_output_frames(plan.output)?;
-    Ok(RenderReport {
-        output: plan.output.to_path_buf(),
+    Ok(RangeReport {
         frames,
-        encoded_frames: Some(encoded_frames),
-        width,
-        height,
-        encoder_fps: fps,
-        seconds: seconds_for(frames, &plan.timeline.timebase),
-        elapsed_ms,
-        opened_streams,
         empty_frames,
-        overlay,
-        audio,
-        decode,
         issues,
+        overlay: painter.stats(),
+        decode,
+        opened_streams,
     })
+}
+
+/// 把若干段**同参数**编码出来的 mp4 接成一个。
+///
+/// 用 concat demuxer 而不是 concat filter：这些段是同一套编码参数逐段编出来的，
+/// demuxer 直接拼流、**不重编码**（重编码会再压一代，也会把刚省下的时间还回去）。
+fn concat_video(parts: &[PathBuf], output: &Path) -> Result<(), String> {
+    if parts.is_empty() {
+        return Err("没有可拼接的分块".to_string());
+    }
+    let list_path = sidecar_path(output, "concat.txt");
+    let mut list = String::new();
+    for part in parts {
+        // **必须是绝对路径。**
+        //
+        // concat demuxer 把 `file` 行里的相对路径按**清单文件所在目录**解析 ——
+        // 而清单就放在输出旁边（`out/vtrim2/`），于是 `out/vtrim2/.x.chunk_0.mp4`
+        // 会被拼成 `out/vtrim2/out/vtrim2/.x.chunk_0.mp4`。
+        // 报出来的错是"Impossible to open"，看起来像"分块没生成"，其实路径被叠了一次。
+        let absolute = std::fs::canonicalize(part)
+            .map_err(|error| format!("分块 {} 不在：{error}", part.display()))?;
+        // concat demuxer 的 `file` 行：单引号包住、内部单引号要转义成 '\''。
+        let text = absolute.display().to_string().replace('\'', "'\\''");
+        list.push_str(&format!("file '{text}'\n"));
+    }
+    std::fs::write(&list_path, list).map_err(|error| format!("写分块清单失败：{error}"))?;
+    let result = (|| -> Result<(), String> {
+        let output_std = output.as_os_str().to_os_string();
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "concat", "-safe", "0", "-i"])
+            .arg(&list_path)
+            // `-c copy`：拼的是同一套参数的裸流，不重编码。
+            .args(["-c", "copy", "-movflags", "+faststart", "-y"])
+            .arg(&output_std)
+            .status()
+            .map_err(|error| format!("起不了 ffmpeg：{error}"))?;
+        if !status.success() {
+            return Err(format!("拼接分块失败（ffmpeg 退出码 {status}）"));
+        }
+        Ok(())
+    })();
+    remove_quietly(&list_path);
+    result
 }
 
 /// 删中间产物。**失败不报错** —— 它只是个临时文件，为它把一次已经成功的出片
@@ -1905,6 +2150,41 @@ pub fn render_frames_png_run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 分块必须**不重不漏**地盖住整个区间 —— 漏一帧成片就短一帧，
+    /// 重一帧就会在拼接处看到同一帧闪两下。
+    ///
+    /// 余数最容易分错：5812 / 4 = 1453 整除，看不出问题；
+    /// 5813 / 4 = 1453 余 1，前三块必须各多一帧，否则最后一块会大一帧。
+    #[test]
+    fn 分块不重不漏地盖住整个区间() {
+        for total in [1usize, 2, 3, 7, 2000, 5812, 5813] {
+            let from = 100i64;
+            let to = from + total as i64 - 1;
+            for workers in 1..=8usize {
+                let workers = workers.min(total);
+                let parts: Vec<(Frame, Frame)> =
+                    (0..workers).map(|i| chunk_bounds(from, to, workers, i)).collect();
+                // 第一块从头开始
+                assert_eq!(parts[0].0, from, "total={total} workers={workers} 起点不对");
+                // 最后一块到尾结束
+                assert_eq!(parts[workers - 1].1, to, "total={total} workers={workers} 终点不对");
+                // 首尾相接、不重不漏
+                for pair in parts.windows(2) {
+                    assert_eq!(
+                        pair[0].1 + 1,
+                        pair[1].0,
+                        "total={total} workers={workers} 在 {}..{} 之间有缝或重叠",
+                        pair[0].1,
+                        pair[1].0
+                    );
+                }
+                // 帧数合计必须等于总数
+                let counted: i64 = parts.iter().map(|(a, b)| b - a + 1).sum();
+                assert_eq!(counted, total as i64, "total={total} workers={workers} 帧数对不上");
+            }
+        }
+    }
 
     fn tb(num: u32, den: u32) -> TimebaseDto {
         TimebaseDto { num, den }

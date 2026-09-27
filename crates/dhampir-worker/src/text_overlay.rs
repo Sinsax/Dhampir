@@ -251,6 +251,22 @@ pub struct OverlayStats {
 }
 
 impl OverlayStats {
+    /// 把另一份账并进来（**分块并行**时每块各有一份，最后要汇总）。
+    ///
+    /// 与 `PoolStats::merge` 同一条理由：这些都是**逐帧累加**的数，
+    /// 两块各画了 10 行就是一共画了 20 行。
+    pub fn merge(&mut self, other: Self) {
+        self.lines_drawn += other.lines_drawn;
+        self.lines_clipped += other.lines_clipped;
+        self.lines_dropped += other.lines_dropped;
+        self.lines_failed += other.lines_failed;
+        self.danmaku_drawn += other.danmaku_drawn;
+        self.danmaku_dropped += other.danmaku_dropped;
+        self.danmaku_failed += other.danmaku_failed;
+        self.cache_hits += other.cache_hits;
+        self.cache_misses += other.cache_misses;
+    }
+
     /// 这一趟有没有文字的事。CLI 用它决定要不要出声。
     pub fn is_silent(&self) -> bool {
         self.lines_drawn == 0

@@ -190,6 +190,7 @@ impl Fixture {
             font_file: font,
             font_bold_file: None,
             font_dir: None,
+            chunk_workers: 1,
             // 这条路出的是 PNG：没有容器可放音轨。
             audio: AudioMode::Silent,
             output: &output,
