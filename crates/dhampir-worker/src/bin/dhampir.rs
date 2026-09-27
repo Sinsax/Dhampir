@@ -169,6 +169,11 @@ struct Args {
     width: Option<u32>,
     height: Option<u32>,
     font_file: Option<String>,
+    /// 粗体字体文件（可选）。字重 >= 600 时用它 —— ffmpeg 的 drawtext
+    /// **没有** bold 开关，粗体就是换一个字体文件。
+    font_bold_file: Option<String>,
+    /// 字体目录（可选）：按契约里的 `font_family` 名字在里面找。
+    font_dir: Option<String>,
     subtitle_out: Option<String>,
     format: Option<SidecarFormat>,
     /// `--track` / `--layer`：`clip insert` 放哪条轨 / 其余动作动哪个片段。
@@ -236,7 +241,7 @@ impl SidecarFormat {
 }
 
 /// 认得的**带值**选项。不在表里的一律报错。
-const KNOWN_VALUE_FLAGS: [&str; 22] = [
+const KNOWN_VALUE_FLAGS: [&str; 24] = [
     "--project",
     "--asset",
     "--out",
@@ -251,6 +256,8 @@ const KNOWN_VALUE_FLAGS: [&str; 22] = [
     "--width",
     "--height",
     "--font-file",
+    "--font-bold-file",
+    "--font-dir",
     // clip / sequence / batch 用的（见 EDIT_FAMILY）。
     "--track",
     "--layer",
@@ -537,6 +544,8 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--width" => args.width = Some(parse_uint(&token, &value)?),
             "--height" => args.height = Some(parse_uint(&token, &value)?),
             "--font-file" => args.font_file = Some(value),
+            "--font-bold-file" => args.font_bold_file = Some(value),
+            "--font-dir" => args.font_dir = Some(value),
             "--subtitle-out" => args.subtitle_out = Some(value),
             "--format" => {
                 let parsed = SidecarFormat::from_flag(&value).ok_or_else(|| {
@@ -1204,6 +1213,9 @@ fn cmd_frame(args: &Args) -> Result<ExitCode, CommandError> {
             .unwrap_or_else(|| "target/s3".to_string()),
     );
     let sources = build_sources(&doc, &root, &resolve_fallback(args, &root)?);
+    // 粗体与字体目录是可选的：没给就是 None（见 RenderPlan 那两个字段的说明）。
+    let font_bold_file = args.font_bold_file.as_deref().map(Path::new);
+    let font_dir = args.font_dir.as_deref().map(Path::new);
     let font_file = match resolve_font(args) {
         Ok(font) => font,
         Err(code) => return Ok(code),
@@ -1233,6 +1245,8 @@ fn cmd_frame(args: &Args) -> Result<ExitCode, CommandError> {
         sequence: doc.sequence_size(),
         subtitles: &subtitles,
         font_file,
+        font_bold_file,
+        font_dir,
         // frame 出的是 PNG：没有容器可放音轨。
         audio: AudioMode::Silent,
         output: &output,
@@ -1340,6 +1354,9 @@ fn cmd_render(args: &Args) -> Result<ExitCode, CommandError> {
             .unwrap_or_else(|| "target/s3".to_string()),
     );
     let sources = build_sources(&doc, &root, &resolve_fallback(args, &root)?);
+    // 粗体与字体目录是可选的：没给就是 None（见 RenderPlan 那两个字段的说明）。
+    let font_bold_file = args.font_bold_file.as_deref().map(Path::new);
+    let font_dir = args.font_dir.as_deref().map(Path::new);
     let font_file = match resolve_font(args) {
         Ok(font) => font,
         Err(code) => return Ok(code),
@@ -1430,6 +1447,8 @@ fn cmd_render(args: &Args) -> Result<ExitCode, CommandError> {
         sequence: doc.sequence_size(),
         subtitles: &subtitles,
         font_file,
+        font_bold_file,
+        font_dir,
         audio: audio_mode,
         output: &output,
     };
@@ -2448,7 +2467,7 @@ mod tests {
         // 所以这里是一张**显式**的"谁认它 + 一条完整的合法命令行"的表。
         // 它必须盖住整张 KNOWN_VALUE_FLAGS：新加一个选项却不在这儿声明谁认它、
         // 怎么用，这条就红。**这比原来那版强**——原来那版只需要选项能被 `edit` 收下。
-        let probe: [(&str, &[&str]); 22] = [
+        let probe: [(&str, &[&str]); 24] = [
             ("--project", &["probe", "--project", "1"]),
             ("--asset", &["info", "--asset", "1"]),
             ("--out", &["render", "--out", "1"]),
@@ -2463,6 +2482,8 @@ mod tests {
             ("--width", &["render", "--width", "1"]),
             ("--height", &["render", "--height", "1"]),
             ("--font-file", &["frame", "--font-file", "1"]),
+            ("--font-bold-file", &["frame", "--font-bold-file", "1"]),
+            ("--font-dir", &["frame", "--font-dir", "1"]),
             (
                 "--track",
                 &[

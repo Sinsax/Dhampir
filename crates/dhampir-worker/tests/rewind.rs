@@ -126,6 +126,8 @@ fn render_all(name: &str, out: &str) -> Rendered {
         subtitles: &subtitles,
         // 这一条与字体无关：夹具里没有字幕轨，给了字体也不会画字。
         font_file: None,
+        font_bold_file: None,
+        font_dir: None,
         // 这一条与声音无关：量的是解码池子。
         audio: AudioMode::Silent,
         output: &output,

@@ -251,7 +251,7 @@ impl Layer {
 /// 字号与边距用**比例**（相对目标高度），不用像素：像素在预览（640x360）与
 /// 成片（1920x1080）里含义不同，两端就不一致了。
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubtitleStyle {
     /// 字号 = 目标高度 * 这个比例。
     #[serde(default = "subtitle_font_ratio")]
@@ -268,11 +268,22 @@ pub struct SubtitleStyle {
     /// 是否加描边（压住亮背景）。
     #[serde(default = "yes")]
     pub outline: bool,
-    /// **描边宽度** = 目标高度 * 这个比例。
+    /// **描边宽度** = 目标高度 * 这个比例，单位是**外侧宽度**（见下）。
     ///
     /// V-Trim 写的是 `12px #403c3b`（1080p 下），即 `12/1080`。
     /// 单位取比例而不是像素：像素在预览（640x360）与成片（1920x1080）
     /// 里含义不同，两端就不一致了 —— 与 `font_ratio` 同一条理由。
+    ///
+    /// # 「外侧宽度」是**口径**，不是实现细节
+    ///
+    /// CSS 的 `-webkit-text-stroke: 12px` 是**居中**描边 —— 判据在字的轮廓上，
+    /// 里外各 6px；而 ffmpeg 的 `drawtext:borderw=12` 是**全在外侧** 12px。
+    /// 同一个数字，两种画法差**一倍**。
+    ///
+    /// 契约必须挑一个说清楚，否则"转译器把 12 填进来"在预览（canvas，居中）
+    /// 与成片（ffmpeg，外侧）上会画出两种粗细 —— 而那是"预览看着对、成片偏粗"，
+    /// 正是这个仓最不想有的那类错。**这里定的是外侧宽度**，因为它是
+    /// ffmpeg 的原生语义（不用换算），而 canvas 那侧画两倍 `lineWidth` 即可。
     #[serde(default = "subtitle_stroke_ratio")]
     pub stroke_ratio: f32,
     /// 描边颜色。`outline` 为假时忽略。
@@ -293,7 +304,36 @@ pub struct SubtitleStyle {
     /// 退场时向上浮的距离（文档像素）。V-Trim 是 `8`。
     #[serde(default)]
     pub rise_out_px: f32,
+    /// **字体族名**（`"LXGW WenKai"` 这种）。`None` = 用宿主的默认字体。
+    ///
+    /// # 它不表示"去系统里找"
+    ///
+    /// 这个仓**不猜系统字体**（`--font-file` 那条纪律）。这个字段的语义是
+    /// **"宿主从你给它的字体目录里按这个名字找"** —— 找不到就用 `--font-file`
+    /// 兜底，并**如实报出来**，而不是悄悄换个字体画。
+    ///
+    /// 为什么值得有：V-Trim 的 `polish.toml` 里写着 `font = "LXGW WenKai"`，
+    /// 而**那台机器上没装** —— 它走到 CSS 的字体栈兜底
+    /// （`'LXGW WenKai','Noto Sans SC','Microsoft YaHei',sans-serif`），
+    /// 实际生效的是**微软雅黑**。把名字带进契约，这件事才是可查的。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+    /// **字重**（100..=900，CSS 的同一套刻度）。默认 400。
+    ///
+    /// V-Trim 的字幕是 `font-weight:700`、弹幕是 `600` —— 而本仓先前
+    /// **完全不设字重**，于是笔画比它细一圈。那不是"差一点观感"，
+    /// 是每一行字都在逐像素上错。
+    #[serde(default = "default_font_weight")]
+    pub font_weight: u32,
+    /// **行高 / 字号**的比例。默认 0 = 用 [`crate::text_layout::LINE_HEIGHT_EM`]（1.2）。
+    ///
+    /// V-Trim 的字幕 CSS 是 `line-height:1.5`，本仓是 1.2 ——
+    /// 单行字幕看不出差别，**两行**的字间距会差 0.3em（72px 字号下是 21.6px）。
+    #[serde(default)]
+    pub line_height: f32,
 }
+
+fn default_font_weight() -> u32 { 400 }
 
 fn subtitle_font_ratio() -> f32 { 0.055 }
 fn subtitle_bottom_margin() -> f32 { 0.06 }
@@ -324,6 +364,9 @@ impl Default for SubtitleStyle {
             fade_out_ms: 0,
             rise_in_px: 0.0,
             rise_out_px: 0.0,
+            font_family: None,
+            font_weight: default_font_weight(),
+            line_height: 0.0,
         }
     }
 }
@@ -383,6 +426,15 @@ pub struct DanmakuSpec {
     /// 必须是 0 或正数；负数会让泳道往上叠。
     #[serde(default)]
     pub lane_spacing_ratio: f32,
+    /// 字体族名（语义同 [`SubtitleStyle::font_family`]，弹幕也归这条）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+    /// 字重。V-Trim 的弹幕是 `600`；默认 400。
+    #[serde(default = "default_font_weight")]
+    pub font_weight: u32,
+    /// 行高 / 字号的比例。默认 0 = 用 [`crate::text_layout::LINE_HEIGHT_EM`]。
+    #[serde(default)]
+    pub line_height: f32,
 }
 
 fn danmaku_lanes() -> u32 { 8 }
@@ -414,6 +466,9 @@ impl Default for DanmakuSpec {
             // **默认都 0 = 复现老行为**（0 号泳道贴顶、间距取行盒高）。
             lane_top_ratio: 0.0,
             lane_spacing_ratio: 0.0,
+            font_family: None,
+            font_weight: default_font_weight(),
+            line_height: 0.0,
         }
     }
 }
@@ -432,6 +487,16 @@ pub struct TrackV2 {
     /// 弹幕轨的参数。非弹幕轨忽略它。
 #[serde(default, skip_serializing_if = "Option::is_none")]
     pub danmaku: Option<DanmakuSpec>,
+    /// **整条轨的音频增益**（线性倍数，1.0 = 原样）。
+    ///
+    /// 与 [`Layer::gain`] 的关系：轨道这个是**上限/母线**，图层那个是那一段自己的量，
+    /// 实际增益是两者**相乘**。V-Trim 的 `[sfx] volume` 就是母线
+    /// （模板里 `var vol = ev.volume || CFG.sfx.volume || 0.1` —— 事件值**覆盖**母线，
+    /// 所以转译器把它填成图层的 `gain`；这个字段留给"整条轨一起调"的工程）。
+    ///
+    /// 非音轨忽略它（与 `subtitle`/`danmaku` 同款：挂错轨不报错，但也不生效）。
+#[serde(default = "one")]
+    pub gain: f32,
 }
 
 /// v2 契约：与 v1 同形，但 `tracks` 用 v2 轨道，并多了工程级标记。
@@ -521,6 +586,7 @@ pub fn migrate_v1_to_v2(project: &Project) -> Result<TimelineV2, MigrateError> {
             // v1 没有字幕/弹幕的概念，如实留空。
             subtitle: None,
             danmaku: None,
+            gain: 1.0,
         });
     }
     Ok(TimelineV2 {
@@ -1283,6 +1349,7 @@ mod v2_tests {
             layers,
             subtitle: None,
             danmaku: None,
+            gain: 1.0,
         }
     }
 

@@ -714,6 +714,7 @@ mod tests {
                 layers,
                 subtitle: None,
                 danmaku: None,
+                gain: 1.0,
             }],
         }
     }

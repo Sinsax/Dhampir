@@ -822,6 +822,7 @@ mod tests {
             layers: Vec::new(),
             subtitle: None,
             danmaku: None,
+            gain: 1.0,
         });
         let issues = precheck(&timeline, &caps);
         assert_eq!(issues.len(), 1);
@@ -868,6 +869,7 @@ mod tests {
                 layers: vec![layer],
                 subtitle: None,
                 danmaku: None,
+                gain: 1.0,
             }],
         };
         // 对端：支持模糊但半径上限只有 16；没有 vignette。

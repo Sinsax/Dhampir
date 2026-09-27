@@ -153,6 +153,8 @@ fn measure(project: &str, limit: Option<i64>, png_sample: usize) -> Result<serde
         sequence: doc.sequence_size(),
         subtitles: &subtitles,
         font_file: None,
+        font_bold_file: None,
+        font_dir: None,
         // 这条尺子量的是**解码**，不是音频：音轨一律不走。
         audio: AudioMode::Silent,
         output: &output,

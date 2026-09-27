@@ -950,6 +950,13 @@ pub struct RenderPlan<'a> {
     /// 为什么不给一个默认字体：本仓不内嵌字体、也不去猜系统字体在哪。
     /// 猜错的后果是**产出一份字全是方框的片子**，而"看起来成功、其实不对"正是要消灭的。
     pub font_file: Option<&'a Path>,
+    /// 粗体字体文件（可选）。契约里的 `font_weight >= 600` 时用它 ——
+    /// ffmpeg 的 `drawtext` 没有 `bold` 开关，**粗体就是换一个字体文件**。
+    pub font_bold_file: Option<&'a Path>,
+    /// 字体目录（可选）：按契约里的 `font_family` 名字在里面找。
+    ///
+    /// 语义是**"从你给我的目录里找"**，不是"去系统里猜" —— 那条纪律没有破。
+    pub font_dir: Option<&'a Path>,
     /// 音轨怎么办。AudioPlan 由本函数从 `timeline`/`sources`/`asset_timebases` 摊出来 ——
     /// **同源求值**要的就是"同一份入参"，让调用方另传一份计划进来反而会分叉。
     pub audio: AudioMode,
@@ -1587,7 +1594,8 @@ pub fn render_plan(
     // 字幕的账走**自己一份** IssueLog：源那边的那份在 sources 里（按 (code,path) 去重），
     // 两份在收尾时合并 —— 于是"同一行字画不下"按行内容去重，不会按帧号刷满清单。
     let mut overlay_log = IssueLog::new();
-    let mut painter = OverlayPainter::new(plan.font_file);
+    let mut painter = OverlayPainter::new(plan.font_file)
+        .with_fonts(plan.font_bold_file, plan.font_dir);
     let started = Instant::now();
     let mut frames = 0usize;
     let mut empty_frames: Vec<Frame> = Vec::new();
@@ -1827,7 +1835,8 @@ pub fn render_frames_png_run(
         .to_path_buf();
     std::fs::create_dir_all(&dir).map_err(|e| format!("建不了目录 {}：{e}", dir.display()))?;
 
-    let mut painter = OverlayPainter::new(plan.font_file);
+    let mut painter = OverlayPainter::new(plan.font_file)
+        .with_fonts(plan.font_bold_file, plan.font_dir);
     let mut written = Vec::new();
     for frame in frames {
         let frame = *frame;

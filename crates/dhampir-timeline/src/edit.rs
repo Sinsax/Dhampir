@@ -752,6 +752,7 @@ mod tests {
                 layers,
                 subtitle: None,
                 danmaku: None,
+                gain: 1.0,
             }],
         });
         built.assets = vec![clip_asset()];

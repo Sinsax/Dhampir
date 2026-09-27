@@ -16,14 +16,20 @@ export interface DanmakuSpec {
   fade_in_ms?: number;
   /** 淡出时长（毫秒）。V-Trim 是 `0.2`。 */
   fade_out_ms?: number;
+  /** 字体族名（语义同 [`SubtitleStyle::font_family`]，弹幕也归这条）。 */
+  font_family?: string | null;
   /** 字号 = 目标高度 * 这个比例。 */
   font_ratio?: number;
+  /** 字重。V-Trim 的弹幕是 `600`；默认 400。 */
+  font_weight?: number;
   /** **相邻泳道的间距**（归一化）。默认 0 = 取行盒高（`font_ratio * LINE_HEIGHT_EM`）。 */
   lane_spacing_ratio?: number;
   /** **0 号泳道的顶边**（归一化，相对目标高）。默认 0 = 贴着画面最上面。 */
   lane_top_ratio?: number;
   /** 泳道数。排不下就**丢该条并计数**，不叠在一起。 */
   lanes?: number;
+  /** 行高 / 字号的比例。默认 0 = 用 [`crate::text_layout::LINE_HEIGHT_EM`]。 */
+  line_height?: number;
   /** **基础不透明度。** V-Trim 用 `0.9`（不是 1.0）。 */
   opacity?: number;
   /** 是否加描边。V-Trim 弹幕是 `2px #000`。 */
@@ -34,7 +40,7 @@ export interface DanmakuSpec {
   stroke_ratio?: number;
 }
 
-export type Easing = "linear" | "ease_in" | "ease_out" | "ease_in_out";
+export type Easing = "linear" | "ease_in" | "ease_out" | "ease_in_out" | "back_out";
 
 export interface Effect {
   /** 类型串，对应 core 的特效注册表。 */
@@ -103,8 +109,14 @@ export interface SubtitleStyle {
   fade_in_ms?: number;
   /** **淡出时长（毫秒）。** 0 = 硬消失。 */
   fade_out_ms?: number;
+  /** **字体族名**（`"LXGW WenKai"` 这种）。`None` = 用宿主的默认字体。 */
+  font_family?: string | null;
   /** 字号 = 目标高度 * 这个比例。 */
   font_ratio?: number;
+  /** **字重**（100..=900，CSS 的同一套刻度）。默认 400。 */
+  font_weight?: number;
+  /** **行高 / 字号**的比例。默认 0 = 用 [`crate::text_layout::LINE_HEIGHT_EM`]（1.2）。 */
+  line_height?: number;
   /** 最多几行（超出的行丢掉 —— 字幕不该盖住半屏）。 */
   max_lines?: number;
   /** 是否加描边（压住亮背景）。 */
@@ -115,7 +127,7 @@ export interface SubtitleStyle {
   rise_out_px?: number;
   /** 描边颜色。`outline` 为假时忽略。 */
   stroke_color?: number[];
-  /** **描边宽度** = 目标高度 * 这个比例。 */
+  /** **描边宽度** = 目标高度 * 这个比例，单位是**外侧宽度**（见下）。 */
   stroke_ratio?: number;
 }
 
@@ -129,6 +141,8 @@ export type TrackKind = "video" | "audio" | "subtitle" | "danmaku";
 export interface TrackV2 {
   /** 弹幕轨的参数。非弹幕轨忽略它。 */
   danmaku?: DanmakuSpec | null;
+  /** **整条轨的音频增益**（线性倍数，1.0 = 原样）。 */
+  gain?: number;
   id: string;
   kind: TrackKind;
   layers?: Layer[];

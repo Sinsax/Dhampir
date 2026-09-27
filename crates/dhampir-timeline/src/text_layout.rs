@@ -284,7 +284,10 @@ pub fn layout(text: &str, style: &SubtitleStyle, sequence: (u32, u32)) -> TextLa
     let sequence_width = sequence.0.max(1) as f32;
     let sequence_height = sequence.1.max(1) as f32;
     let font_px = style.font_ratio.max(0.0) * sequence_height;
-    let line_px = font_px * LINE_HEIGHT_EM;
+    // 轨道可以覆盖行高（V-Trim 的字幕 CSS 是 line-height:1.5，本仓默认 1.2）。
+    // 默认 0 = 老行为，既有工程一字不变。
+    let line_em = if style.line_height > 0.0 { style.line_height } else { LINE_HEIGHT_EM };
+    let line_px = font_px * line_em;
 
     // 安全边距：左右复用 bottom_margin。
     //

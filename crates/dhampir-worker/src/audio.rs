@@ -328,8 +328,10 @@ pub fn plan_audio(
                 output_start_sample,
                 output_samples,
                 source_start_sample,
-                // 契约里每层增益就在 `Layer.gain` 上（默认 1.0）。
-                gain: layer.gain,
+                // 契约里每层增益在 `Layer.gain`（默认 1.0），再乘**轨道的母线增益**
+                // （`TrackV2.gain`，默认也是 1.0）。两者相乘 —— 图层是"这一段多响"，
+                // 轨道是"这一整条一起调"。
+                gain: layer.gain * track.gain,
             });
         }
     }
@@ -461,6 +463,7 @@ mod tests {
                 layers: vec![clip_layer("clip", start, end, asset_id, source_in)],
                 subtitle: None,
                 danmaku: None,
+                gain: 1.0,
             }],
         }
     }
@@ -744,6 +747,7 @@ mod tests {
             layers: vec![clip_layer("other", 30, 90, "tone", 0)],
             subtitle: None,
             danmaku: None,
+            gain: 1.0,
         });
         let plan = plan_audio(
             &timeline,
@@ -776,6 +780,7 @@ mod tests {
             layers: vec![clip_layer("other", 30, 60, "tone", 0)],
             subtitle: None,
             danmaku: None,
+            gain: 1.0,
         });
         let plan = plan_audio(
             &timeline,

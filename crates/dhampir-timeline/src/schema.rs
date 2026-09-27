@@ -322,6 +322,25 @@ pub enum Easing {
     EaseIn,
     EaseOut,
     EaseInOut,
+    /// **回弹**：先冲过头再落回来（`back_out`）。
+    ///
+    /// # 与 `EaseOut` / `EaseIn` 的关系（值得写下来）
+    ///
+    /// V-Trim 的三条缓动里，两条**已经**能对本仓的现成变体：
+    ///
+    /// ```text
+    /// V-Trim  pow2_out(t) = 1-(1-t)^2   ==  EaseOut
+    /// V-Trim  pow2_in(t)  = t^2         ==  EaseIn
+    /// ```
+    ///
+    /// 我先前在转译器里把运镜的过渡报成"用 `ease_out` 近似"——
+    /// **那是错的，它们逐值相同**。所以这一条不是"补一个近似"，
+    /// 是"第三条缓动（过冲）本仓确实没有"。
+    ///
+    /// 系数取经典的 `1.70158`（CSS 的 `easeOutBack` 同款）。V-Trim 的贴纸
+    /// 弹入用的是 `s = 3`（更猛的过冲），差别只有峰值那一下（约 1.10 vs 1.25），
+    /// 而且只在 0.35 秒的窗口里 —— 转译器会把它报出来。
+    BackOut,
 }
 
 impl Easing {
@@ -338,6 +357,17 @@ impl Easing {
                 } else {
                     1.0 - 2.0 * (1.0 - t) * (1.0 - t)
                 }
+            }
+            // `back_out`（经典系数 1.70158）：
+            //     (t-1)^2 * ((s+1)*(t-1) + s) + 1
+            // 与 V-Trim 的 `back_out(t, s)` 同一个式子，只是它的贴纸用 s=3。
+            //
+            // **过冲**：t≈0.7 时超过 1（约 1.10），然后落回 1。
+            // 不是"更慢的 ease_out"——`EaseOut` 单调不减且**永不大于 1**。
+            Self::BackOut => {
+                const S: f32 = 1.70158;
+                let u = t - 1.0;
+                u * u * ((S + 1.0) * u + S) + 1.0
             }
         }
     }
@@ -1256,7 +1286,13 @@ mod tests {
 
     #[test]
     fn 缓动的端点与中点() {
-        for easing in [Easing::Linear, Easing::EaseIn, Easing::EaseOut, Easing::EaseInOut] {
+        for easing in [
+            Easing::Linear,
+            Easing::EaseIn,
+            Easing::EaseOut,
+            Easing::EaseInOut,
+            Easing::BackOut,
+        ] {
             assert!((easing.apply(0.0) - 0.0).abs() < 1e-6, "{:?} 在 0 处应当是 0", easing);
             assert!((easing.apply(1.0) - 1.0).abs() < 1e-6, "{:?} 在 1 处应当是 1", easing);
             // 越界输入要被夹住，而不是外推
@@ -1264,6 +1300,37 @@ mod tests {
             assert!((easing.apply(5.0) - 1.0).abs() < 1e-6);
         }
         assert!((Easing::EaseInOut.apply(0.5) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn 回弹缓动真的会冲过头() {
+        // **这条钉的是 `BackOut` 的定义性质**：它**不是**"更慢的 ease_out"，
+        // 而是"冲过头再落回来"。少了这个不变量，把它实现成 EaseOut 也能过端点用例。
+        let peak = (1..100)
+            .map(|i| Easing::BackOut.apply(i as f32 / 100.0))
+            .fold(f32::MIN, f32::max);
+        assert!(peak > 1.02, "回弹必须冲过 1，实得峰值 {peak}");
+        assert!(peak < 1.2, "但也不该冲得离谱，实得 {peak}");
+
+        // 而 `EaseOut` **永不大于 1**（两者不是同一个东西）。
+        let ease_out_peak = (1..100)
+            .map(|i| Easing::EaseOut.apply(i as f32 / 100.0))
+            .fold(f32::MIN, f32::max);
+        assert!(ease_out_peak <= 1.0 + 1e-6, "EaseOut 不该过冲，实得 {ease_out_peak}");
+    }
+
+    #[test]
+    fn 逐值对上_vtrim_的_pow2_两条() {
+        // V-Trim 的 `pow2_out(t) = 1-(1-t)^2` 与 `pow2_in(t) = t^2`
+        // **与本仓的 EaseOut / EaseIn 逐值相同** —— 所以转译器把那两条
+        // 报成"近似"是错的（我先前就报错了）。
+        for i in 0..=20 {
+            let t = i as f32 / 20.0;
+            let want_out = 1.0 - (1.0 - t) * (1.0 - t);
+            let want_in = t * t;
+            assert!((Easing::EaseOut.apply(t) - want_out).abs() < 1e-6, "pow2_out 在 {t} 处");
+            assert!((Easing::EaseIn.apply(t) - want_in).abs() < 1e-6, "pow2_in 在 {t} 处");
+        }
     }
 
     #[test]

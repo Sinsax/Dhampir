@@ -21,7 +21,7 @@ export interface Clip {
   transition_in?: TransitionSpec | null;
 }
 
-export type Easing = "linear" | "ease_in" | "ease_out" | "ease_in_out";
+export type Easing = "linear" | "ease_in" | "ease_out" | "ease_in_out" | "back_out";
 
 export interface Effect {
   /** 类型串，对应 core 的特效注册表。 */

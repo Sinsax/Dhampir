@@ -103,12 +103,21 @@
     },
     "Easing": {
       "description": "缓动曲线。公式**写死在这里**，两端调同一个函数——\n各写一遍迟早在某个控制点上差一个像素，而那种差异最难归因。",
-      "type": "string",
-      "enum": [
-        "linear",
-        "ease_in",
-        "ease_out",
-        "ease_in_out"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "linear",
+            "ease_in",
+            "ease_out",
+            "ease_in_out"
+          ]
+        },
+        {
+          "description": "**回弹**：先冲过头再落回来（`back_out`）。\n\n# 与 `EaseOut` / `EaseIn` 的关系（值得写下来）\n\nV-Trim 的三条缓动里，两条**已经**能对本仓的现成变体：\n\n```text\nV-Trim  pow2_out(t) = 1-(1-t)^2   ==  EaseOut\nV-Trim  pow2_in(t)  = t^2         ==  EaseIn\n```\n\n我先前在转译器里把运镜的过渡报成\"用 `ease_out` 近似\"——\n**那是错的，它们逐值相同**。所以这一条不是\"补一个近似\"，\n是\"第三条缓动（过冲）本仓确实没有\"。\n\n系数取经典的 `1.70158`（CSS 的 `easeOutBack` 同款）。V-Trim 的贴纸\n弹入用的是 `s = 3`（更猛的过冲），差别只有峰值那一下（约 1.10 vs 1.25），\n而且只在 0.35 秒的窗口里 —— 转译器会把它报出来。",
+          "type": "string",
+          "const": "back_out"
+        }
       ]
     },
     "Effect": {

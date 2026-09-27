@@ -562,6 +562,7 @@ fn sfx_doc() -> ProjectDoc {
                 layers: vec![audio_layer("bed", 0, 60)],
                 subtitle: None,
                 danmaku: None,
+                gain: 1.0,
             },
             TrackV2 {
                 id: "a2".to_string(),
@@ -569,6 +570,7 @@ fn sfx_doc() -> ProjectDoc {
                 layers: vec![audio_layer("shot", 30, 60)],
                 subtitle: None,
                 danmaku: None,
+                gain: 1.0,
             },
         ],
     };

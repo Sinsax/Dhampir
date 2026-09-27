@@ -94,11 +94,25 @@
           "default": 0,
           "minimum": 0
         },
+        "font_family": {
+          "description": "字体族名（语义同 [`SubtitleStyle::font_family`]，弹幕也归这条）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "font_ratio": {
           "description": "字号 = 目标高度 * 这个比例。",
           "type": "number",
           "format": "float",
           "default": 0.03999999910593033
+        },
+        "font_weight": {
+          "description": "字重。V-Trim 的弹幕是 `600`；默认 400。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 400,
+          "minimum": 0
         },
         "lane_spacing_ratio": {
           "description": "**相邻泳道的间距**（归一化）。默认 0 = 取行盒高（`font_ratio * LINE_HEIGHT_EM`）。\n\n必须是 0 或正数；负数会让泳道往上叠。",
@@ -118,6 +132,12 @@
           "format": "uint32",
           "default": 8,
           "minimum": 0
+        },
+        "line_height": {
+          "description": "行高 / 字号的比例。默认 0 = 用 [`crate::text_layout::LINE_HEIGHT_EM`]。",
+          "type": "number",
+          "format": "float",
+          "default": 0.0
         },
         "opacity": {
           "description": "**基础不透明度。** V-Trim 用 `0.9`（不是 1.0）。\n\n弹幕压在画面上，全不透明会太抢 —— 这是**弹幕与字幕的一处固有差别**，\n不是\"再给个字幕也有的旋钮\"。",
@@ -161,12 +181,21 @@
     },
     "Easing": {
       "description": "缓动曲线。公式**写死在这里**，两端调同一个函数——\n各写一遍迟早在某个控制点上差一个像素，而那种差异最难归因。",
-      "type": "string",
-      "enum": [
-        "linear",
-        "ease_in",
-        "ease_out",
-        "ease_in_out"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "linear",
+            "ease_in",
+            "ease_out",
+            "ease_in_out"
+          ]
+        },
+        {
+          "description": "**回弹**：先冲过头再落回来（`back_out`）。\n\n# 与 `EaseOut` / `EaseIn` 的关系（值得写下来）\n\nV-Trim 的三条缓动里，两条**已经**能对本仓的现成变体：\n\n```text\nV-Trim  pow2_out(t) = 1-(1-t)^2   ==  EaseOut\nV-Trim  pow2_in(t)  = t^2         ==  EaseIn\n```\n\n我先前在转译器里把运镜的过渡报成\"用 `ease_out` 近似\"——\n**那是错的，它们逐值相同**。所以这一条不是\"补一个近似\"，\n是\"第三条缓动（过冲）本仓确实没有\"。\n\n系数取经典的 `1.70158`（CSS 的 `easeOutBack` 同款）。V-Trim 的贴纸\n弹入用的是 `s = 3`（更猛的过冲），差别只有峰值那一下（约 1.10 vs 1.25），\n而且只在 0.35 秒的窗口里 —— 转译器会把它报出来。",
+          "type": "string",
+          "const": "back_out"
+        }
       ]
     },
     "Effect": {
@@ -429,11 +458,31 @@
           "default": 0,
           "minimum": 0
         },
+        "font_family": {
+          "description": "**字体族名**（`\"LXGW WenKai\"` 这种）。`None` = 用宿主的默认字体。\n\n# 它不表示\"去系统里找\"\n\n这个仓**不猜系统字体**（`--font-file` 那条纪律）。这个字段的语义是\n**\"宿主从你给它的字体目录里按这个名字找\"** —— 找不到就用 `--font-file`\n兜底，并**如实报出来**，而不是悄悄换个字体画。\n\n为什么值得有：V-Trim 的 `polish.toml` 里写着 `font = \"LXGW WenKai\"`，\n而**那台机器上没装** —— 它走到 CSS 的字体栈兜底\n（`'LXGW WenKai','Noto Sans SC','Microsoft YaHei',sans-serif`），\n实际生效的是**微软雅黑**。把名字带进契约，这件事才是可查的。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "font_ratio": {
           "description": "字号 = 目标高度 * 这个比例。",
           "type": "number",
           "format": "float",
           "default": 0.054999999701976776
+        },
+        "font_weight": {
+          "description": "**字重**（100..=900，CSS 的同一套刻度）。默认 400。\n\nV-Trim 的字幕是 `font-weight:700`、弹幕是 `600` —— 而本仓先前\n**完全不设字重**，于是笔画比它细一圈。那不是\"差一点观感\"，\n是每一行字都在逐像素上错。",
+          "type": "integer",
+          "format": "uint32",
+          "default": 400,
+          "minimum": 0
+        },
+        "line_height": {
+          "description": "**行高 / 字号**的比例。默认 0 = 用 [`crate::text_layout::LINE_HEIGHT_EM`]（1.2）。\n\nV-Trim 的字幕 CSS 是 `line-height:1.5`，本仓是 1.2 ——\n单行字幕看不出差别，**两行**的字间距会差 0.3em（72px 字号下是 21.6px）。",
+          "type": "number",
+          "format": "float",
+          "default": 0.0
         },
         "max_lines": {
           "description": "最多几行（超出的行丢掉 —— 字幕不该盖住半屏）。",
@@ -478,7 +527,7 @@
           "minItems": 4
         },
         "stroke_ratio": {
-          "description": "**描边宽度** = 目标高度 * 这个比例。\n\nV-Trim 写的是 `12px #403c3b`（1080p 下），即 `12/1080`。\n单位取比例而不是像素：像素在预览（640x360）与成片（1920x1080）\n里含义不同，两端就不一致了 —— 与 `font_ratio` 同一条理由。",
+          "description": "**描边宽度** = 目标高度 * 这个比例，单位是**外侧宽度**（见下）。\n\nV-Trim 写的是 `12px #403c3b`（1080p 下），即 `12/1080`。\n单位取比例而不是像素：像素在预览（640x360）与成片（1920x1080）\n里含义不同，两端就不一致了 —— 与 `font_ratio` 同一条理由。\n\n# 「外侧宽度」是**口径**，不是实现细节\n\nCSS 的 `-webkit-text-stroke: 12px` 是**居中**描边 —— 判据在字的轮廓上，\n里外各 6px；而 ffmpeg 的 `drawtext:borderw=12` 是**全在外侧** 12px。\n同一个数字，两种画法差**一倍**。\n\n契约必须挑一个说清楚，否则\"转译器把 12 填进来\"在预览（canvas，居中）\n与成片（ffmpeg，外侧）上会画出两种粗细 —— 而那是\"预览看着对、成片偏粗\"，\n正是这个仓最不想有的那类错。**这里定的是外侧宽度**，因为它是\nffmpeg 的原生语义（不用换算），而 canvas 那侧画两倍 `lineWidth` 即可。",
           "type": "number",
           "format": "float",
           "default": 0.0
@@ -540,6 +589,12 @@
               "type": "null"
             }
           ]
+        },
+        "gain": {
+          "description": "**整条轨的音频增益**（线性倍数，1.0 = 原样）。\n\n与 [`Layer::gain`] 的关系：轨道这个是**上限/母线**，图层那个是那一段自己的量，\n实际增益是两者**相乘**。V-Trim 的 `[sfx] volume` 就是母线\n（模板里 `var vol = ev.volume || CFG.sfx.volume || 0.1` —— 事件值**覆盖**母线，\n所以转译器把它填成图层的 `gain`；这个字段留给\"整条轨一起调\"的工程）。\n\n非音轨忽略它（与 `subtitle`/`danmaku` 同款：挂错轨不报错，但也不生效）。",
+          "type": "number",
+          "format": "float",
+          "default": 1.0
         },
         "id": {
           "type": "string"

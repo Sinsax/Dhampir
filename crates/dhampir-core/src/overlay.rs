@@ -42,7 +42,7 @@
 //! 只有弹幕的工程看不出这件事（默认白字带描边）。
 
 use dhampir_timeline::danmaku::{layout as layout_danmaku, rect_at};
-use dhampir_timeline::layer::{SubtitleStyle, TimelineV2};
+use dhampir_timeline::layer::TimelineV2;
 use dhampir_timeline::schema::{Frame, TimebaseDto, TrackKind};
 use dhampir_timeline::subtitle::{Cue, frame_at_ms};
 use dhampir_timeline::text_layout::{NormalizedRect, layout};
@@ -98,19 +98,34 @@ pub struct DanmakuTextItem {
 /// 模块文档还写明了"要分开就得动契约"。而 V-Trim 的字幕是暖色 `#dcbda0`、
 /// 弹幕是白色 `#ffffff` —— 共用一份时**必然有一个错**，
 /// 而"两边的字都能看见"这件事让人以为没问题。
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TextStyle {
     pub color: [u8; 4],
     pub outline: bool,
     /// 描边宽度（**文档像素**；由 `stroke_ratio * 目标高` 换算而来，
     /// 换算在 `evaluate_overlay` 里做，因为只有它知道目标尺寸）。
+    ///
+    /// **口径是"外侧宽度"**（见 `SubtitleStyle::stroke_ratio` 的说明）：
+    /// CSS 的居中描边是一半，ffmpeg 的 `borderw` 是全部 —— 契约挑了后者。
     pub stroke_px: f32,
     pub stroke_color: [u8; 4],
+    /// 字体族名。宿主**从你给的字体目录里按这个名字找**，找不到要**报出来**
+    /// （不是悄悄换一个字体画）。
+    pub family: Option<String>,
+    /// 字重（CSS 刻度）。宿主据此在字体目录里挑一个粗体文件。
+    pub weight: u32,
 }
 
 impl Default for TextStyle {
     fn default() -> Self {
-        Self { color: [255, 255, 255, 255], outline: true, stroke_px: 0.0, stroke_color: [0, 0, 0, 255] }
+        Self {
+            color: [255, 255, 255, 255],
+            outline: true,
+            stroke_px: 0.0,
+            stroke_color: [0, 0, 0, 255],
+            family: None,
+            weight: 400,
+        }
     }
 }
 
@@ -189,10 +204,10 @@ pub fn evaluate_overlay(
             continue;
         }
         // 轨道级的样式：一条字幕轨 = 一个字幕素材 + 一套样式。
-        // 类型写出来是为了让顶上的 import 有实际用处 —— 也顺带说明这不是随便一个结构。
-        let style: SubtitleStyle = match track.subtitle {
-            Some(style) => style,
-            None => continue,
+        // `SubtitleStyle` 现在带 `Option<String>`（`font_family`），所以**不是 Copy**
+        // —— 这里借它，不搬它。
+        let Some(style) = track.subtitle.as_ref() else {
+            continue;
         };
         // 活着的元素至多一个（轨内不许重叠，由校验保证）。
         let Some(element) = track.layers.iter().find(|layer| layer.covers(frame)) else {
@@ -247,6 +262,8 @@ pub fn evaluate_overlay(
                 outline: style.outline,
                 stroke_px: style.stroke_ratio * target_h,
                 stroke_color: style.stroke_color,
+                family: style.font_family.clone(),
+                weight: style.font_weight,
             };
             styled = true;
         }
@@ -313,6 +330,8 @@ pub fn evaluate_overlay(
             outline: spec.outline,
             stroke_px: spec.stroke_ratio * target_h,
             stroke_color: spec.stroke_color,
+            family: spec.font_family.clone(),
+            weight: spec.font_weight,
         };
         danmaku_styled = true;
     }
@@ -615,7 +634,11 @@ mod tests {
     #[test]
     fn 结构与共享布局逐字段一致() {
         let overlay = evaluate_overlay(&subtitle_timeline(), 15, SEQUENCE, Some(&table())).unwrap();
-        let style = SubtitleStyle { color: [255, 240, 200, 255], outline: false, ..SubtitleStyle::default() };
+        let style = dhampir_timeline::layer::SubtitleStyle {
+            color: [255, 240, 200, 255],
+            outline: false,
+            ..Default::default()
+        };
         let reference = layout("第一行中文", &style, SEQUENCE);
         assert_eq!(overlay.items.len(), reference.lines.len());
         for (item, line) in overlay.items.iter().zip(reference.lines.iter()) {

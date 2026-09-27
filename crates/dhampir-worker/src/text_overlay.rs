@@ -268,6 +268,16 @@ impl OverlayStats {
 pub struct OverlayPainter {
     rasterizer: TextRasterizer,
     font_file: Option<PathBuf>,
+    /// 粗体字体文件（可选）。字重 >= 600 时用它。
+    ///
+    /// # 为什么是"两个文件"而不是"一个 bold 参数"
+    ///
+    /// ffmpeg 的 `drawtext` **没有** `bold` 开关 —— 粗体就是**换一个字体文件**。
+    /// 所以"字重"在这条链路上的落地方式只能是"宿主给出对应字重的文件"。
+    /// 契约里存的是**字重这个意图**（`font_weight`），"哪个文件实现它"是宿主的事。
+    bold_file: Option<PathBuf>,
+    /// 字体目录（可选）：按 `font_family` 的名字在里面找。
+    font_dir: Option<PathBuf>,
     stats: OverlayStats,
 }
 
@@ -278,8 +288,17 @@ impl OverlayPainter {
         Self {
             rasterizer: TextRasterizer::new(),
             font_file: font_file.map(Path::to_path_buf),
+            bold_file: None,
+            font_dir: None,
             stats: OverlayStats::default(),
         }
+    }
+
+    /// 再给一个粗体文件（字重 >= 600 时用）与一个字体目录（按 `font_family` 找）。
+    pub fn with_fonts(mut self, bold_file: Option<&Path>, font_dir: Option<&Path>) -> Self {
+        self.bold_file = bold_file.map(Path::to_path_buf);
+        self.font_dir = font_dir.map(Path::to_path_buf);
+        self
     }
 
     /// 把这一帧的覆盖层叠上去。画不动的地方记问题，不返回 Err ——
@@ -292,11 +311,18 @@ impl OverlayPainter {
         target: (u32, u32),
         log: &mut IssueLog,
     ) {
-        let rasterizer = &mut self.rasterizer;
-        let stats = &mut self.stats;
+        // **把字段拆开借。**
+        //
+        // `rasterizer` 要**可变**借、字体解析只要**不可变**借 ——
+        // 写成 `self.font_for(..)` 那样的方法会把整个 `self` 借住，两边打架。
+        // 拆成几个字段 + 一个自由函数，借用就分开了。
+        let Self { rasterizer, font_file, bold_file, font_dir, stats } = self;
+        let font_for = |style: &dhampir_core::overlay::TextStyle| {
+            pick_font(font_file, bold_file, font_dir, style)
+        };
         paint_lines(
             &mut |key| rasterizer.rasterize(key),
-            self.font_file.as_deref(),
+            &font_for,
             image,
             overlay,
             target,
@@ -313,6 +339,88 @@ impl OverlayPainter {
             ..self.stats
         }
     }
+}
+
+/// 这一套样式该用哪个字体文件。
+///
+/// 顺序：**字体目录里按 `font_family` 找** → 字重 >= 600 时的粗体文件 →
+/// `--font-file` 兜底。
+///
+/// 目录给了、名字也给了、却找不到 —— 这里退到兜底（**不静默换一个相似的字体**：
+/// 换了之后"字长得不对"看起来像"字号配错了"）。要让它可见，看
+/// `--font-dir` 那条的启动报告。
+fn pick_font(
+    font_file: &Option<PathBuf>,
+    bold_file: &Option<PathBuf>,
+    font_dir: &Option<PathBuf>,
+    style: &dhampir_core::overlay::TextStyle,
+) -> Option<PathBuf> {
+    if let (Some(dir), Some(family)) = (font_dir.as_ref(), style.family.as_ref()) {
+        if let Some(found) = resolve_family(dir, family, style.weight) {
+            return Some(found);
+        }
+    }
+    // 字重 >= 600 且给了粗体文件就用它 —— 这是"字重"在 ffmpeg 那侧的落地方式
+    // （`drawtext` 没有 `bold` 开关，粗体就是换一个字体文件）。
+    if style.weight >= 600 {
+        if let Some(bold) = bold_file.as_ref() {
+            return Some(bold.clone());
+        }
+    }
+    font_file.clone()
+}
+
+/// 在字体目录里按族名找一个文件。
+///
+/// 比法是**归一化之后包含**：`"LXGW WenKai"` 与 `LXGWWenKai-Regular.ttf`
+/// 归一化之后分别是 `lxgwwenkai` 与 `lxgwwenkai...`，能对上。
+/// 字重 >= 600 时优先挑文件名里带 `bold` 的那个。
+///
+/// 找不到返回 `None`（调用方退回 `--font-file`）。
+fn resolve_family(dir: &Path, family: &str, weight: u32) -> Option<PathBuf> {
+    let want = normalize_family(family);
+    if want.is_empty() {
+        return None;
+    }
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut regular = None;
+    let mut bold = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path.file_name()?.to_str()?.to_string();
+        let lower = name.to_ascii_lowercase();
+        let is_font = ["ttf", "otf", "ttc"]
+            .iter()
+            .any(|ext| lower.ends_with(&format!(".{ext}")));
+        if !is_font {
+            continue;
+        }
+        let stem = normalize_family(&name);
+        if !stem.contains(&want) {
+            continue;
+        }
+        if lower.contains("bold") || lower.contains("bd") {
+            if bold.is_none() {
+                bold = Some(path.clone());
+            }
+        } else if regular.is_none() {
+            regular = Some(path.clone());
+        }
+    }
+    if weight >= 600 {
+        bold.or(regular)
+    } else {
+        regular.or(bold)
+    }
+}
+
+/// 族名/文件名 -> 只留小写字母数字（丢掉空格、连字符、下划线、扩展名）。
+fn normalize_family(raw: &str) -> String {
+    let stem = raw.rsplit_once('.').map(|(head, _)| head).unwrap_or(raw);
+    stem.chars()
+        .filter(|ch| ch.is_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
 }
 
 /// 一条文字叠上去的结果。**只回答发生了什么** —— 怎么记账由调用方决定
@@ -344,7 +452,7 @@ enum Painted {
 #[allow(clippy::too_many_arguments)]
 fn paint_one(
     rasterize: &mut impl FnMut(&TextRasterKey) -> Result<Rc<TextBitmap>, String>,
-    font_file: Option<&Path>,
+    font_file: Option<PathBuf>,
     image: &mut Rgba8Image,
     target: (u32, u32),
     text: &str,
@@ -438,7 +546,9 @@ fn paint_one(
 /// 能在不起 ffmpeg 的前提下被单测（与 text_raster 里那个缓存缝同一个理由）。
 fn paint_lines(
     rasterize: &mut impl FnMut(&TextRasterKey) -> Result<Rc<TextBitmap>, String>,
-    font_file: Option<&Path>,
+    // 按样式解析出字体文件的闭包（`OverlayPainter::font_for` 的借用版）——
+    // 字体不是"整份一个"，字重/族名都可能不同。
+    font_for: &dyn Fn(&dhampir_core::overlay::TextStyle) -> Option<PathBuf>,
     image: &mut Rgba8Image,
     overlay: &TextOverlay,
     target: (u32, u32),
@@ -451,7 +561,7 @@ fn paint_lines(
     for item in &overlay.items {
         match paint_one(
             &mut *rasterize,
-            font_file,
+            font_for(&overlay.subtitle_style),
             image,
             target,
             &item.text,
@@ -479,7 +589,7 @@ fn paint_lines(
     for item in &overlay.danmaku {
         match paint_one(
             &mut *rasterize,
-            font_file,
+            font_for(&overlay.danmaku_style),
             image,
             target,
             &item.text,
@@ -591,6 +701,8 @@ mod tests {
                 outline: true,
                 stroke_px: 0.0,
                 stroke_color: [0, 0, 0, 255],
+                family: None,
+                weight: 400,
             },
             danmaku_style: dhampir_core::overlay::TextStyle::default(),
             dropped_lines: dropped,
@@ -622,6 +734,8 @@ mod tests {
                 outline: true,
                 stroke_px: 0.0,
                 stroke_color: [0, 0, 0, 255],
+                family: None,
+                weight: 400,
             },
             dropped_lines: 0,
             dropped_danmaku,
@@ -858,7 +972,7 @@ mod tests {
                     *counter += 1;
                     rasterize(key)
                 },
-                painter.font_file.as_deref(),
+                &|_: &dhampir_core::overlay::TextStyle| painter.font_file.clone(),
                 &mut image,
                 &lines,
                 (640, 360),
@@ -884,7 +998,7 @@ mod tests {
         let lines = overlay(&[("一", rect(0.25, -0.4, 0.5, 0.066))], 0);
         paint_lines(
             &mut |key| fake_rasterizer(&mut calls)(key),
-            Some(Path::new("C:/fake/font.ttf")),
+            &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
             &mut image,
             &lines,
             (640, 360),
@@ -914,7 +1028,7 @@ mod tests {
         let lines = overlay(&[("一", rect(0.25, 0.8, 0.5, 0.066))], 0);
         paint_lines(
             &mut |_key| Err("ffmpeg 画不出这一行（退出码 1）：字体不认得".to_string()),
-            Some(Path::new("C:/fake/font.ttf")),
+            &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
             &mut image,
             &lines,
             (64, 64),
@@ -936,7 +1050,7 @@ mod tests {
         let lines = overlay(&[("一", rect(0.25, 0.8, 0.5, 0.066))], 3);
         paint_lines(
             &mut |key| fake_rasterizer(&mut calls)(key),
-            Some(Path::new("C:/fake/font.ttf")),
+            &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
             &mut image,
             &lines,
             (64, 64),
@@ -968,7 +1082,7 @@ mod tests {
         );
         paint_lines(
             &mut |key| fake_rasterizer(&mut calls)(key),
-            Some(Path::new("C:/fake/font.ttf")),
+            &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
             &mut image,
             &items,
             (640, 360),
@@ -1000,7 +1114,7 @@ mod tests {
         let items = danmaku_overlay(&[("第一条", rect(0.6, 0.1, 0.25, 0.066), 0)], 0);
         paint_lines(
             &mut |_key| unreachable!("没有字体时不该走到栅格化"),
-            None,
+            &|_: &dhampir_core::overlay::TextStyle| None,
             &mut image,
             &items,
             (640, 360),
@@ -1037,7 +1151,7 @@ mod tests {
         items.dropped_danmaku = 3;
         paint_lines(
             &mut |key| fake_rasterizer(&mut calls)(key),
-            Some(Path::new("C:/fake/font.ttf")),
+            &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
             &mut image,
             &items,
             (640, 360),

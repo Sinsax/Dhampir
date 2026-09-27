@@ -442,6 +442,7 @@ mod tests {
                 layers: vec![layer],
                 subtitle: None,
                 danmaku: None,
+                gain: 1.0,
             }],
         }
     }
@@ -1028,6 +1029,7 @@ mod tests {
                 layers: vec![adjustment.clone()],
                 subtitle: None,
                 danmaku: None,
+                gain: 1.0,
             }],
         };
         let composite = evaluate_v2(&timeline, 0);
@@ -1048,6 +1050,7 @@ mod tests {
                 layers: vec![adjustment],
                 subtitle: None,
                 danmaku: None,
+                gain: 1.0,
             }],
         };
         assert!(evaluate_v2(&off, 0).layers.is_empty(), "关掉的层不该出现在清单里");
