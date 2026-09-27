@@ -464,7 +464,7 @@ fn text_lines(
     };
     let mut specs = Vec::with_capacity(overlay.items.len());
     for item in &overlay.items {
-        let Some(placement) = place_line(item.rect, target) else {
+        let Some(placement) = place_line(item.rect, target, item.font_ratio) else {
             continue;
         };
         specs.push(TextLineSpec {
@@ -499,7 +499,7 @@ fn danmaku_placements(
 ) -> Vec<TextLineSpec> {
     let mut specs = Vec::with_capacity(overlay.danmaku.len());
     for item in &overlay.danmaku {
-        let Some(placement) = place_line(item.rect, target) else {
+        let Some(placement) = place_line(item.rect, target, item.font_ratio) else {
             continue;
         };
         specs.push(TextLineSpec {

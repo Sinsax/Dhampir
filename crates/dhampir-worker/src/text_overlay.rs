@@ -472,7 +472,7 @@ fn paint_one(
     if opacity <= 0.0 {
         return Painted::Nothing;
     }
-    let Some(placement) = place_line(rect, target) else {
+    let Some(placement) = place_line(rect, target, style.font_ratio) else {
         return Painted::Nothing;
     };
     let path = issue_path(text);
@@ -693,11 +693,13 @@ mod tests {
                     opacity: 1.0,
                     dy_px: 0.0,
                     color: [255, 255, 255, 255],
+                    font_ratio: 0.04,
                 })
                 .collect(),
             danmaku: Vec::new(),
             subtitle_style: dhampir_core::overlay::TextStyle {
                 color: [255, 255, 255, 255],
+                font_ratio: 0.04,
                 outline: true,
                 stroke_px: 0.0,
                 stroke_color: [0, 0, 0, 255],
@@ -726,11 +728,13 @@ mod tests {
                     opacity: 1.0,
                     dy_px: 0.0,
                     color: [255, 255, 255, 255],
+                    font_ratio: 0.04,
                 })
                 .collect(),
             subtitle_style: dhampir_core::overlay::TextStyle::default(),
             danmaku_style: dhampir_core::overlay::TextStyle {
                 color: [255, 255, 255, 255],
+                font_ratio: 0.04,
                 outline: true,
                 stroke_px: 0.0,
                 stroke_color: [0, 0, 0, 255],
@@ -799,8 +803,10 @@ mod tests {
 
     #[test]
     fn 落点把位图中心对准行盒中心() {
-        // 文档坐标 640x360、目标就是 640x360（默认路径）：字号 0.055*360 = 19.8 -> 20。
-        let placement = place_line(rect(0.25, 0.5, 0.5, 0.066), (640, 360)).expect("能落点");
+        // 字号 = font_ratio × 目标高 = (20/360) × 360 = 20。
+        // **它是布局给的事实**，不再由行盒反推（见 TextLine::font_ratio）。
+        let placement =
+            place_line(rect(0.25, 0.5, 0.5, 0.066), (640, 360), 20.0 / 360.0).expect("能落点");
         assert_eq!(placement.font_px, 20);
         assert_eq!((placement.bitmap_width, placement.bitmap_height), (640, 36));
         // 行盒中心 = (0.5, 0.5 + 0.033) -> (320, 191.88)；位图中心对准它。
@@ -812,8 +818,10 @@ mod tests {
     fn 字号跟着目标高度走而不是文档坐标() {
         // 同一个行盒，目标高一倍：字号与位图都要跟着放大 —— 归一化矩形与渲染尺寸无关，
         // 但**像素**当然有关。
-        let small = place_line(rect(0.25, 0.5, 0.5, 0.066), (640, 360)).expect("能落点");
-        let large = place_line(rect(0.25, 0.5, 0.5, 0.066), (1280, 720)).expect("能落点");
+        let small =
+            place_line(rect(0.25, 0.5, 0.5, 0.066), (640, 360), 20.0 / 360.0).expect("能落点");
+        let large =
+            place_line(rect(0.25, 0.5, 0.5, 0.066), (1280, 720), 20.0 / 360.0).expect("能落点");
         assert_eq!(small.font_px, 20);
         assert_eq!(large.font_px, 40);
         assert_eq!(large.bitmap_height, 74);
@@ -822,10 +830,10 @@ mod tests {
     #[test]
     fn 零高度或零尺寸没有可画的东西() {
         // 行盒零高：没有字可画 -> 不是「画失败」，是「没东西」。
-        assert!(place_line(rect(0.5, 0.5, 0.2, 0.0), (640, 360)).is_none());
+        assert!(place_line(rect(0.5, 0.5, 0.2, 0.0), (640, 360), 0.04).is_none());
         // NaN 也要挡住（比较恒假，于是走同一条分支）。
-        assert!(place_line(rect(0.5, 0.5, 0.2, f32::NAN), (640, 360)).is_none());
-        assert!(place_line(rect(0.5, 0.5, 0.2, 0.1), (0, 360)).is_none());
+        assert!(place_line(rect(0.5, 0.5, 0.2, f32::NAN), (640, 360), 0.04).is_none());
+        assert!(place_line(rect(0.5, 0.5, 0.2, 0.1), (0, 360), 0.04).is_none());
     }
 
     // ---- 叠加 ----
@@ -1147,6 +1155,7 @@ mod tests {
             opacity: 1.0,
             dy_px: 0.0,
             color: [255, 255, 255, 255],
+            font_ratio: 0.04,
         });
         items.dropped_danmaku = 3;
         paint_lines(

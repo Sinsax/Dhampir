@@ -73,11 +73,25 @@ impl NormalizedRect {
     }
 }
 
-/// 一行：文本 + 它占的**行盒**（不是字形外框）。
+/// 一行：文本 + 它占的**行盒**（不是字形外框）+ **字号比例**。
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextLine {
     pub text: String,
     pub rect: NormalizedRect,
+    /// **字号**（相对序列高的比例）。布局**本来就知道**它 —— 带着走，
+    /// 下游就不必再从行盒反推。
+    ///
+    /// # 为什么要带着（这是一个改出来的 bug）
+    ///
+    /// [`place_line`] 原先写的是 `font_px = 行盒高 / LINE_HEIGHT_EM` ——
+    /// 行盒是这里按 `line_px = font_px * line_em` 造的，两边用**同一个**
+    /// `line_em` 时才成立。加了可配的行高之后就不是了：
+    /// V-Trim 的 `line-height:1.5` 让行盒变成 `72 * 1.5 = 108`，
+    /// 而反推那边仍除以常量 1.2 —— 算出 `90`，**字号大了 1.25 倍**。
+    ///
+    /// 在 30s 那一帧上肉眼就看得出来：同一句「就是有人在他的那个」，
+    /// 参照的字明显小一圈。
+    pub font_ratio: f32,
 }
 
 /// 一次布局的结果。
@@ -320,6 +334,7 @@ pub fn layout(text: &str, style: &SubtitleStyle, sequence: (u32, u32)) -> TextLa
         let width_norm = (measure_em(raw) * font_px / sequence_width).min(1.0);
         lines.push(TextLine {
             text: raw.clone(),
+            font_ratio: style.font_ratio,
             rect: NormalizedRect {
                 // 居中：字幕的常规排法。想改就加一个对齐字段（加可选字段，不改版本）。
                 x: 0.5 - width_norm / 2.0,
@@ -408,7 +423,7 @@ pub struct LinePlacement {
 ///
 /// 目标尺寸为 0、或行盒没有高度时给 `None`：**没有可画的东西**，
 /// 而不是「画失败」—— 两者在下游的处理不同（前者跳过，后者记问题）。
-pub fn place_line(rect: NormalizedRect, target: (u32, u32)) -> Option<LinePlacement> {
+pub fn place_line(rect: NormalizedRect, target: (u32, u32), font_ratio: f32) -> Option<LinePlacement> {
     if target.0 == 0 || target.1 == 0 {
         return None;
     }
@@ -419,9 +434,12 @@ pub fn place_line(rect: NormalizedRect, target: (u32, u32)) -> Option<LinePlacem
     if !(line_box_px > 0.0) {
         return None;
     }
-    // 字号从行盒高反推，不读轨道样式：结构里已经有全部信息，
-    // 再读一遍样式就是第二个实现，迟早与共享布局漂开。
-    let raw_font_px = (line_box_px / LINE_HEIGHT_EM).round();
+    // **字号是布局给的事实，不是从行盒反推的推断。**
+    //
+    // 这里原先是 `line_box_px / LINE_HEIGHT_EM`，注释还写着「结构里已经有全部
+    // 信息，再读一遍样式就是第二个实现」。那个前提只在行高**恰好等于**常量
+    // `LINE_HEIGHT_EM` 时成立 —— 行高一可配就破了（见 [`TextLine::font_ratio`]）。
+    let raw_font_px = (font_ratio * target_height).round();
     let font_px = if raw_font_px < 1.0 {
         1
     } else {
@@ -687,7 +705,7 @@ mod tests {
         ];
         for rect in rects {
             for target in [(640, 360), (1280, 720), (1920, 1080)] {
-                let placement = place_line(rect, target).expect("有高度就能落点");
+                let placement = place_line(rect, target, 0.04).expect("有高度就能落点");
                 let bitmap_center_x = placement.x as f32 + placement.bitmap_width as f32 / 2.0;
                 let bitmap_center_y = placement.y as f32 + placement.bitmap_height as f32 / 2.0;
                 let box_center_x = rect.center_x() * target.0 as f32;
@@ -705,8 +723,8 @@ mod tests {
         }
     }
 
-    /// 字号由**行盒高**反推，所以同一批归一化矩形在更大的目标上得到更大的字号。
-    /// 位图宽恒等于目标宽、高 = 行盒 + 上下各一份 pad。
+    /// 字号来自**布局给的 `font_ratio`**（不是从行盒反推），所以同一批归一化
+    /// 矩形在更大的目标上得到更大的字号。位图宽恒等于目标宽、高 = 行盒 + 上下各一份 pad。
     #[test]
     fn 字号与位图尺寸跟着目标走() {
         let rect = NormalizedRect {
@@ -715,12 +733,10 @@ mod tests {
             width: 0.5,
             height: 0.066,
         };
-        let small = place_line(rect, (640, 360)).expect("能落点");
-        let large = place_line(rect, (1280, 720)).expect("能落点");
-        assert_eq!(
-            small.font_px, 20,
-            "0.066 × 360 = 23.76 行盒 -> /1.2 = 19.8 -> 20"
-        );
+        // `font_ratio = 20/360`：小目标得 20，大目标得 40。
+        let small = place_line(rect, (640, 360), 20.0 / 360.0).expect("能落点");
+        let large = place_line(rect, (1280, 720), 20.0 / 360.0).expect("能落点");
+        assert_eq!(small.font_px, 20, "0.0556 × 360 = 20");
         assert_eq!(large.font_px, 40, "目标高一倍，字号也一倍");
         assert_eq!(small.bitmap_width, 640, "位图宽取整条目标宽");
         assert_eq!(large.bitmap_width, 1280);
@@ -736,6 +752,24 @@ mod tests {
         );
     }
 
+    /// **行高可配之后，字号不许再从行盒反推。**
+    ///
+    /// 这条钉的是那个改出来的 bug：行盒按 `font * line_height` 造，
+    /// 反推那边却除以常量 `LINE_HEIGHT_EM`（1.2）——
+    /// `line-height:1.5` 之下算出 `72 * 1.5 / 1.2 = 90`，**字号大了 1.25 倍**。
+    /// 同一句字幕在成片里肉眼就看得出来比参照大一圈。
+    #[test]
+    fn 行盒变高不会把字号带大() {
+        let rect = NormalizedRect { x: 0.25, y: 0.5, width: 0.5, height: 0.1 };
+        // 同一份 `font_ratio`，行盒高矮不影响字号。
+        let slim = place_line(rect, (1920, 1080), 72.0 / 1080.0).expect("能落点");
+        let mut tall = rect;
+        tall.height = 0.15;
+        let fat = place_line(tall, (1920, 1080), 72.0 / 1080.0).expect("能落点");
+        assert_eq!(slim.font_px, 72, "字号就是 font_ratio × 目标高");
+        assert_eq!(fat.font_px, 72, "行盒变高不该改变字号（实得 {}）", fat.font_px);
+    }
+
     /// 没有可画的东西与画失败是两回事：这里给 `None`，由宿主决定「跳过」。
     #[test]
     fn 零尺寸或零行高没有可画的东西() {
@@ -745,16 +779,16 @@ mod tests {
             width: 0.2,
             height: 0.1,
         };
-        assert!(place_line(ok, (640, 360)).is_some());
+        assert!(place_line(ok, (640, 360), 0.04).is_some());
         let zero_height = NormalizedRect { height: 0.0, ..ok };
-        assert!(place_line(zero_height, (640, 360)).is_none(), "零高行盒");
+        assert!(place_line(zero_height, (640, 360), 0.04).is_none(), "零高行盒");
         let nan_height = NormalizedRect {
             height: f32::NAN,
             ..ok
         };
-        assert!(place_line(nan_height, (640, 360)).is_none(), "NaN 也要挡住");
-        assert!(place_line(ok, (0, 360)).is_none(), "目标宽为 0");
-        assert!(place_line(ok, (640, 0)).is_none(), "目标高为 0");
+        assert!(place_line(nan_height, (640, 360), 0.04).is_none(), "NaN 也要挡住");
+        assert!(place_line(ok, (0, 360), 0.04).is_none(), "目标宽为 0");
+        assert!(place_line(ok, (640, 0), 0.04).is_none(), "目标高为 0");
     }
 
     /// 反向：**下界不许被优化掉**。描边 0 宽与边距 0 都会让「开了描边/留了余量」
@@ -781,8 +815,14 @@ mod tests {
     fn 布局出来的行能直接落进目标像素() {
         let laid = layout("第一行中文", &style(), SEQUENCE);
         let line = &laid.lines[0];
-        let placement = place_line(line.rect, SEQUENCE).expect("能落点");
+        // 字号**从行里拿**（布局算出来的），不再从行盒反推。
+        let placement = place_line(line.rect, SEQUENCE, line.font_ratio).expect("能落点");
         assert!(placement.font_px > 0);
+        assert_eq!(
+            placement.font_px,
+            (line.font_ratio * SEQUENCE.1 as f32).round() as u32,
+            "字号必须就是布局给的那个比例换出来的"
+        );
         assert!(
             placement.y >= 0,
             "默认样式下不该有负落点，得到 {}",

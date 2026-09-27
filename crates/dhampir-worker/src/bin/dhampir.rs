@@ -1994,6 +1994,7 @@ fn danmaku_item_json(item: &dhampir_core::overlay::DanmakuTextItem) -> serde_jso
         opacity: item.opacity,
         dy_px: item.dy_px,
         color: item.color,
+        font_ratio: item.font_ratio,
     });
     value["lane"] = serde_json::json!(item.lane);
     value["enter"] = serde_json::json!(item.enter);

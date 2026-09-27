@@ -204,6 +204,9 @@ fn 缩放把层缩到中心而四周保持背景() {
 
 /// 文字叠加测试用的目标尺寸：**非方形**，而位图宽度取整条目标宽。
 const TEXT_TARGET: (u32, u32) = (64, 32);
+/// 字号（相对序列高的比例）。**布局算出来的事实**，落点这边只收着用 ——
+/// 早先是拿行盒高除以常量反推的，行高可配之后就错了。
+const TEXT_FONT_RATIO: f32 = 0.055;
 
 /// 三条位置不同的行盒（归一化，文档坐标）。**故意重叠**：重叠处同时验「后一行盖住前一行」。
 const TEXT_RECTS: [(f32, f32, f32, f32); 3] = [
@@ -264,7 +267,7 @@ fn 文字的落点与行盒逐个像素一致() {
         .iter()
         .map(|(x, y, box_width, box_height)| {
             let rect = NormalizedRect { x: *x, y: *y, width: *box_width, height: *box_height };
-            place_line(rect, TEXT_TARGET).expect("行盒有高度，应当给得出落点")
+            place_line(rect, TEXT_TARGET, TEXT_FONT_RATIO).expect("行盒有高度，应当给得出落点")
         })
         .collect();
     // 位图**照落点声明的尺寸造**、整张填满：这一条要证的是落点，不是字形。
@@ -425,6 +428,7 @@ fn 位图尺寸与落点不符时一行都不画() {
     let placed = place_line(
         NormalizedRect { x: 0.25, y: 0.6, width: 0.5, height: 0.15 },
         TEXT_TARGET,
+        TEXT_FONT_RATIO,
     )
     .expect("行盒有高度");
     // 故意造一张比落点宽的位图，并**如实**报它的实际尺寸。

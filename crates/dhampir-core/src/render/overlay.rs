@@ -302,7 +302,10 @@ mod tests {
             // 居中、更大的行盒（字号反推出来的字号应当是 30）。
             NormalizedRect { x: 0.3, y: 0.45, width: 0.4, height: 0.1 },
         ] {
-            let placed = place_line(rect, target).expect("行盒有高度，应当给得出落点");
+            // 第 2 个行盒高 0.1、目标高 360 -> 行盒 36px；
+            // font_ratio 是**布局给的事实**，这里按 0.083 给（= 36*1.2/360 的反推值同量级）。
+            let font_ratio = 0.055;
+            let placed = place_line(rect, target, font_ratio).expect("行盒有高度，应当给得出落点");
             // 行盒中心（目标像素）—— 用契约给的方法算，不在这里重写一遍归一化算术。
             let line_box_center = (
                 rect.center_x() * target.0 as f32,

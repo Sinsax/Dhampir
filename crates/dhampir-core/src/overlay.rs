@@ -65,6 +65,10 @@ pub struct TextItem {
     /// 于是宿主只看到"这一条是什么颜色"，不用自己判断该用哪一个 ——
     /// 两端各判一次就会在"有的条有颜色、有的没有"的工程上分叉。
     pub color: [u8; 4],
+    /// **字号**（相对序列高的比例）。**布局算出来的事实**，跟着条目走 ——
+    /// 宿主不该从行盒反推（行高可配之后那个反推是错的，见
+    /// `dhampir_timeline::text_layout::TextLine::font_ratio`）。
+    pub font_ratio: f32,
 }
 
 /// 一条要画的弹幕：内容 + **这一帧**的矩形 + 泳道与在屏区间 + 这一帧的淡入淡出。
@@ -84,10 +88,9 @@ pub struct DanmakuTextItem {
     /// 这一帧的纵向偏移（文档像素）。
     pub dy_px: f32,
     /// **这一条的颜色**（已解析）：cue 自带（ASS 的 `\c`）覆盖轨道默认。
-    ///
-    /// 这是 V-Trim 弹幕的实测需要：`danmaku.json` 里 `还能续约吗` 是
-    /// `#E33FFF`，其余是白色 —— 没有这个字段的话那一条只能是白的。
     pub color: [u8; 4],
+    /// **字号**（相对序列高的比例）。同 [`TextItem::font_ratio`]。
+    pub font_ratio: f32,
 }
 
 /// 一类文字的画法（颜色 + 描边）。
@@ -101,6 +104,9 @@ pub struct DanmakuTextItem {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextStyle {
     pub color: [u8; 4],
+    /// **字号**（相对序列高的比例）。布局**本来就知道**它，带着走，
+    /// 宿主就不必再从行盒反推（行高可配之后那个反推是错的）。
+    pub font_ratio: f32,
     pub outline: bool,
     /// 描边宽度（**文档像素**；由 `stroke_ratio * 目标高` 换算而来，
     /// 换算在 `evaluate_overlay` 里做，因为只有它知道目标尺寸）。
@@ -120,6 +126,7 @@ impl Default for TextStyle {
     fn default() -> Self {
         Self {
             color: [255, 255, 255, 255],
+            font_ratio: 0.0,
             outline: true,
             stroke_px: 0.0,
             stroke_color: [0, 0, 0, 255],
@@ -255,10 +262,12 @@ pub fn evaluate_overlay(
                     opacity,
                     dy_px,
                     color: item_color,
+                    font_ratio: line.font_ratio,
                 });
             }
             subtitle_style = TextStyle {
                 color: style.color,
+                font_ratio: style.font_ratio,
                 outline: style.outline,
                 stroke_px: style.stroke_ratio * target_h,
                 stroke_color: style.stroke_color,
@@ -321,12 +330,14 @@ pub fn evaluate_overlay(
                 exit: item.exit,
                 opacity: spec.opacity.clamp(0.0, 1.0) * fade,
                 dy_px,
-                // **这条自带的颜色**覆盖轨道默认（V-Trim 的 `还能续约吗` 是粉的）。
+                // **这条自带的颜色**覆盖轨道默认。
                 color: item.color.unwrap_or(spec.color),
+                font_ratio: spec.font_ratio,
             });
         }
         danmaku_style = TextStyle {
             color: spec.color,
+            font_ratio: spec.font_ratio,
             outline: spec.outline,
             stroke_px: spec.stroke_ratio * target_h,
             stroke_color: spec.stroke_color,
