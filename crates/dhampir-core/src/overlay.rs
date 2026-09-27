@@ -58,6 +58,13 @@ pub struct TextItem {
     pub opacity: f32,
     /// 这一帧的纵向偏移（**文档像素**，正为向下）。同样是契约层算好的。
     pub dy_px: f32,
+    /// **这一条的颜色**（已解析）。
+    ///
+    /// 与"轨道样式里的颜色"的关系：轨道给的是**默认**，一条 cue 自己带的
+    /// （ASS 的 `\c&HBBGGRR&`）覆盖它。**在求值层就解析掉**，
+    /// 于是宿主只看到"这一条是什么颜色"，不用自己判断该用哪一个 ——
+    /// 两端各判一次就会在"有的条有颜色、有的没有"的工程上分叉。
+    pub color: [u8; 4],
 }
 
 /// 一条要画的弹幕：内容 + **这一帧**的矩形 + 泳道与在屏区间 + 这一帧的淡入淡出。
@@ -76,6 +83,11 @@ pub struct DanmakuTextItem {
     pub opacity: f32,
     /// 这一帧的纵向偏移（文档像素）。
     pub dy_px: f32,
+    /// **这一条的颜色**（已解析）：cue 自带（ASS 的 `\c`）覆盖轨道默认。
+    ///
+    /// 这是 V-Trim 弹幕的实测需要：`danmaku.json` 里 `还能续约吗` 是
+    /// `#E33FFF`，其余是白色 —— 没有这个字段的话那一条只能是白的。
+    pub color: [u8; 4],
 }
 
 /// 一类文字的画法（颜色 + 描边）。
@@ -219,8 +231,16 @@ pub fn evaluate_overlay(
             let laid: dhampir_timeline::text_layout::TextLayout =
                 layout(&cue.text, &style, sequence);
             dropped_lines += laid.dropped_lines;
+            // **这一条的颜色**：cue 自己带的覆盖轨道默认。
+            let item_color = cue.style.color.unwrap_or(style.color);
             for line in laid.lines {
-                items.push(TextItem { text: line.text, rect: line.rect, opacity, dy_px });
+                items.push(TextItem {
+                    text: line.text,
+                    rect: line.rect,
+                    opacity,
+                    dy_px,
+                    color: item_color,
+                });
             }
             subtitle_style = TextStyle {
                 color: style.color,
@@ -284,6 +304,8 @@ pub fn evaluate_overlay(
                 exit: item.exit,
                 opacity: spec.opacity.clamp(0.0, 1.0) * fade,
                 dy_px,
+                // **这条自带的颜色**覆盖轨道默认（V-Trim 的 `还能续约吗` 是粉的）。
+                color: item.color.unwrap_or(spec.color),
             });
         }
         danmaku_style = TextStyle {

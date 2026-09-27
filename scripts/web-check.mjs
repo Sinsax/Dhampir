@@ -1554,6 +1554,8 @@ function compareSubtitleManifest(frame, cli, manifest) {
         problems.push(label + '：' + key + ' 差 ' + Math.abs(one - two) + '（CLI ' + one + '、页面 ' + two + '）');
       }
     }
+    // **逐条颜色**：同一轨里不同的条可以不一样（ASS 的 `\c`）。
+    problems.push(...compareNumberList(label + '：颜色', left[index].color, right[index].color));
   }
   return problems;
 }
@@ -1642,6 +1644,9 @@ function compareSubtitleDanmaku(frame, cli, manifest) {
         problems.push(label + '：' + key + ' 差 ' + Math.abs(one - two) + '（CLI ' + one + '、页面 ' + two + '）');
       }
     }
+    // **逐条颜色**：V-Trim 的 `还能续约吗` 是粉的、其余是白的 ——
+    // 只比轨道级颜色的话这件事查不出来。
+    problems.push(...compareNumberList(label + '：颜色', left[index].color, right[index].color));
   }
   return problems;
 }

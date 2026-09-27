@@ -341,12 +341,24 @@ pub struct TextItemView {
     pub opacity: f32,
     /// 这一帧的纵向偏移（文档像素，正为向下）。
     pub dy_px: f32,
+    /// **这一条的颜色**（已解析：cue 自带覆盖轨道默认）。
+    ///
+    /// 放在条目上而不是只放轨道级：同一轨里不同的条可以有自己的颜色
+    /// （ASS 的 `\c`），而"这一条该用什么颜色"这件事**求值层已经判完了** ——
+    /// 两端各判一次就会在"有的条有颜色、有的没有"的工程上分叉。
+    pub color: [u8; 4],
 }
 
 impl From<crate::text_layout::TextLine> for TextItemView {
     fn from(line: crate::text_layout::TextLine) -> Self {
-        // 只服务"没有淡入淡出"的老调用方：满不透明、不位移。
-        Self { text: line.text, rect: RectView::from(line.rect), opacity: 1.0, dy_px: 0.0 }
+        // 只服务"没有逐条样式"的老调用方：满不透明、不位移、白色。
+        Self {
+            text: line.text,
+            rect: RectView::from(line.rect),
+            opacity: 1.0,
+            dy_px: 0.0,
+            color: [255, 255, 255, 255],
+        }
     }
 }
 
@@ -372,6 +384,8 @@ pub struct DanmakuItemView {
     pub opacity: f32,
     /// 这一帧的纵向偏移（文档像素）。
     pub dy_px: f32,
+    /// **这一条的颜色**（已解析：cue 自带覆盖轨道默认）。
+    pub color: [u8; 4],
 }
 
 /// 某一帧的文字覆盖层：这一帧还要画哪几行字、哪几条弹幕。
@@ -615,6 +629,7 @@ mod tests {
                     rect: RectView { x: 0.25, y: 0.8, width: 0.5, height: 0.066 },
                     opacity: 1.0,
                     dy_px: 0.0,
+                    color: [255, 240, 200, 255],
                 }],
                 danmaku: vec![DanmakuItemView {
                     text: "飘过".to_string(),
@@ -624,6 +639,7 @@ mod tests {
                     exit: 250,
                     opacity: 0.9,
                     dy_px: 0.0,
+                    color: [255, 255, 255, 255],
                 }],
                 subtitle_style: TextStyleView {
                     color: [255, 240, 200, 255],
@@ -649,12 +665,12 @@ mod tests {
             keys(overlay),
             sorted(&["items", "danmaku", "subtitle_style", "danmaku_style", "dropped_lines", "dropped_danmaku"])
         );
-        assert_eq!(keys(&overlay["items"][0]), sorted(&["text", "rect", "opacity", "dy_px"]));
+        assert_eq!(keys(&overlay["items"][0]), sorted(&["text", "rect", "opacity", "dy_px", "color"]));
         assert_eq!(keys(&overlay["items"][0]["rect"]), sorted(&["x", "y", "width", "height"]));
         // 弹幕那一条：泳道与在屏区间必须在，否则「泳道分配错了」在单帧里查不出来。
         assert_eq!(
             keys(&overlay["danmaku"][0]),
-            sorted(&["text", "rect", "lane", "enter", "exit", "opacity", "dy_px"])
+            sorted(&["text", "rect", "lane", "enter", "exit", "opacity", "dy_px", "color"])
         );
         assert_eq!(keys(&overlay["danmaku"][0]["rect"]), sorted(&["x", "y", "width", "height"]));
         assert_eq!(overlay["danmaku"][0]["lane"], serde_json::json!(0));
@@ -680,6 +696,7 @@ mod tests {
                     rect: RectView { x: 0.0, y: 0.0, width: 1.0, height: 0.1 },
                     opacity: 1.0,
                     dy_px: 0.0,
+                    color: [255, 255, 255, 255],
                 }],
                 danmaku: Vec::new(),
                 subtitle_style: TextStyleView {
@@ -722,7 +739,9 @@ mod tests {
                     exit: 30,
                     opacity: 1.0,
                     dy_px: 0.0,
-                }],                subtitle_style: TextStyleView {
+                    color: [255, 255, 255, 255],
+                }],
+                subtitle_style: TextStyleView {
                     color: [255, 255, 255, 255],
                     outline: true,
                     stroke_px: 0.0,

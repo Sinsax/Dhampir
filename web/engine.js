@@ -81,9 +81,20 @@ function rasterizeLine(line, style) {
     ctx.strokeStyle = strokeColorCss(line, style);
     ctx.strokeText(line.text, x, y);
   }
-  ctx.fillStyle = cssColor(style.color);
+  ctx.fillStyle = cssColor(lineColor(line, style));
   ctx.fillText(line.text, x, y);
   return canvas;
+}
+
+/**
+ * 这一条该用什么颜色。
+ *
+ * **逐条优先**：`line.color` 是求值层算好的结果（cue 自带覆盖轨道默认），
+ * 而 `style.color` 是轨道默认。只在 `line.color` 缺失时才回退 ——
+ * 让 JS 自己判"该用哪一个"就是把同一条规矩放到第二处去实现。
+ */
+function lineColor(line, style) {
+  return Array.isArray(line.color) ? line.color : style.color;
 }
 
 /**

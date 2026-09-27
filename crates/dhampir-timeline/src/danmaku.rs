@@ -65,6 +65,14 @@ pub struct DanmakuItem {
     pub enter: Frame,
     /// 最后一次出现的帧（**闭**区间终点，与 `subtitle::cue_frames` 同款）。
     pub exit: Frame,
+    /// **这条弹幕自带的颜色**（ASS 的 `\c&HBBGGRR&`），`None` = 用轨道默认。
+    ///
+    /// 它在**结构**里而不是在"画法"里：一条弹幕有没有自己的颜色，
+    /// 与"泳道分到几号"一样是**素材本身的事实**，不是渲染目标的事。
+    ///
+    /// 实测需要它：V-Trim 的 `danmaku.json` 里同一条轨上的
+    /// `还能续约吗` 是 `#E33FFF`，其余是白色。
+    pub color: Option<[u8; 4]>,
 }
 
 /// 泳道分配的结果。**丢掉的条数是结论的一部分**，不是日志。
@@ -117,7 +125,14 @@ pub fn layout(cues: &[Cue], spec: &DanmakuSpec, timebase: &TimebaseDto) -> Danma
         }
         match chosen {
             Some(lane) => {
-                result.items.push(DanmakuItem { text: cue.text.clone(), lane, enter, exit });
+                result.items.push(DanmakuItem {
+                    text: cue.text.clone(),
+                    lane,
+                    enter,
+                    exit,
+                    // 这条 cue 自带的颜色（`parse_ass` 从 `\c` 抽出来的）。
+                    color: cue.style.color,
+                });
             }
             None => result.dropped += 1,
         }
@@ -371,7 +386,7 @@ mod tests {
 
     #[test]
     fn 进入帧在右边缘离开帧移出左边() {
-        let item = DanmakuItem { text: "abc".to_string(), lane: 0, enter: 0, exit: 100 };
+        let item = DanmakuItem { text: "abc".to_string(), lane: 0, enter: 0, exit: 100 , color: None};
         let start = rect_at(&item, 0, &spec(8, 8000), SEQUENCE).expect("能算");
         assert_eq!(start.x, 1.0, "进入的那一帧左边缘在画面右边缘");
         let end = rect_at(&item, 100, &spec(8, 8000), SEQUENCE).expect("能算");
@@ -385,7 +400,7 @@ mod tests {
     #[test]
     fn 区间外的帧被夹到两端() {
         // 首末两帧之外（调用方过滤前）也给出确定答案，而不是外推。
-        let item = DanmakuItem { text: "abc".to_string(), lane: 2, enter: 10, exit: 20 };
+        let item = DanmakuItem { text: "abc".to_string(), lane: 2, enter: 10, exit: 20 , color: None};
         let before = rect_at(&item, 0, &spec(8, 8000), SEQUENCE).expect("能算");
         let after = rect_at(&item, 99, &spec(8, 8000), SEQUENCE).expect("能算");
         assert_eq!(before.x, 1.0);
@@ -394,7 +409,7 @@ mod tests {
 
     #[test]
     fn 纵向由泳道决定且在最上面起算() {
-        let item = DanmakuItem { text: "x".to_string(), lane: 3, enter: 0, exit: 10 };
+        let item = DanmakuItem { text: "x".to_string(), lane: 3, enter: 0, exit: 10 , color: None};
         let rect = rect_at(&item, 0, &spec(8, 8000), SEQUENCE).expect("能算");
         // font_ratio 默认 0.04 -> 行盒高 0.048；第 3 条泳道在 3 倍处。
         let height = 0.04 * LINE_HEIGHT_EM;
@@ -404,7 +419,7 @@ mod tests {
 
     #[test]
     fn 归一化宽度依赖宽高比而不是渲染尺寸() {
-        let item = DanmakuItem { text: "半角abc".to_string(), lane: 0, enter: 0, exit: 10 };
+        let item = DanmakuItem { text: "半角abc".to_string(), lane: 0, enter: 0, exit: 10 , color: None};
         let a = rect_at(&item, 0, &spec(8, 8000), (640, 360)).expect("能算");
         let b = rect_at(&item, 0, &spec(8, 8000), (1280, 720)).expect("能算");
         let c = rect_at(&item, 0, &spec(8, 8000), (640, 480)).expect("能算");
@@ -414,7 +429,7 @@ mod tests {
 
     #[test]
     fn 零尺寸或零字号没有可画的() {
-        let item = DanmakuItem { text: "x".to_string(), lane: 0, enter: 0, exit: 10 };
+        let item = DanmakuItem { text: "x".to_string(), lane: 0, enter: 0, exit: 10 , color: None};
         assert!(rect_at(&item, 0, &spec(8, 8000), (0, 360)).is_none());
         assert!(rect_at(&item, 0, &spec(8, 8000), (640, 0)).is_none());
         let mut zero_font = spec(8, 8000);

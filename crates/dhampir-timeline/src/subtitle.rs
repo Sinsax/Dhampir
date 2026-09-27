@@ -239,15 +239,36 @@ pub fn to_srt(cues: &[Cue]) -> String {
 }
 
 /// 把 ASS 的文本转成纯文本：去掉覆盖标签（花括号里的东西），换行标记换成换行符。
-fn ass_text_to_plain(raw: &str) -> String {
+/// 把 ASS 的文本转成纯文本 + **它自带的颜色（如果有）**。
+///
+/// 文本部分：去掉覆盖标签（花括号里的东西），换行标记换成换行符。
+///
+/// 颜色部分：抽 `\c` / `\1c`。这件事以前**没人做** ——
+/// `CueStyle.color` 这个字段早就定义好了，但 `parse_ass` 一律写
+/// `CueStyle::default()`（`color: None`），于是"逐条颜色"在整条链路上
+/// **永远不生效**。那是这个仓第 4 次"写好了没接上"。
+fn ass_text_to_plain(raw: &str) -> (String, Option<[u8; 4]>) {
     let mut out = String::new();
+    let mut color = None;
     let mut depth = 0usize;
+    let mut tag = String::new();
     let mut chars = raw.chars().peekable();
     while let Some(ch) = chars.next() {
         match ch {
-            '{' => depth += 1,
-            '}' => depth = depth.saturating_sub(1),
-            _ if depth > 0 => {}
+            '{' => {
+                depth += 1;
+                tag.clear();
+            }
+            '}' => {
+                depth = depth.saturating_sub(1);
+                // 一个标签块结束了：从攒下来的内容里找颜色。
+                if depth == 0 {
+                    if let Some(found) = ass_color_in_tags(&tag) {
+                        color = Some(found);
+                    }
+                }
+            }
+            _ if depth > 0 => tag.push(ch),
             '\\' => match chars.peek() {
                 Some('N') | Some('n') => {
                     chars.next();
@@ -263,7 +284,57 @@ fn ass_text_to_plain(raw: &str) -> String {
             _ => out.push(ch),
         }
     }
-    out
+    (out, color)
+}
+
+/// 从一串覆盖标签里找颜色，形如 `\c&H00FF00&` 或 `\1c&H00FF00&`。
+///
+/// # ASS 的颜色是 **BGR**，不是 RGB
+///
+/// `&HBBGGRR&` —— 蓝色在前。顺序读反不会报错，只会让红蓝互调，
+/// 而"颜色不对"看起来像"调色参数没配对"，不像"字节序读反了"。
+///
+/// `\1c` 是主色，`\c` 是它的简写；`\2c`/`\3c`（次色/描边色）不取 ——
+/// 本仓的描边色在轨道级，逐条描边色是另一件事。
+fn ass_color_in_tags(tags: &str) -> Option<[u8; 4]> {
+    let bytes = tags.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] != b'\\' {
+            index += 1;
+            continue;
+        }
+        let after_backslash = index + 1;
+        let mut cursor = after_backslash;
+        // 可选的编号（`1c` / `2c` …），然后必须是 `c`。
+        if cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() || bytes[cursor] != b'c' {
+            index = after_backslash;
+            continue;
+        }
+        cursor += 1;
+        let rest = &tags[cursor..];
+        let Some(after_amp) = rest.strip_prefix("&H").or_else(|| rest.strip_prefix("&h")) else {
+            index = cursor;
+            continue;
+        };
+        let hex: String = after_amp
+            .chars()
+            .take_while(|ch| ch.is_ascii_hexdigit())
+            .collect();
+        if hex.len() < 6 {
+            index = cursor;
+            continue;
+        }
+        let value = u32::from_str_radix(&hex[..6], 16).ok()?;
+        let blue = ((value >> 16) & 0xff) as u8;
+        let green = ((value >> 8) & 0xff) as u8;
+        let red = (value & 0xff) as u8;
+        return Some([red, green, blue, 255]);
+    }
+    None
 }
 
 /// ASS 文件里的默认样式（写的时候用）。
@@ -332,12 +403,20 @@ pub fn parse_ass(text: &str) -> Result<ParseReport, String> {
             report.skipped += 1;
             continue;
         };
-        let body = column("Text").map(ass_text_to_plain).unwrap_or_default();
+        // 文本与**这条自带的颜色**一起抽出来（ASS 的 `\c&HBBGGRR&`）。
+        let (body, cue_color) = column("Text")
+            .map(ass_text_to_plain)
+            .unwrap_or_default();
         if body.trim().is_empty() {
             report.skipped += 1;
             continue;
         }
-        report.cues.push(Cue { start_ms: start, end_ms: end, text: body, style: CueStyle::default() });
+        report.cues.push(Cue {
+            start_ms: start,
+            end_ms: end,
+            text: body,
+            style: CueStyle { color: cue_color, ..CueStyle::default() },
+        });
     }
     Ok(report.sorted())
 }
@@ -484,6 +563,56 @@ mod tests {
         let report = parse_ass(text).expect("不该整份失败");
         assert_eq!(report.cues.len(), 1);
         assert_eq!(report.skipped, 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // 逐条颜色（`\c&HBBGGRR&`）
+    //
+    // `CueStyle.color` 这个字段**早就定义了**，但 `parse_ass` 一律写
+    // `CueStyle::default()`（`color: None`）—— 于是"逐条颜色"在整条链路上
+    // 永远不生效。这一组把那个缺口钉住。
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn 逐条颜色从覆盖标签里抽出来() {
+        // V-Trim 的实测形状：`{\c&HFF3FE3}还能续约吗`
+        // 注意 ASS 是 **BGR**：`FF3FE3` -> B=FF, G=3F, R=E3 -> RGB(E3,3F,FF)。
+        let text = "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n\
+                    Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,{\\c&HFF3FE3}还能续约吗\n";
+        let report = parse_ass(text).expect("能解析");
+        assert_eq!(report.cues[0].text, "还能续约吗", "标签要去掉");
+        assert_eq!(report.cues[0].style.color, Some([0xE3, 0x3F, 0xFF, 255]));
+        // 上一条为什么是 BGR：读成 RGB 会让红蓝互调，而"颜色不对"看起来像
+        // 「调色参数没配对」，不像「字节序读反了」。
+    }
+
+    #[test]
+    fn 主色的编号写法也认() {
+        // `\1c` 是主色的完整写法，`\c` 是简写。
+        let text = "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n\
+                    Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,{\\1c&H00FF00&}绿的\n";
+        let report = parse_ass(text).expect("能解析");
+        assert_eq!(report.cues[0].style.color, Some([0x00, 0xFF, 0x00, 255]));
+    }
+
+    #[test]
+    fn 没有颜色的条是自己没有而不是猜一个() {
+        // **不能给默认色**：`None` 的语义是"用轨道给的默认"。
+        // 这里猜一个白色的话，轨道级的暖色就永远被盖掉了。
+        let text = "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n\
+                    Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,{\\an8}没有颜色\n";
+        let report = parse_ass(text).expect("能解析");
+        assert_eq!(report.cues[0].style.color, None);
+    }
+
+    #[test]
+    fn 颜色标签与位置标签混在一起也能抽出来() {
+        // 真实素材就是混着的：`{\move(2136,0,-216,0)}` 与 `{\c&H...}` 同一条。
+        let text = "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n\
+                    Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,{\\move(2136,0,-216,0)}{\\c&HFF0000}蓝的\n";
+        let report = parse_ass(text).expect("能解析");
+        assert_eq!(report.cues[0].text, "蓝的");
+        assert_eq!(report.cues[0].style.color, Some([0x00, 0x00, 0xFF, 255]), "`FF0000`(BGR) 是纯蓝");
     }
 
     #[test]

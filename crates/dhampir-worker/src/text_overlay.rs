@@ -349,6 +349,8 @@ fn paint_one(
     target: (u32, u32),
     text: &str,
     rect: dhampir_core::timeline::text_layout::NormalizedRect,
+    // **这一条的颜色**（求值层已解析）。不是轨道默认 —— 那个只是它的兜底。
+    color: [u8; 4],
     style: &dhampir_core::overlay::TextStyle,
     // 这一帧的不透明度（淡入淡出算出来的，**契约层给的**）。
     opacity: f32,
@@ -381,7 +383,10 @@ fn paint_one(
     let key = TextRasterKey {
         text: text.to_string(),
         font_px: placement.font_px,
-        color: style.color,
+        // **用这一条自己的颜色**（求值层已解析）。
+        // 这里以前读的是 `style.color`（轨道默认）—— 于是"逐条颜色"在求值层
+        // 算对了、到渲染这一层被丢掉。像素级核对才看得出来。
+        color,
         outline: style.outline,
         // `style.stroke_px` 已经是**目标像素**（`evaluate_overlay` 用 `stroke_ratio * 目标高`
         // 算的），而位图恒等于目标宽（见 `LinePlacement::bitmap_width`）
@@ -451,6 +456,9 @@ fn paint_lines(
             target,
             &item.text,
             item.rect,
+            // **这一条的颜色**（求值层已解析：cue 自带覆盖轨道默认）。
+            // 描边与开关仍走轨道样式 —— 那两样在契约里就是轨道级的。
+            item.color,
             &overlay.subtitle_style,
             item.opacity,
             item.dy_px,
@@ -476,6 +484,7 @@ fn paint_lines(
             target,
             &item.text,
             item.rect,
+            item.color,
             &overlay.danmaku_style,
             item.opacity,
             item.dy_px,
@@ -573,6 +582,7 @@ mod tests {
                     // 老行为：满不透明、不位移（淡入淡出默认关）。
                     opacity: 1.0,
                     dy_px: 0.0,
+                    color: [255, 255, 255, 255],
                 })
                 .collect(),
             danmaku: Vec::new(),
@@ -603,6 +613,7 @@ mod tests {
                     exit: 100,
                     opacity: 1.0,
                     dy_px: 0.0,
+                    color: [255, 255, 255, 255],
                 })
                 .collect(),
             subtitle_style: dhampir_core::overlay::TextStyle::default(),
@@ -1021,6 +1032,7 @@ mod tests {
             exit: 100,
             opacity: 1.0,
             dy_px: 0.0,
+            color: [255, 255, 255, 255],
         });
         items.dropped_danmaku = 3;
         paint_lines(

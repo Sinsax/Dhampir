@@ -1955,6 +1955,8 @@ fn text_item_json(item: &dhampir_core::overlay::TextItem) -> serde_json::Value {
         // 淡入淡出：两端都要能对账"这一帧多透明、偏了多少"。
         "opacity": item.opacity,
         "dy_px": item.dy_px,
+        // **逐条颜色**：同一轨里不同的条可以不一样（ASS 的 `\c`）。
+        "color": item.color,
     })
 }
 
@@ -1972,6 +1974,7 @@ fn danmaku_item_json(item: &dhampir_core::overlay::DanmakuTextItem) -> serde_jso
         rect: item.rect,
         opacity: item.opacity,
         dy_px: item.dy_px,
+        color: item.color,
     });
     value["lane"] = serde_json::json!(item.lane);
     value["enter"] = serde_json::json!(item.enter);

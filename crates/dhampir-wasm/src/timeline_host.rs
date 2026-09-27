@@ -208,6 +208,12 @@ struct TextLineSpec {
     rect: NormalizedRect,
     /// 目标像素里的落点（`place_line` 的结果，JS 照着它去栅格化）。
     placement: LinePlacement,
+    /// **这一条的颜色**（已解析：cue 自带覆盖轨道默认）。
+    ///
+    /// 与轨道级的 `*_style.color` 的关系：那个是**默认**，这条是**结果**。
+    /// JS 侧只读这一个 —— 让 JS 自己判"该用哪一个"就是把同一条规矩
+    /// 放到第二处去实现。
+    color: [u8; 4],
     /// 弹幕条目的身份（字幕是 `None`）。
     ///
     /// 为什么要有这个字段：弹幕的 `rect` 逐帧都在动，**单看一帧的矩形分不出
@@ -465,6 +471,7 @@ fn text_lines(
             text: item.text.clone(),
             rect: item.rect,
             placement,
+            color: item.color,
             danmaku: None,
         });
     }
@@ -499,6 +506,7 @@ fn danmaku_placements(
             text: item.text.clone(),
             rect: item.rect,
             placement,
+            color: item.color,
             danmaku: Some(DanmakuIdentity {
                 lane: item.lane,
                 enter: item.enter,
@@ -883,6 +891,7 @@ fn frame_overlay(doc: &ProjectDoc, frame: i64) -> Option<host_api::OverlayView> 
                     rect: item.rect.into(),
                     opacity: item.opacity,
                     dy_px: item.dy_px,
+                    color: item.color,
                 })
                 .collect(),
             // 弹幕的矩形是**这一帧**的滚动位置（core 已经按帧算好）——
@@ -898,6 +907,7 @@ fn frame_overlay(doc: &ProjectDoc, frame: i64) -> Option<host_api::OverlayView> 
                     exit: item.exit,
                     opacity: item.opacity,
                     dy_px: item.dy_px,
+                    color: item.color,
                 })
                 .collect(),
             // **两类各一套画法**（字幕暖色、弹幕白色）。
