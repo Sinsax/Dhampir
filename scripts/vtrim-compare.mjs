@@ -569,6 +569,24 @@ function main() {
         ts.push(Number((w.outStart + (w.width * (k + 0.5)) / 5).toFixed(3)));
       }
       for (const [k, t] of ts.entries()) rows.push({ ...sample(`ev${i}-${k}`, t), group: `${ev.type}@${ev.time}`, t });
+
+      // -----------------------------------------------------------------
+      // **局部基线**：紧邻窗口的几点（前后各两点）。
+      //
+      // 这一条是查 blur 时现出来的：全局基线 7.02 看着很干净，
+      // 但 blur 的窗口（输出 60.90）**正好落在一条弹幕的滚动区间里**
+      // （`56.13-67.65`），而那条弹幕本来就有一条已知差异
+      // （逐条滚动时长 vs 轨道级平均，见 DROP/CLAMP 清单）。
+      // 于是量到 26.17 全部记在 blur 头上 —— **而归因是错的**。
+      //
+      // 局部基线让"底噪本身就在变"这件事显形：判据是**跟邻居比**，
+      // 而不是跟"全片的平均值"比。
+      // -----------------------------------------------------------------
+      const local = [w.outStart - 1.2, w.outStart - 0.6, w.outEnd + 0.6, w.outEnd + 1.2]
+        .filter((x) => x > 0.5 && x < refInfo.duration - 0.5);
+      for (const [k, x] of local.entries()) {
+        rows.push({ ...sample(`loc${i}-${k}`, Number(x.toFixed(3))), group: `${ev.type}@${ev.time}#邻居`, t: Number(x.toFixed(3)) });
+      }
     }
 
     const measured = measure({ dir: runDir, rows });
@@ -584,9 +602,14 @@ function main() {
     const baseRatio = avg(base, 'ratio');
 
     step('结果');
-    log(`  基线（窗口外 ${base.length} 处）：像素差 ${basePixel.toFixed(2)}   高频比 ${baseRatio.toFixed(2)}`);
+    // **基线也要打 dy** —— 它是 dy 那一列的参照点。
+    // 没有它，"blur 位移 -21px" 这句话就没法判：那是**本来就有的位置差**，
+    // 还是**这个特效引入的**？（我第一版只打了像素差与高频比，于是拿到
+    // -21 这个数时不知道该往哪查。）
+    const baseDy = Math.round(avg(base, 'dy'));
+    log(`  基线（窗口外 ${base.length} 处）：像素差 ${basePixel.toFixed(2)}   高频比 ${baseRatio.toFixed(2)}   位移 ${baseDy > 0 ? '+' : ''}${baseDy}px`);
     log('');
-    log('  ' + '特效'.padEnd(20) + '输出窗口'.padEnd(18) + '像素差'.padStart(8) + '高频比'.padStart(8) + '位移'.padStart(6) + '  判定');
+    log('  ' + '特效'.padEnd(20) + '输出窗口'.padEnd(16) + '像素差'.padStart(8) + '邻居'.padStart(9) + '高频比'.padStart(8) + '位移'.padStart(6) + '  判定');
     for (const ev of events) {
       const key = `${ev.type}@${ev.time}`;
       const g = byGroup.get(key);
@@ -595,14 +618,20 @@ function main() {
       const pixel = avg(g, 'pixel');
       const ratio = avg(g, 'ratio');
       const dy = Math.round(avg(g, 'dy'));
-      // 判据：像素差显著高于基线（>1.5x 且绝对差 > 2）就算不对；
-      // 高频比偏离 1.0 超过 25% 单独指出（糊 / 锯齿）
-      const bad = pixel > basePixel * 1.5 + 2;
-      const verdict = bad ? '✗ 高于基线' : '✓';
+      // **判据跟邻居比，不跟全片平均比**（见上面"局部基线"的理由）。
+      const neighbour = byGroup.get(`${key}#邻居`) || [];
+      const ref = neighbour.length >= 2 ? avg(neighbour, 'pixel') : basePixel;
+      const bad = pixel > ref * 1.5 + 2;
+      // **邻居自己也脏的时候，判据没力气** —— 要明说。
+      //
+      // 不说的话，"✓"会被读成"这个特效是对的"，而它实际只说明
+      // "这个窗口跟它周围一样差"。两者的区别在**换一批测试时刻**时就显形了。
+      const noisy = ref > basePixel * 2;
+      const verdict = bad ? '✗ 高于邻居' : noisy ? '⚠ 底噪太脏，判据无效' : '✓';
       const sharp = ratio > 1.25 ? ' 锯齿' : ratio < 0.8 ? ' 偏糊' : '';
       const shift = dy !== 0 ? ` 位移${dy > 0 ? '+' : ''}${dy}px` : '';
-      log('  ' + key.padEnd(20) + `${w.outStart.toFixed(2)}-${w.outEnd.toFixed(2)}`.padEnd(18)
-        + pixel.toFixed(2).padStart(8) + ratio.toFixed(2).padStart(8) + String(dy).padStart(6)
+      log('  ' + key.padEnd(20) + `${w.outStart.toFixed(2)}-${w.outEnd.toFixed(2)}`.padEnd(16)
+        + pixel.toFixed(2).padStart(8) + ref.toFixed(2).padStart(9) + ratio.toFixed(2).padStart(8) + String(dy).padStart(6)
         + `  ${verdict}${sharp}${shift}`);
     }
 
