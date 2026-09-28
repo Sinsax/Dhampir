@@ -116,6 +116,12 @@ pub struct DanmakuTextItem {
     pub color: [u8; 4],
     /// **字号**（相对序列高的比例）。同 [`TextItem::font_ratio`]。
     pub font_ratio: f32,
+    /// **这一条的滚动时长（帧）** —— 逐条不同（见 `Cue::travel_ms`）。
+    ///
+    /// 带着它是为了**逐字段对账**：`rect` 是 `travel_frames` 的函数，
+    /// 只比矩形的话，"两条的时长被对调了"在某些帧上可能看不出来。
+    /// 与 `lane`/`enter`/`exit` 同一条理由。
+    pub travel_frames: i64,
 }
 
 /// 一类文字的画法（颜色 + 描边）。
@@ -383,6 +389,8 @@ pub fn evaluate_overlay(
                 lane: item.lane,
                 enter: item.enter,
                 exit: item.exit,
+                // **逐条的滚动时长**（`\move(...,t1,t2)` 抽出来的；读不到才是轨道级）。
+                travel_frames: item.travel_frames,
                 opacity: spec.opacity.clamp(0.0, 1.0) * fade,
                 dy_px,
                 // **这条自带的颜色**覆盖轨道默认。
@@ -607,8 +615,8 @@ mod tests {
 
     fn cues() -> Vec<Cue> {
         vec![
-            Cue { start_ms: 0, end_ms: 2000, text: "第一行中文".to_string(), style: Default::default() },
-            Cue { start_ms: 2000, end_ms: 4000, text: "第二句".to_string(), style: Default::default() },
+            Cue { start_ms: 0, end_ms: 2000, text: "第一行中文".to_string(), travel_ms: None, style: Default::default() },
+            Cue { start_ms: 2000, end_ms: 4000, text: "第二句".to_string(), travel_ms: None, style: Default::default() },
         ]
     }
 
@@ -769,7 +777,7 @@ mod tests {
         let mut table = SubtitleTable::new();
         table.insert(
             "sub.srt".to_string(),
-            vec![Cue { start_ms: 20_000, end_ms: 22_000, text: "很久以后".to_string(), style: Default::default() }],
+            vec![Cue { start_ms: 20_000, end_ms: 22_000, text: "很久以后".to_string(), travel_ms: None, style: Default::default() }],
         );
         assert!(evaluate_overlay(&subtitle_timeline(), 15, SEQUENCE, Some(&table)).is_none());
     }
@@ -777,7 +785,7 @@ mod tests {
     #[test]
     fn 字幕区间是闭开的() {
         let timebase = TimebaseDto { num: 30, den: 1 };
-        let cue = Cue { start_ms: 2000, end_ms: 4000, text: "x".to_string(), style: Default::default() };
+        let cue = Cue { start_ms: 2000, end_ms: 4000, text: "x".to_string(), travel_ms: None, style: Default::default() };
         // 30fps：2000ms -> 第 60 帧，4000ms -> 第 120 帧。
         assert!(!cue_visible_at(&cue, 59, &timebase), "还没到");
         assert!(cue_visible_at(&cue, 60, &timebase), "起点包含");
@@ -789,7 +797,7 @@ mod tests {
     fn 短于一帧的字幕仍然显示一帧() {
         let timebase = TimebaseDto { num: 30, den: 1 };
         // 3ms 的间隔在 30fps 下取整之后是同一帧 —— 不能一条都不显示。
-        let cue = Cue { start_ms: 1000, end_ms: 1003, text: "x".to_string(), style: Default::default() };
+        let cue = Cue { start_ms: 1000, end_ms: 1003, text: "x".to_string(), travel_ms: None, style: Default::default() };
         assert!(cue_visible_at(&cue, 30, &timebase));
     }
 
@@ -802,6 +810,7 @@ mod tests {
                 start_ms: 0,
                 end_ms: 2000,
                 text: "一\n二\n三\n四\n五".to_string(),
+                travel_ms: None,
                 style: Default::default(),
             }],
         );
@@ -877,7 +886,7 @@ mod tests {
     // ---- 侧挂导出（T2.7）：两种问法必须说的是同一件事 ----
 
     fn cue(start_ms: u64, end_ms: u64, text: &str) -> Cue {
-        Cue { start_ms, end_ms, text: text.to_string(), style: Default::default() }
+        Cue { start_ms, end_ms, text: text.to_string(), travel_ms: None, style: Default::default() }
     }
 
     /// 一个带样式的字幕轨（两个紧邻、不重叠的元素）、一条**没样式**的轨、

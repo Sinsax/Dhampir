@@ -1867,6 +1867,8 @@ fn sidecar_text(
             start_ms: start,
             end_ms: end,
             text: span.text.clone(),
+            // 侧挂 SRT 没有 travel（那是 ASS 的 `\move` 专有）。
+            travel_ms: None,
             // 侧挂文件只带文本与时间：源里的加粗/斜体/颜色不进这里（`to_srt` 也没有地方放）。
             style: CueStyle::default(),
         });
@@ -2031,6 +2033,8 @@ fn danmaku_item_json(item: &dhampir_core::overlay::DanmakuTextItem) -> serde_jso
     value["lane"] = serde_json::json!(item.lane);
     value["enter"] = serde_json::json!(item.enter);
     value["exit"] = serde_json::json!(item.exit);
+    // **逐条的滚动时长**：`rect` 是它的函数，两端要对账就得看得见它。
+    value["travel_frames"] = serde_json::json!(item.travel_frames);
     value
 }
 

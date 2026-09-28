@@ -894,6 +894,8 @@ mod tests {
                     // 在屏区间在这一点上无关紧要（画法只看这一帧的矩形），给一对确定值。
                     enter: 0,
                     exit: 100,
+                    // 在屏区间在这一点上无关紧要；travel 同（画法只看这一帧的矩形）。
+                    travel_frames: 600,
                     opacity: 1.0,
                     dy_px: 0.0,
                     color: [255, 255, 255, 255],
@@ -1322,6 +1324,7 @@ mod tests {
             lane: 0,
             enter: 0,
             exit: 100,
+            travel_frames: 600,
             opacity: 1.0,
             dy_px: 0.0,
             color: [255, 255, 255, 255],

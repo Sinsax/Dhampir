@@ -138,7 +138,18 @@ pub fn layout(cues: &[Cue], spec: &DanmakuSpec, timebase: &TimebaseDto) -> Danma
         // 淡入走完才起滚（V-Trim 的 `el - fadeIn`）。
         let fade_frames = frames_for_ms(spec.fade_in_ms, cue.start_ms, timebase);
         let scroll_start = enter.saturating_add(fade_frames);
-        let travel_frames = frames_for_ms(spec.duration_ms, cue.start_ms, timebase);
+        // **滚动时长优先用这条 cue 自己的**（`\move(...,t1,t2)` 的 `t2-t1`），
+        // 读不到才回退到轨道级的 `duration_ms`。
+        //
+        // V-Trim 的 `progress = (el - fadeIn) / travel`，而 **`travel` 逐条不同**
+        // （它按文本字节数算：实测四条 20.21 / 16.37 / 16.80 / 14.24 秒）。
+        // 轨道级那一个值只能取平均，于是**长句滚得太快、短句滚得太慢** ——
+        // 症状是"同一时刻参照的弹幕在左边、本仓的还在右边"。
+        //
+        // 回退不是权宜：老素材（3 参数 `\move` 或 `\pos`）本来就只该有轨道级口径，
+        // 有它才保证"既有工程逐字节不变"。
+        let travel_ms = cue.travel_ms.unwrap_or(spec.duration_ms);
+        let travel_frames = frames_for_ms(travel_ms, cue.start_ms, timebase);
         let mut chosen = None;
         for (index, free) in free_at.iter_mut().enumerate() {
             if *free < enter {
@@ -363,6 +374,7 @@ mod tests {
     /// 这条注释先前写的是"反正不参与在屏时长"，而那个前提是错的。
     fn cue(start_ms: u64, text: &str) -> Cue {
         Cue {
+            travel_ms: None,
             start_ms,
             end_ms: start_ms + 1000,
             text: text.to_string(),
@@ -370,9 +382,18 @@ mod tests {
         }
     }
 
+    /// 同上，但**带上这一条自己的 travel**（`\move(...,t1,t2)` 抽出来的）。
+    fn cue_travel(start_ms: u64, travel_ms: u64, text: &str) -> Cue {
+        Cue {
+            travel_ms: Some(travel_ms),
+            ..cue(start_ms, text)
+        }
+    }
+
     /// 同上，但显式给 `End`（要测窗口长度时用）。
     fn cue_span(start_ms: u64, end_ms: u64, text: &str) -> Cue {
         Cue {
+            travel_ms: None,
             start_ms,
             end_ms,
             text: text.to_string(),
@@ -385,6 +406,34 @@ mod tests {
     }
 
     const SEQUENCE: (u32, u32) = (640, 360);
+    /// **滚动时长用这条 cue 自己的，不是轨道级的。**
+    ///
+    /// V-Trim 的 `progress = (el - fadeIn) / travel`，而 **`travel` 逐条不同**
+    /// （它按文本字节数算）。轨道级那一个值只能取平均，于是长句滚得太快、短句滚得太慢。
+    ///
+    /// 这条用例盯的是 `layout` 里那一行的**取值来源** —— 先前没有用例，
+    /// 把 `cue.travel_ms` 换回 `spec.duration_ms` 也**不会红**。
+    #[test]
+    fn 滚动时长用_cue_自己的而不是轨道级的() {
+        let spec = spec(4, 20_000); // 轨道级 20 秒
+        let tb = tb(60, 1);
+        // 两条 cue，同一个轨道级规格，但各自的 travel 不同。
+        let cues = vec![cue_travel(0, 5_000, "短"), cue_travel(0, 10_000, "长")];
+        let out = layout(&cues, &spec, &tb);
+        assert_eq!(out.items.len(), 2, "两条都该排到泳道");
+        // 60fps：5 秒 = 300 帧、10 秒 = 600 帧。轨道级是 20 秒 = 1200 帧。
+        let mut travels: Vec<i64> = out.items.iter().map(|i| i.travel_frames).collect();
+        travels.sort();
+        assert_eq!(
+            travels,
+            vec![300, 600],
+            "必须逐条用自己的 travel（轨道级会给出两个 1200）"
+        );
+        // 没有 travel 的那条回退到轨道级。
+        let fallback = layout(&vec![cue(0, "没写")], &spec, &tb);
+        assert_eq!(fallback.items[0].travel_frames, 1200, "读不到就该回退到轨道级");
+    }
+
 
     #[test]
     fn 弹幕素材里的_move_坐标不进文本() {

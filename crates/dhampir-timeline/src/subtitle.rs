@@ -32,6 +32,20 @@ pub struct Cue {
     pub end_ms: u64,
     /// 文本。内部换行用换行符。
     pub text: String,
+    /// **这一条自己的滚动时长**（毫秒），从 `\move(x1,y1,x2,y2,t1,t2)` 的
+    /// `t2 - t1` 抽出来。`None` = 素材没写（老素材 / 静态 `\pos`）。
+    ///
+    /// # 为什么这个值该在 cue 上，而不是在轨道规格上
+    ///
+    /// V-Trim 的滚动进度是 `progress = (el - fadeIn) / travel`，而 **`travel` 逐条不同**
+    /// （它按文本字节数算：实测四条是 20.21 / 16.37 / 16.80 / 14.24 秒）。
+    /// 而契约里的 `DanmakuSpec::duration_ms` 是**轨道级**的一个值 —— 它只能取平均，
+    /// 于是长句滚得太快、短句滚得太慢。
+    ///
+    /// 3 参数的 `\move(x1,y1,x2,y2)` 跨的是 **cue 窗口**，不是 travel ——
+    /// 所以"把 travel 编码进素材"必须写 6 参数那一版。读不到就回退到轨道级
+    /// （向后兼容：老素材一条都不会变）。
+    pub travel_ms: Option<u64>,
     pub style: CueStyle,
 }
 
@@ -216,6 +230,9 @@ pub fn parse_srt(text: &str) -> Result<ParseReport, String> {
             start_ms,
             end_ms,
             text: body.trim_end().to_string(),
+            // **SRT 没有 travel 这个概念**（它是 ASS 的 `\move` 专有）；
+            // SRT 那条路只用于字幕，而字幕不做滚动。
+            travel_ms: None,
             style: CueStyle::default(),
         });
     }
@@ -247,9 +264,10 @@ pub fn to_srt(cues: &[Cue]) -> String {
 /// `CueStyle.color` 这个字段早就定义好了，但 `parse_ass` 一律写
 /// `CueStyle::default()`（`color: None`），于是"逐条颜色"在整条链路上
 /// **永远不生效**。那是这个仓第 4 次"写好了没接上"。
-fn ass_text_to_plain(raw: &str) -> (String, Option<[u8; 4]>) {
+fn ass_text_to_plain(raw: &str) -> AssTags {
     let mut out = String::new();
     let mut color = None;
+    let mut travel_ms = None;
     let mut depth = 0usize;
     let mut tag = String::new();
     let mut chars = raw.chars().peekable();
@@ -261,10 +279,13 @@ fn ass_text_to_plain(raw: &str) -> (String, Option<[u8; 4]>) {
             }
             '}' => {
                 depth = depth.saturating_sub(1);
-                // 一个标签块结束了：从攒下来的内容里找颜色。
+                // 一个标签块结束了：从攒下来的内容里找颜色与 travel。
                 if depth == 0 {
                     if let Some(found) = ass_color_in_tags(&tag) {
                         color = Some(found);
+                    }
+                    if let Some(found) = ass_move_travel_in_tags(&tag) {
+                        travel_ms = Some(found);
                     }
                 }
             }
@@ -284,7 +305,46 @@ fn ass_text_to_plain(raw: &str) -> (String, Option<[u8; 4]>) {
             _ => out.push(ch),
         }
     }
-    (out, color)
+    AssTags { text: out, color, travel_ms }
+}
+
+/// 从一串覆盖标签里抽出来的东西。
+#[derive(Debug, Clone, Default)]
+struct AssTags {
+    text: String,
+    color: Option<[u8; 4]>,
+    /// `\move(x1,y1,x2,y2,t1,t2)` 的 `t2 - t1`（毫秒）。
+    travel_ms: Option<u64>,
+}
+
+/// 从一串覆盖标签里找 `\move` 的**显式时长**。
+///
+/// # 为什么只认 6 参数那一版
+///
+/// ASS 的 `\move` 有两种写法：
+///
+/// * `\move(x1,y1,x2,y2)`   —— 跨的是 **cue 窗口**（起点到终点由 cue 的 Start/End 定）
+/// * `\move(x1,y1,x2,y2,t1,t2)` —— **显式**给出移动的起止时刻（毫秒，相对 cue 起点）
+///
+/// "滚动时长"是后者那个 `t2 - t1`。前者**不是**它 —— 把 cue 窗口当成 travel
+/// 是本仓库踩过的一个坑（一条窗口 5 秒、travel 10 秒的弹幕会在屏上待 10 秒）。
+/// 所以这里**只认 6 参数**：读不到就返回 `None`，由调用方回退到轨道级。
+fn ass_move_travel_in_tags(tags: &str) -> Option<u64> {
+    let at = tags.find("\\move(")?;
+    let rest = &tags[at + "\\move(".len()..];
+    let close = rest.find(')')?;
+    let args: Vec<&str> = rest[..close].split(',').map(|a| a.trim()).collect();
+    // 只认 6 个参数那一版。少于 6 个 = 没有显式时刻。
+    if args.len() != 6 {
+        return None;
+    }
+    let t1: u64 = args[4].parse().ok()?;
+    let t2: u64 = args[5].parse().ok()?;
+    // 倒着写（或写相等）是坏素材：当没写，别把它当成"0 秒滚完"。
+    if t2 <= t1 {
+        return None;
+    }
+    Some(t2 - t1)
 }
 
 /// 从一串覆盖标签里找颜色，形如 `\c&H00FF00&` 或 `\1c&H00FF00&`。
@@ -403,10 +463,10 @@ pub fn parse_ass(text: &str) -> Result<ParseReport, String> {
             report.skipped += 1;
             continue;
         };
-        // 文本与**这条自带的颜色**一起抽出来（ASS 的 `\c&HBBGGRR&`）。
-        let (body, cue_color) = column("Text")
-            .map(ass_text_to_plain)
-            .unwrap_or_default();
+        // 文本、**这条自带的颜色**（`\c&HBBGGRR&`）、**这条的 travel**
+        // （`\move(...,t1,t2)`）一起抽出来。
+        let tags = column("Text").map(ass_text_to_plain).unwrap_or_default();
+        let body = tags.text;
         if body.trim().is_empty() {
             report.skipped += 1;
             continue;
@@ -415,7 +475,8 @@ pub fn parse_ass(text: &str) -> Result<ParseReport, String> {
             start_ms: start,
             end_ms: end,
             text: body,
-            style: CueStyle { color: cue_color, ..CueStyle::default() },
+            travel_ms: tags.travel_ms,
+            style: CueStyle { color: tags.color, ..CueStyle::default() },
         });
     }
     Ok(report.sorted())
@@ -615,11 +676,37 @@ mod tests {
         assert_eq!(report.cues[0].style.color, Some([0x00, 0x00, 0xFF, 255]), "`FF0000`(BGR) 是纯蓝");
     }
 
+    /// **`\move` 的显式时长**：只认 6 参数那一版。
+    ///
+    /// 3 参数版跨的是 **cue 窗口**，不是 travel —— 把它当成 travel 是本仓踩过的坑
+    /// （一条窗口 5 秒、travel 10 秒的弹幕会在屏上待 10 秒）。
+    #[test]
+    fn 只认六参数的_move_时长() {
+        let head = "[Script Info]\n[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n";
+        let cue = |tags: &str| {
+            let text = format!("{head}Dialogue: 0,0:00:01.00,0:00:05.00,Default,,0,0,0,,{tags}字\n");
+            parse_ass(&text).expect("能解析").cues
+        };
+        // 6 参数：取出 t2 - t1。
+        assert_eq!(cue("{\\move(1920,20,-200,20,0,16800)}")[0].travel_ms, Some(16_800));
+        // 3 参数：**没有**显式时长 —— 必须回退（这里读出 None）。
+        assert_eq!(cue("{\\move(1920,20,-200,20)}")[0].travel_ms, None);
+        // 静态 `\pos`：本来就不滚。
+        assert_eq!(cue("{\\pos(960,1040)}")[0].travel_ms, None);
+        // 倒着写 / 写相等：坏素材，当没写 —— **不能**读成"0 秒滚完"。
+        assert_eq!(cue("{\\move(1,2,3,4,5000,1000)}")[0].travel_ms, None);
+        assert_eq!(cue("{\\move(1,2,3,4,1000,1000)}")[0].travel_ms, None);
+        // 与颜色同一条 cue（真实素材就是混着的）。
+        let both = cue("{\\move(1920,20,-200,20,0,14000)}{\\c&HFF0000}红");
+        assert_eq!(both[0].travel_ms, Some(14_000));
+        assert_eq!(both[0].style.color, Some([0, 0, 255, 255]), "颜色仍要抽出来（ASS 是 BGR）");
+    }
+
     #[test]
     fn ass_往返稳定() {
         let cues = vec![
-            Cue { start_ms: 1000, end_ms: 3500, text: "第一句".to_string(), style: CueStyle::default() },
-            Cue { start_ms: 60_000, end_ms: 62_000, text: "两行\n第二行".to_string(), style: CueStyle::default() },
+            Cue { start_ms: 1000, end_ms: 3500, text: "第一句".to_string(), travel_ms: None, style: CueStyle::default() },
+            Cue { start_ms: 60_000, end_ms: 62_000, text: "两行\n第二行".to_string(), travel_ms: None, style: CueStyle::default() },
         ];
         let written = to_ass(&cues, &AssStyle::default());
         let back = parse_ass(&written).expect("能解析自己写的");
