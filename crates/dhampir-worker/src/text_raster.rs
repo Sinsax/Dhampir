@@ -89,7 +89,14 @@ pub use dhampir_core::timeline::text_layout::{bitmap_size, border_px, pad_px};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TextRasterKey {
     /// 一行的文本。**不含换行**：多行由共享布局先切开，这里只画一行。
+    ///
+    /// 带 `.hl` 时这是**其中一段**（渲染侧逐段各要一次栅格化，见 `paint_one`）。
     pub text: String,
+    /// **这一段相对"整行居中位置"的水平偏移**（目标像素）。
+    ///
+    /// 0 = 老行为（整行居中画完）。非 0 时 `drawtext` 的 `x` 加上它 ——
+    /// 于是"某一段"能画在行内的正确位置上，而**不必引第二个栅格器**。
+    pub x_offset: i32,
     /// 字号（目标像素）。
     pub font_px: u32,
     /// 样式色，RGBA。alpha 是样式自己的不透明度。
@@ -308,10 +315,20 @@ pub fn drawtext_args(key: &TextRasterKey, text_file: &Path) -> Vec<String> {
     // `%{n}` 则被换成帧号 —— 画出来的是别的东西。关掉之后 `%` 只是普通字符。
     // **这一项删不得**：删了它，用户文本里的一个百分号就能毁掉整条字幕。
     let mut drawtext = format!(
-        "drawtext=fontfile={}:textfile={}:fontsize={}:fontcolor=white:expansion=none:x=(w-text_w)/2:y=(h-text_h)/2",
+        // `x` 里的 `text_w` 是**这一段自己的**宽（drawtext 的表达式只看当前 filter），
+        // 所以"整行居中"这件事**由调用方算好偏移传进来**（`x_offset`）。
+        // 0 时不写那一项 —— 既有工程的滤镜串逐字符不变。
+        "drawtext=fontfile={}:textfile={}:fontsize={}:fontcolor=white:expansion=none:x=(w-text_w)/2{}:y=(h-text_h)/2",
         filter_value(&key.font_file.to_string_lossy()),
         filter_value(&text_file.to_string_lossy()),
         key.font_px,
+        if key.x_offset == 0 {
+            String::new()
+        } else if key.x_offset > 0 {
+            format!("+{}", key.x_offset)
+        } else {
+            format!("-{}", -key.x_offset)
+        },
     );
     if key.outline {
         if key.stroke_px > 0 {
@@ -542,6 +559,7 @@ mod tests {
     /// 一个测试用键：只让高度变，宽度固定 —— 反向用例要盯的正是「尺寸」这一项。
     fn key(text: &str, height: u32) -> TextRasterKey {
         TextRasterKey {
+            x_offset: 0,
             text: text.to_string(),
             font_px: 32,
             color: [255, 240, 200, 255],
@@ -935,6 +953,7 @@ mod tests {
         let font_px = 48u32;
         let (width, height) = bitmap_size(640, font_px as f32 * 1.2, font_px);
         let key = TextRasterKey {
+            x_offset: 0,
             text: "第一行中文字幕".to_string(),
             font_px,
             color: [255, 240, 200, 255],
@@ -993,6 +1012,7 @@ mod tests {
         let font_px = 40u32;
         let (width, height) = bitmap_size(960, font_px as f32 * 1.2, font_px);
         let key = TextRasterKey {
+            x_offset: 0,
             text: "The quick brown fox jumps over the lazy dog".to_string(),
             font_px,
             color: [255, 255, 255, 255],
@@ -1032,6 +1052,7 @@ mod tests {
         let font_px = 40u32;
         let (width, height) = bitmap_size(400, font_px as f32 * 1.2, font_px);
         let make = |text: &str| TextRasterKey {
+            x_offset: 0,
             text: text.to_string(),
             font_px,
             color: [255, 255, 255, 255],

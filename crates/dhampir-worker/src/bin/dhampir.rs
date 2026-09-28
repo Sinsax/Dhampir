@@ -1997,6 +1997,13 @@ fn text_item_json(item: &dhampir_core::overlay::TextItem) -> serde_json::Value {
         // 字号决定 `ctx.font`，缩放决定**描边宽度**（参照 `swEff = sw * scale`）。
         "font_ratio": item.font_ratio,
         "scale": item.scale,
+        // **高亮分段**（`.hl`），颜色已由求值层解析好。
+        // 空数组 = 没有标记，宿主走"一次画完"的老路（既有工程逐字节不变）。
+        "parts": item
+            .parts
+            .iter()
+            .map(|r| serde_json::json!({ "text": r.text, "color": r.color }))
+            .collect::<Vec<_>>(),
     })
 }
 
@@ -2018,6 +2025,8 @@ fn danmaku_item_json(item: &dhampir_core::overlay::DanmakuTextItem) -> serde_jso
         font_ratio: item.font_ratio,
         // 弹幕不缩字（参照的弹幕没有缩字逻辑）；这里是从弹幕条目转出来的。
         scale: 1.0,
+        // 弹幕没有 `.hl` 标记（参照的弹幕路径也不解析它）。
+        parts: Vec::new(),
     });
     value["lane"] = serde_json::json!(item.lane);
     value["enter"] = serde_json::json!(item.enter);

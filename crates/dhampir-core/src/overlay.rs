@@ -75,6 +75,25 @@ pub struct TextItem {
     /// 而描边是宿主按 `stroke_px` 画的。与 `font_ratio` 同一条理由：
     /// 布局算出来的事实，跟着条目走。
     pub scale: f32,
+    /// **按高亮切好的分段，颜色已经解析好**。
+    ///
+    /// 空 = 这一条没有 `.hl` 标记 —— 渲染侧照老路用 `color` 一次画完
+    /// （**既有工程逐字节不变**）。
+    ///
+    /// # 为什么颜色在这里就解析掉
+    ///
+    /// 与 `color` 同一条规矩：轨道/样式给的是**默认**，`<span class="hl">`
+    /// 覆盖它。**求值层解析掉**，宿主只看到"这一段是什么颜色"，
+    /// 不用自己判该用哪一个 —— 两端各判一次就会在"有的条有标记、有的没有"
+    /// 的工程上分叉。
+    pub parts: Vec<TextRun>,
+}
+
+/// 一段要画的文字 + 它**最终**的颜色。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextRun {
+    pub text: String,
+    pub color: [u8; 4],
 }
 
 /// 一条要画的弹幕：内容 + **这一帧**的矩形 + 泳道与在屏区间 + 这一帧的淡入淡出。
@@ -110,6 +129,12 @@ pub struct DanmakuTextItem {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextStyle {
     pub color: [u8; 4],
+    /// **高亮词的颜色**（`None` = 不做高亮）。
+    ///
+    /// 与 `SubtitleStyle::highlight_color` 同一件事，但从契约带到这里时
+    /// 已经**逐条解析成 `TextItem::parts` 里的具体颜色** —— 这个字段留着
+    /// 是给"想知道样式默认值"的宿主看的（以及清单里能对账）。
+    pub highlight_color: Option<[u8; 4]>,
     /// **字号**（相对序列高的比例）。布局**本来就知道**它，带着走，
     /// 宿主就不必再从行盒反推（行高可配之后那个反推是错的）。
     pub font_ratio: f32,
@@ -132,6 +157,8 @@ impl Default for TextStyle {
     fn default() -> Self {
         Self {
             color: [255, 255, 255, 255],
+            // None = 不做高亮（默认）。
+            highlight_color: None,
             font_ratio: 0.0,
             outline: true,
             stroke_px: 0.0,
@@ -261,7 +288,26 @@ pub fn evaluate_overlay(
             dropped_lines += laid.dropped_lines;
             // **这一条的颜色**：cue 自己带的覆盖轨道默认。
             let item_color = cue.style.color.unwrap_or(style.color);
+            // 高亮色：样式给了才做高亮（没给 = 不做，既有工程不变）。
+            let hl_color = style.highlight_color.unwrap_or(item_color);
             for line in laid.lines {
+                // **只有真的带标记时才填 `parts`。**
+                //
+                // 全部 `highlight == false` 时留空 —— 那样渲染侧走的是
+                // 原来那条"一次画完"的路，既有工程逐字节不变。
+                // 反过来（无标记也填一段）会让每一帧都多一次栅格化。
+                let has_mark = line.parts.iter().any(|p| p.highlight);
+                let runs: Vec<TextRun> = if has_mark {
+                    line.parts
+                        .iter()
+                        .map(|p| TextRun {
+                            text: p.text.clone(),
+                            color: if p.highlight { hl_color } else { item_color },
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 items.push(TextItem {
                     text: line.text,
                     rect: line.rect,
@@ -270,10 +316,12 @@ pub fn evaluate_overlay(
                     color: item_color,
                     font_ratio: line.font_ratio,
                     scale: line.scale,
+                    parts: runs,
                 });
             }
             subtitle_style = TextStyle {
                 color: style.color,
+                highlight_color: style.highlight_color,
                 font_ratio: style.font_ratio,
                 outline: style.outline,
                 stroke_px: style.stroke_ratio * target_h,
@@ -344,6 +392,8 @@ pub fn evaluate_overlay(
         }
         danmaku_style = TextStyle {
             color: spec.color,
+            // 弹幕没有 `.hl` 标记（参照的弹幕路径也不解析它）。
+            highlight_color: None,
             font_ratio: spec.font_ratio,
             outline: spec.outline,
             stroke_px: spec.stroke_ratio * target_h,

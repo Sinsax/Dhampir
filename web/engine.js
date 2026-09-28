@@ -81,6 +81,39 @@ function rasterizeLine(line, style) {
   const strokePx = style.stroke_px > 0
     ? Math.round(style.stroke_px * scaled)
     : Math.round(line.border_px * scaled);
+
+  // **有 `.hl` 分段时：逐段各画一次**（参照 `index.html:1985-1994` 就是这么画的）。
+  //
+  //     line.forEach(p => {
+  //       ctx.strokeText(p.text, sx, ly);
+  //       ctx.fillStyle = p.hl ? hlColor : color;
+  //       ctx.fillText(p.text, sx, ly);
+  //       sx += ctx.measureText(p.text).width;
+  //     });
+  //
+  // **浏览器这边偏移是准的** —— `measureText` 与 `fillText` 是同一个引擎，
+  // 与参照的条件完全一致。CLI 那边不是（`drawtext` 拿不到别段的宽），
+  // 那一处的残差写在 `text_overlay.rs::paint_parts` 的注释里。
+  if (Array.isArray(line.parts) && line.parts.length > 0) {
+    const widths = line.parts.map((p) => ctx.measureText(p.text).width);
+    const total = widths.reduce((a, b) => a + b, 0);
+    let sx = x - total / 2;
+    for (let i = 0; i < line.parts.length; i += 1) {
+      const part = line.parts[i];
+      if (style.outline === true && strokePx > 0) {
+        ctx.lineWidth = strokePx * 2;
+        ctx.strokeStyle = strokeColorCss(line, style);
+        ctx.strokeText(part.text, sx, y);
+      }
+      ctx.fillStyle = cssColor(part.color && part.color.length === 4
+        ? part.color
+        : lineColor(line, style));
+      ctx.fillText(part.text, sx, y);
+      sx += widths[i];
+    }
+    return canvas;
+  }
+
   if (style.outline === true && strokePx > 0) {
     // 边宽取两倍：drawtext 的 borderw 是**向外**扩一圈，而 canvas 的描边压在字上。
     // 先描边后填字，内半边被字盖掉，剩下的外半边就是那一圈。

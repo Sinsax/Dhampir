@@ -466,6 +466,94 @@ enum Painted {
 /// 事后过滤意味着问题已经记进 `IssueLog` 了，而它没有撤回 —— 弹幕一出画面
 /// 整次出片就会被判失败。
 #[allow(clippy::too_many_arguments)]
+/// **逐段画一行**（`.hl` 分支）。见 [`paint_one`] 里那段说明。
+///
+/// 每一段各自栅格化（自己的文字、自己的行内偏移、自己的颜色），
+/// 然后**都按同一个落点**贴上去 —— 位图恒等于目标宽，
+/// 段内的偏移是在 `drawtext` 的 `x` 表达式里加的。
+#[allow(clippy::too_many_arguments)]
+fn paint_parts(
+    rasterize: &mut impl FnMut(&TextRasterKey) -> Result<Rc<TextBitmap>, String>,
+    font_file: Option<PathBuf>,
+    image: &mut Rgba8Image,
+    target: (u32, u32),
+    parts: &[dhampir_core::overlay::TextRun],
+    style: &dhampir_core::overlay::TextStyle,
+    scale: f32,
+    opacity: f32,
+    dy_px: f32,
+    judge_clip: bool,
+    log: &mut IssueLog,
+    placement: LinePlacement,
+) -> Painted {
+    // 整行文本：诊断用（`issue_path` 与"被切了"那条消息都要一个可读的身份）。
+    let whole: String = parts.iter().map(|p| p.text.as_str()).collect();
+    let path = issue_path(&whole);
+    let Some(font_file) = font_file else {
+        log.record(
+            "subtitle_font_missing",
+            &path,
+            format!("这一帧要画带 `.hl` 的「{whole}」，而宿主没有给字体（--font-file）"),
+        );
+        return Painted::Failed;
+    };
+
+    // 逻辑字宽（em -> 目标像素）累加出的**行内偏移**。
+    // 参照用的是 canvas 真实字宽；这里只能是逻辑宽，理由见 `paint_one` 那段注释。
+    let font_px = placement.font_px as f32;
+    let widths: Vec<f32> = parts
+        .iter()
+        .map(|p| dhampir_core::timeline::text_layout::measure_em(&p.text) * font_px)
+        .collect();
+    let total: f32 = widths.iter().sum();
+    let offset_y = dy_px.round() as i32;
+    let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u32;
+
+    let mut clipped = false;
+    let mut cursor = -total / 2.0;
+    for (index, run) in parts.iter().enumerate() {
+        let key = TextRasterKey {
+            text: run.text.clone(),
+            // `drawtext` 那边是 `x=(w-text_w)/2+本项`，而 `text_w` 只知道自己这一段
+            // —— 所以"整行居中"由这里算好（见 `paint_one` 的残差说明）。
+            x_offset: cursor.round() as i32,
+            font_px: placement.font_px,
+            color: run.color,
+            outline: style.outline,
+            // 与老路同一条：描边要乘这一条的缩放（参照 `swEff = sw * scale`）。
+            stroke_px: (style.stroke_px * scale).round() as u32,
+            stroke_color: style.stroke_color,
+            font_file: font_file.clone(),
+            width: placement.bitmap_width,
+            height: placement.bitmap_height,
+        };
+        cursor += widths[index];
+        let bitmap = match rasterize(&key) {
+            Ok(bitmap) => bitmap,
+            Err(error) => {
+                log.record("subtitle_raster_failed", &path, error);
+                return Painted::Failed;
+            }
+        };
+        let report = match blit_scaled(image, &bitmap, placement.x, placement.y + offset_y, alpha)
+        {
+            Ok(report) => report,
+            Err(error) => {
+                log.record("subtitle_blit_failed", &path, error);
+                return Painted::Failed;
+            }
+        };
+        if judge_clip {
+            if let Some(message) = clip_message(&run.text, &bitmap, placement, target, report.skipped)
+            {
+                log.record("subtitle_ink_clipped", &path, message);
+                clipped = true;
+            }
+        }
+    }
+    Painted::Drawn { clipped }
+}
+
 fn paint_one(
     rasterize: &mut impl FnMut(&TextRasterKey) -> Result<Rc<TextBitmap>, String>,
     font_file: Option<PathBuf>,
@@ -478,6 +566,8 @@ fn paint_one(
     // **这一条被整体缩了多少**（1.0 = 没缩）。描边要跟着它缩 ——
     // 参照是 `swEff = sw * wrapped.scale`。函数参数上不能用文档注释。
     scale: f32,
+    // **按高亮切好的分段**（颜色已解析）。空 = 没有 `.hl`，走一次画完的老路。
+    parts: &[dhampir_core::overlay::TextRun],
     style: &dhampir_core::overlay::TextStyle,
     // 这一帧的不透明度（淡入淡出算出来的，**契约层给的**）。
     opacity: f32,
@@ -507,8 +597,52 @@ fn paint_one(
         );
         return Painted::Failed;
     };
+    // ---------------------------------------------------------------------
+    // **有 `.hl` 分段时：逐段各画一张（各自上色 + 各自的行内偏移）。**
+    // ---------------------------------------------------------------------
+    //
+    // 参照也是这么画的（`index.html:1985-1994`）：
+    //
+    // ```text
+    // line.forEach(p => {
+    //   ctx.strokeText(p.text, sx, ly);            // 逐段描边
+    //   ctx.fillStyle = p.hl ? hlColor : color;    // 逐段填色
+    //   ctx.fillText(p.text, sx, ly);
+    //   sx += pw;                                  // pw = measureText(p.text).width
+    // });
+    // ```
+    //
+    // # 行内偏移怎么来的（**这里是本仓与参照的一处已知残差**）
+    //
+    // 参照的 `pw` 是 **canvas 量出来的真实字宽** —— 量字与画字同一个引擎。
+    // 而这里 `drawtext` 的 `text_w` 只在**它自己那一张**里可用，
+    // 过滤器之间不能互引 —— **拿不到另一些段的真实宽度**。
+    // 所以偏移用**布局的逻辑字宽**（`measure_em`）累加，与行盒那套几何同源。
+    //
+    // 影响：全角字（中文）逻辑宽与实际推进一致，**偏移是准的**；
+    // 中英混排时英文半角的逻辑宽是估算值，**偏移会差几像素**。
+    // 这是"逻辑度量 vs 真实字体"那一类既有差异的延续，不是新引入的形状。
+    if !parts.is_empty() {
+        return paint_parts(
+            rasterize,
+            // `paint_one` 上面已经确认过字体给没给，这里带下去就行。
+            Some(font_file),
+            image,
+            target,
+            parts,
+            style,
+            scale,
+            opacity,
+            dy_px,
+            judge_clip,
+            log,
+            placement,
+        );
+    }
     let key = TextRasterKey {
         text: text.to_string(),
+        // 整行居中：老行为（`.hl` 的分段走上面那条分支）。
+        x_offset: 0,
         font_px: placement.font_px,
         // **用这一条自己的颜色**（求值层已解析）。
         // 这里以前读的是 `style.color`（轨道默认）—— 于是"逐条颜色"在求值层
@@ -593,6 +727,8 @@ fn paint_lines(
             item.color,
             // 字幕的缩放：布局算出来的（参照从不截断，缩字是它的常规路径）。
             item.scale,
+            // **逐段颜色**：空 = 没有 `.hl`，走一次画完的老路。
+            &item.parts,
             &overlay.subtitle_style,
             item.opacity,
             item.dy_px,
@@ -623,6 +759,8 @@ fn paint_lines(
             // 不把这个字段放进 `DanmakuTextItem` —— 放进去就等于宣称弹幕会缩，
             // 一个恒为 1 的字段只会让读的人以为它有意义。
             1.0,
+            // 弹幕没有 `.hl` 标记。
+            &[],
             &overlay.danmaku_style,
             item.opacity,
             item.dy_px,
@@ -723,11 +861,13 @@ mod tests {
                     color: [255, 255, 255, 255],
                     font_ratio: 0.04,
                     scale: 1.0,
+                    parts: Vec::new(),
                 })
                 .collect(),
             danmaku: Vec::new(),
             subtitle_style: dhampir_core::overlay::TextStyle {
                 color: [255, 255, 255, 255],
+                highlight_color: None,
                 font_ratio: 0.04,
                 outline: true,
                 stroke_px: 0.0,
@@ -763,6 +903,7 @@ mod tests {
             subtitle_style: dhampir_core::overlay::TextStyle::default(),
             danmaku_style: dhampir_core::overlay::TextStyle {
                 color: [255, 255, 255, 255],
+                highlight_color: None,
                 font_ratio: 0.04,
                 outline: true,
                 stroke_px: 0.0,

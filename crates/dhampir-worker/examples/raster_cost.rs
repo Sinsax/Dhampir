@@ -208,6 +208,7 @@ fn run(args: Result<Args, String>) -> Result<(), String> {
         for index in 0..args.cold {
             let text = LINES[index % LINES.len()];
             let key = TextRasterKey {
+                x_offset: 0,
                 text: text.to_string(),
                 font_px,
                 color: style.color,
@@ -243,6 +244,7 @@ fn run(args: Result<Args, String>) -> Result<(), String> {
         // --- 热：同一个键过缓存 -------------------------------------------
         let warm_text = LINES[0];
         let warm_key = TextRasterKey {
+            x_offset: 0,
             text: warm_text.to_string(),
             font_px,
             color: style.color,

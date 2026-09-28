@@ -126,6 +126,29 @@ if (tw > maxLineW + EPS) scale = max(0.7, min(1, maxLineW * 3 / tw));
 缩字号时**描边也跟着缩**（参照 `swEff = sw * wrapped.scale`）——
 不缩的症状是"缩过的字幕描边显得特别粗"，而字号与行高都对，只有描边不对。
 
+#### 高亮词：`<span class="hl">`
+
+字幕文本里可以写 `<span class="hl">…</span>`，那几段用 `highlight_color` 上色
+（其余用正文色）。**只有填色不同，描边仍用 `stroke_color`** —— 与参照一致：
+
+```text
+ctx.strokeText(p.text, sx, ly);            // 逐段描边
+ctx.fillStyle = p.hl ? hlColor : color;    // 逐段填色
+ctx.fillText(p.text, sx, ly);
+```
+
+| 字段 | 默认 | 作用 |
+|---|---|---|
+| `highlight_color` | `None` | **`None` = 不做高亮**（既有工程逐字节不变）。V-Trim 的默认是 `#f56b41` |
+
+**没有标记时一行只栅格化一次**（走老路）；有标记时才逐段各栅格化一次。
+
+⚠️ **两端各有一处已知残差**：段与段之间的**水平推进量**。
+
+* **浏览器**：`ctx.measureText` —— **量字与画字同一个引擎**，与参照条件完全一致，**偏移是准的**
+* **CLI**：`drawtext` 的 `text_w` 只在**它自己那一张**里可用，过滤器之间不能互引，
+  所以偏移用**布局的逻辑字宽**累加。全角字（中文）准；中英混排时英文半角会差几像素
+
 ### 4.3 分块并行（默认关）
 
 ```bash
