@@ -106,6 +106,29 @@ pub struct TextLine {
     /// （`font_ratio / style.font_ratio` 也能反推，但那是"靠两个字段的商"，
     /// 一旦哪天其中一个改了口径就会**静默**漂）。
     pub scale: f32,
+    /// **按高亮切好的分段**（`.hl`）。没标记时就是一段 `highlight = false`。
+    ///
+    /// 与 `text` 的关系：`text` 是这些段的**拼接**（断行、量宽、栅格化缓存键
+    /// 都还用 `text`）。渲染侧按 `parts` **逐段描边 + 填色** —— 参照就是这么画的：
+    ///
+    /// ```text
+    /// line.forEach(p => {
+    ///   ctx.strokeText(p.text, sx, ly);            // 先描边
+    ///   ctx.fillStyle = p.hl ? hlColor : color;    // 再按段填色
+    ///   ctx.fillText(p.text, sx, ly);
+    ///   sx += pw;
+    /// });
+    /// ```
+    pub parts: Vec<TextPart>,
+}
+
+/// 一行里的**一段**：文字 + 它是不是高亮（`<span class="hl">` 包起来的）。
+///
+/// 断行会把一段拆到两行 —— 所以 `parts` 是**每行各自**的，不是全篇的。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextPart {
+    pub text: String,
+    pub highlight: bool,
 }
 
 /// 一次布局的结果。
@@ -185,14 +208,77 @@ fn is_zero_width(ch: char) -> bool {
     )
 }
 
+/// 把一段文本按 `<span class="hl">…</span>` 切成 `(文字, 是否高亮)` 的段。
+///
+/// 与参照的正则**同一套语义**：
+///
+/// ```text
+/// /<span class="hl">([^<]+)<\/span>|[^<]+/g
+/// ```
+///
+/// 它是"要么一个高亮 span、要么一段不含 `<` 的普通文字" —— 所以**别的标签
+/// （`<b>` 之类）会被跳过**，而它们之间的文字照收。这里手写同一件事：
+/// 见 `<span class="hl">` 就进高亮段，见 `</span>` 就出来，见别的 `<…>` 就**整段丢掉**。
+///
+/// 不用 `regex` crate：这条规则只认一个固定的开始标签，手写比引依赖清楚。
+fn parse_highlight(text: &str) -> Vec<(String, bool)> {
+    const OPEN: &str = "<span class=\"hl\">";
+    let mut out: Vec<(String, bool)> = Vec::new();
+    let mut plain = String::new();
+    let mut rest = text;
+    loop {
+        let Some(at) = rest.find('<') else {
+            plain.push_str(rest);
+            break;
+        };
+        plain.push_str(&rest[..at]);
+        rest = &rest[at..];
+        if let Some(body) = rest.strip_prefix(OPEN) {
+            // 高亮段：取到 `</span>`（没有闭合就吃到结尾 —— 不假装它闭合了）。
+            let end = body.find("</span>");
+            let (marked, after) = match end {
+                Some(i) => (&body[..i], &body[i + "</span>".len()..]),
+                None => (body, ""),
+            };
+            if !plain.is_empty() {
+                out.push((std::mem::take(&mut plain), false));
+            }
+            if !marked.is_empty() {
+                out.push((marked.to_string(), true));
+            }
+            rest = after;
+            continue;
+        }
+        // 别的标签：整段丢掉（与参照的正则一致 —— 两边都不匹配它）。
+        match rest.find('>') {
+            Some(i) => rest = &rest[i + 1..],
+            None => break,
+        }
+    }
+    if !plain.is_empty() {
+        out.push((plain, false));
+    }
+    if out.is_empty() {
+        out.push((String::new(), false));
+    }
+    out
+}
+
 /// 排版原子：文本 + 宽度 + 是不是空格。
 struct Atom {
     text: String,
     width: f32,
     is_space: bool,
+    /// 这个原子属不属于高亮段（`.hl`）。
+    highlight: bool,
 }
 
-fn flush_word(atoms: &mut Vec<Atom>, word: &mut String, word_width: &mut f32) {
+fn flush_word(
+    atoms: &mut Vec<Atom>,
+    word: &mut String,
+    word_width: &mut f32,
+    highlight: bool,
+) {
     if word.is_empty() {
         return;
     }
@@ -200,6 +286,7 @@ fn flush_word(atoms: &mut Vec<Atom>, word: &mut String, word_width: &mut f32) {
         text: std::mem::take(word),
         width: *word_width,
         is_space: false,
+        highlight,
     });
     *word_width = 0.0;
 }
@@ -212,43 +299,69 @@ fn atoms_of(paragraph: &str) -> Vec<Atom> {
     let mut atoms: Vec<Atom> = Vec::new();
     let mut word = String::new();
     let mut word_width = 0.0_f32;
+    // 当前正在处理的段是不是高亮段。切段时先把攒着的词吐出去。
+    let mut highlight = false;
 
-    for ch in paragraph.chars() {
-        if is_zero_width(ch) {
-            // 零宽字符不占宽度，跟着当前这个词走。
+    for (segment, is_hl) in parse_highlight(paragraph) {
+        if is_hl != highlight {
+            flush_word(&mut atoms, &mut word, &mut word_width, highlight);
+            highlight = is_hl;
+        }
+        for ch in segment.chars() {
+            if is_zero_width(ch) {
+                // 零宽字符不占宽度，跟着当前这个词走。
+                word.push(ch);
+                continue;
+            }
+            if ch == ' ' || ch == '\t' {
+                flush_word(&mut atoms, &mut word, &mut word_width, highlight);
+                atoms.push(Atom {
+                    text: " ".to_string(),
+                    width: SPACE_EM,
+                    is_space: true,
+                    highlight,
+                });
+                continue;
+            }
+            if is_full_width(ch) {
+                flush_word(&mut atoms, &mut word, &mut word_width, highlight);
+                atoms.push(Atom {
+                    text: ch.to_string(),
+                    width: advance_em(ch),
+                    is_space: false,
+                    highlight,
+                });
+                continue;
+            }
             word.push(ch);
-            continue;
+            word_width += advance_em(ch);
         }
-        if ch == ' ' || ch == '\t' {
-            flush_word(&mut atoms, &mut word, &mut word_width);
-            atoms.push(Atom {
-                text: " ".to_string(),
-                width: SPACE_EM,
-                is_space: true,
-            });
-            continue;
-        }
-        if is_full_width(ch) {
-            flush_word(&mut atoms, &mut word, &mut word_width);
-            atoms.push(Atom {
-                text: ch.to_string(),
-                width: advance_em(ch),
-                is_space: false,
-            });
-            continue;
-        }
-        word.push(ch);
-        word_width += advance_em(ch);
     }
-    flush_word(&mut atoms, &mut word, &mut word_width);
+    flush_word(&mut atoms, &mut word, &mut word_width, highlight);
     atoms
 }
 
 /// 贪心断行一段文本，结果追加进 out。**至少产出一行**（空段产出一个空行）。
-fn wrap_paragraph(paragraph: &str, max_width_em: f32, out: &mut Vec<String>) {
-    let mut line = String::new();
+fn wrap_paragraph(paragraph: &str, max_width_em: f32, out: &mut Vec<Vec<TextPart>>) {
+    let mut line: Vec<TextPart> = Vec::new();
     let mut width = 0.0_f32;
     let mut pending_space: Option<f32> = None;
+
+    /// 往当前行末尾追加一段（**同高亮属性就合并** —— 参照也是这么做的：
+    /// `if(last&&last.hl===hl)last.text+=ch;else cur.push({text:ch,hl:hl})`）。
+    fn push(line: &mut Vec<TextPart>, text: &str, highlight: bool) {
+        if let Some(last) = line.last_mut() {
+            if last.highlight == highlight {
+                last.text.push_str(text);
+                return;
+            }
+        }
+        line.push(TextPart {
+            text: text.to_string(),
+            highlight,
+        });
+    }
+    let line_text = |line: &[TextPart]| line.iter().map(|p| p.text.as_str()).collect::<String>();
 
     for atom in atoms_of(paragraph) {
         if atom.is_space {
@@ -274,25 +387,34 @@ fn wrap_paragraph(paragraph: &str, max_width_em: f32, out: &mut Vec<String>) {
             for ch in atom.text.chars() {
                 let advance = advance_em(ch);
                 if piece_width + advance > max_width_em && !piece.is_empty() {
-                    out.push(std::mem::take(&mut piece));
+                    out.push(vec![TextPart {
+                        text: std::mem::take(&mut piece),
+                        highlight: atom.highlight,
+                    }]);
                     piece_width = 0.0;
                 }
                 piece.push(ch);
                 piece_width += advance;
             }
-            line = piece;
+            line = vec![TextPart {
+                text: piece,
+                highlight: atom.highlight,
+            }];
             width = piece_width;
             continue;
         }
 
         if let Some(space) = pending_space.take() {
-            line.push(' ');
+            // 空格跟着**前一段**的属性走（它就是前一段后面的那个空格）。
+            let hl = line.last().map(|p| p.highlight).unwrap_or(atom.highlight);
+            push(&mut line, " ", hl);
             width += space;
         }
-        line.push_str(&atom.text);
+        push(&mut line, &atom.text, atom.highlight);
         width += atom.width;
     }
 
+    let _ = line_text(&line);
     out.push(line);
 }
 
@@ -360,7 +482,7 @@ pub fn layout(text: &str, style: &SubtitleStyle, sequence: (u32, u32)) -> TextLa
     // 折行在"缩放后"的参照系里做：每字宽度乘 `scale`，等价于可用宽除以 `scale`。
     let wrap_width_em = max_width_em / scale;
 
-    let mut raw_lines: Vec<String> = Vec::new();
+    let mut raw_lines: Vec<Vec<TextPart>> = Vec::new();
     for paragraph in text.split('\n') {
         wrap_paragraph(paragraph, wrap_width_em, &mut raw_lines);
     }
@@ -382,9 +504,12 @@ pub fn layout(text: &str, style: &SubtitleStyle, sequence: (u32, u32)) -> TextLa
 
     let mut lines = Vec::with_capacity(keep);
     for (index, raw) in raw_lines.iter().take(keep).enumerate() {
-        let width_norm = (measure_em(raw) * font_px / sequence_width).min(1.0);
+        // `text` 是各段的拼接：断行量宽、栅格化缓存键都还用它。
+        let text: String = raw.iter().map(|p| p.text.as_str()).collect();
+        let width_norm = (measure_em(&text) * font_px / sequence_width).min(1.0);
         lines.push(TextLine {
-            text: raw.clone(),
+            parts: raw.clone(),
+            text,
             font_ratio: style.font_ratio * scale,
             scale,
             rect: NormalizedRect {
@@ -817,6 +942,93 @@ mod tests {
     ///
     /// 参照**从不丢行**（它把折出来的行全画了）；本仓的 `max_lines` 是"超出就丢"。
     /// 两者靠"缩字保证装得下"对上。
+    /// **高亮段解析**：与参照那个正则同一套语义
+    /// （`/<span class="hl">([^<]+)<\/span>|[^<]+/g`）。
+    #[test]
+    fn 高亮段按参照的正则语义切分() {
+        // 普通文本
+        assert_eq!(parse_highlight("没有标记"), vec![("没有标记".to_string(), false)]);
+        // 前后的普通文字 + 中间一段高亮
+        assert_eq!(
+            parse_highlight("前<span class=\"hl\">高亮</span>后"),
+            vec![
+                ("前".to_string(), false),
+                ("高亮".to_string(), true),
+                ("后".to_string(), false),
+            ]
+        );
+        // **别的标签要被跳过**：参照的正则两边都不匹配 `<b>`，而它两边的文字照收。
+        //
+        // ⚠️ 这里是本仓与参照**形状不同、像素相同**的一处：参照会切出
+        // `[a, b, c]` **三段**（正则各匹配一次），本仓把被跳过的标签两边的
+        // 普通文字**连成一段**。画出来一模一样（两段之间没有墨），
+        // 而段数少意味着**描边少叠两次** —— 段边界上描边会叠色。
+        assert_eq!(
+            parse_highlight("a<b>b</b>c"),
+            vec![("abc".to_string(), false)],
+            "被跳过的标签两侧的普通文字应当连成一段"
+        );
+        // 开头就是高亮
+        assert_eq!(
+            parse_highlight("<span class=\"hl\">高</span>平"),
+            vec![("高".to_string(), true), ("平".to_string(), false)]
+        );
+        // 没闭合：吃到结尾，**不假装它闭合了**
+        assert_eq!(parse_highlight("x<span class=\"hl\">y"), vec![
+            ("x".to_string(), false),
+            ("y".to_string(), true),
+        ]);
+    }
+
+    /// **同行里相邻的同属性段要合并** —— 参照也是这么做的
+    /// （`if(last&&last.hl===hl)last.text+=ch`），不合并会让渲染侧多画几次
+    /// 描边，而描边在段边界上会**叠色**，看起来像"描边变粗了"。
+    #[test]
+    fn 同行相邻的同属性段合并() {
+        let mut style = style();
+        style.font_ratio = 0.04;
+        style.max_lines = 3;
+        style.safe_width_ratio = 0.875;
+        style.keep_all_lines = true;
+        let seq = (1920, 1080);
+        // 高亮紧跟普通：两段属性不同 -> 不合并；两段都普通 -> 合并成一段。
+        let out = layout("甲<span class=\"hl\">乙</span>丙丁", &style, seq);
+        let parts = &out.lines[0].parts;
+        assert_eq!(parts.len(), 3, "属性不同不该合并：{parts:?}");
+        assert_eq!(parts[0].highlight, false);
+        assert_eq!(parts[1].highlight, true);
+        assert_eq!(parts[1].text, "乙");
+        assert_eq!(parts[2].highlight, false);
+        assert_eq!(parts[2].text, "丙丁", "相邻的两个普通段应当并成一段");
+        // `text` 是各段的拼接 —— 两者必须一致，否则量宽与画的字不是一个东西。
+        assert_eq!(out.lines[0].text, "甲乙丙丁");
+    }
+
+    /// **一段被断行拆到两行**时，两行各自带自己的分段。
+    #[test]
+    fn 高亮段跨行时两行各自带分段() {
+        let mut style = style();
+        style.font_ratio = 0.04;
+        style.max_lines = 3;
+        style.safe_width_ratio = 0.875;
+        style.keep_all_lines = true;
+        let seq = (1920, 1080);
+        // **长度要算过**：`max_width_em = 1920*0.875 / (0.04*1080) = 38.9 em`，
+        // 所以 30 个全宽字（30 em）**一行就装得下**。我第一版写 3 遍，
+        // 断言"必然跨行"直接打红。要 6 遍（60 em）才跨。
+        let marked = format!("<span class=\"hl\">{}</span>", "一二三四五六七八九十".repeat(6));
+        let out = layout(&marked, &style, seq);
+        assert!(out.lines.len() > 1, "这份文本应当折成多行，实得 {}", out.lines.len());
+        for line in &out.lines {
+            assert!(
+                line.parts.iter().all(|p| p.highlight),
+                "整条都是高亮，每一行的每一段都该是 true"
+            );
+            let joined: String = line.parts.iter().map(|p| p.text.as_str()).collect();
+            assert_eq!(joined, line.text, "分段拼接必须等于 text");
+        }
+    }
+
     #[test]
     fn 装不下时整体缩字号() {
         let mut style = style();

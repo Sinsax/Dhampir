@@ -115,6 +115,8 @@ export interface SubtitleStyle {
   font_ratio?: number;
   /** **字重**（100..=900，CSS 的同一套刻度）。默认 400。 */
   font_weight?: number;
+  /** **高亮词的颜色**（字幕文本里 `<span class="hl">…</span>` 那几段）。 */
+  highlight_color?: number[] | null;
   /** **不截断行数**（默认 false = 老行为：超过 `max_lines` 就丢）。 */
   keep_all_lines?: boolean;
   /** **行高 / 字号**的比例。默认 0 = 用 [`crate::text_layout::LINE_HEIGHT_EM`]（1.2）。 */

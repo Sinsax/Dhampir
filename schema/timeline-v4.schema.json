@@ -478,6 +478,22 @@
           "default": 400,
           "minimum": 0
         },
+        "highlight_color": {
+          "description": "**高亮词的颜色**（字幕文本里 `<span class=\"hl\">…</span>` 那几段）。\n\n`None` = 不做高亮（默认，既有工程逐字节不变）。\n\n参照（`index.html:1952` / `:1992`）：\n\n```text\nvar hlColor = subS.highlight_color || '#f56b41';\n...\nctx.fillStyle = p.hl ? hlColor : color;\n```\n\n也就是**只有填色不同，描边仍用 `stroke_color`** —— 参照对每一段\n先 `strokeText` 再按 `p.hl` 选 `fillStyle`。\n转译器按参照写 `#f56b41` = `[245, 107, 65, 255]`。",
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0
+          },
+          "maxItems": 4,
+          "minItems": 4
+        },
         "keep_all_lines": {
           "description": "**不截断行数**（默认 false = 老行为：超过 `max_lines` 就丢）。\n\n参照 `wrapCaptionParts` **从不丢行** —— 它把折出来的行**全画了**，\n那个 `MAX_LINES = 3` 只出现在缩字公式里（\"缩到恰好三行装得下\"），\n**不是截断阈值**。\n\n而它的闭式只保证 `总宽 × scale == 可用宽 × 3`，**贪心折行每行会浪费一点**\n（可用宽 46.67 em 的一行只装得下 46 个全宽字），所以**实际会折出 4 行**。\n于是\"缩字 + `max_lines = 3`\"仍会丢掉第 4 行 —— 与参照不一致。\n\n实测：140 个全宽字、`max_lines = 3`、`shrink_min_scale = 0.7` 时\n折行结果是 4 行、丢 1 行；置 true 才与参照一致（丢 0 行）。",
           "type": "boolean",

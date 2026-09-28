@@ -377,6 +377,23 @@ pub struct SubtitleStyle {
     /// 折行结果是 4 行、丢 1 行；置 true 才与参照一致（丢 0 行）。
     #[serde(default)]
     pub keep_all_lines: bool,
+    /// **高亮词的颜色**（字幕文本里 `<span class="hl">…</span>` 那几段）。
+    ///
+    /// `None` = 不做高亮（默认，既有工程逐字节不变）。
+    ///
+    /// 参照（`index.html:1952` / `:1992`）：
+    ///
+    /// ```text
+    /// var hlColor = subS.highlight_color || '#f56b41';
+    /// ...
+    /// ctx.fillStyle = p.hl ? hlColor : color;
+    /// ```
+    ///
+    /// 也就是**只有填色不同，描边仍用 `stroke_color`** —— 参照对每一段
+    /// 先 `strokeText` 再按 `p.hl` 选 `fillStyle`。
+    /// 转译器按参照写 `#f56b41` = `[245, 107, 65, 255]`。
+    #[serde(default)]
+    pub highlight_color: Option<[u8; 4]>,
 }
 
 fn default_font_weight() -> u32 { 400 }
@@ -419,6 +436,8 @@ impl Default for SubtitleStyle {
             shrink_min_scale: 0.0,
             // false = 超出 max_lines 就丢，既有工程逐字节不变。
             keep_all_lines: false,
+            // None = 不做高亮，既有工程逐字节不变。
+            highlight_color: None,
         }
     }
 }

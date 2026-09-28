@@ -771,7 +771,7 @@ mod tests {
         let rect = NormalizedRect { x: 0.125, y: 0.75, width: 0.5, height: 0.0625 };
         let view = RectView::from(rect);
         assert_eq!(view, RectView { x: 0.125, y: 0.75, width: 0.5, height: 0.0625 });
-        let item = TextItemView::from(TextLine { text: "两行\n两行".to_string(), rect, font_ratio: 0.04, scale: 1.0 });
+        let item = TextItemView::from(TextLine { text: "两行\n两行".to_string(), parts: vec![], rect, font_ratio: 0.04, scale: 1.0 });
         let value = serde_json::to_value(&item).unwrap();
         assert_eq!(value["text"], serde_json::json!("两行\n两行"));
         assert_eq!(value["rect"]["x"], serde_json::json!(0.125));
