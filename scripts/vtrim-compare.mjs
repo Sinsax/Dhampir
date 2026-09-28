@@ -54,7 +54,8 @@
 // * `ffmpeg` / `ffprobe` 在 PATH 上
 // * `dhampir.exe`（`--dhampir`，默认 `target/debug/dhampir.exe`）
 // * `vtrim.exe`（`--vtrim`，不传就自己找 `.workbuddy/perf/bin/vtrim.exe`）
-// * 转译器（`--translator`，默认 `tools/polish-to-dhampir.mjs`）
+// * 转译器（`--translator` / `VTRIM_TRANSLATOR`，默认找 `<V-Trim>/tools/…`）——
+//   **它在 V-Trim 那一侧**，见下面"转译器住在哪"
 //
 // **转译器不属于这个仓库**（它是 V-Trim 那一侧的东西，见 `docs/vtrim-integration.md`），
 // 所以路径可配 —— 等它搬到 V-Trim 去了，这里传个路径就行。
@@ -93,7 +94,8 @@ const USAGE = `用法：node scripts/vtrim-compare.mjs --clip <clip 目录> [选
   --clip <目录>         V-Trim 的片段目录（里面有 polish.toml / clip.mp4）
   --events <json>       要插进去的测试事件（JSON 数组，源时间）。不给 = 只比现有工程
   --out <目录>          运行目录（默认 out/vtrim-compare）
-  --translator <路径>   转译器（默认 tools/polish-to-dhampir.mjs）
+  --translator <路径>   转译器（默认找 ../V-Trim/tools/polish-to-dhampir.mjs；
+                        也可用环境变量 VTRIM_TRANSLATOR）
   --dhampir <路径>      dhampir 可执行（默认 target/debug/dhampir.exe）
   --vtrim <路径>        vtrim 可执行（默认自动找）
   --font-file <路径>    字幕字体（默认 C:/Windows/Fonts/msyh.ttc）
@@ -395,7 +397,18 @@ function main() {
   if (!existsSync(tomlPath)) throw new Error(`找不到 ${tomlPath}`);
 
   const runDir = resolve(args.out || join(REPO_ROOT, 'out', 'vtrim-compare'));
-  const translator = resolve(args.translator || join(REPO_ROOT, 'tools', 'polish-to-dhampir.mjs'));
+  // 转译器**住在 V-Trim 那一侧**（见 docs/vtrim-integration.md 第十节）。
+  //
+  // 与 `vtrim` 同一个办法：候选列表 + 环境变量，全找不到就**大声报错并列出找过哪里**。
+  // 「指一个相对路径」在这里是错的 —— Dhampir 与 V-Trim 是两个仓库，
+  // `<Dhampir>/tools/…` 这个位置已经**不存在**了（那份是重复的，已删）。
+  const translatorCandidates = [
+    args.translator,
+    process.env.VTRIM_TRANSLATOR,
+    join(REPO_ROOT, '..', 'V-Trim', 'tools', 'polish-to-dhampir.mjs'),
+    join(REPO_ROOT, '..', '..', 'V-Trim', 'tools', 'polish-to-dhampir.mjs'),
+  ].filter(Boolean).map((p) => resolve(p));
+  const translator = translatorCandidates.find((p) => existsSync(p));
   const dhampir = resolve(args.dhampir || join(REPO_ROOT, 'target', 'debug', 'dhampir.exe'));
   const fontFile = args.fontFile || 'C:/Windows/Fonts/msyh.ttc';
   // vtrim 可执行：按**候选列表**找，而不是猜一个相对路径。
@@ -411,9 +424,15 @@ function main() {
   ].filter(Boolean).map((p) => resolve(p));
   const vtrim = vtrimCandidates.find((p) => existsSync(p)) || 'vtrim';
 
-  for (const [what, path] of [['转译器', translator], ['dhampir', dhampir]]) {
-    if (!existsSync(path)) throw new Error(`找不到${what}：${path}`);
+  if (!translator) {
+    throw new Error(
+      '找不到转译器（`polish-to-dhampir.mjs`）。它住在 V-Trim 那一侧，\n' +
+      '  用 `--translator <路径>` 或环境变量 `VTRIM_TRANSLATOR` 显式指一个。找过：\n' +
+      translatorCandidates.map((p) => `    ${p}`).join('\n'),
+    );
   }
+  if (!existsSync(dhampir)) throw new Error(`找不到 dhampir：${dhampir}`);
+  log(`转译器：${translator}`);
   // `vtrim` 落回 PATH 时这里不报错（让它自己 spawn 失败），但**列清楚找过什么**。
   log(`vtrim：${existsSync(vtrim) ? vtrim : `${vtrim}（不在候选里，试 PATH）`}`);
   if (!existsSync(vtrim)) {

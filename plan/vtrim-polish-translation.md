@@ -1,5 +1,14 @@
 # polish.toml → Dhampir 工程：一次真实的转译
 
+> **转译器已搬到 V-Trim 那一侧。** 这份文档里出现的 `tools/polish-to-dhampir.mjs`
+> 指的是**当时**它在 Dhampir 里的位置；现在它在：
+>
+>     <V-Trim>/tools/polish-to-dhampir.mjs
+>     <V-Trim>/scripts/check-vtrim-translator.mjs
+>     <V-Trim>/docs/vtrim-integration.md   （转译接口正文）
+>
+> 下面的命令与读数**保持原样不动** —— 它们是当时的实测记录，改掉就不是记录了。
+
 两个样本，都记在这份文档里：
 
 | 样本 | 目录 | 特点 |

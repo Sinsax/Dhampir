@@ -1,5 +1,14 @@
 # 承接 V-Trim polish：缺口清单与分阶段计划
 
+> **转译器已搬到 V-Trim 那一侧。** 这份文档里出现的 `tools/polish-to-dhampir.mjs`
+> 指的是**当时**它在 Dhampir 里的位置；现在它在：
+>
+>     <V-Trim>/tools/polish-to-dhampir.mjs
+>     <V-Trim>/scripts/check-vtrim-translator.mjs
+>     <V-Trim>/docs/vtrim-integration.md   （转译接口正文）
+>
+> 下面的命令与读数**保持原样不动** —— 它们是当时的实测记录，改掉就不是记录了。
+
 这份文档把 `tools/polish-to-dhampir.mjs` 转译时**报出来的每一处缺口**
 汇总成一张表，并给出分阶段的落地计划。数字全部来自实测
 （样本 A = `海市蜃楼之馆`，样本 B = `最鱿鱼之人`）。
