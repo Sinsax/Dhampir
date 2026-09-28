@@ -15,6 +15,41 @@
 > **为什么不在这里留一份**：那八节讲的是 V-Trim 的事件语义，改一次要动两边，
 > 而"两份并存的文档"一定会**静默漂移** —— 读的人不知道该信哪一份。
 > 所以这里只保留**跨仓库的那一节（第九节，运行在 Dhampir 侧）**与边界声明。
+>
+> **本仓不保存转译器的任何副本**（工作树里没有、git 也不跟踪它）。
+> 需要的时候**从 V-Trim 拿**，不改本仓的状态。
+
+---
+
+## 怎么从 V-Trim 拿（用的时候才拿）
+
+**什么都不用复制。** `scripts/vtrim-compare.mjs` 自己会去找，顺序是：
+
+| 优先级 | 来源 |
+|---|---|
+| 1 | `--translator <路径>` |
+| 2 | 环境变量 `VTRIM_TRANSLATOR` |
+| 3 | `<本仓>/../V-Trim/tools/polish-to-dhampir.mjs` |
+| 4 | `<本仓>/../../V-Trim/tools/polish-to-dhampir.mjs` |
+
+四个都找不到就**报错并列出找过哪些地方**（不静默退成"没有转译器"）。
+
+所以两个仓并排放着（`.../Code/Dhampir` 与 `.../Code/V-Trim`）时**开箱即用**；
+放别处就给它一个路径：
+
+```bash
+node scripts/vtrim-compare.mjs --clip "<片段目录>" --events fx.json \
+  --translator /path/to/V-Trim/tools/polish-to-dhampir.mjs
+```
+
+**只想转译、不跑对比**时，直接跑 V-Trim 那份（它自带 CLI）：
+
+```bash
+node <V-Trim>/tools/polish-to-dhampir.mjs "<片段目录>" --out out/t.json
+```
+
+它用起来仍然是零依赖的 —— 转译器**不 import 本仓的任何东西**，
+本仓也**不 import 它**。两个方向都没有代码依赖，只有"约定"。
 
 ---
 
