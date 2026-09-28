@@ -1993,6 +1993,10 @@ fn text_item_json(item: &dhampir_core::overlay::TextItem) -> serde_json::Value {
         "dy_px": item.dy_px,
         // **逐条颜色**：同一轨里不同的条可以不一样（ASS 的 `\c`）。
         "color": item.color,
+        // 字号与**这一条被缩了多少**。JS 侧栅格化要用它们：
+        // 字号决定 `ctx.font`，缩放决定**描边宽度**（参照 `swEff = sw * scale`）。
+        "font_ratio": item.font_ratio,
+        "scale": item.scale,
     })
 }
 
@@ -2012,6 +2016,8 @@ fn danmaku_item_json(item: &dhampir_core::overlay::DanmakuTextItem) -> serde_jso
         dy_px: item.dy_px,
         color: item.color,
         font_ratio: item.font_ratio,
+        // 弹幕不缩字（参照的弹幕没有缩字逻辑）；这里是从弹幕条目转出来的。
+        scale: 1.0,
     });
     value["lane"] = serde_json::json!(item.lane);
     value["enter"] = serde_json::json!(item.enter);

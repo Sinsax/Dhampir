@@ -345,6 +345,38 @@ pub struct SubtitleStyle {
     /// 转译器按 V-Trim 显式写 0.875。
     #[serde(default)]
     pub safe_width_ratio: f32,
+    /// **装不下时整体缩字号的下限**。默认 0 = 不缩（老行为：超出直接丢行）。
+    ///
+    /// 参照（`index.html` 的 `wrapCaptionParts`）是：
+    ///
+    /// ```text
+    /// var scale = 1;
+    /// if (tw > maxLineW + EPS) scale = Math.max(0.7, Math.min(1, maxLineW * 3 / tw));
+    /// ```
+    ///
+    /// 也就是**闭式**算出缩放比（`tw` 是基准字号下的总宽），再按缩放后的字号折行；
+    /// `size = baseSize * scale`、`lh = size * 1.5`、`swEff = sw * scale`。
+    /// 转译器按参照写 **0.7**。
+    ///
+    /// 默认 0（不缩）是为了既有工程逐字节不变 —— 这是一条**行为变化**，
+    /// 不能悄悄改默认值（否则老工程的"多出来的行被丢掉"会变成"整块字变小"，
+    /// 两者一眼就能看出来，但那属于换行为而不是修真值）。
+    #[serde(default)]
+    pub shrink_min_scale: f32,
+    /// **不截断行数**（默认 false = 老行为：超过 `max_lines` 就丢）。
+    ///
+    /// 参照 `wrapCaptionParts` **从不丢行** —— 它把折出来的行**全画了**，
+    /// 那个 `MAX_LINES = 3` 只出现在缩字公式里（"缩到恰好三行装得下"），
+    /// **不是截断阈值**。
+    ///
+    /// 而它的闭式只保证 `总宽 × scale == 可用宽 × 3`，**贪心折行每行会浪费一点**
+    /// （可用宽 46.67 em 的一行只装得下 46 个全宽字），所以**实际会折出 4 行**。
+    /// 于是"缩字 + `max_lines = 3`"仍会丢掉第 4 行 —— 与参照不一致。
+    ///
+    /// 实测：140 个全宽字、`max_lines = 3`、`shrink_min_scale = 0.7` 时
+    /// 折行结果是 4 行、丢 1 行；置 true 才与参照一致（丢 0 行）。
+    #[serde(default)]
+    pub keep_all_lines: bool,
 }
 
 fn default_font_weight() -> u32 { 400 }
@@ -383,6 +415,10 @@ impl Default for SubtitleStyle {
             line_height: 0.0,
             // 0 = 沿用老行为（左右边距复用 `bottom_margin`），既有工程逐字节不变。
             safe_width_ratio: 0.0,
+            // 0 = 不缩字（超出行数就丢），既有工程逐字节不变。
+            shrink_min_scale: 0.0,
+            // false = 超出 max_lines 就丢，既有工程逐字节不变。
+            keep_all_lines: false,
         }
     }
 }

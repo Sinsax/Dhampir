@@ -41,6 +41,12 @@ use crate::layer::SubtitleStyle;
 
 /// 行高与字号的比例。1.2 是常见的默认值（比 1.0 松，比 1.5 紧）。
 pub const LINE_HEIGHT_EM: f32 = 1.2;
+
+/// 缩字公式里的 `MAX_LINES`（参照 `wrapCaptionParts` 的 `MAX_LINES = 3`）。
+///
+/// **它不是截断阈值** —— 参照从不丢行，这个 3 只出现在
+/// `scale = maxLineW * 3 / tw` 里，作用是"缩到恰好三行装得下"。
+pub const SHRINK_MAX_LINES: f32 = 3.0;
 /// 全角字符的前进宽度（em）。
 pub const FULL_WIDTH_EM: f32 = 1.0;
 /// 半角字符的前进宽度（em）。
@@ -92,6 +98,14 @@ pub struct TextLine {
     /// 在 30s 那一帧上肉眼就看得出来：同一句「就是有人在他的那个」，
     /// 参照的字明显小一圈。
     pub font_ratio: f32,
+    /// **这一行被整体缩了多少**（1.0 = 没缩）。
+    ///
+    /// 参照的 `swEff = sw * wrapped.scale` —— **描边要跟着缩**，
+    /// 而描边是在渲染侧按 `stroke_ratio * 目标高` 算的。与 `font_ratio`
+    /// 同一条理由：布局本来就知道它，带着走，下游就不必再反推
+    /// （`font_ratio / style.font_ratio` 也能反推，但那是"靠两个字段的商"，
+    /// 一旦哪天其中一个改了口径就会**静默**漂）。
+    pub scale: f32,
 }
 
 /// 一次布局的结果。
@@ -316,16 +330,53 @@ pub fn layout(text: &str, style: &SubtitleStyle, sequence: (u32, u32)) -> TextLa
         return empty;
     }
     let max_width_em = max_width_px / font_px;
+    // `EPS = 0.5`（参照的像素容差）换算到 em。
+    let eps_em = 0.5 / font_px;
+
+    // ---------------------------------------------------------------------
+    // 装不下时**整体缩字号**（参照 `wrapCaptionParts` 的闭式）
+    // ---------------------------------------------------------------------
+    //
+    //     var scale = 1;
+    //     if (tw > maxLineW + EPS) scale = Math.max(0.7, Math.min(1, maxLineW * 3 / tw));
+    //
+    // `tw` 是**基准字号下的总宽**，`3` 是参照自己的 `MAX_LINES`。
+    // 缩完之后 `tw * scale == maxLineW * 3` —— 也就是**恰好要 3 行**，
+    // 所以折行结果必然 <= 3 行。**参照从不丢行**（它把折出来的行全画了），
+    // `3` 只出现在这个公式里；本仓的 `max_lines` 是"超出就丢"，
+    // 两者要靠"缩字保证装得下"对上 —— 转译器同时写 `safe_width_ratio`、
+    // `shrink_min_scale` 与 `max_lines` 三个才等价。
+    //
+    // 多段落时用**最长那一段**的总宽：每段各自折行，缩字要让最长的那段也装得下。
+    // 单段落时它与参照的 `tw` 完全一致。
+    let total_em = text
+        .split('\n')
+        .map(measure_em)
+        .fold(0.0_f32, f32::max);
+    let mut scale = 1.0_f32;
+    if style.shrink_min_scale > 0.0 && total_em > max_width_em + eps_em {
+        scale = (max_width_em * SHRINK_MAX_LINES / total_em).clamp(style.shrink_min_scale, 1.0);
+    }
+    // 折行在"缩放后"的参照系里做：每字宽度乘 `scale`，等价于可用宽除以 `scale`。
+    let wrap_width_em = max_width_em / scale;
 
     let mut raw_lines: Vec<String> = Vec::new();
     for paragraph in text.split('\n') {
-        wrap_paragraph(paragraph, max_width_em, &mut raw_lines);
+        wrap_paragraph(paragraph, wrap_width_em, &mut raw_lines);
     }
 
     // max_lines = 0 表示不显示：全部丢掉并如实计数。
-    let keep = (style.max_lines as usize).min(raw_lines.len());
+    // `keep_all_lines` 时**不截断**（参照从不丢行，见那个字段的文档）。
+    let keep = if style.keep_all_lines {
+        raw_lines.len()
+    } else {
+        (style.max_lines as usize).min(raw_lines.len())
+    };
     let dropped_lines = raw_lines.len() - keep;
 
+    // **缩过的字号**：`size = baseSize * scale`（参照），行高跟着它走。
+    let font_px = font_px * scale;
+    let line_px = line_px * scale;
     let line_height_norm = line_px / sequence_height;
     let block_top = 1.0 - margin - (keep as f32) * line_height_norm;
 
@@ -334,7 +385,8 @@ pub fn layout(text: &str, style: &SubtitleStyle, sequence: (u32, u32)) -> TextLa
         let width_norm = (measure_em(raw) * font_px / sequence_width).min(1.0);
         lines.push(TextLine {
             text: raw.clone(),
-            font_ratio: style.font_ratio,
+            font_ratio: style.font_ratio * scale,
+            scale,
             rect: NormalizedRect {
                 // 居中：字幕的常规排法。想改就加一个对齐字段（加可选字段，不改版本）。
                 x: 0.5 - width_norm / 2.0,
@@ -758,6 +810,112 @@ mod tests {
     /// 反推那边却除以常量 `LINE_HEIGHT_EM`（1.2）——
     /// `line-height:1.5` 之下算出 `72 * 1.5 / 1.2 = 90`，**字号大了 1.25 倍**。
     /// 同一句字幕在成片里肉眼就看得出来比参照大一圈。
+    /// **装不下时整体缩字号**（参照 `wrapCaptionParts` 的闭式）。
+    ///
+    /// 参照：`scale = clamp(maxLineW * 3 / tw, 0.7, 1)`，`tw` 是基准字号下的总宽。
+    /// 缩完之后 `tw * scale == maxLineW * 3` —— 恰好三行，所以折行结果必然 <= 3 行。
+    ///
+    /// 参照**从不丢行**（它把折出来的行全画了）；本仓的 `max_lines` 是"超出就丢"。
+    /// 两者靠"缩字保证装得下"对上。
+    #[test]
+    fn 装不下时整体缩字号() {
+        let mut style = style();
+        style.font_ratio = 0.04;
+        style.max_lines = 3;
+        style.safe_width_ratio = 0.875;
+        style.line_height = 1.5;
+        let seq = (1920, 1080);
+
+        // 基准：不缩（默认 0）—— 老行为，超出就丢。
+        // **长度要选在窗口里**，这一条踩过两次：
+        //   * 6 遍（60 字）：可用宽约 39 em -> 只要 2 行，`max_lines=3` 装得下，
+        //     "不缩该丢行"**根本不成立**（实丢 0）
+        //   * 20 遍（200 字）：`scale = 39*3/200 = 0.58` 撞到下限 0.7，
+        //     缩到下限仍装不下 3 行 -> 还是会丢
+        // 要让"缩且**一行都不丢**"成立，得落在这个窗口里：
+        //     `39*3/总宽 ∈ (0.7, 1)`  ->  总宽 ∈ (117, 167) em
+        // 而且**丢的行数也要有差别**，否则"缩字至少少丢"这条断言没有分辨力：
+        //     不缩：ceil(160/38) = 5 行 -> 丢 2
+        //     缩后：ceil(160/46.67) = 4 行 -> 丢 1
+        // （140 字时两边都是 4 行、都丢 1 —— 我上一版就卡在这儿。）
+        let long = "一二三四五六七八九十".repeat(16);
+        let no_shrink = layout(&long, &style, seq);
+        assert_eq!(no_shrink.lines[0].scale, 1.0, "shrink_min_scale=0 时不该缩");
+        assert!(
+            no_shrink.dropped_lines > 0,
+            "不缩就该丢行（实丢 {}）",
+            no_shrink.dropped_lines
+        );
+
+        // 打开缩字：应当缩、且**一行都不丢**。
+        style.shrink_min_scale = 0.7;
+        let shrunk = layout(&long, &style, seq);
+        let scale = shrunk.lines[0].scale;
+        assert!(scale < 1.0, "打开缩字后应当缩，实得 {scale}");
+        assert!(scale >= 0.7 - 1e-6, "缩字不得低于下限 0.7，实得 {scale}");
+        // ⚠️ **缩字本身并不能保证"一行都不丢"**。
+        //
+        // 参照的闭式只保证 `总宽 × scale == 可用宽 × 3`，而**贪心折行每行会浪费**
+        // （可用宽 46.67 em 的一行只装得下 46 个全宽字）—— 所以实际折出 **4 行**。
+        // 参照那边不丢，是因为它**根本不截断**（`wrapCaptionParts` 把折出来的全画了）。
+        // 这里要两件事一起：缩字 **+ 不截断**。
+        assert!(
+            shrunk.dropped_lines < no_shrink.dropped_lines,
+            "缩字至少要**少丢**：{} vs {}",
+            shrunk.dropped_lines,
+            no_shrink.dropped_lines
+        );
+        style.keep_all_lines = true;
+        let kept = layout(&long, &style, seq);
+        assert_eq!(kept.dropped_lines, 0, "缩字 + 不截断，才与参照一样一行都不丢");
+        assert!(
+            kept.lines.len() <= SHRINK_MAX_LINES as usize + 1,
+            "缩完应当是 3~4 行（贪心折行的浪费最多再要一行），实得 {}",
+            kept.lines.len()
+        );
+        // 字号与行高都要跟着缩（参照：`size = baseSize * scale`、`lh = size * 1.5`）。
+        assert!(
+            (shrunk.lines[0].font_ratio - style.font_ratio * scale).abs() < 1e-6,
+            "font_ratio 必须乘过 scale"
+        );
+        // **行盒高也要缩**：它由 `line_px = font_px * line_em` 来，字号缩了它就得跟着缩。
+        let one = layout("一", &style, seq);
+        assert!(
+            shrunk.lines[0].rect.height < one.lines[0].rect.height,
+            "行盒高必须跟着缩（{} vs {}）",
+            shrunk.lines[0].rect.height,
+            one.lines[0].rect.height
+        );
+        // 且**不超过可用宽**（安全宽 87.5%）。
+        for line in &shrunk.lines {
+            assert!(
+                line.rect.width <= 0.875 + 1e-4,
+                "缩完的行不得超出安全宽：{}",
+                line.rect.width
+            );
+        }
+    }
+
+    /// 缩字**下限**要真的生效：极长的文本也只缩到 0.7，然后**允许丢行**。
+    #[test]
+    fn 缩字到下限之后才允许丢行() {
+        let mut style = style();
+        style.font_ratio = 0.04;
+        style.max_lines = 3;
+        style.safe_width_ratio = 0.875;
+        style.shrink_min_scale = 0.7;
+        let seq = (1920, 1080);
+        // 长到即使缩到 0.7 也装不下 3 行。
+        let huge = "一二三四五六七八九十".repeat(60);
+        let out = layout(&huge, &style, seq);
+        assert!(
+            (out.lines[0].scale - 0.7).abs() < 1e-6,
+            "极长文本应当缩到下限 0.7，实得 {}",
+            out.lines[0].scale
+        );
+        assert!(out.dropped_lines > 0, "缩到下限还装不下，就该丢行");
+    }
+
     #[test]
     fn 行盒变高不会把字号带大() {
         let rect = NormalizedRect { x: 0.25, y: 0.5, width: 0.5, height: 0.1 };

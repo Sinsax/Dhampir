@@ -115,6 +115,8 @@ export interface SubtitleStyle {
   font_ratio?: number;
   /** **字重**（100..=900，CSS 的同一套刻度）。默认 400。 */
   font_weight?: number;
+  /** **不截断行数**（默认 false = 老行为：超过 `max_lines` 就丢）。 */
+  keep_all_lines?: boolean;
   /** **行高 / 字号**的比例。默认 0 = 用 [`crate::text_layout::LINE_HEIGHT_EM`]（1.2）。 */
   line_height?: number;
   /** 最多几行（超出的行丢掉 —— 字幕不该盖住半屏）。 */
@@ -127,6 +129,8 @@ export interface SubtitleStyle {
   rise_out_px?: number;
   /** **换行安全宽**（占画布宽的比例）。默认 0 = 沿用老行为。 */
   safe_width_ratio?: number;
+  /** **装不下时整体缩字号的下限**。默认 0 = 不缩（老行为：超出直接丢行）。 */
+  shrink_min_scale?: number;
   /** 描边颜色。`outline` 为假时忽略。 */
   stroke_color?: number[];
   /** **描边宽度** = 目标高度 * 这个比例，单位是**外侧宽度**（见下）。 */

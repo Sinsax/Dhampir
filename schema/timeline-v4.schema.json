@@ -478,6 +478,11 @@
           "default": 400,
           "minimum": 0
         },
+        "keep_all_lines": {
+          "description": "**不截断行数**（默认 false = 老行为：超过 `max_lines` 就丢）。\n\n参照 `wrapCaptionParts` **从不丢行** —— 它把折出来的行**全画了**，\n那个 `MAX_LINES = 3` 只出现在缩字公式里（\"缩到恰好三行装得下\"），\n**不是截断阈值**。\n\n而它的闭式只保证 `总宽 × scale == 可用宽 × 3`，**贪心折行每行会浪费一点**\n（可用宽 46.67 em 的一行只装得下 46 个全宽字），所以**实际会折出 4 行**。\n于是\"缩字 + `max_lines = 3`\"仍会丢掉第 4 行 —— 与参照不一致。\n\n实测：140 个全宽字、`max_lines = 3`、`shrink_min_scale = 0.7` 时\n折行结果是 4 行、丢 1 行；置 true 才与参照一致（丢 0 行）。",
+          "type": "boolean",
+          "default": false
+        },
         "line_height": {
           "description": "**行高 / 字号**的比例。默认 0 = 用 [`crate::text_layout::LINE_HEIGHT_EM`]（1.2）。\n\nV-Trim 的字幕 CSS 是 `line-height:1.5`，本仓是 1.2 ——\n单行字幕看不出差别，**两行**的字间距会差 0.3em（72px 字号下是 21.6px）。",
           "type": "number",
@@ -510,6 +515,12 @@
         },
         "safe_width_ratio": {
           "description": "**换行安全宽**（占画布宽的比例）。默认 0 = 沿用老行为。\n\n# 为什么不是复用 `bottom_margin`\n\n本仓先前拿 `bottom_margin` 当左右边距用（那个字段本来是\"距底边多远\"）。\n默认值 0.06 凑出来是 **88%**，而 V-Trim 写死的是 **87.5%**\n（`wrapCaptionParts(cap.parts, CW * 0.875, …)`）—— 两个数**碰巧接近但不是同一个**，\n于是在刚好卡边界的行上会断在不同的地方。当时复用是\"不动契约\"的权宜，\n现在把它说清楚。\n\n默认 **0 = 沿用老行为**（继续复用 `bottom_margin`），所以既有工程逐字节不变；\n转译器按 V-Trim 显式写 0.875。",
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
+        "shrink_min_scale": {
+          "description": "**装不下时整体缩字号的下限**。默认 0 = 不缩（老行为：超出直接丢行）。\n\n参照（`index.html` 的 `wrapCaptionParts`）是：\n\n```text\nvar scale = 1;\nif (tw > maxLineW + EPS) scale = Math.max(0.7, Math.min(1, maxLineW * 3 / tw));\n```\n\n也就是**闭式**算出缩放比（`tw` 是基准字号下的总宽），再按缩放后的字号折行；\n`size = baseSize * scale`、`lh = size * 1.5`、`swEff = sw * scale`。\n转译器按参照写 **0.7**。\n\n默认 0（不缩）是为了既有工程逐字节不变 —— 这是一条**行为变化**，\n不能悄悄改默认值（否则老工程的\"多出来的行被丢掉\"会变成\"整块字变小\"，\n两者一眼就能看出来，但那属于换行为而不是修真值）。",
           "type": "number",
           "format": "float",
           "default": 0.0

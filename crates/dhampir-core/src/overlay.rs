@@ -69,6 +69,12 @@ pub struct TextItem {
     /// 宿主不该从行盒反推（行高可配之后那个反推是错的，见
     /// `dhampir_timeline::text_layout::TextLine::font_ratio`）。
     pub font_ratio: f32,
+    /// **这一条被整体缩了多少**（1.0 = 没缩）。
+    ///
+    /// 参照的 `swEff = sw * wrapped.scale` —— **描边要跟着缩**，
+    /// 而描边是宿主按 `stroke_px` 画的。与 `font_ratio` 同一条理由：
+    /// 布局算出来的事实，跟着条目走。
+    pub scale: f32,
 }
 
 /// 一条要画的弹幕：内容 + **这一帧**的矩形 + 泳道与在屏区间 + 这一帧的淡入淡出。
@@ -263,6 +269,7 @@ pub fn evaluate_overlay(
                     dy_px,
                     color: item_color,
                     font_ratio: line.font_ratio,
+                    scale: line.scale,
                 });
             }
             subtitle_style = TextStyle {

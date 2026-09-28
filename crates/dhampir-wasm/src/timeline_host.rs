@@ -221,6 +221,13 @@ struct TextLineSpec {
     /// 那三样数字，所以它们跟着条目一路带到清单里，而不是在报告那一层从别处再查一遍
     /// —— 再查一遍就是给「清单」与「报告」两次说法不一致的机会。
     danmaku: Option<DanmakuIdentity>,
+    /// **这一条被整体缩了多少**（1.0 = 没缩）。
+    ///
+    /// JS 侧栅格化时**描边要乘它**（参照 `swEff = sw * wrapped.scale`）。
+    /// 与 `color` 同一条理由：布局算出来的事实，带着走，别让 JS 反推
+    /// （`font_ratio / style.font_ratio` 也能推，但那是靠两个字段的商，
+    /// 一旦其中一个改了口径就会**静默**漂）。
+    scale: f32,
 }
 
 /// 一条弹幕的身份：泳道 + 在屏帧区间（**闭**区间）。
@@ -473,6 +480,7 @@ fn text_lines(
             placement,
             color: item.color,
             danmaku: None,
+            scale: item.scale,
         });
     }
     (Some(overlay), specs)
@@ -512,6 +520,8 @@ fn danmaku_placements(
                 enter: item.enter,
                 exit: item.exit,
             }),
+            // **弹幕不缩字**（参照的弹幕路径没有缩字逻辑），恒 1。
+            scale: 1.0,
         });
     }
     specs

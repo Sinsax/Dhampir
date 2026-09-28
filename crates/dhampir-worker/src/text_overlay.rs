@@ -475,6 +475,9 @@ fn paint_one(
     rect: dhampir_core::timeline::text_layout::NormalizedRect,
     // **这一条的颜色**（求值层已解析）。不是轨道默认 —— 那个只是它的兜底。
     color: [u8; 4],
+    // **这一条被整体缩了多少**（1.0 = 没缩）。描边要跟着它缩 ——
+    // 参照是 `swEff = sw * wrapped.scale`。函数参数上不能用文档注释。
+    scale: f32,
     style: &dhampir_core::overlay::TextStyle,
     // 这一帧的不透明度（淡入淡出算出来的，**契约层给的**）。
     opacity: f32,
@@ -515,7 +518,10 @@ fn paint_one(
         // `style.stroke_px` 已经是**目标像素**（`evaluate_overlay` 用 `stroke_ratio * 目标高`
         // 算的），而位图恒等于目标宽（见 `LinePlacement::bitmap_width`）
         // —— 所以两者同一套单位，不用再缩一次。
-        stroke_px: style.stroke_px.round() as u32,
+        // **描边要乘这一条的缩放**：参照 `swEff = sw * wrapped.scale`。
+        // 不乘的症状是"缩过的字幕描边显得特别粗" —— 字号与行高都对，
+        // 只有描边不对，很难一眼看出来。
+        stroke_px: (style.stroke_px * scale).round() as u32,
         stroke_color: style.stroke_color,
         font_file: font_file.to_path_buf(),
         width: placement.bitmap_width,
@@ -585,6 +591,8 @@ fn paint_lines(
             // **这一条的颜色**（求值层已解析：cue 自带覆盖轨道默认）。
             // 描边与开关仍走轨道样式 —— 那两样在契约里就是轨道级的。
             item.color,
+            // 字幕的缩放：布局算出来的（参照从不截断，缩字是它的常规路径）。
+            item.scale,
             &overlay.subtitle_style,
             item.opacity,
             item.dy_px,
@@ -611,6 +619,10 @@ fn paint_lines(
             &item.text,
             item.rect,
             item.color,
+            // **弹幕不缩字**（参照的弹幕路径没有缩字逻辑），恒传 1.0。
+            // 不把这个字段放进 `DanmakuTextItem` —— 放进去就等于宣称弹幕会缩，
+            // 一个恒为 1 的字段只会让读的人以为它有意义。
+            1.0,
             &overlay.danmaku_style,
             item.opacity,
             item.dy_px,
@@ -710,6 +722,7 @@ mod tests {
                     dy_px: 0.0,
                     color: [255, 255, 255, 255],
                     font_ratio: 0.04,
+                    scale: 1.0,
                 })
                 .collect(),
             danmaku: Vec::new(),

@@ -73,7 +73,14 @@ function rasterizeLine(line, style) {
   // **描边宽度优先用契约给的**（`stroke_px`），0 才退回"从字号推"——
   // 与 CLI 侧 `text_raster.rs` 的同一条分支判据，两边必须一致，
   // 否则预览与成片的描边粗细不同（而那看起来像"字重不一样"）。
-  const strokePx = style.stroke_px > 0 ? Math.round(style.stroke_px) : line.border_px;
+  //
+  // **再乘这一条的缩放**（`line.scale`）：参照是 `swEff = sw * wrapped.scale`
+  // —— 装不下时整体缩字号，描边要跟着缩。不乘的症状是"缩过的字幕描边特别粗"，
+  // 而字号与行高都对，只有描边不对，很难一眼看出来。
+  const scaled = (line.scale > 0 ? line.scale : 1);
+  const strokePx = style.stroke_px > 0
+    ? Math.round(style.stroke_px * scaled)
+    : Math.round(line.border_px * scaled);
   if (style.outline === true && strokePx > 0) {
     // 边宽取两倍：drawtext 的 borderw 是**向外**扩一圈，而 canvas 的描边压在字上。
     // 先描边后填字，内半边被字盖掉，剩下的外半边就是那一圈。
