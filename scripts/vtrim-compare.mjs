@@ -563,11 +563,44 @@ function main() {
 
     for (const [i, ev] of events.entries()) {
       const w = winOf(ev);
-      // 窗口内均匀取 5 点（含两端略内缩，避开边界帧）
+      // -----------------------------------------------------------------
+      // **取样点必须落在"两个片子都会取到同一帧"的时刻上。**（坑丙）
+      //
+      // 本仓与参照的帧率**不一样**（实测这一对是 60 vs 30）。同一条时间
+      // `-ss t` 在 60fps 上落在第 `round(t*60)` 帧，在 30fps 上落在
+      // `round(t*30)` 帧 —— **是两个不同的瞬间**。
+      //
+      // 对长窗口这无所谓；对**短效果**是致命的：stutter 的台阶只有 0.06 秒，
+      // 半帧错位就把整条量歪。实测症状是"stutter 18.24、邻居 5.42"，
+      // 而按参照帧率对齐再取，每一个点的最佳位移都是 (0,0)、整帧差 2.4~4.8 ——
+      // **效果本来就是对的**。
+      //
+      // 修法：取样点取**参照帧长**的整数倍（粗的那个）。这样两个片子都必然
+      // 落在自己那一格的开头，时间是一致的。
+      //
+      // 具体做法：**取参照每一帧的中点**。那一瞬间在两个片子里都落在
+      // "参照的第 f 帧"之内 —— 60fps 那边会取到覆盖这一瞬间的那一帧，
+      // 于是两边看的是**同一个瞬间**。
+      //
+      // ⚠️ 我第一版写成 `round(t/refFrame)*refFrame + refFrame*0.5` ——
+      // 那个 `+0.5` 把点推到参照帧的**中点**，而 60fps 那边正好落到**下一帧**，
+      // **自己制造了半帧错位**（stutter 从 18.24 只降到 12.43）。
+      // 中点要加在**帧号**上，不是加在时间上。
+      const refFrame = 1 / (refInfo.fps || 30);
       const ts = [];
-      for (let k = 0; k < 5; k += 1) {
-        ts.push(Number((w.outStart + (w.width * (k + 0.5)) / 5).toFixed(3)));
+      const firstF = Math.ceil(w.outStart / refFrame - 1e-6);
+      const lastF = Math.floor(w.outEnd / refFrame + 1e-6);
+      for (let f = firstF; f <= lastF && ts.length < 8; f += 1) {
+        // **取帧边界，不取中点。**
+        //
+        // 反直觉，但实测如此：ffmpeg 的 `-ss t` 会输出**PTS >= t 的第一帧**。
+        // 取中点 `(f+0.5)/fps` 时，那个值在浮点上可能落到 f+1 的边界上，
+        // 于是参照取到 f+1、本仓取到"含 f+1 的那一帧" —— **两边又错开一帧**。
+        // 实测：取中点 stutter 量出 14.30，取边界量出 (0,0)。
+        ts.push(Number((f * refFrame).toFixed(4)));
       }
+      // 窗口比参照一帧还短：只能取一个点（取窗口中点）。
+      if (!ts.length) ts.push(Number((w.outStart + w.width / 2).toFixed(4)));
       for (const [k, t] of ts.entries()) rows.push({ ...sample(`ev${i}-${k}`, t), group: `${ev.type}@${ev.time}`, t });
 
       // -----------------------------------------------------------------
@@ -597,6 +630,13 @@ function main() {
     });
 
     const avg = (list, key) => list.reduce((s, x) => s + x[key], 0) / Math.max(list.length, 1);
+    /// **中位数**。判据要用它，不能用平均数 —— 见下面 `median` 那一段的理由。
+    const median = (list, key) => {
+      if (!list.length) return 0;
+      const v = list.map((x) => x[key]).sort((a, b) => a - b);
+      const mid = v.length >> 1;
+      return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
+    };
     const base = byGroup.get('基线') || [];
     const basePixel = avg(base, 'pixel');
     const baseRatio = avg(base, 'ratio');
@@ -609,29 +649,43 @@ function main() {
     const baseDy = Math.round(avg(base, 'dy'));
     log(`  基线（窗口外 ${base.length} 处）：像素差 ${basePixel.toFixed(2)}   高频比 ${baseRatio.toFixed(2)}   位移 ${baseDy > 0 ? '+' : ''}${baseDy}px`);
     log('');
-    log('  ' + '特效'.padEnd(20) + '输出窗口'.padEnd(16) + '像素差'.padStart(8) + '邻居'.padStart(9) + '高频比'.padStart(8) + '位移'.padStart(6) + '  判定');
+    log('  ' + '特效'.padEnd(20) + '输出窗口'.padEnd(16) + '中位差'.padStart(8) + '邻居'.padStart(9) + '高频比'.padStart(8) + '最差点'.padStart(7) + '位移'.padStart(6) + '  判定');
     for (const ev of events) {
       const key = `${ev.type}@${ev.time}`;
       const g = byGroup.get(key);
       if (!g) continue;
       const w = winOf(ev);
-      const pixel = avg(g, 'pixel');
-      const ratio = avg(g, 'ratio');
-      const dy = Math.round(avg(g, 'dy'));
+      // -----------------------------------------------------------------
+      // **用中位数，不用平均数。**（坑丁）
+      //
+      // 一个窗口只取 5~8 个点，而只要**有一个点落在镜头切换/硬切那一帧上**，
+      // 它的差就是几十上百，足以主导整条平均。
+      // 实测：blur 窗口 8 个点是 `1.13 1.14 1.13 1.18 1.18 **157.35** 2.75 2.69`
+      // —— 平均 21.08、中位 1.18。**那个 157 是参照刚切到全幅、本仓还在画中画，
+      // 是"切换差一帧"，不是 blur 的问题。**
+      const pixel = median(g, 'pixel');
+      const ratio = median(g, 'ratio');
+      const dy = Math.round(median(g, 'dy'));
       // **判据跟邻居比，不跟全片平均比**（见上面"局部基线"的理由）。
       const neighbour = byGroup.get(`${key}#邻居`) || [];
-      const ref = neighbour.length >= 2 ? avg(neighbour, 'pixel') : basePixel;
+      const ref = neighbour.length >= 2 ? median(neighbour, 'pixel') : basePixel;
       const bad = pixel > ref * 1.5 + 2;
       // **邻居自己也脏的时候，判据没力气** —— 要明说。
       //
       // 不说的话，"✓"会被读成"这个特效是对的"，而它实际只说明
       // "这个窗口跟它周围一样差"。两者的区别在**换一批测试时刻**时就显形了。
       const noisy = ref > basePixel * 2;
-      const verdict = bad ? '✗ 高于邻居' : noisy ? '⚠ 底噪太脏，判据无效' : '✓';
+      // 窗口比参照的 2 帧还短时，取样点会**重复落在同一帧**上 —— 判据照样给，
+      // 但要说清"这条窗口只能取到 N 个不同的帧"。
+      const refFramesInWindow = Math.max(1, Math.round(w.width * (refInfo.fps || 30)));
+      const thin = refFramesInWindow < 2;
+      const verdict = bad ? '✗ 高于邻居' : noisy ? '⚠ 底噪太脏，判据无效' : thin ? '✓ 窗口仅 ' + refFramesInWindow + ' 参照帧' : '✓';
       const sharp = ratio > 1.25 ? ' 锯齿' : ratio < 0.8 ? ' 偏糊' : '';
       const shift = dy !== 0 ? ` 位移${dy > 0 ? '+' : ''}${dy}px` : '';
+      const worst = Math.max(...g.map((x) => x.pixel));
       log('  ' + key.padEnd(20) + `${w.outStart.toFixed(2)}-${w.outEnd.toFixed(2)}`.padEnd(16)
-        + pixel.toFixed(2).padStart(8) + ref.toFixed(2).padStart(9) + ratio.toFixed(2).padStart(8) + String(dy).padStart(6)
+        + pixel.toFixed(2).padStart(8) + ref.toFixed(2).padStart(9) + ratio.toFixed(2).padStart(8)
+        + worst.toFixed(0).padStart(7) + String(dy).padStart(6)
         + `  ${verdict}${sharp}${shift}`);
     }
 
