@@ -24,7 +24,8 @@
 //! 那是 v2 的事。冻帧至少是**两端都能一模一样算出来**的。
 
 use dhampir_timeline::layer::{
-    AssetTimebases, BlendMode, Layer as LayerV2, TimelineV2, source_frame_looped,
+    AssetTimebases, BlendMode, Layer as LayerV2, TimelineV2, source_frame_at_delays,
+    source_frame_looped,
 };
 use dhampir_timeline::schema::{
     Clip, Effect, Frame, Project, TimebaseDto, TrackKind, Transform, TransitionSpec,
@@ -202,15 +203,31 @@ impl EvalContext<'_> {
         match self.assets.and_then(|table| table.get(&source.asset_id)) {
             // 时间基不合法时退回恒等而不是 panic：那是**契约层**该报的错
             // （invalid_timebase），渲染器没必要在这里死给你看。
-            Some(asset) => source_frame_looped(
-                source.source_in,
-                local_frame,
-                self.timeline,
-                asset,
-                self.assets.and_then(|table| table.frame_count(&source.asset_id)),
-                element.loop_source,
-            )
-            .unwrap_or(identity),
+            // **有逐帧延迟表就先走它**：GIF 那种动图每帧停留时长不一样，
+            // 而 `source_frame_looped` 是"按素材单一时间基匀速换算" —— 用它等于
+            // 假设每帧等长，累计误差会随时间线性长出来。
+            Some(asset) => match self
+                .assets
+                .and_then(|table| table.frame_delays(&source.asset_id))
+            {
+                Some(delays) => source_frame_at_delays(
+                    source.source_in,
+                    local_frame,
+                    self.timeline,
+                    delays,
+                    element.loop_source,
+                )
+                .unwrap_or(identity),
+                None => source_frame_looped(
+                    source.source_in,
+                    local_frame,
+                    self.timeline,
+                    asset,
+                    self.assets.and_then(|table| table.frame_count(&source.asset_id)),
+                    element.loop_source,
+                )
+                .unwrap_or(identity),
+            },
             None => identity,
         }
     }

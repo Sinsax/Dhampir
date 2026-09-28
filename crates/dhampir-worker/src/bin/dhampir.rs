@@ -1637,6 +1637,7 @@ fn cmd_import(args: &Args) -> Result<ExitCode, CommandError> {
         uri: relativize_uri(path, &asset_root),
         frame_count: None,
         timebase: None,
+        frame_delays_ms: None,
         width: None,
         height: None,
         content_hash: None,

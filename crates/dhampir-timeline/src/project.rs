@@ -113,6 +113,13 @@ pub struct Asset {
     /// 素材自身帧率。与工程时基不同就要换算。
 #[serde(default)]
     pub timebase: Option<TimebaseDto>,
+    /// **逐帧延迟表（毫秒）**，GIF 那种非匀速动图才有。
+    ///
+    /// 有它时帧号按延迟**累加**（`source_frame_at_delays`），不按素材单一时间基匀速换算 ——
+    /// 后者等于假设每帧等长，非匀速动图的累计误差会随时间**线性**长出来。
+    /// `None` = 匀速，老行为（既有工程逐字节不变）。
+#[serde(default)]
+    pub frame_delays_ms: Option<Vec<u32>>,
 #[serde(default)]
     pub width: Option<u32>,
 #[serde(default)]
@@ -238,6 +245,7 @@ pub fn shell_from_timeline(timeline: TimelineV2) -> ProjectDoc {
                     uri: source.asset_id.clone(),
                     frame_count: None,
                     timebase: None,
+                    frame_delays_ms: None,
                     width: None,
                     height: None,
                     content_hash: None,
@@ -305,7 +313,15 @@ impl ProjectDoc {
                 continue;
             }
             if let Some(timebase) = asset.timebase.clone() {
-                table.insert_with_count(asset.id.clone(), timebase, asset.frame_count);
+                // **有逐帧延迟表就一起登记**：帧号要按延迟累加，不按素材单一时间基换算。
+                match asset.frame_delays_ms.clone() {
+                    Some(delays) if !delays.is_empty() => {
+                        table.insert_with_delays(asset.id.clone(), timebase, delays);
+                    }
+                    _ => {
+                        table.insert_with_count(asset.id.clone(), timebase, asset.frame_count);
+                    }
+                }
             }
         }
         table
@@ -727,6 +743,7 @@ mod tests {
             uri: format!("file://{id}"),
             frame_count: frames,
             timebase: None,
+            frame_delays_ms: None,
             width: None,
             height: None,
             content_hash: None,

@@ -84,6 +84,19 @@
           "format": "int64",
           "default": null
         },
+        "frame_delays_ms": {
+          "description": "**逐帧延迟表（毫秒）**，GIF 那种非匀速动图才有。\n\n有它时帧号按延迟**累加**（`source_frame_at_delays`），不按素材单一时间基匀速换算 ——\n后者等于假设每帧等长，非匀速动图的累计误差会随时间**线性**长出来。\n`None` = 匀速，老行为（既有工程逐字节不变）。",
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
         "height": {
           "type": [
             "integer",

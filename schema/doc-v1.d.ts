@@ -8,6 +8,8 @@ export interface Asset {
   content_hash?: string | null;
   /** 素材总帧数。**有它才谈得上校验素材内越界。** */
   frame_count?: number | null;
+  /** **逐帧延迟表（毫秒）**，GIF 那种非匀速动图才有。 */
+  frame_delays_ms?: number[] | null;
   height?: number | null;
   id: string;
   kind: AssetKind;

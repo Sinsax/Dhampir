@@ -745,6 +745,77 @@ pub fn source_frame_at(
     Ok(source_in.saturating_add(clamped))
 }
 
+/// 按**逐帧延迟表**把时间换成素材帧号 —— GIF 那种"每帧停留时长不一样"的素材。
+///
+/// # 为什么需要它（`source_frame_at` 在这里是错的）
+///
+/// [`source_frame_at`] 用**素材的单一时间基**做换算，等于假设"每帧等长"。
+/// GIF 允许逐帧不同的 delay，而底座把整张动图当成匀速 —— 于是**非匀速的动图会越走越偏**：
+/// 累计误差随时间线性长出来，几秒之后就对不上了。
+///
+/// 这不是"精度差一点"：它错在**前提**上。所以延迟表存在时**不用**那条换算。
+///
+/// # 语义
+///
+/// * `delays[i]` = 素材第 `i` 帧停留多久（毫秒）。**长度必须等于帧数**。
+/// * 时间按延迟表**累加**，落在哪一格就是哪一帧 —— 天然处理"某帧停 30ms、某帧停 500ms"。
+/// * `loop_source`：整张素材循环（与 [`source_frame_looped`] 同一套语义 ——
+///   素材是个圈，`source_in` 只是**从圈的哪里开始进**）。
+/// * `source_in` 是**循环入口的帧号**，按 `(entry + i) mod count` 落到实际帧上。
+/// * **不循环**且时间超过总时长时，**停在最后一帧**（不外推 —— 延迟表之外没有可依的速率）。
+///
+/// # 与 `frame_count` 的关系
+///
+/// 延迟表的长度**就是**帧数。调用方给的 `frame_count` 与它不一致时以**延迟表为准**
+/// （它不是猜的，是从素材里读出来的），并把不一致当错误报出来 —— 静默取小值会让
+/// 一段动图**少播几帧**，而那种错看起来像"动图就是短"。
+pub fn source_frame_at_delays(
+    source_in: Frame,
+    local_frame: Frame,
+    timeline: &TimebaseDto,
+    delays_ms: &[u32],
+    loop_source: bool,
+) -> Result<Frame, String> {
+    if timeline.num == 0 || timeline.den == 0 {
+        return Err(format!("时间线的时间基不合法：{}/{}", timeline.num, timeline.den));
+    }
+    if delays_ms.is_empty() {
+        return Err("延迟表是空的 —— 至少要有一帧".to_string());
+    }
+    let count = delays_ms.len() as i128;
+    // 总时长（毫秒）。用 i128 累加：长动图乘上几千帧也不会溢出。
+    let total: i128 = delays_ms.iter().map(|d| i128::from(*d)).sum();
+    if total <= 0 {
+        return Err("延迟表的总时长是 0 —— 那样任何时刻都落在第 0 帧，等于不动".to_string());
+    }
+    // 这一帧在时间线上的时刻（毫秒）。纯整数：中间量 i128。
+    let ms = i128::from(local_frame) * 1000 * i128::from(timeline.den) / i128::from(timeline.num);
+    let ms = if loop_source {
+        ms.rem_euclid(total)
+    } else {
+        ms.clamp(0, total - 1)
+    };
+    // 找它落在哪一格。线性扫：帧数在几百量级，二分是没必要的复杂度。
+    let mut acc: i128 = 0;
+    let mut index: i128 = 0;
+    for (i, d) in delays_ms.iter().enumerate() {
+        let next = acc + i128::from(*d);
+        if ms < next {
+            index = i as i128;
+            break;
+        }
+        acc = next;
+        index = i as i128; // 落到末尾时取最后一帧
+    }
+    // `source_in` 是循环入口：整张循环时按 (entry + i) mod count 落帧。
+    let frame = if loop_source {
+        (i128::from(source_in) + index).rem_euclid(count)
+    } else {
+        i128::from(source_in) + index
+    };
+    Ok(frame.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64)
+}
+
 /// 与 [`source_frame_at`] 同样的换算，但**可以循环**。
 ///
 /// `loop_source` 为真时，走到素材末尾就**回到素材第 0 帧**接着播。
@@ -911,6 +982,11 @@ pub struct AssetTimebases {
 pub struct AssetTiming {
     pub timebase: TimebaseDto,
     pub frame_count: Option<Frame>,
+    /// **逐帧延迟表（毫秒）**，GIF 那种非匀速动图才有。
+    ///
+    /// 有它时帧号走 [`source_frame_at_delays`]（按延迟累加），
+    /// **不走** `source_frame_at`（那等于假设每帧等长）。`None` = 匀速，老行为。
+    pub frame_delays_ms: Option<Vec<u32>>,
 }
 
 impl AssetTimebases {
@@ -919,7 +995,10 @@ impl AssetTimebases {
     }
 
     pub fn insert(&mut self, asset_id: impl Into<String>, timebase: TimebaseDto) {
-        self.entries.insert(asset_id.into(), AssetTiming { timebase, frame_count: None });
+        self.entries.insert(
+            asset_id.into(),
+            AssetTiming { timebase, frame_count: None, frame_delays_ms: None },
+        );
     }
 
     /// 连帧数一起登记。循环素材必须走这个 —— 见 `AssetTiming` 的说明。
@@ -929,11 +1008,34 @@ impl AssetTimebases {
         timebase: TimebaseDto,
         frame_count: Option<Frame>,
     ) {
-        self.entries.insert(asset_id.into(), AssetTiming { timebase, frame_count });
+        self.entries.insert(asset_id.into(), AssetTiming { timebase, frame_count, frame_delays_ms: None });
     }
 
     pub fn get(&self, asset_id: &str) -> Option<&TimebaseDto> {
         self.entries.get(asset_id).map(|timing| &timing.timebase)
+    }
+
+    /// 连**逐帧延迟表**一起登记（GIF 那种非匀速动图）。
+    ///
+    /// 延迟表的长度**就是**帧数 —— 冲突时以延迟表为准（它不是猜的，是从素材读出来的）。
+    pub fn insert_with_delays(
+        &mut self,
+        asset_id: impl Into<String>,
+        timebase: TimebaseDto,
+        delays_ms: Vec<u32>,
+    ) {
+        let frame_count = Some(delays_ms.len() as Frame);
+        self.entries.insert(
+            asset_id.into(),
+            AssetTiming { timebase, frame_count, frame_delays_ms: Some(delays_ms) },
+        );
+    }
+
+    /// 逐帧延迟表。`None` = 匀速（走老的 `source_frame_at`）。
+    pub fn frame_delays(&self, asset_id: &str) -> Option<&[u32]> {
+        self.entries
+            .get(asset_id)
+            .and_then(|timing| timing.frame_delays_ms.as_deref())
     }
 
     /// 帧数。登记时没给就是 `None`（不能循环）。
@@ -999,6 +1101,94 @@ mod tests {
 
     fn tb(num: u32, den: u32) -> TimebaseDto {
         TimebaseDto { num, den }
+    }
+
+    /// **逐帧延迟表**：GIF 那种"每帧停留不同"的动图。
+    ///
+    /// 核心判据：帧号按 **延迟累加** 落在哪一格，而不是按素材单一时间基匀速换算。
+    /// 匀速时两者一致 —— 这正是"加了延迟表不改变既有匀速素材"的回归保护。
+    #[test]
+    fn 逐帧延迟表按累加落帧() {
+        let tl = tb(60, 1); // 工程 60fps：local_frame 每帧 16.667ms
+        // 三帧，分别停 100 / 20 / 20 ms（总 140ms）。
+        let delays = [100u32, 20, 20];
+        let at = |local: i64| source_frame_at_delays(0, local, &tl, &delays, true).unwrap();
+
+        // t=0ms -> 第 0 帧；t=99ms 还在第 0 帧（它停 100ms）
+        assert_eq!(at(0), 0);
+        assert_eq!(at(5), 0); // 83ms
+        // t=100ms 起进第 1 帧（100..120ms）：60fps 下 local 6 = 100ms 整
+        assert_eq!(at(6), 1, "t=100ms 应当进第 1 帧");
+        assert_eq!(at(7), 1); // 116ms
+        // t=120ms 起进第 2 帧
+        assert_eq!(at(8), 2, "t=133ms 应当在第 2 帧");
+        // 总长 140ms，t>=140ms 循环回第 0 帧
+        assert_eq!(at(9), 0, "t=150ms 超出一圈应当循环回第 0 帧");
+        // ⚠️ 这两条我第一版写反了：250ms 取模 140 得 **110ms**，那是第 1 帧（100~120ms），
+        // 不是第 0 帧。**"循环"这件事要算余数，不能凭"多了一圈"就猜回第 0 帧。**
+        assert_eq!(at(15), 1, "t=250ms -> 余 110ms -> 第 1 帧");
+        assert_eq!(at(21), 0, "t=350ms -> 余 70ms -> 第 0 帧");
+    }
+
+    /// **匀速时与老的换算完全一致** —— 这是"既有工程不变"的回归保护。
+    #[test]
+    fn 匀速延迟表与老换算一致() {
+        let tl = tb(60, 1);
+        let asset = tb(30, 1); // 素材 30fps
+        let delays = [1000u32 / 30; 30]; // 30 帧，每帧 33ms（近似）
+        // 老路径（素材单一时间基）
+        for local in [0i64, 1, 3, 7, 30, 61] {
+            let old = source_frame_looped(0, local, &tl, &asset, Some(30), true).unwrap();
+            let new = source_frame_at_delays(0, local, &tl, &delays, true).unwrap();
+            // 延迟表用的是 round(1000/30)=33ms，与 30fps 的精确值有取整差；容 1 帧。
+            assert!(
+                (old - new).abs() <= 1,
+                "local={local}: 老 {old} 新 {new} 差得太多"
+            );
+        }
+    }
+
+    /// **不循环时停在最后一帧** —— 延迟表之外没有可依的速率，不外推。
+    #[test]
+    fn 不循环时停在最后一帧() {
+        let tl = tb(60, 1);
+        let delays = [100u32, 20, 20];
+        let at = |local: i64| source_frame_at_delays(0, local, &tl, &delays, false).unwrap();
+        assert_eq!(at(0), 0);
+        assert_eq!(at(7), 1);
+        assert_eq!(at(9), 2, "不循环时最后一段仍是最后一帧");
+        assert_eq!(at(600), 2, "远远超出总时长也不外推");
+    }
+
+    /// **`source_in` 是循环入口**（整张循环的语义，与 `source_frame_looped` 一致）。
+    #[test]
+    fn 延迟表的循环入口按_source_in_落帧() {
+        let tl = tb(60, 1);
+        let delays = [100u32, 20, 20];
+        // 入口 = 2：t=0 时应当落在第 2 帧
+        let at = |local: i64| source_frame_at_delays(2, local, &tl, &delays, true).unwrap();
+        assert_eq!(at(0), 2, "入口帧就是 t=0 的那一帧");
+        assert_eq!(at(6), 0, "入口 2 的下一帧绕回 0");
+        assert_eq!(at(8), 1);
+    }
+
+    /// 坏输入要**报错**，不是悄悄取第 0 帧。
+    #[test]
+    fn 延迟表的坏输入要报错() {
+        let tl = tb(60, 1);
+        assert!(
+            source_frame_at_delays(0, 0, &tl, &[], true).is_err(),
+            "空延迟表应当报错"
+        );
+        assert!(
+            source_frame_at_delays(0, 0, &tl, &[0, 0], true).is_err(),
+            "总时长为 0 应当报错（任何时刻都落第 0 帧 = 不动）"
+        );
+        let bad = TimebaseDto { num: 0, den: 1 };
+        assert!(
+            source_frame_at_delays(0, 0, &bad, &[30], true).is_err(),
+            "时间基不合法应当报错"
+        );
     }
 
     #[test]

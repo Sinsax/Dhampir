@@ -711,6 +711,7 @@ mod tests {
             uri: "proxy.mp4".to_string(),
             frame_count: Some(480),
             timebase: Some(tb(60, 1)),
+            frame_delays_ms: None,
             width: Some(1920),
             height: Some(1080),
             content_hash: None,
