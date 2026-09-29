@@ -54,6 +54,32 @@ native 侧现在**不走这个抽象**：`dhampir-worker/src/pipeline.rs:706` �
    **没想清就落笔，正是 `pipeline.rs` 出过事故的同类**（历史上那次是把两趟 uniform 写进同一个
    encoder，两趟读到同一次写入；症状隐蔽到只有一条"孤立亮点该被摊到邻点"的测试才抓得住）。
 
+## 设计问题已定：帧槽的所有权
+
+原先留的那个问题（"离屏纹理归谁持有、怎么跨帧复用"）**已从现有代码读出来了**：
+
+```text
+pipeline.rs:1804   let target = ctx.device.create_texture(...)   // 渲染区间**之前**建一次
+pipeline.rs:2043   let target = ctx.device.create_texture(...)   // 出 PNG **之前**建一次
+                   两处 usage 都是 RENDER_ATTACHMENT | COPY_SRC，format 都是 WORK_FORMAT
+```
+
+所以现有语义就是：**一次渲染运行建一块目标纹理，跨帧复用**。于是帧槽的答案是对称的：
+
+| | 离屏帧槽（native） | canvas 帧槽（wasm） |
+|---|---|---|
+| 持有 | 一块 `Texture` + 它的 `View` | surface + 当前帧纹理 |
+| 生命周期 | **一次渲染运行** | 一次渲染运行 |
+| `acquire()` | 每帧返回**同一个** view | 抓当前 surface 纹理，**一帧只能调一次** |
+| `finish()` | 无操作（读回/编码由调用方接着做） | `present()` |
+
+**结论：剩下的是机械活，不是设计活** —— `impl FrameSink` 就是把 `pipeline.rs:1804`/`2043`
+那两处 `create_texture` 收进一个类型里，`acquire` 返回它、`finish` 留空。
+
+**但要避免"实现了却没人用"**：形如 `impl FrameSink for X` 而主路径不走它，就是死代码。
+所以正确的收口是**让那两处就地 `create_texture` 改成走这个类型** —— 那样实现就不是摆设，
+而且**行为不变**（同一块纹理、同样的 usage、同样的跨帧复用）。
+
 ## 怎么验（补完之后）
 
 ```text
