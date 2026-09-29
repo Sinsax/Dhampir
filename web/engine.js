@@ -327,8 +327,28 @@ export class Engine {
    * | headless Chrome（本仓的测量脚本） | `video` | 4~6 ms | 0 |
    * | 真窗口 Chrome（宿主页面） | `bitmap` | **191 ms** | **41** |
    *
-   * **同一个探针在两个环境给出不同答案，而其中一个要付 40 倍代价。** 与其猜，
-   * 不如让宿主能明确指定 —— 宿主比探针更清楚自己刚绑上的是什么。
+   * **同一个探针在两个环境给出不同答案。** 与其猜，不如让宿主能明确指定。
+   *
+   * # ⚠️ 但实测结论是：`"video"` 这条路在浏览器里**走不通**
+   *
+   * 宿主页面上抓到过真堆栈：
+   *
+   * ```text
+   * panicked at wgpu-30.0.1/src/backend/webgpu.rs:2835:14:
+   *   called `Result::unwrap()` on an `Err` value:
+   *     JsValue(TypeError: GPUQueue.copyExternalImageToTexture: 'source' member of
+   *     GPUCopyExternalImageSourceInfo could not be converted to any of:
+   *     ImageBitmap, HTMLImageElement, HTMLCanvasElement, OffscreenCanvas)
+   * ```
+   *
+   * **那张清单里没有 `<video>`** —— 不是设备的怪癖，是 WebGPU 的输入类型就不含视频元素。
+   * 所以 `"video"` 模式下**第一次 draw 必 panic**；而且**一次 panic 会把 wasm 侧的
+   * `ProjectHost`（一个 `RefCell`）永久借住**，之后任何调用都 `RefCell already borrowed`
+   * —— 也就是说"失败后退回 bitmap"这种兜底**同样救不回来**（回退调用自己就 panic）。
+   *
+   * 结论：**宿主不要指定 `"video"`**；让 `attach()` 的探针决定。`"bitmap"` 是浏览器里
+   * 唯一能走通的路（每帧 `createImageBitmap`），它的代价主要落在 GPU 上传上 ——
+   * 在软件适配器上实测 ~190ms/帧、在真适配器上 4~6ms。
    *
    * @param {"video"|"bitmap"} mode
    * @returns {string} 上一个模式（方便调用方记账/回退）
