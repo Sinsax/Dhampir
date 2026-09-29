@@ -63,7 +63,15 @@ function rasterizeLine(line, style) {
   canvas.height = line.bitmap_height;
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.font = line.font_px + "px " + TEXT_FONT;
+  // **字体族与字重优先用契约给的**（`style.family` / `style.weight`）。
+  //
+  // 这条链以前是断的：契约里 `TextStyle.family` 有文档（"宿主按这个名字找，
+  // 找不到要报出来"），但样式 JSON 不带它 → 这里只能回退到写死的 `sans-serif`，
+  // 症状是**字号/位置/颜色都对、只有字形不对**。权重同理（V-Trim 用 700/600，
+  // canvas 不给就是 400）。`TEXT_FONT` 保留为**兜底**：契约没给时才用它。
+  const family = style && style.family ? style.family : TEXT_FONT;
+  const weight = style && style.weight ? style.weight : 400;
+  ctx.font = weight + " " + line.font_px + "px " + family;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.lineJoin = "round";

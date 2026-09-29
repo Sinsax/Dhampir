@@ -1829,14 +1829,26 @@ fn text_style_view(style: &dhampir_core::overlay::TextStyle) -> host_api::TextSt
     }
 }
 
-/// `{color, outline, stroke_px, stroke_color}` —— 与 `host_api::TextStyleView`
-/// 和 CLI 的 `--text-frame` **逐字段同名**。
+/// `{color, outline, stroke_px, stroke_color, family, weight}` —— 与 CLI 的
+/// `--text-frame` **逐字段同名**。
+///
+/// # `family` / `weight` 为什么必须在这里给
+///
+/// 契约里 [`dhampir_core::overlay::TextStyle`] 早就有 `family`：它的文档写着
+/// **"宿主从你给的字体目录里按这个名字找，找不到要报出来（不是悄悄换一个字体画）"**。
+/// 但这条链以前**断在这里** —— 样式 JSON 不带它，于是浏览器侧的栅格化只能用一个
+/// 写死的 `sans-serif`，而**症状是"字体不对"**：字号对、位置对、颜色对，只有字形不对。
+///
+/// 权重同理：V-Trim 的字幕是 `font-weight:700`、弹幕 600，而 canvas 不给权重时是 400
+/// —— 看起来像"字重不太一样"。
 fn text_style_json(style: &dhampir_core::overlay::TextStyle) -> serde_json::Value {
     serde_json::json!({
         "color": style.color,
         "outline": style.outline,
         "stroke_px": style.stroke_px,
         "stroke_color": style.stroke_color,
+        "family": style.family,
+        "weight": style.weight,
     })
 }
 
