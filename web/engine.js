@@ -795,6 +795,17 @@ export class Engine {
       // 全是空白字符的行**不做位图**：宿主不判它（栅格化出来本来就是空的），
       // 硬塞一张空的进去只会让"这一行没有位图"那条判据失去意义。
       if (line.visible !== true) continue;
+
+      // **内容没变就不提交** —— 这是 wasm 那边"复用上一帧纹理"能生效的前提。
+      //
+      // wasm 的 `upload_text_bitmaps` 现在只在**收到新位图**（脏标记）时才重建纹理 + 重传，
+      // 而"收到新位图"由这里决定。判据就是上面那个栅格化缓存的 key（**内容级**，不是行号级）——
+      // 所以"第 i 行换了字"必然不命中、必然提交，"第 i 行没变"才跳过，不会留下上一行的字。
+      //
+      // 为什么值得：实测（clip-25，2 行字幕）这段占 3.3ms/帧；双跑证明宿主侧的栅格化缓存
+      // 只省掉其中 11% —— 大头正是这次**每帧无条件重建纹理 + 重传**。
+      if (RASTER_CACHE.has(rasterKey(line, style))) continue;
+
       let bitmap = null;
       try {
         // **直排 alpha**：宿主用 copy_external_image_to_texture 上传，并且声明

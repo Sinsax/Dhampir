@@ -295,6 +295,20 @@ pub struct ProjectHost {
     /// 与 `text_bitmaps` 分开一份：下标各自从 0 起，两边的清单互不影响 ——
     /// 共用一个命名空间的话，多出一条字幕就会把弹幕的编号整段推后。
     danmaku_bitmaps: HashMap<u32, web_sys::ImageBitmap>,
+    /// **这一帧新到过位图的行号**（`set_text_bitmap` 落进来的）。
+    ///
+    /// 存在的理由：`upload_text_bitmaps` 以前**每帧**为每一行新建纹理 + 重传，
+    /// 哪怕那一行的位图与上一帧逐字节相同。实测（clip-25，2 行字幕）那一段占
+    /// 3.3ms/帧，而宿主侧的栅格化缓存只省掉其中 11% —— **大头就是这次重传**。
+    /// 有了脏集合，只有真的换了位图的行才重建纹理。
+    text_dirty: std::collections::HashSet<u32>,
+    danmaku_dirty: std::collections::HashSet<u32>,
+    /// 上一帧已经上传好的纹理（按行号）。没有脏标记的行直接复用它。
+    ///
+    /// 用 `Vec` 而不是 `HashMap`：行号本来就是 0..lines.len() 的稠密下标，
+    /// 而且复用时要按下标顺序取。
+    text_uploads: Vec<Option<(wgpu::Texture, wgpu::TextureView, (u32, u32))>>,
+    danmaku_uploads: Vec<Option<(wgpu::Texture, wgpu::TextureView, (u32, u32))>>,
 }
 
 /// 渲染期的解析器：不 seek，只取「当前停在哪一帧」的纹理。
@@ -544,9 +558,24 @@ fn upload_text_bitmaps(
     format: wgpu::TextureFormat,
     lines: &[TextLineSpec],
     bitmaps: &HashMap<u32, web_sys::ImageBitmap>,
+    // 上一帧已上传的纹理 + 这一帧到过位图的行号。
+    //
+    // **都取不可变借用**：wgpu 的 `Texture` / `TextureView` 是 `Clone`（内部是 Arc），
+    // 所以复用只要 `.cloned()`，不必把 cache 改成 `&mut`，也就不必 `mem::take` 绕借用检查。
+    previous: &[Option<(wgpu::Texture, wgpu::TextureView, (u32, u32))>],
+    dirty: &std::collections::HashSet<u32>,
 ) -> Vec<Option<(wgpu::Texture, wgpu::TextureView, (u32, u32))>> {
     let mut out = Vec::with_capacity(lines.len());
     for index in 0..lines.len() {
+        // **这一行没换位图就不重建、不重传** —— 直接复用上一帧那张纹理。
+        // 这一句是整个改动的意义所在：以前每帧无条件 create_texture + copy，
+        // 而同一行字的位图跨帧逐字节相同（内容由 JS 的栅格化缓存保证）。
+        if !dirty.contains(&(index as u32)) {
+            match previous.get(index) {
+                Some(slot) => { out.push(slot.clone()); continue; }
+                None => {}
+            }
+        }
         let Some(bitmap) = bitmaps.get(&(index as u32)) else {
             out.push(None);
             continue;
@@ -742,6 +771,10 @@ impl ProjectHost {
             text_bitmaps,
             danmaku_lines,
             danmaku_bitmaps,
+            text_dirty,
+            danmaku_dirty,
+            text_uploads,
+            danmaku_uploads,
         } = self;
         let (width, height) = *size;
         let sink_format = sink.format();
@@ -787,6 +820,8 @@ impl ProjectHost {
                 sink_format,
                 text_lines,
                 text_bitmaps,
+                text_uploads,
+                text_dirty,
             );
             let uploaded_danmaku = upload_text_bitmaps(
                 &ctx.device,
@@ -794,6 +829,8 @@ impl ProjectHost {
                 sink_format,
                 danmaku_lines,
                 danmaku_bitmaps,
+                danmaku_uploads,
+                danmaku_dirty,
             );
             // **弹幕排在字幕之后**：同一帧里弹幕在画面上层（与传统弹幕播放器一致），
             // 而重叠只可能发生在泳道多到压住字幕时 —— 那时的先后顺序是唯一能表态的地方。
@@ -1420,6 +1457,10 @@ pub async fn dhampir_project_attach(canvas_id: String) -> Result<String, JsValue
             text_bitmaps: HashMap::new(),
             danmaku_lines: Vec::new(),
             danmaku_bitmaps: HashMap::new(),
+            text_dirty: std::collections::HashSet::new(),
+            danmaku_dirty: std::collections::HashSet::new(),
+            text_uploads: Vec::new(),
+            danmaku_uploads: Vec::new(),
         });
     });
     Ok(json)
@@ -1935,6 +1976,7 @@ pub fn dhampir_project_set_text_bitmap(index: u32, bitmap: web_sys::ImageBitmap)
                 host.text_lines.len()
             )));
         }
+        host.text_dirty.insert(index);
         if let Some(previous) = host.text_bitmaps.insert(index, bitmap) {
             previous.close();
         }
@@ -1965,6 +2007,7 @@ pub fn dhampir_project_set_danmaku_bitmap(index: u32, bitmap: web_sys::ImageBitm
                 host.danmaku_lines.len()
             )));
         }
+        host.danmaku_dirty.insert(index);
         if let Some(previous) = host.danmaku_bitmaps.insert(index, bitmap) {
             previous.close();
         }
@@ -2028,7 +2071,7 @@ pub async fn dhampir_project_text_probe(frame: i32) -> Result<String, JsValue> {
             compose::evaluate_v2_with_assets(&doc.timeline, frame_number, Some(&assets));
         let format = host.sink.format();
         let uploaded =
-            upload_text_bitmaps(&host.ctx.device, &host.ctx.queue, format, &host.text_lines, &host.text_bitmaps);
+            upload_text_bitmaps(&host.ctx.device, &host.ctx.queue, format, &host.text_lines, &host.text_bitmaps, &host.text_uploads, &host.text_dirty);
 
         // 0 = 无字，1 = 全都有，2+i = 减去第 i 行。
         let mut textures = Vec::with_capacity(2 + host.text_lines.len());
