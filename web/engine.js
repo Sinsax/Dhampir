@@ -571,9 +571,21 @@ export class Engine {
     const t0 = timing ? performance.now() : 0;
     const sources = this.sourcesFor(frame);
     const t1 = timing ? performance.now() : 0;
-    // 位图模式**先清**：不清的话，这一帧不再出现的 source 会拿着上一帧的位图被画出来，
-    // 而画面看起来完全正常，只是"慢了半拍"。
-    if (this.sourceMode === "bitmap") this.mod.dhampir_project_clear_bitmaps();
+    // **每帧先清位图 —— 两种模式都要清。**
+    //
+    // 以前这里只清 bitmap 模式，理由是"video 模式直接走 `<video>`，没有位图这一步"。
+    // 那句话对**只**用 `<video>` 的工程成立，但**静态源（贴纸 / 图片序列）没有 video**，
+    // 它们的位图由宿主交进来 —— 而 wasm 侧的 resolver 是**位图优先**：
+    //
+    //     if let Some(bitmap) = self.bitmaps.get(source) { … return … }   // 先查位图
+    //
+    // 于是 video 模式下不清，宿主交进来的位图就**永不过期**：某个 source 这一帧
+    // 已经不该出现（或不该再更新）时，它还在拿旧位图被画出来 —— 正是下面那句注释
+    // 怕的"慢了半拍"。实测踩到过：把贴纸 <img> 打断之后画面**逐字节不变**。
+    //
+    // 多清一次对只用 `<video>` 的工程**无害**：那种工程从不往 bitmaps 里放东西，
+    // 清一个空表没有副作用。
+    this.mod.dhampir_project_clear_bitmaps();
     const t2 = timing ? performance.now() : 0;
     let seekMs = 0, bitmapMs = 0, setMs = 0;
     // 短路命中率：**这个数决定"每帧都在真 seek"还是"大多数帧直接返回"**。
