@@ -31,6 +31,11 @@
 
 ## 改动清单（5 处 + 3 个调用点）
 
+> ⚠️ **必须一次做完，拆不开。** 试过拆法：只加字段 + 初始化会被 `dead_code` 抓
+> （字段"从未被读"）；加了写入也一样（仍"从未被读"）。本仓是 0 警告标准，
+> 所以**唯一无警告的最小单元就是下面这 5 处 + 3 个调用点一起落地**。
+> 想分步验证的话，分的是**判据**（cargo check / SSIM / textcost），不是**改动**。
+
 ```rust
 // ① ProjectHost 加字段（text_bitmaps 附近，L279/297 之后）
 text_dirty: std::collections::HashSet<u32>,
@@ -80,7 +85,7 @@ fn upload_text_bitmaps(
 
 ```text
 每步都能单独判：
-  cargo check -p dhampir-wasm                     # ① ② 之后就能编过
+  cargo check -p dhampir-wasm                     # 改动落地后必须 0 警告
   wasm-pack build crates/dhampir-wasm --target web --out-dir www/pkg --dev
   node scripts/check-dual-end.mjs --frames 0,30,89   # 必须仍是 SSIM 1.000000
   node scripts/run-guards.mjs                        # 18/20（红的两条照旧）
