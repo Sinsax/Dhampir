@@ -751,7 +751,7 @@ export class Engine {
    * 记的是**上一次**的值（不累积、不统计）：引擎是底座，攒统计是调用方的事
    * —— 底座一旦开始攒状态，多实例/多画布就会互相污染。
    */
-  async seek(frame) {
+  async seek(frame, options = {}) {
     if (this.timing && !Array.isArray(this.slowSeeks)) this.slowSeeks = [];
     const t0 = performance.now();
     const sources = await this.prepare(frame);
@@ -759,6 +759,16 @@ export class Engine {
     // **诊断开关**：关掉 draw 之后 seekMs 会不会掉下来 ——
     // 这能判定"慢"是解码本身的，还是被上一帧的 GPU 上屏拖住的。
     // 只在测量时用，正常路径恒为 true。
+    // **宿主缝隙：prepare 做完了、还没 draw。**
+    //
+    // 为什么非要有这个钩子：`prepare` 的第一件事是 `clear_bitmaps()`，所以宿主
+    // **在 `seek` 之后**交的静态源位图（贴纸/图片序列），会被**下一次** prepare 清掉，
+    // 永远等不到 draw —— 实测就是这个现象：交与不交，画面逐字节相同。
+    //
+    // 契约原文「JS 把某个 source 当前帧转成位图交给宿主 …… **必须在 seek 完成之后做**」
+    // 里的 seek 指的是「把 <video> 定位好」，不是 engine.seek —— 这一点以前会把人绕进去。
+    if (typeof options.onPrepared === 'function') await options.onPrepared(frame);
+    
     if (this.skipDraw !== true) this.mod.dhampir_project_draw(frame);
     const t2 = performance.now();
     this.lastSeekCost = { prepareMs: t1 - t0, drawMs: t2 - t1, totalMs: t2 - t0 };
