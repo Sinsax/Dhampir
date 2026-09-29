@@ -10,7 +10,15 @@
 //!
 //! 平台差异只有两个出口：
 //!
-//! 1. [`io::FrameSource`] / [`io::FrameSink`] —— "帧从哪来、画到哪去"
+//! 1. **帧从哪来、画到哪去** —— 今天真正在用的那一对是
+//!    [`render::timeline::SourceResolver`]（帧进）+ [`io::FrameSink`]（帧出）。
+//!    两侧各有真实实现：浏览器是 `BoundVideos`，native 是 `DecodingSources`。
+//!
+//!    ⚠️ [`io::FrameSource`] 是 **M0 的更早写法**，如今只剩 M3 的单视频预览那条路在用
+//!    （`dhampir-wasm/src/preview.rs`）—— **别照它去接新宿主**，它不承担"帧号精确"那条
+//!    铁律所要求的换算（`SourceResolver::texture_for` 把 `source_frame` 放进参数里，
+//!    就是为了不让源内帧号被悄悄忽略）。这段话以前写成"1 号接缝是 FrameSource"，
+//!    会把人引到老路上去，所以改掉。
 //! 2. `wgpu::Instance` 的创建 —— **唯一允许分叉的地方**，且这个分叉发生在宿主里，
 //!    不在本 crate 里（见 [`gpu::NATIVE_BACKENDS`] / [`gpu::BROWSER_BACKENDS`] 的说明）
 //!
