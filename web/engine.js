@@ -353,6 +353,24 @@ export class Engine {
    * @param {"video"|"bitmap"} mode
    * @returns {string} 上一个模式（方便调用方记账/回退）
    */
+  /**
+   * **跟随播放**（默认 `false`）。
+   *
+   * 打开后：`prepare` 发现某个 `<video>` 正在播、且与目标时刻的偏差在
+   * {@link Engine#followTolerance} 以内时，**不 seek**，直接取它正在显示的帧。
+   *
+   * 适用：**预览**（人眼看片 —— 视频按 1× 播，取当前帧就是对的）。
+   * 不适用：**帧精确**的任何用途（出片、双端比对、逐帧导出）—— 那些必须逐帧 seek。
+   * 所以这是**宿主显式选开**的开关，默认关。
+   *
+   * 背景：长 GOP 素材上"每帧 seek"是灾难 —— 实测一份 1080p60 素材 GOP > 4 秒，
+   * ffmpeg 一次 seek 要 150~183ms，浏览器 212ms/帧（5fps）。
+   */
+  followPlayback = false;
+
+  /** 跟随播放时允许的偏差（秒）。默认 1/30 —— 一帧级偏差，人眼看不出。 */
+  followTolerance = 1 / 30;
+
   setSourceMode(mode) {
     const next = mode === "bitmap" ? "bitmap" : "video";
     const previous = this.sourceMode;
@@ -543,7 +561,25 @@ export class Engine {
       if (video === undefined) continue;
       const a = timing ? performance.now() : 0;
       const before = timing ? { t: video.currentTime, rs: video.readyState } : null;
-      await this.seekVideo(video, entry.seconds);
+      // **跟随播放**（宿主选开，默认关）：视频自己在往前走时**不 seek**，
+      // 直接拿它**正在显示**的那一帧。
+      //
+      // 为什么必须：源素材的 GOP 可能长得离谱（实测一份 1080p60 素材
+      // **前 250 帧里 0 个关键帧**，GOP > 4 秒），于是每设一次 currentTime
+      // 解码器都要退回上一个关键帧再往前解几百帧 —— ffmpeg 实测一次 150~183ms，
+      // 浏览器里 212ms/帧，预览只剩 5fps。而**看片不需要帧精确**：视频按 1× 播，
+      // 取它当前显示的帧就是对的。帧精确（出片、双端比对）仍然走 seek 那条路，
+      // 所以这个开关**默认关** —— 开了它，seek 就不再是帧精确的了。
+      // **只要视频在播，就跟它** —— 不比绝对时刻。
+      //
+      // 为什么不能比：一开始我加了「偏差在 followTolerance 内才跟」，结果**振荡** ——
+      // 跟随几帧后偏差涨过阈值 -> seek 一次 200ms -> 那 200ms 又把偏差推得更大 ->
+      // 于是几乎每帧都在 seek（实测读数就是 seek 在 0 与 200ms 之间跳）。
+      //
+      // 正确语义：**播放中，视频自己就是权威**（它按 1× 走，与 DOM 时钟同起点同速率，
+      // 偏差只会在毫秒级）。容差只该用在「暂停/拖动后要不要补一次 seek」上。
+      const following = this.followPlayback === true && video.paused !== true;
+      if (following !== true) await this.seekVideo(video, entry.seconds);
       const b = timing ? performance.now() : 0;
       const spent = b - a;
       seekMs += spent;
