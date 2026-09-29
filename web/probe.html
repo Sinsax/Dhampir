@@ -10,6 +10,20 @@ const report = { ok: false, frames: [], drawError: null };
 const log = (m) => { document.getElementById("log").textContent += m + "\n"; };
 const post = (o) => fetch("/result", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(o) });
 
+/** 帧耗时的分位数。用 **中位 + p95** 而不是均值：一次 GC 或一次 seek 抖动就能把均值拉歪。 */
+function stat(xs) {
+  if (!xs.length) return null;
+  const s = xs.slice().sort((a, b) => a - b);
+  const at = (q) => s[Math.min(s.length - 1, Math.floor(q * s.length))];
+  return {
+    n: s.length,
+    median: +at(0.5).toFixed(2),
+    p95: +at(0.95).toFixed(2),
+    max: +s[s.length - 1].toFixed(2),
+    mean: +(s.reduce((a, b) => a + b, 0) / s.length).toFixed(2),
+  };
+}
+
 try {
   const mod = await import("/pkg/dhampir_wasm.js");
   await mod.default();
@@ -27,6 +41,19 @@ try {
     video.addEventListener("error", () => rej(new Error("video error")), { once: true });
   });
   video.pause();
+
+  // ---- ⚠️ `?canvas=WxH`：分辨率对帧耗时的影响是**数量级**的，量的时候必须能指定 ----
+  // 默认仍是 320x180（W0 验收的原样，不改它的行为）。
+  const qs = new URLSearchParams(location.search);
+  const canvasSpec = qs.get("canvas");
+  if (canvasSpec) {
+    const [w, h] = canvasSpec.split("x").map(Number);
+    if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
+      document.getElementById("c").width = w;
+      document.getElementById("c").height = h;
+      report.canvas = canvasSpec;
+    }
+  }
 
   report.attach = JSON.parse(await mod.dhampir_project_attach("c"));
   // 把工程里出现的每个 source 都绑到同一个 video 上（样本工程只有一个真实素材）
@@ -51,6 +78,74 @@ try {
     report.frames.push({ frame, sources: info.sources, pngLength: dataUrl.length });
     log("frame " + frame + " -> " + info.sources.length + " 源, canvas " + dataUrl.length + " 字节");
   }
+
+  // ---- 帧耗时：**预览能不能实时，只取决于这一段** ------------------------------
+  //
+  // 上面那两帧各自附带一次 `toDataURL`（**导出**那条路的代价，与预览无关），
+  // 所以它不能拿来回答"预览能不能实时"。这里单起一段，只做预览真正会做的事：
+  //
+  //   ① 顺序播放：连续帧，每帧只 seek 到它自己的时刻（多半落在同一个 GOP 里）
+  //   ② 原地重画：**不 seek**，对同一帧反复 draw —— 这是"seek 已经就位之后，
+  //      渲染本身要多少毫秒"，也就是**实时播放的下界**
+  //
+  // 两段分开量，是因为它们的代价差一个数量级（native 侧实测：顺序 ~30ms/帧、
+  // seek ~110ms/帧）。实时预览要的是 ① 的数字；拖动进度条看的是 seek 的数字。
+  const timing = { canvas: report.canvas || "320x180" };
+  const N = Number(qs.get("n") || 40);
+
+  // ① 顺序播放：从第 0 帧起连续 N 帧
+  {
+    const seekMs = [], drawMs = [], wallMs = [];
+    let prev = performance.now();
+    for (let f = 0; f < N; f += 1) {
+      const info = JSON.parse(mod.dhampir_project_sources_for(f));
+      const t0 = performance.now();
+      for (const entry of info.sources) {
+        await new Promise((res) => {
+          const done = () => { video.removeEventListener("seeked", done); res(); };
+          video.addEventListener("seeked", done);
+          video.currentTime = entry.seconds;
+          setTimeout(done, 3000);
+        });
+      }
+      const t1 = performance.now();
+      mod.dhampir_project_draw(f);
+      await new Promise((r) => requestAnimationFrame(r)); // 让这一帧真的上屏
+      const t2 = performance.now();
+      seekMs.push(t1 - t0);
+      drawMs.push(t2 - t1);
+      wallMs.push(t2 - prev);
+      prev = t2;
+    }
+    timing.sequential = { seekMs: stat(seekMs), drawMs: stat(drawMs), wallMs: stat(wallMs) };
+    if (timing.sequential.wallMs && timing.sequential.wallMs.median > 0) {
+      timing.sequential.fps = +(1000 / timing.sequential.wallMs.median).toFixed(1);
+    }
+    log(`顺序 ${N} 帧：wall 中位 ${timing.sequential.wallMs.median} ms -> ${timing.sequential.fps} fps；`
+      + `seek 中位 ${timing.sequential.seekMs.median} ms；draw 中位 ${timing.sequential.drawMs.median} ms`);
+  }
+
+  // ② 原地重画：同一个帧反复 draw（不 seek）—— 渲染本身的下界
+  {
+    const drawMs = [], wallMs = [];
+    let prev = performance.now();
+    for (let i = 0; i < N; i += 1) {
+      const t0 = performance.now();
+      mod.dhampir_project_draw(30);
+      await new Promise((r) => requestAnimationFrame(r));
+      const t1 = performance.now();
+      drawMs.push(t1 - t0);
+      wallMs.push(t1 - prev);
+      prev = t1;
+    }
+    timing.sameFrameRedraw = { drawMs: stat(drawMs), wallMs: stat(wallMs) };
+    if (timing.sameFrameRedraw.wallMs && timing.sameFrameRedraw.wallMs.median > 0) {
+      timing.sameFrameRedraw.fps = +(1000 / timing.sameFrameRedraw.wallMs.median).toFixed(1);
+    }
+    log(`原地重画 ${N} 次：draw 中位 ${timing.sameFrameRedraw.drawMs.median} ms -> `
+      + `${timing.sameFrameRedraw.fps} fps（实时播放的下界）`);
+  }
+  report.timing = timing;
 
   report.ok = true;
 } catch (error) {
