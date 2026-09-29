@@ -81,10 +81,22 @@ let uploaded_danmaku = upload_text_bitmaps(
     &ctx.device, &ctx.queue, sink_format, danmaku_lines, danmaku_bitmaps,
 );
 
-// text_probe 里（L2031）
+// text_probe 里（L2031）—— 单行、**直接字段访问**：
+//   这一处加上 `&mut host.text_uploads` 是允许的（不相交字段借用），不用 mem::take。
 let uploaded =
-    upload_text_bitmaps(&host.ctx.device, &host.ctx.queue, format, &host.text_lines, &host.text_…);
+    upload_text_bitmaps(&host.ctx.device, &host.ctx.queue, format, &host.text_lines, &host.text_bitmaps);
 ```
+
+`upload_text_bitmaps` 的**收尾**（`timeline_host.rs:601-604`）—— 复用分支要插在
+`for index in 0..lines.len()`（L549）的开头，收尾处把缓存换成新的 `out`：
+
+```rust
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        out.push(Some((texture, view, size)));
+    }
+    // 交给下一帧（调用方在自己那边存回去）
+    out
+}
 
 ### ⚠️ 借用检查：这一处不是照着加参数就完事
 
