@@ -236,6 +236,16 @@ export class Engine {
     // 文字清单的**代**。行号是按位置编的，而栅格化是异步的 —— 两次 seek 交叠时，
     // 老的那一趟回来手上指的行可能已经是另一条字幕了（见 prepareText）。
     this.textToken = 0;
+    // **"这一路、这一行、这份内容"有没有交过的记录**（字幕一份、弹幕一份）。
+    //
+    // 用途只有一个：决定要不要**跳过提交** —— 跳过了，wasm 那边就会复用上一帧那张
+    // 已经上传好的纹理（省掉 create_texture + 重传，实测这段从 3.3ms 降到 0.2ms）。
+    //
+    // ⚠️ 判据必须带上**行号**。只按内容判会出错：栅格化缓存是全内容的，而 wasm 是按
+    // 行号取纹理的 —— "上一帧 [A,B]、这一帧只剩 [B]"时，第 0 行会被误判成没变，
+    // 于是复用第 0 行那张 A 的纹理。`count` 记着上一帧的行数，行数一变整份作废。
+    this.textMemo = { keys: new Map(), count: -1 };
+    this.danmakuMemo = { keys: new Map(), count: -1 };
     // 最近一次**算好并交给宿主**的清单（`prepareText` 里写的）。
     //
     // 判定通道读它，而不是再调一次 `textFrame`：那会重算一份新清单并把刚提交的位图
@@ -764,11 +774,16 @@ export class Engine {
     const token = (this.textToken += 1);
     // **两类各一套画法**（字幕暖色、弹幕白色 + 各自的描边）——
     // 以前是一份共用的，而共用时"字幕是暖色、弹幕是白色"这件事**必然错一个**。
+    //
+    // 每类各带一份 memo：它是"这一路、这一帧、这份内容"有没有交过的记录，
+    // 决定要不要跳过提交（跳过 = 让 wasm 复用上一帧那张纹理）。**两路不能共用** ——
+    // 它们的编号空间与风格都不同，共用会让"字幕第 i 行"与"弹幕第 i 条"互相冒充。
     const placed = await this.rasterizePlacements(
       manifest.placements,
       manifest.subtitle_style,
       token,
       (index, bitmap) => this.mod.dhampir_project_set_text_bitmap(index, bitmap),
+      this.textMemo,
     );
     // 这一趟过期了就别接着交下一批：宿主手上的清单已经不是这一帧的了。
     if (placed === false) return manifest;
@@ -777,6 +792,7 @@ export class Engine {
       manifest.danmaku_style,
       token,
       (index, bitmap) => this.mod.dhampir_project_set_danmaku_bitmap(index, bitmap),
+      this.danmakuMemo,
     );
     return manifest;
   }
@@ -789,22 +805,31 @@ export class Engine {
    *
    * `style` 是 `{color, outline, stroke_px, stroke_color}`，**来自契约**。
    */
-  async rasterizePlacements(placements, style, token, submit) {
+  async rasterizePlacements(placements, style, token, submit, memo) {
+    // 行数变了 → wasm 手上那张"按行号的纹理表"长度也变了，整份作废（这一帧全部重交）。
+    if (memo.count !== placements.length) {
+      memo.keys.clear();
+      memo.count = placements.length;
+    }
     for (let index = 0; index < placements.length; index += 1) {
       const line = placements[index];
       // 全是空白字符的行**不做位图**：宿主不判它（栅格化出来本来就是空的），
       // 硬塞一张空的进去只会让"这一行没有位图"那条判据失去意义。
       if (line.visible !== true) continue;
 
-      // **内容没变就不提交** —— 这是 wasm 那边"复用上一帧纹理"能生效的前提。
+      // **这一路、这一行、内容都没变 → 不提交** —— 这是 wasm 那边"复用上一帧纹理"的前提。
       //
-      // wasm 的 `upload_text_bitmaps` 现在只在**收到新位图**（脏标记）时才重建纹理 + 重传，
-      // 而"收到新位图"由这里决定。判据就是上面那个栅格化缓存的 key（**内容级**，不是行号级）——
-      // 所以"第 i 行换了字"必然不命中、必然提交，"第 i 行没变"才跳过，不会留下上一行的字。
+      // ⚠️ 判据必须是 **(哪一路, 行号, 内容)** 三元，**不能只按内容去查栅格化缓存**。这是
+      // 踩过的坑：那个缓存是**全内容**的（"B" 上一帧出现在第 1 行，它的 key 就在缓存里），
+      // 而 wasm 复用纹理是**按行号**取的。于是"上一帧 [A,B]、这一帧只剩 [B]"时，
+      // 第 0 行会被误判成"没变"而跳过提交，wasm 照旧复用第 0 行那张 **A** 的纹理 ——
+      // 画面显示的成了上一行的字（就是 wasm 注释里怕的"慢了半拍"）。
       //
-      // 为什么值得：实测（clip-25，2 行字幕）这段占 3.3ms/帧；双跑证明宿主侧的栅格化缓存
-      // 只省掉其中 11% —— 大头正是这次**每帧无条件重建纹理 + 重传**。
-      if (RASTER_CACHE.has(rasterKey(line, style))) continue;
+      // 为什么值得这么绕：实测（clip-25，2 行字幕）这段占 3.3ms/帧；宿主侧的栅格化缓存
+      // 双跑只省掉其中 11% —— 大头正是**每帧无条件重建纹理 + 重传**，而那份重传由这一句决定。
+      const key = rasterKey(line, style);
+      if (memo.keys.get(index) === key) continue;
+      memo.keys.set(index, key);
 
       let bitmap = null;
       try {
