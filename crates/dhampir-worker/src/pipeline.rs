@@ -235,6 +235,62 @@ pub struct PoolStats {
     pub frames_read: usize,
 }
 
+/// 离屏帧槽：把一帧画进一块**跨帧复用**的纹理。
+///
+/// 这是 `dhampir_core::io::FrameSink` 在 **native 侧**的形态 —— `io.rs` 的文档写的就是它
+/// （"native 侧：离屏 texture，交给 readback 读回、再交给编码器"）。
+/// wasm 侧的对称物是 `CanvasFrameSink`（`acquire` 抓 surface 纹理、`finish` 才 `present`）。
+///
+/// # 所有权（这一条是从现有语义读出来的，不是新定的）
+///
+/// 原先是在渲染区间**之前**就地 `create_texture` 一次、跨帧复用 —— 所以"纹理归帧槽自己、
+/// 生命周期 = 一次渲染运行"**与既有行为完全一致**，换成它不改变任何东西。
+pub struct OffscreenFrameSink {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
+impl OffscreenFrameSink {
+    /// 一次渲染运行建一块，之后跨帧复用。
+    pub fn new(device: &wgpu::Device, width: u32, height: u32, label: &'static str) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: WORK_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Self { texture, view }
+    }
+
+    /// 本帧要画进去的视图。（每帧同一个 —— 与"跨帧复用"一致。）
+    pub fn view(&self) -> &wgpu::TextureView {
+        &self.view
+    }
+
+    /// 底层纹理（读回 / 编码要用它的 `COPY_SRC`）。
+    pub fn texture(&self) -> &wgpu::Texture {
+        &self.texture
+    }
+}
+
+/// 让 native 侧也**实现** `io::FrameSink` —— "两个入口各实现同一对 trait" 的后一半。
+///
+/// 它很薄（`acquire` 就是返回那个复用的 view、`finish` 无处可做），这是**对的**：
+/// 两个入口的差别本来就只在"帧槽去哪"，而那是 `acquire`/`finish` 两行的事。
+impl dhampir_core::io::FrameSink for OffscreenFrameSink {
+    fn acquire(&mut self, _device: &wgpu::Device) -> wgpu::TextureView {
+        self.view.clone()
+    }
+
+    /// 离屏帧槽没有"提交"这一步：读回/编码由调用方接着做。
+    fn finish(&mut self, _frame: i64) {}
+}
+
 impl PoolStats {
     /// 把另一份账并进来（**分块并行**时每块各有一份，最后要汇总）。
     ///
@@ -1801,21 +1857,8 @@ fn render_range(
         open_leg(NATIVE_BACKENDS).map_err(|error| format!("拿不到 GPU 上下文：{error}"))?;
     let renderer = TimelineRenderer::new(&ctx.device, WORK_FORMAT);
 
-    let target = ctx.device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("dhampir pipeline target"),
-        size: wgpu::Extent3d {
-            width: plan.width,
-            height: plan.height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: WORK_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    // 走 `io::FrameSink` 在 native 侧的形态：纹理归它、生命周期 = 一次渲染运行（与原来逐值一致）。
+    let target = OffscreenFrameSink::new(&ctx.device, plan.width, plan.height, "dhampir pipeline target");
 
     // **先把这一趟要哪些 (源, 源内帧) 算出来**：池子靠它决定"读到的帧要不要留下"。
     // 这一步是纯的、不碰 GPU 也不碰解码器，所以它失败不了，也不会让出片慢多少。
@@ -1850,7 +1893,7 @@ fn render_range(
             &ctx.device,
             &ctx.queue,
             &mut command,
-            &target_view,
+            target.view(),
             RenderSpace {
                 sequence: plan.sequence,
                 target: (plan.width, plan.height),
@@ -1873,7 +1916,7 @@ fn render_range(
         let mut image = match pollster::block_on(readback::read_texture_rgba8(
             &ctx.device,
             &ctx.queue,
-            &target,
+            target.texture(),
         )) {
             Ok(image) => image,
             Err(error) => {
@@ -2040,21 +2083,7 @@ pub fn render_frames_png_run(
     let (ctx, _init) =
         open_leg(NATIVE_BACKENDS).map_err(|error| format!("拿不到 GPU 上下文：{error}"))?;
     let renderer = TimelineRenderer::new(&ctx.device, WORK_FORMAT);
-    let target = ctx.device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("dhampir frame target"),
-        size: wgpu::Extent3d {
-            width: plan.width,
-            height: plan.height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: WORK_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let target = OffscreenFrameSink::new(&ctx.device, plan.width, plan.height, "dhampir frame target");
     // 与出片那条路**同一条**规矩：需求先算出来，再交给池子。
     // 一次只要一帧时需求就是那一帧，池子于是退化成"直接读过去、只留那一帧"。
     // 取 min/max 而不是 first/last：调用方给的帧号不保证有序，
@@ -2095,7 +2124,7 @@ pub fn render_frames_png_run(
             &ctx.device,
             &ctx.queue,
             &mut command,
-            &target_view,
+            target.view(),
             RenderSpace {
                 sequence: plan.sequence,
                 target: (plan.width, plan.height),
@@ -2108,7 +2137,7 @@ pub fn render_frames_png_run(
         let mut image = pollster::block_on(readback::read_texture_rgba8(
             &ctx.device,
             &ctx.queue,
-            &target,
+            target.texture(),
         ))
         .map_err(|error| format!("第 {frame} 帧读回失败：{error}"))?;
         let mut overlay_log = IssueLog::new();
