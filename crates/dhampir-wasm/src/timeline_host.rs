@@ -718,6 +718,18 @@ impl ProjectHost {
     /// 尺寸画的，两者只在「同一份清单 + 同一个画布」里互相成立。只作废一半，
     /// 剩下那一半会被当成有效数据继续用 —— 而它看起来完全正常（只是位置/内容是旧的），
     /// 正是这个项目最不想要的那类错。
+    /// 画布尺寸变了 / 字幕换了：连**已上传的纹理**一起作废。
+    ///
+    /// 与 [`Self::invalidate_text`] 分开，是因为**不能被每帧调**：`text_frame` 每帧都会
+    /// `invalidate_text`（作废上一帧的行位图），而"没变的行复用上一帧纹理"恰恰要跨帧活着。
+    /// 只有落点体系变了才该连纹理一起扔。
+    fn invalidate_text_uploads(&mut self) {
+        self.text_uploads.clear();
+        self.danmaku_uploads.clear();
+        self.text_dirty.clear();
+        self.danmaku_dirty.clear();
+    }
+
     fn invalidate_text(&mut self) {
         self.text_lines.clear();
         self.danmaku_lines.clear();
@@ -832,6 +844,20 @@ impl ProjectHost {
                 danmaku_uploads,
                 danmaku_dirty,
             );
+            // **把这帧的成果存回去** —— 下一帧"没变的行"要靠它复用纹理。
+            //
+            // 以前漏了这两句：upload_text_bitmaps 算出来的 `uploaded` 直接丢掉，
+            // 于是 `text_uploads` 永远是空的 -> "没变的行"既拿不到上一帧的纹理、
+            // 又因为位图表每帧被 invalidate_text drain 掉而拿不到位图 -> 那一行不画。
+            // 症状就是"字幕/弹幕只出现一下就消失"，而画面其余部分完全正常。
+            // clone 而不是 move：下面 overlay_items 还要用这两个 Vec。里面装的都是
+            // Texture/TextureView（Arc 背书），克隆的代价只是几十个句柄。
+            *text_uploads = uploaded_lines.clone();
+            *danmaku_uploads = uploaded_danmaku.clone();
+            // **脏标记用完即清**：它表达的是"这一帧有新位图"，不是"历史上脏过"。
+            // 不清的后果同上：那些行每一帧都去重建，而位图早被 drain 掉了。
+            text_dirty.clear();
+            danmaku_dirty.clear();
             // **弹幕排在字幕之后**：同一帧里弹幕在画面上层（与传统弹幕播放器一致），
             // 而重叠只可能发生在泳道多到压住字幕时 —— 那时的先后顺序是唯一能表态的地方。
             let mut items = overlay_items(text_lines, &uploaded_lines, None);
@@ -1943,6 +1969,8 @@ pub fn dhampir_project_set_subtitles(asset_id: String, text: String, format: Str
     PROJECT_HOST.with(|h| {
         if let Some(host) = h.borrow_mut().as_mut() {
             host.invalidate_text();
+        // 落点体系变了：连已上传的纹理一起扔（见 invalidate_text_uploads 的说明）。
+        host.invalidate_text_uploads();
         }
     });
     host_api::to_json(&serde_json::json!({
@@ -2330,6 +2358,8 @@ pub fn dhampir_project_resize(width: u32, height: u32) -> Result<(), JsValue> {
         // 不作废的话它们看起来仍然有效（`text_frame` 还是这一帧），于是字会按旧尺寸贴上去。
         // 作废的代价只是「这一帧要等 JS 重新栅格化」，而那是它本来就要做的事。
         host.invalidate_text();
+        // 落点体系变了：连已上传的纹理一起扔（见 invalidate_text_uploads 的说明）。
+        host.invalidate_text_uploads();
         Ok(())
     })
 }

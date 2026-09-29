@@ -377,6 +377,7 @@ export class Engine {
       this.sourceMode = (await Engine.probeVideoCopy()) ? "video" : "bitmap";
     }
     this.mod.dhampir_project_set_bitmap_mode(this.sourceMode === "bitmap");
+    this.resetTextMemos();
     return info;
   }
 
@@ -501,7 +502,25 @@ export class Engine {
    * 一路坏了**不抛**：那一份字幕就登记不上，宿主会在每一帧报 `subtitle_unregistered`。
    * 「这部片子没有字幕」与「字幕没读进来」的输出必须不一样 —— 这里正是那个分岔点。
    */
+  /**
+   * **把"某一路这一行交过什么"的记录清掉** —— 下一帧会全部重交一遍。
+   *
+   * 必须和 wasm 侧对齐：`dhampir_project_set_subtitles` 与 `dhampir_project_resize`
+   * 会调 `invalidate_text_uploads()`，把已上传的纹理连同脏标记一起扔掉。
+   * 宿主如果还记着"这一行交过"，下一帧就会跳过提交 —— 而 wasm 手上已经没有那张纹理了，
+   * 结果是**那一行永久不显示**（换字幕/改画布尺寸之后立刻就会看到）。
+   *
+   * 画布尺寸变化会让 key 自己变（位图宽高在 key 里），所以那条路本来不会漏；
+   * 但"重新登记同一份字幕"的 key 与旧的一样，**非清不可**。
+   */
+  resetTextMemos() {
+    this.textMemo = { keys: new Map(), count: -1 };
+    this.danmakuMemo = { keys: new Map(), count: -1 };
+  }
+
   async loadSubtitles(entries) {
+    // 字幕换了 -> wasm 侧已经丢弃已上传的纹理，宿主这边也得忘掉"交过什么"。
+    this.resetTextMemos();
     const list = Array.isArray(entries) ? entries : [];
     const fetched = await Promise.all(list.map(async (entry) => {
       try {
