@@ -70,7 +70,35 @@ fn upload_text_bitmaps(
 ```
 
 **三个调用点跟着改**：`draw` 里两处（`timeline_host.rs:784` / `791`）
-与 `text_probe` 一处（`L2031`）。
+与 `text_probe` 一处（`L2031`）。原文如下：
+
+```rust
+// draw 里（L784 / L791）—— 注意它们用的是**裸变量** text_bitmaps / danmaku_bitmaps
+let uploaded_lines = upload_text_bitmaps(
+    &ctx.device, &ctx.queue, sink_format, text_lines, text_bitmaps,
+);
+let uploaded_danmaku = upload_text_bitmaps(
+    &ctx.device, &ctx.queue, sink_format, danmaku_lines, danmaku_bitmaps,
+);
+
+// text_probe 里（L2031）
+let uploaded =
+    upload_text_bitmaps(&host.ctx.device, &host.ctx.queue, format, &host.text_lines, &host.text_…);
+```
+
+### ⚠️ 借用检查：这一处不是照着加参数就完事
+
+`draw` 里那两个 `text_bitmaps` / `danmaku_bitmaps` 是从 `host` **借出来**的裸变量。
+再传 `&mut host.text_uploads` 会**同时可变借用 host** → 编译不过。
+
+可行做法（挑一个）：
+
+* 用 `std::mem::take` 先把 uploads 取出来，用完再放回去；
+* 或者把 uploads 也借成裸变量（与 `text_bitmaps` 同样的写法），
+  但那就得把 `upload_text_bitmaps` 改成**收 `&mut` 的那一份**而不是 `&host`；
+* 或者让 `upload_text_bitmaps` 收 `&mut Vec<…>` 之前，先把 `text_bitmaps` 与
+  `text_lines` 的借用结束掉（调换语句顺序往往就够）。
+
 
 ## 宿主那一半（`web/engine.js`）
 
