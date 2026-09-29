@@ -311,6 +311,28 @@ export class Engine {
   }
 
   /**
+   * 交一张**静态位图**给某个 source —— 贴纸 / 图片序列这类**没有 `<video>`** 的源。
+   *
+   * # 为什么必须由宿主交
+   *
+   * `prepare` 只会对 `this.videos` 里的元素做 `createImageBitmap`，所以"没有视频元素"的源
+   * 它一个位图都不会生成 —— 那一层就**静默少画**（画面看起来正常，只是少了几层贴纸）。
+   * wasm 侧的契约写得很清楚：`dhampir_project_set_bitmap(source, bitmap)` 就是给这种情况准备的
+   * （"JS 把某个 source **当前帧**转成位图交给宿主"）。
+   *
+   * # 时序
+   *
+   * 契约要求"**seek 完成之后**交"（早了拿到的是上一帧）。而 `seek` 内部先 `clear_bitmaps()`
+   * 再 `draw()`，所以宿主在 `seek` **之后**交的位图会在**下一帧**被画出来 —— 晚一帧（16ms），
+   * 人眼看不出；要同帧就得拆开 `prepare`/`draw`，那属于后续优化。
+   *
+   * 传进来的位图**不要自己 close()**：宿主换新的时候会 `previous.close()`（契约如此）。
+   */
+  setSourceBitmap(source, bitmap) {
+    this.mod.dhampir_project_set_bitmap(source, bitmap);
+  }
+
+  /**
    * **明确指定源模式**（`"video"` 零拷贝 / `"bitmap"` 每帧 createImageBitmap）。
    *
    * # 为什么需要这个入口
