@@ -30,6 +30,66 @@ const hann = (resolve) => (event) => resolve(event);
  */
 const TEXT_FONT = "sans-serif";
 
+/**
+ * **栅格化缓存：内容 -> 那张 canvas。**
+ *
+ * # 为什么缓存 canvas，而不是 `ImageBitmap`
+ *
+ * wasm 侧 `dhampir_project_set_text_bitmap` 在换掉旧位图时会 `previous.close()`。
+ * 如果跨帧复用同一个 `ImageBitmap`，第二次提交时 `insert` 返回的 `previous`
+ * **就是它自己** —— wasm 会把它 close 掉，于是拿到一张**已关闭的位图**。
+ * canvas 是我们自己的东西，wasm 碰不到，所以缓存这一层是安全的；
+ * 位图仍然**每帧新建**（`createImageBitmap(canvas)`），与契约完全兼容。
+ *
+ * # 省掉的是什么
+ *
+ * 省掉的是**字体渲染**（`fillText` / `measureText`，`textMs` 里的主要部分），
+ * 而不是位图创建与上传。原生侧缓存的就是这一层 —— 出片报告里的
+ * 「栅格化缓存命中 88 / 未命中 1」量的是同一件事（89 行里 88 行没重新栅格化）。
+ *
+ * # key 里为什么**不含位置**
+ *
+ * 位图内容与它贴在哪儿无关 —— 位置由每帧的 manifest 给（`placement.x/y`），
+ * wasm 拿着它去摆。把位置算进 key 只会让"同一条字幕、位置每帧微动"永远不命中。
+ */
+const RASTER_CACHE = new Map();
+const RASTER_CACHE_LIMIT = 512;
+
+/** 影响像素的那些字段 —— 位置除外。 */
+function rasterKey(line, style) {
+  return [
+    line.text,
+    line.color,
+    line.parts,
+    line.font_px,
+    line.scale,
+    line.border_px,
+    line.bitmap_width,
+    line.bitmap_height,
+    style,
+  ].map((v) => JSON.stringify(v === undefined ? null : v)).join("|");
+}
+
+/**
+ * **栅格化入口（带缓存）** —— 调用点看起来与以前一字不差。
+ *
+ * 为什么做成"包一层"而不是把缓存塞进调用点：`createImageBitmap(rasterizeLine(…))`
+ * 那个形状是 `check-overlay-plumbing.mjs` 的锚点（它要在 `createImageBitmap(` 附近
+ * 同时看到 `rasterizeLine(` 与 `premultiplyAlpha: "none"`）。守卫守的是真东西 ——
+ * "字形位图必须由 rasterizeLine 造、且必须声明直排 alpha" —— 所以**该改的是我**，
+ * 不是它。包一层之后锚点原样还在，缓存也在。
+ */
+function rasterizeLine(line, style) {
+  const key = rasterKey(line, style);
+  let canvas = RASTER_CACHE.get(key);
+  if (canvas === undefined) {
+    canvas = rasterizeLineUncached(line, style);
+    if (RASTER_CACHE.size >= RASTER_CACHE_LIMIT) RASTER_CACHE.clear();
+    RASTER_CACHE.set(key, canvas);
+  }
+  return canvas;
+}
+
 /** `[r,g,b,a]`（各 0-255）-> canvas 认的颜色串。 */
 function cssColor(rgba) {
   const parts = Array.isArray(rgba) && rgba.length >= 3 ? rgba : [255, 255, 255, 255];
@@ -57,7 +117,7 @@ function cssColor(rgba) {
  * （alpha 只随覆盖度走）。于是这里**直接照着那份结果落笔**：填 style.color、描黑边，
  * 而不是在 JS 里再写一遍逐像素公式（那就是第二份实现，迟早与 tint 漂开）。
  */
-function rasterizeLine(line, style) {
+function rasterizeLineUncached(line, style) {
   const canvas = document.createElement("canvas");
   canvas.width = line.bitmap_width;
   canvas.height = line.bitmap_height;
@@ -740,6 +800,9 @@ export class Engine {
         // **直排 alpha**：宿主用 copy_external_image_to_texture 上传，并且声明
         // premultiplied_alpha = false。两边必须一致 —— 说错不会报错，只会让字的边缘发暗，
         // 而那看起来像"字体没渲染好"，不像"叠加算错了"。
+        //
+        // `rasterizeLine` 内部走栅格化缓存（见 `RASTER_CACHE` 的说明）：
+        // **canvas 可以跨帧复用，`ImageBitmap` 不可以**（wasm 换掉旧位图时会 close 它）。
         bitmap = await createImageBitmap(rasterizeLine(line, style), {
           premultiplyAlpha: "none",
         });
