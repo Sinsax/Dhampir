@@ -310,6 +310,38 @@ export class Engine {
     return info;
   }
 
+  /**
+   * **明确指定源模式**（`"video"` 零拷贝 / `"bitmap"` 每帧 createImageBitmap）。
+   *
+   * # 为什么需要这个入口
+   *
+   * `attach()` 的自动判定靠 `probeVideoCopy()`，而那个探针拿的是
+   * `document.createElement("video")` —— **一个没有 `src`、`readyState === 0` 的空元素**。
+   * 于是它量到的不是"这块设备能不能把 video 拷进纹理"，而是"空 video 抛哪个异常"：
+   * 抛 `could not be converted` 就判 false，抛别的（如 `InvalidStateError`）就判 **true**。
+   *
+   * 实测（同一份 1080p60 工程、同一个引擎、同一台机器）：
+   *
+   * | 环境 | 探针结果 | 每帧 | 慢 seek |
+   * |---|---|---|---|
+   * | headless Chrome（本仓的测量脚本） | `video` | 4~6 ms | 0 |
+   * | 真窗口 Chrome（宿主页面） | `bitmap` | **191 ms** | **41** |
+   *
+   * **同一个探针在两个环境给出不同答案，而其中一个要付 40 倍代价。** 与其猜，
+   * 不如让宿主能明确指定 —— 宿主比探针更清楚自己刚绑上的是什么。
+   *
+   * @param {"video"|"bitmap"} mode
+   * @returns {string} 上一个模式（方便调用方记账/回退）
+   */
+  setSourceMode(mode) {
+    const next = mode === "bitmap" ? "bitmap" : "video";
+    const previous = this.sourceMode;
+    this.sourceMode = next;
+    // 与 `attach()` 里同一件事：契约侧要跟着切（bitmap 模式每帧会先 clear_bitmaps）。
+    this.mod.dhampir_project_set_bitmap_mode(next === "bitmap");
+    return previous;
+  }
+
   /** 把一个 source 绑到一个 video 元素上。 */
   bindSource(source, videoId) {
     this.mod.dhampir_project_bind_source(source, videoId);
