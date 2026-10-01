@@ -12,15 +12,15 @@ export interface DanmakuSpec {
   color?: number[];
   /** 一条弹幕从右滚到左要多久（毫秒）。 */
   duration_ms?: number;
-  /** 淡入时长（毫秒）。V-Trim 的 `getActiveDms()` 是 `0.3`。 */
+  /** 淡入时长（毫秒）。参照实现 是 `0.3`。 */
   fade_in_ms?: number;
-  /** 淡出时长（毫秒）。V-Trim 是 `0.2`。 */
+  /** 淡出时长（毫秒）。参照实现 是 `0.2`。 */
   fade_out_ms?: number;
   /** 字体族名（语义同 [`SubtitleStyle::font_family`]，弹幕也归这条）。 */
   font_family?: string | null;
   /** 字号 = 目标高度 * 这个比例。 */
   font_ratio?: number;
-  /** 字重。V-Trim 的弹幕是 `600`；默认 400。 */
+  /** 字重。参照实现 的弹幕是 `600`；默认 400。 */
   font_weight?: number;
   /** **相邻泳道的间距**（归一化）。默认 0 = 取行盒高（`font_ratio * LINE_HEIGHT_EM`）。 */
   lane_spacing_ratio?: number;
@@ -30,13 +30,13 @@ export interface DanmakuSpec {
   lanes?: number;
   /** 行高 / 字号的比例。默认 0 = 用 [`crate::text_layout::LINE_HEIGHT_EM`]。 */
   line_height?: number;
-  /** **基础不透明度。** V-Trim 用 `0.9`（不是 1.0）。 */
+  /** **基础不透明度。** 参照实现 用 `0.9`（不是 1.0）。 */
   opacity?: number;
-  /** 是否加描边。V-Trim 弹幕是 `2px #000`。 */
+  /** 是否加描边。参照实现 弹幕是 `2px #000`。 */
   outline?: boolean;
   /** 描边颜色。 */
   stroke_color?: number[];
-  /** 描边宽度 = 目标高度 * 这个比例（V-Trim 是 `2/1080`）。 */
+  /** 描边宽度 = 目标高度 * 这个比例（参照实现 是 `2/1080`）。 */
   stroke_ratio?: number;
 }
 
@@ -109,7 +109,7 @@ export interface SubtitleStyle {
   fade_in_ms?: number;
   /** **淡出时长（毫秒）。** 0 = 硬消失。 */
   fade_out_ms?: number;
-  /** **字体族名**（`"LXGW WenKai"` 这种）。`None` = 用宿主的默认字体。 */
+  /** **字体族名**（`"Noto Sans SC"` 这种）。`None` = 用宿主的默认字体。 */
   font_family?: string | null;
   /** 字号 = 目标高度 * 这个比例。 */
   font_ratio?: number;
@@ -125,12 +125,20 @@ export interface SubtitleStyle {
   max_lines?: number;
   /** 是否加描边（压住亮背景）。 */
   outline?: boolean;
-  /** 入场时从下方浮上来的距离（**文档像素**）。V-Trim 是 `20`。 */
+  /** 入场时从下方浮上来的距离（**文档像素**）。参照实现 是 `20`。 */
   rise_in_px?: number;
-  /** 退场时向上浮的距离（文档像素）。V-Trim 是 `8`。 */
+  /** 退场时向上浮的距离（文档像素）。参照实现 是 `8`。 */
   rise_out_px?: number;
   /** **换行安全宽**（占画布宽的比例）。默认 0 = 沿用老行为。 */
   safe_width_ratio?: number;
+  /** **阴影的模糊半径**（占**文档高**的比例；0 = 硬阴影）。 */
+  shadow_blur_ratio?: number;
+  /** **文字阴影的颜色**（`None` = 不画阴影，默认 —— 既有工程逐字节不变）。 */
+  shadow_color?: number[] | null;
+  /** 阴影的水平偏移（**文档像素**，与 `transform.x/y` 同一坐标系）。 */
+  shadow_dx_px?: number;
+  /** 阴影的垂直偏移（文档像素，**正数向下**）。 */
+  shadow_dy_px?: number;
   /** **装不下时整体缩字号的下限**。默认 0 = 不缩（老行为：超出直接丢行）。 */
   shrink_min_scale?: number;
   /** 描边颜色。`outline` 为假时忽略。 */

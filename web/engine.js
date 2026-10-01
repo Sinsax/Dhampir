@@ -66,6 +66,9 @@ function rasterKey(line, style) {
     line.border_px,
     line.bitmap_width,
     line.bitmap_height,
+    // **不透明度必须进 key**：淡入期间它逐帧在变，不进 key 就会一直复用
+    // 第一帧那张（alpha 已烤死在位图里）—— 症状是"字幕不淡入、但也不报错"。
+    line.opacity,
     style,
   ].map((v) => JSON.stringify(v === undefined ? null : v)).join("|");
 }
@@ -123,11 +126,15 @@ function rasterizeLineUncached(line, style) {
   canvas.height = line.bitmap_height;
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, canvas.width, canvas.height);
+  // **淡入淡出靠 alpha 烤进位图** —— 与 CLI 同一条思路（合成用的混合方程取的是
+  // 位图自己的 alpha，`OverlayItem` 上没有 alpha 字段）。清单里的 `opacity`
+  // 由宿主算好（`text_envelope`），这里只照用；不给就是 1。
+  ctx.globalAlpha = (typeof line.opacity === "number" && line.opacity >= 0) ? line.opacity : 1;
   // **字体族与字重优先用契约给的**（`style.family` / `style.weight`）。
   //
   // 这条链以前是断的：契约里 `TextStyle.family` 有文档（"宿主按这个名字找，
   // 找不到要报出来"），但样式 JSON 不带它 → 这里只能回退到写死的 `sans-serif`，
-  // 症状是**字号/位置/颜色都对、只有字形不对**。权重同理（V-Trim 用 700/600，
+  // 症状是**字号/位置/颜色都对、只有字形不对**。权重同理（参照实现 用 700/600，
   // canvas 不给就是 400）。`TEXT_FONT` 保留为**兜底**：契约没给时才用它。
   const family = style && style.family ? style.family : TEXT_FONT;
   const weight = style && style.weight ? style.weight : 400;
@@ -150,6 +157,15 @@ function rasterizeLineUncached(line, style) {
     ? Math.round(style.stroke_px * scaled)
     : Math.round(line.border_px * scaled);
 
+  // 这一套样式的文字阴影（`null` = 不画）。判据与 CLI 侧
+  // `text_overlay::shadow_spec` **逐条相同**：颜色给了、且 alpha 不为 0。
+  //
+  // ⚠️ **不画阴影时这里绝不许碰 `shadow*` 那几个属性** —— canvas 的默认值本来就是
+  // "没有阴影"，而把 `shadowBlur` 设成 0、`shadowColor` 设成透明也仍然会走一遍
+  // 阴影路径，某些实现下像素会变（投影的合成方式与直接画不一样）。
+  // "老工程逐字节不变"在这里就是"一个属性都不设"。
+  const shadow = textShadow(style);
+
   // **有 `.hl` 分段时：逐段各画一次**（参照 `index.html:1985-1994` 就是这么画的）。
   //
   //     line.forEach(p => {
@@ -168,6 +184,8 @@ function rasterizeLineUncached(line, style) {
     let sx = x - total / 2;
     for (let i = 0; i < line.parts.length; i += 1) {
       const part = line.parts[i];
+      // **先阴影、后文字** —— 与 CLI 侧同一个顺序（那边是先贴阴影位图）。
+      if (shadow !== null) drawShadow(ctx, shadow, part.text, sx, y);
       if (style.outline === true && strokePx > 0) {
         ctx.lineWidth = strokePx * 2;
         ctx.strokeStyle = strokeColorCss(line, style);
@@ -182,6 +200,7 @@ function rasterizeLineUncached(line, style) {
     return canvas;
   }
 
+  if (shadow !== null) drawShadow(ctx, shadow, line.text, x, y);
   if (style.outline === true && strokePx > 0) {
     // 边宽取两倍：drawtext 的 borderw 是**向外**扩一圈，而 canvas 的描边压在字上。
     // 先描边后填字，内半边被字盖掉，剩下的外半边就是那一圈。
@@ -203,6 +222,62 @@ function rasterizeLineUncached(line, style) {
  */
 function lineColor(line, style) {
   return Array.isArray(line.color) ? line.color : style.color;
+}
+
+/**
+ * 这一套样式里的**文字阴影**（`null` = 不画）。
+ *
+ * 判据与 CLI 侧 `text_overlay::shadow_spec` **逐条相同**：
+ *   1. `shadow_color` 给了（是四元数组）；
+ *   2. 它的 **alpha 不为 0** —— 全透明的阴影 = 看不见的阴影 = 不画。
+ * 第二条不是洁癖：为它走一遍阴影路径会**改变像素**（见 `rasterizeLineUncached` 里
+ * 那段"不画时一个属性都不设"），而画面上一个像素都不该多。
+ *
+ * 三个量都是**像素**（求值层已经把契约里的比例换好了），量纲与 `stroke_px` 一致。
+ */
+function textShadow(style) {
+  if (!style || !Array.isArray(style.shadow_color)) return null;
+  const color = style.shadow_color;
+  if (color.length < 4 || color[3] === 0) return null;
+  return {
+    color,
+    // `shadowBlur` 就是契约给的像素值：canvas 那边它已经等价于"σ 的两倍"，
+    // 而 CLI 侧要把它除以 2 才是 `gblur` 的 σ（见 `text_raster::shadow_sigma_px`）
+    // —— **那个 2 就是两端"观感近似"而不是逐像素一致的来源**。
+    blur: typeof style.shadow_blur_px === "number" && style.shadow_blur_px > 0
+      ? style.shadow_blur_px
+      : 0,
+    dx: typeof style.shadow_dx_px === "number" ? style.shadow_dx_px : 0,
+    dy: typeof style.shadow_dy_px === "number" ? style.shadow_dy_px : 0,
+  };
+}
+
+/**
+ * 画一遍"只有阴影"的那一笔。**必须在文字之前调用**（影子在底下）。
+ *
+ * # 为什么用"填一遍阴影色 + 开阴影"这一招
+ *
+ * canvas 的阴影是**画一笔就投一次**：把 `shadow*` 装上再 `fillText`，
+ * 落下来的东西有两样 —— 影子（按偏移、按模糊）**和这一笔自己**。
+ * 于是这里填的颜色是**阴影色**：那一份"自己"与真正要画的字**完全重合**，
+ * 随后被描边 + 填字压在下面。好处是这一笔**没有描边**（=`shadow` 只装着
+ * 填充那一笔），与 CLI 侧"阴影只取填充轮廓、不参与描边宽度"是同一条口径。
+ *
+ * # 已知残差（两端同形，写下来不藏）
+ *
+ * 正文色**半透明**时，会从字里透出下面那一份阴影色的重合笔（CLI 侧也会 ——
+ * 那边是模糊回卷过来的阴影），所以它是"影子在字下面"的正常表现，不是叠错。
+ * 逐像素两边仍然不同：模糊核本来就不同。
+ */
+function drawShadow(ctx, shadow, text, x, y) {
+  ctx.save();
+  ctx.shadowColor = cssColor(shadow.color);
+  ctx.shadowBlur = shadow.blur;
+  ctx.shadowOffsetX = shadow.dx;
+  ctx.shadowOffsetY = shadow.dy;
+  ctx.fillStyle = cssColor(shadow.color);
+  ctx.fillText(text, x, y);
+  ctx.restore();
 }
 
 /**
@@ -252,6 +327,93 @@ export class Engine {
     // 全部作废（宿主那边清单与位图是一起作废的），于是 probe 判的是"没有位图的清单"。
     // 交互路径不读它。
     this.textManifest = null;
+    // **阶段 4 的"代"**：内容标识里带上它，于是任何"这一路的画面可能换了一份"的事
+    // 都会让标识整体变掉 ⇒ 宿主必然重新上传，不会拿旧纹理顶新内容。
+    //
+    // # 为什么必须要有这一代
+    //
+    // `open()` 一份新工程时，source 标识与素材帧号**都可能与旧的逐字相同**
+    // （同一个 `a.mp4`、同一个 `source_frame`），而内容完全是另一份片子。
+    // 少了这一代，宿主的复用判据会把"新工程的第 30 帧"认成"旧工程的第 30 帧"，
+    // 于是画面停在上一份片上 —— 而画面**看起来完全正常**，只是"慢了半拍"。
+    //
+    // 旧口径没有这个责任（那时每帧无条件 `clear_bitmaps`），它是阶段 4 **新引入**的：
+    // 一旦开始"跨帧留着"，"什么变了"就必须有人回答。所以这一代不是一个保险，
+    // 它是那条判据的一部分。
+    this.planGeneration = 0;
+    // **阶段 5：单飞队列。** 同一时刻只允许**一条**"这一帧的管线"在跑，后到的排队。
+    //
+    // # 为什么必须有它（不是优化，是防 panic）
+    //
+    // 上一轮在这里出过事：同一帧被排了两次续跑、或 pre-roll 与正常 seek 并发 ⇒
+    // wasm 侧的 `clear_bitmaps` 重入 ⇒ `RefCell already borrowed` panic。
+    // 而 wasm 里的 panic 抓不住，**一次 panic 会把那个 `RefCell` 永久借住** ——
+    // 之后任何调用都 panic，页面上只剩"启动失败：unreachable executed"。
+    //
+    // 所以并发这件事在这里被**结构性地**挡掉：不是靠"小心一点"，也不是靠 RefCell 的借用。
+    // 用队列而不是"忙就拒绝"：拒绝会让播放中那一帧被丢掉（症状是画面卡一下），
+    // 排队只让它晚一点。
+    this.pipeline = Promise.resolve();
+    // **阶段 5：预渲染缓存的开关** —— 默认**关**。
+    //
+    // 打开它每帧要多一次"自有中间纹理 + blit 到画布"（那是白花的钱），只有在
+    // "同一帧被要第二次"真的发生时才赚得回来 —— 而这件事由宿主的排帧方式决定，
+    // 不是这一层能假设的。所以默认关，由宿主显式打开（`setPreviewCache` / `?cache=1`）。
+    //
+    // 开关与窗口都**由这一侧给**：wasm 跑在 `wasm32-unknown-unknown` 上，
+    // 那一侧没有环境变量（`std::env::var` 恒返回 `Err`，读它等于读死代码）。
+    this.previewCache = { enabled: false, seconds: [3, 2], maxMb: 256 };
+    /** 待提前渲染的帧（同一个槽位只留最新的一帧）。 */
+    this.prerollPending = null;
+    /** 提前渲染的预算（毫秒）。宿主给；`null` = 不自动跑（只提供 `schedulePreroll`）。 */
+    this.prerollBudgetMs = null;
+  }
+
+  /**
+   * **打开 / 关掉预渲染缓存**（阶段 5）。返回上一个开关状态。
+   *
+   * # 为什么把它放在这一层、而不是读环境变量
+   *
+   * 配置被读的那一侧（wasm）**没有环境** —— `wasm32-unknown-unknown` 上
+   * `std::env::var` 恒返回 `Err`。所以"用 `VTEDIT_PREVIEW_CACHE*` 调"是死代码。
+   * 能看见配置的只有 JS，于是开关也在这里。
+   *
+   * # 关掉是**完全**关掉
+   *
+   * 关掉时下一帧的 `begin_frame` **不带 `cache` 字段** ⇒ 宿主直接丢掉整张表、
+   * 回到"合成直接落在画布上"的旧路（不多一次中间纹理 + blit）。
+   * 也就是说这个开关的**关**态与阶段 5 之前逐字节相同。
+   *
+   * @param {boolean} enabled
+   * @param {{seconds?: number[], maxMb?: number}} [options] 窗口（前/后秒数）与内存上限
+   */
+  setPreviewCache(enabled, options = {}) {
+    const previous = this.previewCache.enabled === true;
+    const seconds = Array.isArray(options.seconds) ? options.seconds : [3, 2];
+    const forward = Number(seconds[0]) > 0 ? Number(seconds[0]) : 3;
+    const back = Number(seconds[1]) > 0 ? Number(seconds[1]) : 2;
+    const maxMb = Number(options.maxMb);
+    this.previewCache = {
+      enabled: enabled === true,
+      seconds: [forward, back],
+      maxMb: maxMb > 0 ? maxMb : 256,
+    };
+    if (enabled !== true) {
+      // 关掉时把待渲染的也丢掉 —— 留着会在关掉之后又跑一帧预热，那没有意义。
+      this.prerollPending = null;
+    }
+    return previous;
+  }
+
+  /**
+   * 换了一份"这一路的画面"就代 +1（见 {@link Engine#planGeneration} 的说明）。
+   *
+   * 调用点只放**真的可能改掉源画面**的那些：换工程（open / edit / undo / redo）、
+   * 给 source 换 video 元素、换源模式。**不放**的：拖动播放头、resize
+   * （前者不改内容，后者只改落点体系、由 wasm 那边的尺寸判据管）。
+   */
+  bumpPlanGeneration() {
+    this.planGeneration += 1;
   }
 
   /**
@@ -304,6 +466,8 @@ export class Engine {
       // 向 Rust 要一份**规范化**的工程文件，而不是把输入原样存下来 ——
       // 输入可能是不带资产表的裸契约，那样页面读不到 assets。
       this.projectFile = JSON.parse(this.mod.dhampir_project_doc());
+      // 换了一份工程 ⇒ 源标识与素材帧号可能一字不差而内容不同，标识必须整体作废。
+      this.bumpPlanGeneration();
     }
     return result;
   }
@@ -323,6 +487,8 @@ export class Engine {
     const result = JSON.parse(this.mod.dhampir_project_edit(JSON.stringify(op)));
     if (result.ok === true) {
       this.projectFile = JSON.parse(this.mod.dhampir_project_doc());
+      // 编辑会改掉图层与素材区间 ⇒ 同一个素材帧号可能变成另一幅画面。
+      this.bumpPlanGeneration();
     }
     return result;
   }
@@ -338,6 +504,8 @@ export class Engine {
     const result = JSON.parse(this.mod.dhampir_project_undo());
     if (result.ok === true) {
       this.projectFile = JSON.parse(this.mod.dhampir_project_doc());
+      // 撤回/重做换的是另一份时间线 ⇒ 同上的理由。
+      this.bumpPlanGeneration();
     }
     return result;
   }
@@ -346,6 +514,7 @@ export class Engine {
     const result = JSON.parse(this.mod.dhampir_project_redo());
     if (result.ok === true) {
       this.projectFile = JSON.parse(this.mod.dhampir_project_doc());
+      this.bumpPlanGeneration();
     }
     return result;
   }
@@ -368,16 +537,42 @@ export class Engine {
   async attach(canvasId) {
     const info = JSON.parse(await this.mod.dhampir_project_attach(canvasId));
     this.attached = true;
-    // 源模式：默认**问浏览器**；?src=video / ?src=bitmap 可以强制，
-    // 用来比较两条路的画面与速度（两条路的输出应当逐字节相同）。
+    // 源模式：**默认 bitmap**；`?src=video` / `?src=bitmap` 可以强制。
+    //
+    // ⚠️ 以前默认是"问浏览器"（`probeVideoCopy()`），但那个探测**不可靠**，
+    // 而且判错的方式最坏：它拿一个**空 `<video>`** 去试 `copyExternalImageToTexture`，
+    // 类型这一关过了就算"支持"（注释也写着"接受但内容不可用是另一种错"）——
+    // 可是**类型过关 ≠ 真能画出画面**。在软件 / 回退适配器上（`device_type: Other`），
+    // 直传常常**静默产出空内容**：不报错、不 panic，**只是黑屏**。
+    // 用户实测：切进 Dhampir 一按播放就黑屏，而工具条上写着 `· video`。
+    //
+    // 所以默认走 bitmap：每帧 `createImageBitmap` + 上传，慢一点（软件适配器上十几毫秒），
+    // 但**一定画得出来**。video 直传留作显式开关，用来比较两条路的画面与速度
+    // （两条路的输出应当逐字节相同）。
     const override = new URLSearchParams(location.search).get("src");
-    if (override === "video" || override === "bitmap") {
+ // 默认 video（零拷贝）✓ —— 用户要求：全都用 video，不做 bitmap 自动 fallback ✓
+    // 只保留 ?src=bitmap 这一个**人工**旁路（排查用），不参与任何自动逻辑 ✓
+    if (override === "bitmap") {
       this.sourceMode = override;
     } else {
-      this.sourceMode = (await Engine.probeVideoCopy()) ? "video" : "bitmap";
+      // 用户要求：**默认就用 video（零拷贝）** ✓
+      this.sourceMode = "video";
     }
     this.mod.dhampir_project_set_bitmap_mode(this.sourceMode === "bitmap");
+    // **阶段 5：预渲染缓存的开关也可以从 URL 给**（`?cache=1`），与 `?src=` 同一个口径 ——
+    // 它让"不改宿主代码就能量一次命中收益"成为可能。默认关。
+    const query = new URLSearchParams(location.search);
+    if (query.get("cache") === "1") {
+      const parts = (query.get("cacheSeconds") || "3,2").split(",").map(Number);
+      const mb = Number(query.get("cacheMb"));
+      this.setPreviewCache(true, {
+        seconds: [parts[0], parts[1]],
+        maxMb: mb > 0 ? mb : 256,
+      });
+    }
     this.resetTextMemos();
+    // 换了一次 attach（含换 canvas / 重建宿主）⇒ 标识整体作废。
+    this.bumpPlanGeneration();
     return info;
   }
 
@@ -470,6 +665,8 @@ export class Engine {
     this.sourceMode = next;
     // 与 `attach()` 里同一件事：契约侧要跟着切（bitmap 模式每帧会先 clear_bitmaps）。
     this.mod.dhampir_project_set_bitmap_mode(next === "bitmap");
+    // 换了源模式 ⇒ 宿主手上那份驻留纹理的来源口径变了，标识整体作废。
+    this.bumpPlanGeneration();
     return previous;
   }
 
@@ -478,6 +675,42 @@ export class Engine {
     this.mod.dhampir_project_bind_source(source, videoId);
     const video = document.getElementById(videoId);
     if (video !== null) this.videos.set(source, video);
+    // 同一个 source 换了元素 ⇒ 同一个素材帧号已经是另一幅画面，标识必须作废。
+    this.bumpPlanGeneration();
+  }
+
+  /**
+   * **有界等待**一段视频可被 `createImageBitmap` 取帧（或超时）。
+   *
+   * 为什么必须有：`createImageBitmap(<video>)` 在 `readyState < 2` 或正在 `seeking`
+   * 时会抛 `InvalidStateError: Passed-in video does not have enough data` ——
+   * 而那一帧**整个视频层不画**（症状是黑一下，或"贴纸/字幕都没了"）。
+   * 跳转、骑过手动屏蔽区间、刚起播都会撞上，真工程里能稳定复现。
+   *
+   * 所以这里等 `seeked` / `loadeddata` / `canplay`，**只在这些事件真的把视频变成可读时
+   * 才提前结束**，否则等满超时再交给调用方去处理失败 —— 宁可慢这一帧，
+   * 也不要交一帧没有画面的。
+   */
+  static waitVideoReady(video, timeoutMs) {
+    const ok = () => video.readyState >= 2 && video.seeking !== true;
+    if (ok()) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (value) => {
+        if (done) return;
+        done = true;
+        video.removeEventListener("seeked", onEvent);
+        video.removeEventListener("loadeddata", onEvent);
+        video.removeEventListener("canplay", onEvent);
+        clearTimeout(timer);
+        resolve(value);
+      };
+      const onEvent = () => { if (ok()) finish(true); };
+      const timer = setTimeout(() => finish(ok()), timeoutMs);
+      video.addEventListener("seeked", onEvent);
+      video.addEventListener("loadeddata", onEvent);
+      video.addEventListener("canplay", onEvent);
+    });
   }
 
   /** 这一帧需要哪些源、各停在**第几秒**。秒数由整数帧号经时间基换算。 */
@@ -628,6 +861,76 @@ export class Engine {
   }
 
   /**
+   * **这一帧的来源集合与内容标识**（阶段 4）—— 交给宿主决定哪些位图可以留着。
+   *
+   * # 标识是什么、为什么是它
+   *
+   * 标识 = **素材帧号**（`entry.source_frame`）。贴纸（GIF / 图片序列）铺在时间线上时
+   * 一个素材帧通常要撑好几个时间线帧；素材帧号没变 ⇒ 那一层的内容逐像素相同 ⇒
+   * 宿主可以留着上一帧上传好的纹理，于是 `createImageBitmap` 与那次 GPU 上传**一起省掉**。
+   *
+   * 判据只能是**调用方给的**：宿主按位图对象 / 尺寸 / 时间戳猜，都会在"新的一帧恰好
+   * 长得一样"时把"变了"判成"没变" —— 症状是画面停在上一帧的贴纸上，
+   * 看起来完全正常，只是"慢了半拍"。
+   *
+   * # 什么时候**不给**标识（= 全部照旧重交）
+   *
+   * `followPlayback`（宿主选开、默认关）下视频自己在往前走 ⇒ 同一个素材帧号对应的
+   * **不是**同一幅画面，标识不成立。那时一律不给标识，行为与改前逐字节相同。
+   *
+   * # 没有新导出时
+   *
+   * 回落到 `clear_bitmaps()` —— **逐字节就是改前的行为**。产物里 wasm 与 engine.js 是
+   * 两个文件，版本错配（旧 wasm + 新 engine.js）时必须退化成旧行为，
+   * 而不是抛一句 `dhampir_project_begin_frame is not a function`。
+   *
+   * @returns {{need: string[], reuse: string[], dropped: number}|null} `null` = 没有复用信息
+   */
+  beginFramePlan(frame, sources) {
+    if (typeof this.mod.dhampir_project_begin_frame !== "function") {
+      // 旧 wasm：走的就是改前那一条路，一个字节都没变。
+      this.mod.dhampir_project_clear_bitmaps();
+      return null;
+    }
+    // **标识里带"代"**：见 `planGeneration` —— 换工程 / 换元素之后，同一个素材帧号
+    // 可能已经是另一幅画面，标识必须整体变掉，否则宿主会拿旧纹理顶新内容。
+    const generation = "g" + this.planGeneration + ":";
+    const pin = this.followPlayback !== true;
+    const payload = { frame: frame, sources: [] };
+    for (const entry of sources) {
+      if (pin && typeof entry.source_frame === "number") {
+        payload.sources.push({ source: entry.source, id: generation + entry.source_frame });
+      } else {
+        // 裸字符串 = **没有标识** ⇒ 这一项按"必须重交"处理（宿主不许猜）。
+        payload.sources.push(entry.source);
+      }
+    }
+    // **阶段 5：缓存开着才带 `cache`**。不带 = 宿主丢掉整张表、走旧路
+    // （"默认关"在协议上就是这个意思，不需要第二个开关）。
+    if (this.previewCache.enabled === true) {
+      payload.cache = {
+        enabled: true,
+        seconds: this.previewCache.seconds,
+        max_mb: this.previewCache.maxMb,
+      };
+    }
+    let plan = null;
+    try {
+      plan = JSON.parse(this.mod.dhampir_project_begin_frame(JSON.stringify(payload)));
+    } catch (error) {
+      // 解析不了也走下面的回落 —— 宁可这一帧慢，也不要留着一帧不知道来历的位图。
+      plan = null;
+    }
+    if (plan === null || plan.ok !== true) {
+      // 入参形状不对时宿主**一个字段都没改**（解析发生在动宿主状态之前），
+      // 所以这里退回旧行为是安全的；不退的话上一帧的位图会留在宿主里被继续画。
+      this.mod.dhampir_project_clear_bitmaps();
+      return null;
+    }
+    return plan;
+  }
+
+  /**
    * 把某一帧所需的源全部 seek 到位（位图模式下顺带把位图做好）。
    *
    * # 多路 seek 为什么是**串行**的（这是一个试过并证伪的优化）
@@ -674,12 +977,35 @@ export class Engine {
     //
     // 多清一次对只用 `<video>` 的工程**无害**：那种工程从不往 bitmaps 里放东西，
     // 清一个空表没有副作用。
-    this.mod.dhampir_project_clear_bitmaps();
+    //
+    // ---- 阶段 4：把"每帧无条件清空"换成"声明这一帧的来源集合" ----
+    //
+    // `beginFramePlan` 的内部就是上面这段语义，只是**多了一档复用**：同源、同内容标识
+    // 的那些位图留着（连 GPU 上传都省）。它是**放宽式**的 —— 没发标识的源、以及
+    // 没有新导出的旧 wasm，行为与改前逐字节相同（判据在 wasm 的 `plan_bitmap` 那边，
+    // 有单测钉着）。
+    const plan = this.beginFramePlan(frame, sources);
+    const reuse = plan === null ? null : new Set(plan.reuse || []);
+    // **阶段 5：命中 ⇒ 源这一圈整个跳过。**
+    //
+    // `begin_frame` 顺手把"这一帧在不在缓存表里"回报回来（`cached`），于是**准备之前**
+    // 就知道要不要花这一圈的钱。只在 `draw` 里判是不够的：那时 seek 与栅格化都已经花了，
+    // 省下的只有渲染 —— "整圈"不会明显下降，缓存也就看不出有什么用。
+    //
+    // 命中时跳过的是 **seek**（prepare 里唯一的长等待，实测慢帧里 99% 的时间在它身上）。
+    // 文字那一趟**照旧做**：`textProbe` 判的正是"刚算过的那份清单 + 它的位图"，
+    // 跳过它判定通道会拿到一份没有位图的清单，于是 probe 给出**错的红** ——
+    // 为一趟零点几毫秒的活换一个假红不划算。
+    const frameCached = plan !== null && plan.cached === true;
     const t2 = timing ? performance.now() : 0;
     let seekMs = 0, bitmapMs = 0, setMs = 0;
+    // 阶段 4 的读数：这一帧**跳过**了几次位图重建、真交了几张。
+    let reusedBitmaps = 0, submittedBitmaps = 0;
     // 短路命中率：**这个数决定"每帧都在真 seek"还是"大多数帧直接返回"**。
     let hits = 0, misses = 0, maxDeltaMs = 0;
     for (const entry of sources) {
+      // **命中的这一帧不进这一圈**（见上面那段）。
+      if (frameCached) continue;
       const video = this.videos.get(entry.source);
       if (video === undefined) continue;
       const a = timing ? performance.now() : 0;
@@ -728,13 +1054,65 @@ export class Engine {
         });
         if (this.slowSeeks.length > 60) this.slowSeeks.shift();
       }
+      // ===== VIDEO_CAPS：**开跑前**用纯 JS 问一次（不碰 wasm ⇒ 失败也不会打死引擎 ✓）=====
+      // Firefox 的 GPUCopyExternalImageSourceInfo 名单里**没有 HTMLVideoElement**
+      //（实测报错：could not be converted to any of: ImageBitmap, HTMLImageElement,
+      //  HTMLCanvasElement, OffscreenCanvas）⇒ 直接把它交给 wasm 会 panic ✗。
+      // ⇒ 这里先用 JS 试一次 copy：不抛 ⇒ 保持 video ✓（Edge/Chromium ✓）；抛 TypeError ⇒ 切 bitmap ✓。
+      // 注意：这是**开跑前的判定**，不是"出错后回退" ✓ —— 所以永远不会 panic ✓。
+      if (this.sourceMode === "video" && this.videoCopyOk === undefined) {
+        const probeVideo = this.videos.values().next().value
+        if (probeVideo) {
+          try {
+            const ad = await navigator.gpu.requestAdapter()
+            const dev = ad && (await ad.requestDevice())
+            if (dev) {
+              const tex = dev.createTexture({
+                size: [16, 16, 1],
+                format: "rgba8unorm",
+                usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT
+              })
+              dev.queue.copyExternalImageToTexture({ source: probeVideo }, { texture: tex }, [16, 16])
+              this.videoCopyOk = true
+            }
+          } catch (e) {
+            this.videoCopyOk = false
+            console.warn("[dhampir] 这个浏览器不收 <video> 作为零拷贝源 ⇒ 改用 bitmap ✓（浏览器限制，非代码问题）", String((e && e.message) || e))
+          }
+          if (this.videoCopyOk === false) this.setSourceMode("bitmap")
+        }
+      }
       if (this.sourceMode === "bitmap") {
+        // **阶段 4：这一帧的内容标识与上一帧一致 ⇒ 宿主手上那张纹理就是这一帧要的。**
+        //
+        // 于是 `createImageBitmap`（一次全幅回读）与那次 GPU 上传**一起跳过**，
+        // `set_bitmap` 也不必调 —— 宿主那边留着的位图与纹理仍然有效。
+        //
+        // 判据由**宿主**给出（`plan.reuse`），不是我这边猜的：只有它知道自己手上
+        // 到底还有没有那张纹理（可能刚被清过、也可能尺寸对不上）。所以这里只消费
+        // 它的结论，不重新判断一次 —— 两处各判一次就是给两个答案不一致的机会。
+        if (reuse !== null && reuse.has(entry.source)) {
+          reusedBitmaps += 1;
+          continue;
+        }
         // **必须在 seek 之后**：早了拿到的是上一帧，而画面看起来完全正常。
+        // 而且**要先等它真的可读**（见 `waitVideoReady` 的说明）——
+        // 不等的话，跳转后的那一帧会抛 `InvalidStateError`，整个视频层空掉。
         try {
+          await Engine.waitVideoReady(video, 400);
+          // **①b 已按"读数判决"撤回**（pre-declared rule：`bitmap` 没变小就撤 ✓）。
+          //
+          // 你的实测：`bitmap 17ms` —— 与改前的 13~18ms **同一区间** ⇒ 给
+          // `createImageBitmap` 加 `resizeWidth/resizeHeight` **没有**省掉那次 1080p 回读
+          // （回读发生在缩放之前），所以这里回到不带参数的原样。
+          //
+          // 保留下来的：`this.targetW/targetH`（`resize` 里记的目标尺寸）—— 它自己没坏处，
+          // 而且以后若要在别处按目标尺寸做事还用得上。① 那条路（按窗口尺寸渲染）**不受影响** ✓。
           const bitmap = await createImageBitmap(video);
           const c = timing ? performance.now() : 0;
           bitmapMs += c - b;
           this.mod.dhampir_project_set_bitmap(entry.source, bitmap);
+          submittedBitmaps += 1;
           if (timing) setMs += performance.now() - c;
         } catch (error) {
           // 这一路这一帧没有画面 -> 那一层会被跳过（宿主侧 require_bitmap 会让它返回 None）。
@@ -762,6 +1140,18 @@ export class Engine {
         shortCircuitHits: hits,
         shortCircuitMisses: misses,
         maxMissDeltaMs: Number(maxDeltaMs.toFixed(3)),
+        // ---- 阶段 4 的读数 ----
+        // `reusedBitmaps` = 这一帧**跳过**了几次 `createImageBitmap` + GPU 上传；
+        // `submittedBitmaps` = 真交了几张。两者之和 ≈ 走 bitmap 那条路的源数。
+        reusedBitmaps: reusedBitmaps,
+        submittedBitmaps: submittedBitmaps,
+        // 宿主侧的累计计数（"真的少拷了几次"）。没有新导出时是 null。
+        hostUploads: plan === null || plan.uploads === undefined ? null : plan.uploads,
+        // ---- 阶段 5 的读数 ----
+        // `cacheHit` = 这一帧没花 seek 的钱（画面直接从缓存搬上画布）。
+        // `cache` = 宿主的命中/未命中/容量（没有新导出或表没建时是 null）。
+        cacheHit: frameCached,
+        cache: plan === null || plan.cache === undefined ? null : plan.cache,
       };
     }
     return sources;
@@ -881,7 +1271,66 @@ export class Engine {
    * 记的是**上一次**的值（不累积、不统计）：引擎是底座，攒统计是调用方的事
    * —— 底座一旦开始攒状态，多实例/多画布就会互相污染。
    */
+  /**
+   * **单飞入口**：同一时刻只允许一条管线在跑（见构造器里 `pipeline` 的说明）。
+   *
+   * 提前渲染（`options.preroll`）走的也是这条路 ⇒ 它**不可能**与正常 seek 并发。
+   * 上一轮那个 `RefCell already borrowed` panic 就是从这里漏出去的。
+   */
   async seek(frame, options = {}) {
+    const run = () => this.seekImpl(frame, options);
+    const next = this.pipeline.then(run, run);
+    // 链自己吞掉结果与错误：否则一次失败会把后面**所有**的帧卡死。
+    // 调用方拿到的仍是 `next`（错误照旧抛给它）。
+    this.pipeline = next.then(() => {}, () => {});
+    return next;
+  }
+
+  /**
+   * 排一帧**提前渲染**（阶段 5）。同一个槽位只留最新的一帧。
+   *
+   * 预渲染的语义是"把接下来要用的那几帧先算好"；排十几帧没有意义（算完早播过去了），
+   * 而且每一帧都要把源重新 seek 一遍 —— 那是在跟播放抢解码器。
+   *
+   * 返回是否受理：缓存关着就不受理（预热一张不存在的表没有意义）。
+   */
+  schedulePreroll(frame) {
+    if (this.previewCache.enabled !== true) return false;
+    this.prerollPending = frame;
+    return true;
+  }
+
+  /**
+   * 现在要不要真的跑那一帧？跑就把它取走，交给**同一条单飞队列**。
+   *
+   * # 门控为什么**不是** "fps >= 50"
+   *
+   * 低帧率机器永远到不了那个门限 ⇒ 那条门控等于"这台机器永远不预热"，
+   * 而它恰恰是最需要预热的。判据改成**上一帧的实际耗时**：低于预算的一半才预热 ——
+   * 预热自己也要花钱，它花掉的时间必须能被后面的命中赚回来。
+   *
+   * 真正开跑在 `requestIdleCallback` 里（没有就退到 `setTimeout`），
+   * 且**不**在这里直接跑：`seek` 的队列保证它与正常 seek 串行。
+   */
+  pumpPreroll(budgetMs) {
+    if (this.prerollPending === null) return false;
+    if (this.previewCache.enabled !== true) {
+      this.prerollPending = null;
+      return false;
+    }
+    const budget = Number(budgetMs);
+    const last = this.lastSeekCost;
+    if (last === undefined || !(budget > 0) || !(last.totalMs <= budget * 0.5)) return false;
+    const frame = this.prerollPending;
+    this.prerollPending = null;
+    const start = () => { this.seek(frame, { preroll: true }).catch(() => {}); };
+    if (typeof requestIdleCallback === "function") requestIdleCallback(() => start(), { timeout: 200 });
+    else setTimeout(start, 0);
+    return true;
+  }
+
+  /** 真正干活的那条路。**不要直接调它** —— 它没有单飞保护，请用 `seek`。 */
+  async seekImpl(frame, options = {}) {
     if (this.timing && !Array.isArray(this.slowSeeks)) this.slowSeeks = [];
     const t0 = performance.now();
     const sources = await this.prepare(frame);
@@ -899,9 +1348,21 @@ export class Engine {
     // 里的 seek 指的是「把 <video> 定位好」，不是 engine.seek —— 这一点以前会把人绕进去。
     if (typeof options.onPrepared === 'function') await options.onPrepared(frame);
     
-    if (this.skipDraw !== true) this.mod.dhampir_project_draw(frame);
+    // **pre-roll**：`options.preroll` 时改走 `dhampir_project_preroll` —— 它与 `draw`
+    // 做完全一样的事（含**填进预渲染缓存**），**只是最后不 blit 到画布**。
+    //
+    // 为什么必须是"换导出"而不是"skipDraw = true"：填缓存那一步**就在 draw 里面**，
+    // 跳掉整个 draw 就等于什么都没算 ✗（缓存永远是空的）。
+    //
+    // 顺带解决了一个正确性隐患：pre-roll 走的是**同一条准备路径** ⇒ `sources_for`、
+    // 视频 seek、`onPrepared` 交源位图全都照旧 ✓ —— 不会把"空帧"灌进缓存
+    //（那种命中时会画出一帧空的，比不缓存更糟）。
+    if (options.preroll === true) this.mod.dhampir_project_preroll(frame);
+    else if (this.skipDraw !== true) this.mod.dhampir_project_draw(frame);
     const t2 = performance.now();
     this.lastSeekCost = { prepareMs: t1 - t0, drawMs: t2 - t1, totalMs: t2 - t0 };
+    // 预算够就顺手排一帧预热（宿主给了 `prerollBudgetMs` 才动，默认 null = 不动）。
+    this.pumpPreroll(this.prerollBudgetMs);
     return sources;
   }
 
@@ -917,11 +1378,18 @@ export class Engine {
 
   resize(width, height) {
     this.mod.dhampir_project_resize(width, height);
+    // ①b 需要知道目标尺寸：取视频帧时按它缩（见下面 createImageBitmap 那处）。
+    // 以前这里只转发给 wasm，JS 侧没有这个数 —— 于是每帧都按 1080p 全幅取帧，
+    // 而那 13~18ms 的成本大头正是全幅的读回与格式转换。
+    this.targetW = width;
+    this.targetH = height;
   }
 
   /** 把一个 video 元素接到某个 source 上（页面可能已有元素，不必再建）。 */
   registerVideo(source, video) {
     this.videos.set(source, video);
+    // 与 `bindSource` 同一条理由：换了元素就是换了画面。
+    this.bumpPlanGeneration();
   }
 }
 

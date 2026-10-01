@@ -1561,14 +1561,32 @@ function compareSubtitleManifest(frame, cli, manifest) {
 }
 
 /**
- * 比一套文字画法：`{color, outline, stroke_px, stroke_color}`。
+ * 比一套文字画法：`{color, outline, stroke_px, stroke_color, shadow_*}`。
  *
- * `stroke_px` 按容差比（它是浮点），其余严格比。
+ * `stroke_px` / `shadow_*` 按容差比（它们是浮点），其余严格比。
+ *
+ * # 文字阴影为什么要比
+ *
+ * 四个键决定"影子画不画、画多大、挪多远"。它**不是**字形级差异 ——
+ * 字形的像素本来就允许两端不同（字体都不一样），但**影子挪了多少**是样式的
+ * 结构量：一端读到 2px、另一端 0，就会出现"预览有影子、成片没有"那种
+ * 只在两边摆在一起时才看得出来的错。所以这里逐字段比，
+ * 而**不**去比影子落在哪些像素上（那才是字形级的）。
  */
 function compareTextStyle(where, cli, manifest) {
   const problems = [];
-  if (cli === undefined || manifest === undefined) {
-    problems.push(where + '：一端没有这套样式');
+  // ⚠️ **`null` 与"键不在"是同一件事**：这一端**没有**这套样式
+  // （本仓的纪律是"可省略的默认值不写进 JSON"，见 `host_api` 的 `skip_serializing_if`）。
+  // 所以：
+  //   * 两端都没有 ⇒ **一致**，不是问题（"这一刻没有文字"的边界帧就落在这里，
+  //     实测帧 240 就是 CLI 吐 `null`、页面缺键 —— 把它当红是假红）；
+  //   * 只有一端没有 ⇒ 才是真问题（预览有影子、成片没有，正是这条要防的）。
+  // 上面只挡 `undefined` 的话，`null` 会在读 `cli.color` 时**当场 TypeError**，
+  // 而"通道自己崩了"比"判红"更坏（实测踩到过：跑 `--verdict subtitle` 直接崩）。
+  if (cli == null || manifest == null) {
+    if (cli == null && manifest == null) return problems;
+    problems.push(where + '：一端有这套样式、另一端没有（'
+      + (cli == null ? 'CLI 侧没有' : '页面侧没有') + '）');
     return problems;
   }
   problems.push(...compareNumberList(where + '：颜色', cli.color, manifest.color));
@@ -1579,6 +1597,17 @@ function compareTextStyle(where, cli, manifest) {
     problems.push(where + '：描边宽度不同（CLI ' + cli.stroke_px + '、页面 ' + manifest.stroke_px + '）');
   }
   problems.push(...compareNumberList(where + '：描边色', cli.stroke_color, manifest.stroke_color));
+  // 阴影色：`null` 只和 `null` 相等 —— "不画阴影"这件事两端必须同时成立，
+  // 一端有一端无就是最坏的那种（成片多一圈、预览没有）。
+  problems.push(
+    ...compareNumberList(where + '：阴影色', cli.shadow_color ?? null, manifest.shadow_color ?? null),
+  );
+  for (const key of ['shadow_dx_px', 'shadow_dy_px', 'shadow_blur_px']) {
+    if (Math.abs((cli[key] ?? 0) - (manifest[key] ?? 0)) > SUBTITLE_TOLERANCE) {
+      problems.push(where + '：' + key + ' 不同（CLI ' + cli[key]
+        + '、页面 ' + manifest[key] + '）');
+    }
+  }
   return problems;
 }
 
@@ -1634,7 +1663,7 @@ function compareSubtitleDanmaku(frame, cli, manifest) {
           + '（CLI ' + a[key] + '、页面 ' + b[key] + '）');
       }
     }
-    // 弹幕的淡入淡出：**基础不透明度也在这里**（V-Trim 用 0.9，不是 1）。
+    // 弹幕的淡入淡出：**基础不透明度也在这里**（参照实现 用 0.9，不是 1）。
     for (const key of ['opacity', 'dy_px']) {
       const one = left[index][key];
       const two = right[index][key];
@@ -1644,7 +1673,7 @@ function compareSubtitleDanmaku(frame, cli, manifest) {
         problems.push(label + '：' + key + ' 差 ' + Math.abs(one - two) + '（CLI ' + one + '、页面 ' + two + '）');
       }
     }
-    // **逐条颜色**：V-Trim 的 `还能续约吗` 是粉的、其余是白的 ——
+    // **逐条颜色**：参照实现 的 `还能续约吗` 是粉的、其余是白的 ——
     // 只比轨道级颜色的话这件事查不出来。
     problems.push(...compareNumberList(label + '：颜色', left[index].color, right[index].color));
   }

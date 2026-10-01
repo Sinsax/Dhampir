@@ -105,11 +105,11 @@ dhampir render --project P.json --from 0 --to 89 --out out.mp4 | jq -c 'select(.
 
 | 字段 | 默认 | 作用 |
 |---|---|---|
-| `safe_width_ratio` | `0.0` | 换行安全宽（0 = 沿用 `bottom_margin`，凑出约 88%）。V-Trim 是**写死 87.5%** |
+| `safe_width_ratio` | `0.0` | 换行安全宽（0 = 沿用 `bottom_margin`，凑出约 88%）。参照实现 是**写死 87.5%** |
 | `shrink_min_scale` | `0.0` | **装不下时整体缩字号的下限**（0 = 不缩，超出就丢行） |
 | `keep_all_lines` | `false` | **不截断**，折多少行画多少行 |
 
-参照（V-Trim 的 `wrapCaptionParts`）是：
+参照实现的换行规则是：
 
 ```text
 if (tw > maxLineW + EPS) scale = max(0.7, min(1, maxLineW * 3 / tw));
@@ -139,7 +139,7 @@ ctx.fillText(p.text, sx, ly);
 
 | 字段 | 默认 | 作用 |
 |---|---|---|
-| `highlight_color` | `None` | **`None` = 不做高亮**（既有工程逐字节不变）。V-Trim 的默认是 `#f56b41` |
+| `highlight_color` | `None` | **`None` = 不做高亮**（既有工程逐字节不变）。转译器会给它一个显式值 |
 
 **没有标记时一行只栅格化一次**（走老路）；有标记时才逐段各栅格化一次。
 
@@ -148,6 +148,36 @@ ctx.fillText(p.text, sx, ly);
 * **浏览器**：`ctx.measureText` —— **量字与画字同一个引擎**，与参照条件完全一致，**偏移是准的**
 * **CLI**：`drawtext` 的 `text_w` 只在**它自己那一张**里可用，过滤器之间不能互引，
   所以偏移用**布局的逻辑字宽**累加。全角字（中文）准；中英混排时英文半角会差几像素
+
+#### 文字阴影：`shadow_color`
+
+字幕可以带一层**带模糊的阴影**（参照是 CSS 的 `text-shadow: 0 2px 12px rgba(0,0,0,.4)`）。
+
+| 字段 | 默认 | 作用 |
+|---|---|---|
+| `shadow_color` | `None` | 阴影颜色（RGBA，**alpha 生效**）。**`None` = 不画阴影**，既有工程逐字节不变 |
+| `shadow_dx_px` | `0.0` | 水平偏移（**文档像素**，与 `transform.x/y` 同一坐标系） |
+| `shadow_dy_px` | `0.0` | 垂直偏移（文档像素，**正数向下**）。参照的 `0 2px` 就是这里写 `2.0` |
+| `shadow_blur_ratio` | `0.0` | **模糊半径**（占**文档高**的比例；0 = 硬阴影）。`12/1080` 就是参照的 12px |
+
+三条口径（不写清就会各写各的）：
+
+1. **只画一次，不参与描边宽度**：阴影是"同一行字按偏移再画一遍"，
+   它取的是**填充**的轮廓 —— `stroke_ratio` / `stroke_color` 一点都不进来；
+2. **偏移是文档像素、模糊是比例**：与描边那对（`stroke_ratio` → `stroke_px`）同一条分工，
+   求值层把比例乘目标高换成像素；
+3. **`shadow_color = None` 与 alpha = 0 是同一件事**：都不画。
+   所以给字幕配阴影**不会**影响弹幕（`DanmakuSpec` 里根本没有阴影字段），
+   也不会让老工程多出一次栅格化。
+
+⚠️ **两端只保证"观感近似"，不保证逐像素一致**（与"字形像素允许不同"同一条口径）：
+
+* **浏览器**：canvas 原生的 `shadowColor` / `shadowOffsetX` / `shadowOffsetY` / `shadowBlur`；
+* **CLI**：ffmpeg 的 `drawtext`（**只有白字填充，不带描边**）+ `gblur=sigma=模糊半径/2`。
+  那个 **÷2** 就是两边对齐的那一步：canvas 的 `shadowBlur` 等价于 σ 的两倍，
+  而 `gblur` 直接吃 σ。谁要把这条当逐像素判据，先看 `plan/text-shadow-design.md` §2。
+
+阴影**不进墨迹报告**（每行都画，判据会恒真）—— 与弹幕同理。
 
 #### 弹幕的滚动时长：逐条，不是轨道级
 

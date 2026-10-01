@@ -129,8 +129,8 @@ pub struct DanmakuTextItem {
 /// # 为什么字幕与弹幕**各一套**
 ///
 /// 这个结构以前是没有的：`TextOverlay` 上只有一份 `color` + `outline` 给两者共用，
-/// 模块文档还写明了"要分开就得动契约"。而 V-Trim 的字幕是暖色 `#dcbda0`、
-/// 弹幕是白色 `#ffffff` —— 共用一份时**必然有一个错**，
+/// 模块文档还写明了"要分开就得动契约"。而**字幕与弹幕的默认色本来就不同**
+/// —— 共用一份时**必然有一个错**，
 /// 而"两边的字都能看见"这件事让人以为没问题。
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextStyle {
@@ -157,6 +157,27 @@ pub struct TextStyle {
     pub family: Option<String>,
     /// 字重（CSS 刻度）。宿主据此在字体目录里挑一个粗体文件。
     pub weight: u32,
+    /// **文字阴影的颜色**（`None` = 不画阴影）。
+    ///
+    /// 与 `stroke_ratio` 那边同一条分工：**求值层已经解析完**
+    /// （`None` 与"alpha = 0"在这里是同一个答案），宿主只照用。
+    pub shadow_color: Option<[u8; 4]>,
+    /// 阴影的水平偏移（**文档像素**，与 `transform.x/y` 同一坐标系）。
+    ///
+    /// 量纲与 [`TextStyle::stroke_px`] 一致：都是"求值层拿到的那个尺寸"下的像素。
+    /// 默认路径（导出尺寸 = `render_hints`）上它就是成片里的像素；显式换导出尺寸时
+    /// 它与描边宽度**一起**保持原样 —— 两者同一条边界，见 `docs/usage.md` 的字幕阴影一节。
+    pub shadow_dx_px: f32,
+    /// 阴影的垂直偏移（文档像素，**正数向下**）。
+    pub shadow_dy_px: f32,
+    /// **阴影的模糊半径**（**像素**；0 = 硬阴影）。
+    ///
+    /// 由契约里的 `shadow_blur_ratio` 乘**目标高**换算而来 —— 与
+    /// `stroke_ratio` -> `stroke_px` 是同一处、同一条理由：
+    /// **只有求值层知道目标尺寸**，宿主只看到"多少像素"。
+    ///
+    /// 两端核不同（canvas `shadowBlur` / ffmpeg `gblur`），所以只保证观感近似。
+    pub shadow_blur_px: f32,
 }
 
 impl Default for TextStyle {
@@ -171,6 +192,13 @@ impl Default for TextStyle {
             stroke_color: [0, 0, 0, 255],
             family: None,
             weight: 400,
+            // None = 不画阴影；偏移与模糊都是 0。
+            // **这一组就是"老工程什么都不变"** —— 少了 None，没写过阴影的工程
+            // 会突然多出阴影（而且它压在所有字上）。
+            shadow_color: None,
+            shadow_dx_px: 0.0,
+            shadow_dy_px: 0.0,
+            shadow_blur_px: 0.0,
         }
     }
 }
@@ -334,6 +362,13 @@ pub fn evaluate_overlay(
                 stroke_color: style.stroke_color,
                 family: style.font_family.clone(),
                 weight: style.font_weight,
+                // **阴影也在这里落地**：契约给的是比例（`shadow_blur_ratio`），
+                // 换算成像素要目标尺寸 —— 与上面 `stroke_px` 同一条理由、同一处。
+                // 偏移本来就是像素（文档像素），原样带过去。
+                shadow_color: style.shadow_color,
+                shadow_dx_px: style.shadow_dx_px,
+                shadow_dy_px: style.shadow_dy_px,
+                shadow_blur_px: style.shadow_blur_ratio * target_h,
             };
             styled = true;
         }
@@ -382,7 +417,7 @@ pub fn evaluate_overlay(
                 0.0,
                 0.0,
             );
-            // **基础不透明度乘在淡入淡出之上** —— V-Trim 的弹幕是 `0.9 * fade`。
+            // **基础不透明度乘在淡入淡出之上** —— 参照实现 的弹幕是 `0.9 * fade`。
             danmaku.push(DanmakuTextItem {
                 text: item.text,
                 rect,
@@ -408,6 +443,13 @@ pub fn evaluate_overlay(
             stroke_color: spec.stroke_color,
             family: spec.font_family.clone(),
             weight: spec.font_weight,
+            // **弹幕恒不画阴影**：`DanmakuSpec` 没有阴影字段（加一个就要动契约，
+            // 而"弹幕要不要阴影"没人提过）。这里如实给"不画"，而不是跟着字幕走
+            // —— 跟着走的话，给字幕配的阴影会**莫名其妙地**出现在弹幕上。
+            shadow_color: None,
+            shadow_dx_px: 0.0,
+            shadow_dy_px: 0.0,
+            shadow_blur_px: 0.0,
         };
         danmaku_styled = true;
     }
@@ -683,6 +725,57 @@ mod tests {
         table
     }
 
+    /// 与 [`both_timeline`] 同形，但**字幕那一边写了阴影**。
+    ///
+    /// 弹幕那一半没有阴影字段可写 —— 那正是这条夹具要证明的事：
+    /// 字幕配了阴影，弹幕**不该跟着有**。
+    fn shadow_timeline() -> TimelineV2 {
+        timeline(
+            r#"{
+                "schema": 3,
+                "timebase": { "num": 30, "den": 1 },
+                "tracks": [
+                    {
+                        "id": "sub",
+                        "kind": "subtitle",
+                        "layers": [{
+                            "id": "cue",
+                            "start": 0,
+                            "end": 120,
+                            "source": { "asset_id": "sub.srt", "source_in": 0 }
+                        }],
+                        "subtitle": {
+                            "font_ratio": 0.055,
+                            "color": [255, 240, 200, 255],
+                            "outline": false,
+                            "shadow_color": [0, 0, 0, 102],
+                            "shadow_dx_px": 3.0,
+                            "shadow_dy_px": 2.0,
+                            "shadow_blur_ratio": 0.011111111
+                        }
+                    },
+                    {
+                        "id": "dm",
+                        "kind": "danmaku",
+                        "layers": [{
+                            "id": "shots",
+                            "start": 0,
+                            "end": 120,
+                            "source": { "asset_id": "dm.ass", "source_in": 0 }
+                        }],
+                        "danmaku": {
+                            "asset_id": "dm.ass",
+                            "lanes": 4,
+                            "duration_ms": 2000,
+                            "font_ratio": 0.04,
+                            "color": [0, 255, 0, 255]
+                        }
+                    }
+                ]
+            }"#,
+        )
+    }
+
     #[test]
     fn 没有字幕表时没有覆盖层() {
         assert!(evaluate_overlay(&subtitle_timeline(), 15, SEQUENCE, None).is_none());
@@ -737,7 +830,7 @@ mod tests {
         // `subtitle_timeline()` 没写 `stroke_ratio`，于是它取默认值 0；
         // 而 `stroke_px` 算出来必须是 **0**（= "别用契约的值，让栅格器按字号推"）。
         //
-        // 我第一版把默认值写成 `12/1080`（V-Trim 的实际值），于是这里会算出
+        // 我第一版把默认值写成 `12/1080`（参照实现 的实际值），于是这里会算出
         // `12/1080 * 360 = 4`，而老行为是 `border_px(20) = 1` —— 描边粗了 4 倍，
         // 既有工程的产物全变。默认值是**契约的一部分**，不是风格偏好。
         let overlay = evaluate_overlay(&subtitle_timeline(), 15, SEQUENCE, Some(&table())).unwrap();
@@ -757,9 +850,81 @@ mod tests {
         );
     }
 
+    /// **文字阴影**：契约给的是比例，求值层按目标高换算成像素 ——
+    /// 与 `stroke_px` 同一处、同一条理由（只有求值层知道目标尺寸）。
+    ///
+    /// 这条同时把**两种量纲**分开钉住：`shadow_blur_ratio` 是比例（换目标尺寸就差），
+    /// `shadow_dx_px` / `shadow_dy_px` 是**文档像素**（换目标尺寸**不**变）。
+    /// 只验其中一半的话，"把偏移也当比例算"这种错会一路绿到画面上。
+    #[test]
+    fn 阴影字段透传且模糊按目标高换算成像素() {
+        let overlay = evaluate_overlay(&shadow_timeline(), 15, SEQUENCE, Some(&table()))
+            .expect("这一帧应当有字幕");
+        let style = &overlay.subtitle_style;
+        assert_eq!(style.shadow_color, Some([0, 0, 0, 102]), "颜色要原样透传");
+        assert_eq!(
+            (style.shadow_dx_px, style.shadow_dy_px),
+            (3.0, 2.0),
+            "偏移要原样透传（它们是文档像素，不是比例）"
+        );
+        // 12/1080 × 360 = 4px。**乘的是求值层拿到的那个高**，与描边同一处。
+        let expected = 12.0 / 1080.0 * SEQUENCE.1 as f32;
+        assert!(
+            (style.shadow_blur_px - expected).abs() < 1e-4,
+            "模糊半径要按目标高换算：期望 {expected}，实得 {}",
+            style.shadow_blur_px
+        );
+
+        // 换一个目标尺寸：**比例换出来不同的像素**，而偏移一动不动。
+        let large = evaluate_overlay(&shadow_timeline(), 15, (1920, 1080), Some(&table()))
+            .expect("这一帧应当有字幕");
+        assert!(
+            (large.subtitle_style.shadow_blur_px - 12.0).abs() < 1e-4,
+            "1080 高下 12/1080 应当换出 12px，实得 {}",
+            large.subtitle_style.shadow_blur_px
+        );
+        assert_eq!(
+            large.subtitle_style.shadow_dx_px, 3.0,
+            "偏移是文档像素：它**不**随目标尺寸变（变了就是预览与成片不一致）"
+        );
+    }
+
+    /// **反向用例**：没写过阴影的工程必须一个阴影都不画。
+    ///
+    /// 少了"默认 None"，**所有既有工程**都会突然多出一圈阴影（而且它压在所有字上）
+    /// —— 那是"看起来只是有点脏"的一类错，最难查。
+    #[test]
+    fn 没写过阴影的工程一个阴影都不画() {
+        let overlay = evaluate_overlay(&subtitle_timeline(), 15, SEQUENCE, Some(&table())).unwrap();
+        let style = &overlay.subtitle_style;
+        assert_eq!(style.shadow_color, None);
+        assert_eq!(
+            (style.shadow_dx_px, style.shadow_dy_px, style.shadow_blur_px),
+            (0.0, 0.0, 0.0)
+        );
+        // `Default` 也必须是不画 —— 它是"没给样式"那条路的兜底。
+        assert_eq!(TextStyle::default().shadow_color, None);
+    }
+
+    /// **弹幕不跟着字幕画阴影**：`DanmakuSpec` 里没有阴影字段。
+    ///
+    /// 跟着走（"弹幕复用轨道样式"那种顺手实现）的症状是：给字幕配的阴影
+    /// **莫名其妙地出现在弹幕上**，而弹幕本来是要"轻"一点的东西。
+    #[test]
+    fn 字幕配了阴影弹幕也不画() {
+        let overlay = evaluate_overlay(&shadow_timeline(), 15, SEQUENCE, Some(&both_table()))
+            .expect("这一帧应当有字");
+        assert_eq!(overlay.subtitle_style.shadow_color, Some([0, 0, 0, 102]));
+        assert_eq!(
+            overlay.danmaku_style.shadow_color, None,
+            "弹幕不该继承字幕的阴影"
+        );
+        assert_eq!(overlay.danmaku_style.shadow_blur_px, 0.0);
+    }
+
     #[test]
     fn 字幕与弹幕各有一套颜色() {
-        // **这是拆开 `color` 的理由**：V-Trim 的字幕是暖色、弹幕是白色，
+        // **这是拆开 `color` 的理由**：参照实现 的字幕是暖色、弹幕是白色，
         // 共用一份时必然有一个错 —— 而"两边的字都看得见"让人以为没问题。
         let overlay = evaluate_overlay(&both_timeline(), 15, SEQUENCE, Some(&both_table())).unwrap();
         assert_eq!(overlay.subtitle_style.color, [255, 240, 200, 255], "字幕用字幕的颜色");

@@ -84,7 +84,7 @@ use dhampir_core::overlay::TextOverlay;
 use dhampir_core::readback::Rgba8Image;
 
 use crate::pipeline::IssueLog;
-use crate::text_raster::{TextBitmap, TextRasterKey, TextRasterizer};
+use crate::text_raster::{TextBitmap, TextRasterKey, TextRasterizer, shadow_key};
 
 // ---------------------------------------------------------------------------
 // 几何：行盒 -> 目标像素里的落点
@@ -388,7 +388,7 @@ fn pick_font(
 
 /// 在字体目录里按族名找一个文件。
 ///
-/// 比法是**归一化之后包含**：`"LXGW WenKai"` 与 `LXGWWenKai-Regular.ttf`
+/// 比法是**归一化之后包含**：`"Noto Sans SC"` 与 `NotoSansSC-Regular.ttf`
 /// 归一化之后分别是 `lxgwwenkai` 与 `lxgwwenkai...`，能对上。
 /// 字重 >= 600 时优先挑文件名里带 `bold` 的那个。
 ///
@@ -508,6 +508,8 @@ fn paint_parts(
     let total: f32 = widths.iter().sum();
     let offset_y = dy_px.round() as i32;
     let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u32;
+    // 阴影参数整行算一次（它是**样式级**的，不是逐段的）。
+    let shadow = shadow_spec(style);
 
     let mut clipped = false;
     let mut cursor = -total / 2.0;
@@ -523,11 +525,33 @@ fn paint_parts(
             // 与老路同一条：描边要乘这一条的缩放（参照 `swEff = sw * scale`）。
             stroke_px: (style.stroke_px * scale).round() as u32,
             stroke_color: style.stroke_color,
+            // 这一张是**文字**位图（阴影是另一张，见下面的 `paint_shadow`）。
+            shadow_color: None,
+            shadow_blur_px: 0,
+            shadow_dx_px: 0,
+            shadow_dy_px: 0,
+            shadow_pad: 0,
             font_file: font_file.clone(),
             width: placement.bitmap_width,
             height: placement.bitmap_height,
         };
         cursor += widths[index];
+        // **先阴影、后文字**（阴影在底下）。逐段各画各的阴影 ——
+        // 与浏览器那条路一致（canvas 的 `fillText` 也是一段一次）。
+        // 已知残差：后一段的阴影会压在**前一段的文字**上（顺序决定的），
+        // 两端同序，所以它不影响"两端一致"这件事。
+        if let Some(shadow) = shadow {
+            paint_shadow(
+                &mut *rasterize,
+                &key,
+                shadow,
+                image,
+                (placement.x, placement.y + offset_y),
+                alpha,
+                &path,
+                log,
+            );
+        }
         let bitmap = match rasterize(&key) {
             Ok(bitmap) => bitmap,
             Err(error) => {
@@ -552,6 +576,94 @@ fn paint_parts(
         }
     }
     Painted::Drawn { clipped }
+}
+
+/// 一条文字这一帧要不要画阴影 —— 要的话：什么色、挪多远、糊多少。
+///
+/// # 判据只有一条，而且它决定"老路走不走得通"
+///
+/// `shadow_color` 是 `Some` **且** alpha 不为 0。缺省（`None`）与"全透明"是**同一个
+/// 答案**：不新增 ffmpeg 调用、不扩边、参数串与像素**逐字节不变**（理由见
+/// `crate::text_raster` 的阴影那一节）。所以这里必须早返回 `None`，
+/// 而不是"画一张透明度为 0 的位图" —— 后者会多起一次进程，而且位图尺寸也变了。
+#[derive(Debug, Clone, Copy)]
+struct ShadowSpec {
+    color: [u8; 4],
+    /// 偏移（目标像素）。契约里写的是**文档像素**，与 `stroke_px` 同量纲
+    /// （求值层拿到的那个尺寸），所以这里只取整，不再换算一次。
+    dx: i32,
+    dy: i32,
+    /// 模糊半径（目标像素；0 = 硬阴影）。
+    blur_px: u32,
+}
+
+/// 取这一套样式里的阴影参数（`None` = 这一行不画阴影）。
+fn shadow_spec(style: &dhampir_core::overlay::TextStyle) -> Option<ShadowSpec> {
+    let color = style.shadow_color?;
+    // 全透明的阴影 = 看不见的阴影 = 不画。**不许为它起一次栅格化**：
+    // 那会多一次 ffmpeg 进程，而画面上一个像素都不多。
+    if color[3] == 0 {
+        return None;
+    }
+    Some(ShadowSpec {
+        color,
+        dx: style.shadow_dx_px.round() as i32,
+        dy: style.shadow_dy_px.round() as i32,
+        // 负数与 NaN 都按 0 算（`max` 对 NaN 的取舍：NaN.max(0.0) 给 0.0，
+        // 于是这里不会把 NaN 转成一个巨大的 u32 —— 那种值会直接 OOM）。
+        blur_px: style.shadow_blur_px.max(0.0).round() as u32,
+    })
+}
+
+/// 把这一条的阴影贴上去。**必须在文字之前调用**（阴影在底下）。
+///
+/// 返回 `false` = 阴影没画出来（问题已经记进 `log`）。**文字仍然照画** ——
+/// 与模块文档那条原则一致：已经画出来的帧仍然值得看、值得查，而"失败了但画面上一片空"
+/// 会让人以为失败的原因在别处。整次出片照旧按问题清单判失败。
+///
+/// 阴影越出画面**不记问题、也不计数**：它本来就允许被画布边缘切掉
+/// （偏移 + 模糊），而"墨迹被切"那条判据是**字幕行**的（见模块文档的判据表）。
+#[allow(clippy::too_many_arguments)]
+fn paint_shadow(
+    rasterize: &mut impl FnMut(&TextRasterKey) -> Result<Rc<TextBitmap>, String>,
+    text_key: &TextRasterKey,
+    shadow: ShadowSpec,
+    image: &mut Rgba8Image,
+    // 文字位图的落点。阴影的原点 = 它 - pad + 偏移。
+    origin: (i32, i32),
+    alpha: u32,
+    path: &str,
+    log: &mut IssueLog,
+) -> bool {
+    let key = shadow_key(text_key, shadow.color, shadow.blur_px, shadow.dx, shadow.dy);
+    // 位图四周扩过 `pad`，而字在两张位图里**都居中** —— 所以原点要往回挪一份 pad，
+    // 再叠上偏移。少挪那一份，整张阴影会往右下角偏一个 pad（而"看着有点偏"
+    // 正是最难查的一类）。
+    let pad = key.shadow_pad as i32;
+    let bitmap = match rasterize(&key) {
+        Ok(bitmap) => bitmap,
+        Err(error) => {
+            log.record(
+                "subtitle_raster_failed",
+                path,
+                format!("画文字阴影失败（这一行的字仍会画出来）：{error}"),
+            );
+            return false;
+        }
+    };
+    match blit_scaled(
+        image,
+        &bitmap,
+        origin.0 - pad + shadow.dx,
+        origin.1 - pad + shadow.dy,
+        alpha,
+    ) {
+        Ok(_) => true,
+        Err(error) => {
+            log.record("subtitle_blit_failed", path, error);
+            false
+        }
+    }
 }
 
 fn paint_one(
@@ -657,10 +769,42 @@ fn paint_one(
         // 只有描边不对，很难一眼看出来。
         stroke_px: (style.stroke_px * scale).round() as u32,
         stroke_color: style.stroke_color,
+        // 这一张是**文字**位图：阴影是另一张（`paint_shadow`），
+        // 两者的键在缓存里各占一格（不然会把没模糊的那张递给有模糊的）。
+        shadow_color: None,
+        shadow_blur_px: 0,
+        shadow_dx_px: 0,
+        shadow_dy_px: 0,
+        shadow_pad: 0,
         font_file: font_file.to_path_buf(),
         width: placement.bitmap_width,
         height: placement.bitmap_height,
     };
+    // 纵向偏移（淡入上浮/退场下移）：**只挪落点**，不重算布局 ——
+    // 位置是"布局给的行盒 + 这一帧的动画偏移"，两件事分开才说得清。
+    let offset_y = dy_px.round() as i32;
+    let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u32;
+    // ---------------------------------------------------------------------
+    // **先阴影、后文字**（阴影必须在底下）。
+    // ---------------------------------------------------------------------
+    //
+    // 判据全在 `shadow_spec` 里：`shadow_color` 缺省（或 alpha = 0）时这里是
+    // 一个不做任何事的 `None` —— 不新增 ffmpeg 调用、不扩边、参数串与像素
+    // 逐字节不变。**"不画阴影"这条分支就是老路本身**，不是它旁边的一条路。
+    if let Some(shadow) = shadow_spec(style) {
+        // 位图是**先取后贴**：两张都取到缓存里，贴的顺序才是阴影 -> 文字。
+        // （阴影画不出来时不拦文字：问题已经记下，字照画，见 `paint_shadow`。）
+        paint_shadow(
+            &mut *rasterize,
+            &key,
+            shadow,
+            image,
+            (placement.x, placement.y + offset_y),
+            alpha,
+            &path,
+            log,
+        );
+    }
     let bitmap = match rasterize(&key) {
         Ok(bitmap) => bitmap,
         Err(error) => {
@@ -668,15 +812,12 @@ fn paint_one(
             return Painted::Failed;
         }
     };
-    // 纵向偏移（淡入上浮/退场下移）：**只挪落点**，不重算布局 ——
-    // 位置是"布局给的行盒 + 这一帧的动画偏移"，两件事分开才说得清。
-    let offset_y = dy_px.round() as i32;
     let report = match blit_scaled(
         image,
         &bitmap,
         placement.x,
         placement.y + offset_y,
-        (opacity.clamp(0.0, 1.0) * 255.0).round() as u32,
+        alpha,
     ) {
         Ok(report) => report,
         Err(error) => {
@@ -874,6 +1015,11 @@ mod tests {
                 stroke_color: [0, 0, 0, 255],
                 family: None,
                 weight: 400,
+                // **不画阴影**：这是"老工程"的那套样式。
+                shadow_color: None,
+                shadow_dx_px: 0.0,
+                shadow_dy_px: 0.0,
+                shadow_blur_px: 0.0,
             },
             danmaku_style: dhampir_core::overlay::TextStyle::default(),
             dropped_lines: dropped,
@@ -912,6 +1058,11 @@ mod tests {
                 stroke_color: [0, 0, 0, 255],
                 family: None,
                 weight: 400,
+                // 弹幕恒不画阴影（`DanmakuSpec` 里没有阴影字段）。
+                shadow_color: None,
+                shadow_dx_px: 0.0,
+                shadow_dy_px: 0.0,
+                shadow_blur_px: 0.0,
             },
             dropped_lines: 0,
             dropped_danmaku,
@@ -943,6 +1094,11 @@ mod tests {
     /// 真位图就是这样（drawtext 把字放在中间，四周是 pad）。拿「整张全不透明」当假位图
     /// 会把切线判据顺带点着，测试就不再只验它想验的那件事。
     fn ink_bitmap(width: u32, height: u32) -> TextBitmap {
+        ink_bitmap_of(width, height, [255, 255, 255, 255])
+    }
+
+    /// 同上，但指定墨色 —— 阴影那条用例靠**颜色**分辨"贴的是哪一张"。
+    fn ink_bitmap_of(width: u32, height: u32, color: [u8; 4]) -> TextBitmap {
         let mut bitmap = TextBitmap::blank(width, height);
         let x0 = width / 2 - width / 8;
         let x1 = width / 2 + width / 8;
@@ -951,7 +1107,7 @@ mod tests {
         for y in y0..y1 {
             for x in x0..x1 {
                 let at = ((y as usize) * (width as usize) + x as usize) * 4;
-                bitmap.pixels[at..at + 4].copy_from_slice(&[255, 255, 255, 255]);
+                bitmap.pixels[at..at + 4].copy_from_slice(&color);
             }
         }
         bitmap
@@ -1240,6 +1396,169 @@ mod tests {
         assert!(log.is_empty(), "丢行不该判失败：那是样式自己写的上限");
         assert_eq!(painter.stats().lines_dropped, 3);
         assert_eq!(painter.stats().lines_drawn, 1);
+    }
+
+    // ---- 文字阴影（B5）：先阴影、后文字，而且阴影真的挪了 ----
+
+    /// **不画阴影时：一个像素都不动、一次多余的栅格化都不发生。**
+    ///
+    /// 这是"既有工程逐字节不变"在这一层的执行处：`shadow_color` 缺省时
+    /// 不许出现第二张位图（多起一次 ffmpeg 进程），也不许动任何像素。
+    #[test]
+    fn 不画阴影时不多栅格化也不动像素() {
+        let target = (640u32, 360u32);
+        let rect = rect(0.25, 0.8, 0.5, 0.066);
+        let mut baseline = frame(640, 360, [0, 0, 0, 255]);
+        let mut calls = 0usize;
+        let mut log = IssueLog::new();
+        let mut painter = OverlayPainter::new(Some(Path::new("C:/fake/font.ttf")));
+        let lines = overlay(&[("一", rect)], 0);
+        assert_eq!(lines.subtitle_style.shadow_color, None, "夹具就是老样式");
+        paint_lines(
+            &mut |key| fake_rasterizer(&mut calls)(key),
+            &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            &mut baseline,
+            &lines,
+            target,
+            &mut log,
+            &mut painter.stats,
+        );
+        assert_eq!(calls, 1, "只有文字那一张，阴影不该引出第二次栅格化");
+
+        // 同一帧再画一次"全透明的阴影"：**判据与缺省相同**（看不见就别画）。
+        let mut transparent = frame(640, 360, [0, 0, 0, 255]);
+        let mut calls = 0usize;
+        let mut lines = overlay(&[("一", rect)], 0);
+        lines.subtitle_style.shadow_color = Some([0, 0, 0, 0]);
+        lines.subtitle_style.shadow_dy_px = 4.0;
+        paint_lines(
+            &mut |key| fake_rasterizer(&mut calls)(key),
+            &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            &mut transparent,
+            &lines,
+            target,
+            &mut log,
+            &mut painter.stats,
+        );
+        assert_eq!(calls, 1, "全透明的阴影也该走同一条老路");
+        assert_eq!(transparent, baseline, "全透明的阴影与不画必须逐字节相同");
+    }
+
+    /// **画阴影时：阴影真的落在偏移处，而且文字压在它上面。**
+    ///
+    /// 假栅格器按"这一张是不是阴影"给不同颜色（阴影蓝、文字白），于是
+    /// 「贴了几张、贴在哪、谁在上面」这几件事在像素上都能读出来。
+    #[test]
+    fn 画阴影时阴影落在偏移处且文字压在它上面() {
+        let target = (640u32, 360u32);
+        let rect = rect(0.25, 0.8, 0.5, 0.066);
+        // 落点取共享几何给的那个（不手算）：这条要验的是叠加那一步，不是布局。
+        let placement = place_line(rect, target, 0.04).expect("能落点");
+        let (w, h) = (placement.bitmap_width, placement.bitmap_height);
+
+        let mut image = frame(640, 360, [0, 0, 0, 255]);
+        let mut log = IssueLog::new();
+        let mut calls = 0usize;
+        let mut painter = OverlayPainter::new(Some(Path::new("C:/fake/font.ttf")));
+        let mut lines = overlay(&[("一", rect)], 0);
+        lines.subtitle_style.shadow_color = Some([0, 0, 0, 255]);
+        // 只留垂直偏移（不用模糊）：**阴影的落点=文字落点+(0,20)**，于是
+        // 两块墨在纵向完全错开，"偏移生效了没有"一眼可判。
+        lines.subtitle_style.shadow_dx_px = 0.0;
+        lines.subtitle_style.shadow_dy_px = 20.0;
+        lines.subtitle_style.shadow_blur_px = 0.0;
+        paint_lines(
+            &mut |key| {
+                calls += 1;
+                let color = if key.shadow_color.is_some() {
+                    // 阴影那张：画布四周扩过 pad，墨在**画布中心**（与文字那张同一个规则）。
+                    assert_eq!(key.width, w + 40, "blur=0、dy=20 时四周各扩 20");
+                    assert_eq!(key.height, h + 40);
+                    [0, 0, 255, 255]
+                } else {
+                    assert_eq!((key.width, key.height), (w, h), "文字那张尺寸不许变");
+                    [255, 255, 255, 255]
+                };
+                Ok(Rc::new(ink_bitmap_of(key.width, key.height, color)))
+            },
+            &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            &mut image,
+            &lines,
+            target,
+            &mut log,
+            &mut painter.stats,
+        );
+        assert!(log.is_empty(), "这里不该有问题：{:?}", log.into_vec());
+        assert_eq!(calls, 2, "文字一张 + 阴影一张");
+
+        // 墨块在各自的位图里居中：文字那张占 [y0, y1)，阴影那张整体下移 20。
+        let cx = placement.x + (w as i32) / 2;
+        let text_y = placement.y + (h as i32) / 2;
+        let shadow_y = text_y + 20;
+        let got_text = image.pixel(cx as u32, text_y as u32).expect("在画面里");
+        let got_shadow = image.pixel(cx as u32, shadow_y as u32).expect("在画面里");
+        assert_eq!(got_text, [255, 255, 255, 255], "文字应当在最上面");
+        assert_eq!(
+            got_shadow, [0, 0, 255, 255],
+            "阴影必须落在**偏移之后**的位置（dy=20）—— 落在文字原处就是没挪"
+        );
+        // 反向：偏移方向**上方**（文字原处）不能是阴影色。
+        assert_ne!(
+            image.pixel(cx as u32, (text_y - 20) as u32).expect("在画面里"),
+            [0, 0, 255, 255],
+            "偏移的反方向出现了阴影色：说明它被贴到了别处"
+        );
+    }
+
+    /// 阴影画不出来时：**文字仍然画出来**，但问题要记下来（整次出片照样判失败）。
+    ///
+    /// 反过来的做法（把文字也丢掉）看上去"更一致"，代价是画面上一片空 ——
+    /// 而查问题的人需要的恰恰是"字在哪、阴影缺了"。
+    #[test]
+    fn 阴影画不出来也要把字画出来并记问题() {
+        let target = (640u32, 360u32);
+        let rect = rect(0.25, 0.8, 0.5, 0.066);
+        let mut image = frame(640, 360, [0, 0, 0, 255]);
+        let mut log = IssueLog::new();
+        let mut calls = 0usize;
+        let mut painter = OverlayPainter::new(Some(Path::new("C:/fake/font.ttf")));
+        let mut lines = overlay(&[("一", rect)], 0);
+        lines.subtitle_style.shadow_color = Some([0, 0, 0, 255]);
+        lines.subtitle_style.shadow_blur_px = 6.0;
+        paint_lines(
+            &mut |key| {
+                calls += 1;
+                if key.shadow_color.is_some() {
+                    return Err("ffmpeg 说不出这一张".to_string());
+                }
+                Ok(Rc::new(ink_bitmap(key.width, key.height)))
+            },
+            &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            &mut image,
+            &lines,
+            target,
+            &mut log,
+            &mut painter.stats,
+        );
+        assert_eq!(calls, 2, "两张都要试过");
+        let issues = log.into_vec();
+        assert_eq!(codes(&issues), vec!["subtitle_raster_failed"]);
+        assert!(
+            issues[0].message.contains("阴影"),
+            "消息要说清是阴影那一张：{}",
+            issues[0].message
+        );
+        // 文字画出来了：账面上算"画了"，帧上也有墨（阴影缺了）。
+        assert_eq!(painter.stats().lines_drawn, 1);
+        assert_eq!(painter.stats().lines_failed, 0);
+        let placement = place_line(rect, target, 0.04).expect("能落点");
+        let px = placement.x + placement.bitmap_width as i32 / 2;
+        let py = placement.y + placement.bitmap_height as i32 / 2;
+        assert_eq!(
+            image.pixel(px as u32, py as u32).expect("在画面里"),
+            [255, 255, 255, 255],
+            "阴影失败不该把文字也丢掉"
+        );
     }
 
     // ---- 弹幕：同一条画法，不同的判据 ----

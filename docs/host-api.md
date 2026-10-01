@@ -1,6 +1,6 @@
 # 宿主 API
 
-Version: 4
+Version: 5
 
 下游宿主读这一份就够：**形状在 `crates/dhampir-timeline/src/host_api.rs`，
 版本问 `dhampir_host_api_version`，导出名单在文末**。
@@ -15,7 +15,7 @@ Version: 4
 而这里的形状是钉死的（每条都有键集断言）—— 启动时问一次，记住就够了。
 
 * 对端要判断对面是哪个版本，调 `dhampir_host_api_version`：返回整数，与
-  `host_api::HOST_API_VERSION` 是同一个数（现在等于 4）。
+  `host_api::HOST_API_VERSION` 是同一个数（现在等于 5）。
 * 版本的真值在 Rust 源码那一行常量里；这个函数的返回值、这份文档的 `Version:` 行
   与文末名单，都由守卫跟源码比对 —— **「升了常量忘了改文档」不会静默通过**。
 
@@ -74,6 +74,36 @@ Version: 4
   编辑失败**不占一步**（失败的那一步没有可退的东西）。
 * 没有载入工程时给 `no_project`。
 
+## v4 -> v5 变了什么
+
+**形状面**：`overlay` 里的 `subtitle_style` / `danmaku_style` 多了四个键 ——
+**文字阴影**。**导出面一个都没动。**
+
+| 键 | 含义 |
+|---|---|
+| `shadow_color` | 阴影颜色（RGBA 四字节）。`null` = **不画阴影**（默认，老工程就是这个形状） |
+| `shadow_dx_px` | 水平偏移（文档像素，与 `transform.x/y` 同一坐标系） |
+| `shadow_dy_px` | 垂直偏移（文档像素，**正数向下**） |
+| `shadow_blur_px` | **模糊半径（像素）**。契约里是 `shadow_blur_ratio`（占高的比例），求值层按高换算过来 |
+
+* **为什么四个都能缺省还要升版本**：规矩是「**wasm 返回体加字段即视为 API 变更**」。
+  对端拿到的形状变了就是破坏性改动，不管变的是谁"觉得"重要的字段 —— 与 v3 -> v4
+  正好是同一句话的两半（那边形状没变、导出面变了，照样升）。
+* **老工程一个键都不多**：四个字段都带 `skip_serializing_if`，缺省值不进返回体，
+  所以"没写过阴影的工程"拿到的形状与 v4 **逐字节相同**。
+* **弹幕那半边恒为不画**（`shadow_color: null`）：`DanmakuSpec` 里没有阴影字段，
+  跟着字幕走会让给字幕配的阴影莫名其妙地出现在弹幕上。
+* **量纲**：偏移与模糊都是**像素**，且与 `stroke_px` 同一条口径（求值层拿到的那个尺寸
+  —— 默认路径上就是导出尺寸）。这一层**不**再做一次"文档 -> 目标"的换算：
+  那需要两个尺寸，而 `evaluate_overlay` 只有前者。
+* **两端只保证观感近似**：浏览器是 canvas 的 `shadowBlur`，CLI 是 ffmpeg 的
+  `gblur`（σ = 模糊半径 / 2）。**不保证逐像素一致** —— 与"字形像素允许不同"同一条。
+
+**已知边界（不假装）**：浏览器那一侧，阴影是画在**与文字同一张画布**里的，
+所以模糊/偏移超出那一行的位图范围时会被裁掉；CLI 那一侧会为阴影多开一张扩过边的位图。
+两端因此只在"影子没超出那一行"时严格近似。字形的位图尺寸是**契约给的**
+（`placements[].bitmap_width/height`），不能为了影子改它。
+
 ## 那几行字是谁画的
 
 **宿主画**。`overlay` 只说「画哪几行字（字幕与弹幕）、各占哪个矩形」：栅格化（字体、字号、
@@ -91,6 +121,7 @@ Version: 4
 
 - `dhampir_host_api_version`
 - `dhampir_project_attach`
+- `dhampir_project_begin_frame`
 - `dhampir_project_bind_source`
 - `dhampir_project_clear_bitmaps`
 - `dhampir_project_doc`
@@ -101,6 +132,7 @@ Version: 4
 - `dhampir_project_frame`
 - `dhampir_project_open`
 - `dhampir_project_precheck`
+- `dhampir_project_preroll`
 - `dhampir_project_redo`
 - `dhampir_project_render_probe`
 - `dhampir_project_resize`

@@ -176,13 +176,13 @@ pub struct Layer {
     ///
     /// `opacity` 是"这一层**怎么画**"，`gain` 是"这一层**怎么响**" ——
     /// 两个不同的量。混在 `opacity` 上会让"把画面调淡"顺手把声音也调小，
-    /// 而那是**两个独立的意图**（V-Trim 就是这么用的：音效有画面没有透明度）。
+    /// 而那是**两个独立的意图**（参照实现 就是这么用的：音效有画面没有透明度）。
     ///
     /// # 它一直是个死字段的反面
     ///
     /// 混音器**早就会乘增益**（`AudioSegment.gain`，T13 引入），
     /// 但契约里没有这个字段，于是 `plan_audio` 只能写死 `1.0` ——
-    /// 运行时支持、契约不支持，表现在成片里就是"V-Trim 配的音量全丢"。
+    /// 运行时支持、契约不支持，表现在成片里就是"参照实现 配的音量全丢"。
     /// 这一条是**白捡的**：加个字段，混音器那行不用动。
     ///
     /// 只有音轨层用它；视频层上写它等于没写（渲染器不看），但也不报错 ——
@@ -207,7 +207,7 @@ pub struct Layer {
     /// 动图贴纸（GIF）是**短素材铺长区间**：实测一张 12 帧的 GIF
     /// 要覆盖 224 个时间线帧（3.7 秒）。没有这个开关时只有两条路 ——
     /// 谎报 `frame_count`（校验过、渲染读不存在的帧），
-    /// 或者把贴纸缩短（动图放完就消失，与 V-Trim 行为不同）。
+    /// 或者把贴纸缩短（动图放完就消失，与 参照实现 行为不同）。
     /// 两条都是**用错的形状去套**，所以这里加一个正当的表达。
     ///
     /// 循环在**素材帧**上取模，不是时间线帧 —— 素材 10fps、时间线 60fps 时
@@ -270,7 +270,7 @@ pub struct SubtitleStyle {
     pub outline: bool,
     /// **描边宽度** = 目标高度 * 这个比例，单位是**外侧宽度**（见下）。
     ///
-    /// V-Trim 写的是 `12px #403c3b`（1080p 下），即 `12/1080`。
+    /// 参照实现 写的是 `12px #403c3b`（1080p 下），即 `12/1080`。
     /// 单位取比例而不是像素：像素在预览（640x360）与成片（1920x1080）
     /// 里含义不同，两端就不一致了 —— 与 `font_ratio` 同一条理由。
     ///
@@ -291,20 +291,20 @@ pub struct SubtitleStyle {
     pub stroke_color: [u8; 4],
     /// **淡入时长（毫秒）。** 0 = 硬出现。
     ///
-    /// V-Trim 的 `getActiveSubs()`：`fadeIn = 0.35`，透明度走 `pow2_out`，
+    /// 参照实现 的入场包络：`fadeIn = 0.35`，透明度走 `pow2_out`，
     /// 同时从下方 `+20px` 浮上来。
     #[serde(default)]
     pub fade_in_ms: u64,
     /// **淡出时长（毫秒）。** 0 = 硬消失。
     #[serde(default)]
     pub fade_out_ms: u64,
-    /// 入场时从下方浮上来的距离（**文档像素**）。V-Trim 是 `20`。
+    /// 入场时从下方浮上来的距离（**文档像素**）。参照实现 是 `20`。
     #[serde(default)]
     pub rise_in_px: f32,
-    /// 退场时向上浮的距离（文档像素）。V-Trim 是 `8`。
+    /// 退场时向上浮的距离（文档像素）。参照实现 是 `8`。
     #[serde(default)]
     pub rise_out_px: f32,
-    /// **字体族名**（`"LXGW WenKai"` 这种）。`None` = 用宿主的默认字体。
+    /// **字体族名**（`"Noto Sans SC"` 这种）。`None` = 用宿主的默认字体。
     ///
     /// # 它不表示"去系统里找"
     ///
@@ -312,22 +312,21 @@ pub struct SubtitleStyle {
     /// **"宿主从你给它的字体目录里按这个名字找"** —— 找不到就用 `--font-file`
     /// 兜底，并**如实报出来**，而不是悄悄换个字体画。
     ///
-    /// 为什么值得有：V-Trim 的 `polish.toml` 里写着 `font = "LXGW WenKai"`，
-    /// 而**那台机器上没装** —— 它走到 CSS 的字体栈兜底
-    /// （`'LXGW WenKai','Noto Sans SC','Microsoft YaHei',sans-serif`），
-    /// 实际生效的是**微软雅黑**。把名字带进契约，这件事才是可查的。
+    /// 为什么值得有：工程里写的族名**经常是这台机器上没装的那个** ——
+    /// 它落回字体栈兜底，实际生效的是**另一个字体**，
+    /// 而成片里看不出"字体被换过"。把名字带进契约，这件事才是可查的。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_family: Option<String>,
     /// **字重**（100..=900，CSS 的同一套刻度）。默认 400。
     ///
-    /// V-Trim 的字幕是 `font-weight:700`、弹幕是 `600` —— 而本仓先前
+    /// 参照实现 的字幕是 `font-weight:700`、弹幕是 `600` —— 而本仓先前
     /// **完全不设字重**，于是笔画比它细一圈。那不是"差一点观感"，
     /// 是每一行字都在逐像素上错。
     #[serde(default = "default_font_weight")]
     pub font_weight: u32,
     /// **行高 / 字号**的比例。默认 0 = 用 [`crate::text_layout::LINE_HEIGHT_EM`]（1.2）。
     ///
-    /// V-Trim 的字幕 CSS 是 `line-height:1.5`，本仓是 1.2 ——
+    /// 参照实现 的字幕 CSS 是 `line-height:1.5`，本仓是 1.2 ——
     /// 单行字幕看不出差别，**两行**的字间距会差 0.3em（72px 字号下是 21.6px）。
     #[serde(default)]
     pub line_height: f32,
@@ -336,18 +335,18 @@ pub struct SubtitleStyle {
     /// # 为什么不是复用 `bottom_margin`
     ///
     /// 本仓先前拿 `bottom_margin` 当左右边距用（那个字段本来是"距底边多远"）。
-    /// 默认值 0.06 凑出来是 **88%**，而 V-Trim 写死的是 **87.5%**
-    /// （`wrapCaptionParts(cap.parts, CW * 0.875, …)`）—— 两个数**碰巧接近但不是同一个**，
+    /// 默认值 0.06 凑出来是 **88%**，而 参照实现 写死的是 **87.5%**
+    /// （参照实现把安全宽写死成 87.5%）—— 两个数**碰巧接近但不是同一个**，
     /// 于是在刚好卡边界的行上会断在不同的地方。当时复用是"不动契约"的权宜，
     /// 现在把它说清楚。
     ///
     /// 默认 **0 = 沿用老行为**（继续复用 `bottom_margin`），所以既有工程逐字节不变；
-    /// 转译器按 V-Trim 显式写 0.875。
+    /// 转译器按 参照实现 显式写 0.875。
     #[serde(default)]
     pub safe_width_ratio: f32,
     /// **装不下时整体缩字号的下限**。默认 0 = 不缩（老行为：超出直接丢行）。
     ///
-    /// 参照（`index.html` 的 `wrapCaptionParts`）是：
+    /// 参照实现的换行规则是：
     ///
     /// ```text
     /// var scale = 1;
@@ -365,7 +364,7 @@ pub struct SubtitleStyle {
     pub shrink_min_scale: f32,
     /// **不截断行数**（默认 false = 老行为：超过 `max_lines` 就丢）。
     ///
-    /// 参照 `wrapCaptionParts` **从不丢行** —— 它把折出来的行**全画了**，
+    /// 参照实现**从不丢行** —— 它把折出来的行**全画了**，
     /// 那个 `MAX_LINES = 3` 只出现在缩字公式里（"缩到恰好三行装得下"），
     /// **不是截断阈值**。
     ///
@@ -381,19 +380,72 @@ pub struct SubtitleStyle {
     ///
     /// `None` = 不做高亮（默认，既有工程逐字节不变）。
     ///
-    /// 参照（`index.html:1952` / `:1992`）：
+    /// 参照实现的做法（示意）：
     ///
     /// ```text
-    /// var hlColor = subS.highlight_color || '#f56b41';
+    /// var hlColor = style.highlight_color || <默认高亮色>;
     /// ...
     /// ctx.fillStyle = p.hl ? hlColor : color;
     /// ```
     ///
-    /// 也就是**只有填色不同，描边仍用 `stroke_color`** —— 参照对每一段
-    /// 先 `strokeText` 再按 `p.hl` 选 `fillStyle`。
-    /// 转译器按参照写 `#f56b41` = `[245, 107, 65, 255]`。
+    /// 也就是**只有填色不同，描边仍用 `stroke_color`** —— 逐段先描边、
+    /// 再按"这一段是不是高亮"选填色。
+    /// 转译器会给它一个显式值；本仓**不猜**。
     #[serde(default)]
     pub highlight_color: Option<[u8; 4]>,
+    /// **文字阴影的颜色**（`None` = 不画阴影，默认 —— 既有工程逐字节不变）。
+    ///
+    /// 参照是 CSS 的 `text-shadow: 0 2px 12px rgba(0,0,0,.4)` —— 三个参数里
+    /// 这一个管颜色，另两个管偏移与模糊（下面三个字段）。
+    ///
+    /// # 三条口径（不写清就会各写各的）
+    ///
+    /// 1. **alpha 生效**：半透明阴影是常态（参照给的是 `.4`）。
+    ///    与 `color` 那一支不同 —— 那个的 alpha 语义一个字都没变。
+    /// 2. **只画一次，不参与描边宽度**：阴影就是"同一行字按偏移再画一遍"，
+    ///    描边与阴影**各自独立**。所以阴影那一张里画的**只有填充**，
+    ///    `stroke_ratio` / `stroke_color` 一点都不进来。
+    /// 3. **`None` 与"全透明"是同一件事**：`Some([r,g,b,0])` 也不画
+    ///    —— 两端都不许为它多起一次栅格化，见 `text_overlay` 的判据。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow_color: Option<[u8; 4]>,
+    /// 阴影的水平偏移（**文档像素**，与 `transform.x/y` 同一坐标系）。
+    ///
+    /// # 为什么是文档像素而不是目标像素
+    ///
+    /// 预览 640×360 与成片 1920×1080 必须落**同一个比例** —— 与 `transform.x/y`
+    /// 同一条理由（T1 的换算照走）。写成目标像素的话，同一个工程换个导出尺寸
+    /// 阴影就跑到别处去了，而那正是「预览所见 != 成片所得」。
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub shadow_dx_px: f32,
+    /// 阴影的垂直偏移（文档像素，**正数向下**）。
+    ///
+    /// 参照的 `text-shadow: 0 2px …` 就是这里写 2.0。
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub shadow_dy_px: f32,
+    /// **阴影的模糊半径**（占**文档高**的比例；0 = 硬阴影）。
+    ///
+    /// 单位取比例而不是像素：像素在预览与成片里含义不同 —— 与 `font_ratio` /
+    /// `stroke_ratio` 同一条理由。求值层按目标高换算成像素（`shadow_blur_px`）。
+    ///
+    /// # 两端实现不同，**只保证"观感近似"**
+    ///
+    /// 浏览器走 canvas 原生的 `shadowBlur`（规范口径是 σ 的两倍），
+    /// 出片侧是 ffmpeg 的 `gblur`（直接吃 σ）。两者**不是同一条公式**，
+    /// 所以这里**不保证逐像素一致** —— 与"字形像素允许不同"同一条口径。
+    /// 谁要拿它当逐像素判据，先看 `plan/text-shadow-design.md` §2。
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub shadow_blur_ratio: f32,
+}
+
+/// `0.0` 不写进文件 —— 这是"既有工程逐字节不变"的执行处：
+/// 新加的三个浮点偏移/模糊字段默认 0，老工程重写一次**一个字节都不多**。
+///
+/// 与 `schema.rs` 的 `is_one` 同款（那边是"等于默认值就不写"的另一个实例）。
+/// 比法用 `== 0.0`：`-0.0 == 0.0` 为真，于是负零也走"不写"那一支 —— 而它在
+/// JSON 里是 `-0.0`，写出来就是个没意义的新键。
+fn is_zero_f32(value: &f32) -> bool {
+    *value == 0.0
 }
 
 fn default_font_weight() -> u32 { 400 }
@@ -404,7 +456,7 @@ fn subtitle_max_lines() -> u32 { 2 }
 fn subtitle_color() -> [u8; 4] { [255, 255, 255, 255] }
 /// **默认 0.0 = "宽度从字号推"**（升级前的老行为，`border_px(font_px)`）。
 ///
-/// 这里踩过一个坑：我第一版把默认值写成 `12/1080`（V-Trim 的实际值），
+/// 这里踩过一个坑：我第一版把默认值写成 `12/1080`（参照实现 的实际值），
 /// 于是**所有既有工程**的描边在 640×360 预览里从 `border_px(20)=1px`
 /// 变成 `12/1080*360=4px` —— 逐字节不变的判据当场就破了。
 /// 契约默认值不是"我觉得合理的值"，是"**让老工程一字不变**的值"。
@@ -438,6 +490,13 @@ impl Default for SubtitleStyle {
             keep_all_lines: false,
             // None = 不做高亮，既有工程逐字节不变。
             highlight_color: None,
+            // None = 不画阴影；三个偏移/模糊量默认 0（硬阴影、不偏移）。
+            // 这一组默认值就是"老工程升上来什么都不变"的全部内容 ——
+            // 少了 None，"没写过阴影的工程"会突然多出一圈黑边。
+            shadow_color: None,
+            shadow_dx_px: 0.0,
+            shadow_dy_px: 0.0,
+            shadow_blur_ratio: 0.0,
         }
     }
 }
@@ -460,26 +519,26 @@ pub struct DanmakuSpec {
     /// **文字颜色，RGBA。**
     ///
     /// 这个字段以前**故意没有**（`overlay.rs` 的模块文档写着"颜色与描边两者共用，
-    /// 要分开就得动契约"）。后果不是"少一个选项"：V-Trim 的字幕是暖色
-    /// `#dcbda0`、弹幕是白色 `#ffffff` —— 共用一份时**必然有一个错**。
+    /// 要分开就得动契约"）。后果不是"少一个选项"：**字幕与弹幕的默认色本来就不同**
+    /// —— 共用一份时**必然有一个错**。
     #[serde(default = "danmaku_color")]
     pub color: [u8; 4],
-    /// **基础不透明度。** V-Trim 用 `0.9`（不是 1.0）。
+    /// **基础不透明度。** 参照实现 用 `0.9`（不是 1.0）。
     ///
     /// 弹幕压在画面上，全不透明会太抢 —— 这是**弹幕与字幕的一处固有差别**，
     /// 不是"再给个字幕也有的旋钮"。
     #[serde(default = "danmaku_opacity")]
     pub opacity: f32,
-    /// 淡入时长（毫秒）。V-Trim 的 `getActiveDms()` 是 `0.3`。
+    /// 淡入时长（毫秒）。参照实现 是 `0.3`。
     #[serde(default)]
     pub fade_in_ms: u64,
-    /// 淡出时长（毫秒）。V-Trim 是 `0.2`。
+    /// 淡出时长（毫秒）。参照实现 是 `0.2`。
     #[serde(default)]
     pub fade_out_ms: u64,
-    /// 是否加描边。V-Trim 弹幕是 `2px #000`。
+    /// 是否加描边。参照实现 弹幕是 `2px #000`。
     #[serde(default = "yes")]
     pub outline: bool,
-    /// 描边宽度 = 目标高度 * 这个比例（V-Trim 是 `2/1080`）。
+    /// 描边宽度 = 目标高度 * 这个比例（参照实现 是 `2/1080`）。
     #[serde(default = "danmaku_stroke_ratio")]
     pub stroke_ratio: f32,
     /// 描边颜色。
@@ -488,7 +547,7 @@ pub struct DanmakuSpec {
     /// **0 号泳道的顶边**（归一化，相对目标高）。默认 0 = 贴着画面最上面。
     ///
     /// 与 [`Self::lane_spacing_ratio`] 一起把"弹幕带"这块区域说清楚。
-    /// 实测需要可配：V-Trim 的带从 **0.0781** 开始（1080p 下约 84px），
+    /// 实测需要可配：参照实现 的带从 **0.0781** 开始（1080p 下约 84px），
     /// 而本仓老规则是 0 起 —— 差值是肉眼可见的一整条文字行。
     #[serde(default)]
     pub lane_top_ratio: f32,
@@ -500,7 +559,7 @@ pub struct DanmakuSpec {
     /// 字体族名（语义同 [`SubtitleStyle::font_family`]，弹幕也归这条）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_family: Option<String>,
-    /// 字重。V-Trim 的弹幕是 `600`；默认 400。
+    /// 字重。参照实现 的弹幕是 `600`；默认 400。
     #[serde(default = "default_font_weight")]
     pub font_weight: u32,
     /// 行高 / 字号的比例。默认 0 = 用 [`crate::text_layout::LINE_HEIGHT_EM`]。
@@ -512,7 +571,7 @@ fn danmaku_lanes() -> u32 { 8 }
 fn danmaku_duration() -> u64 { 8000 }
 fn danmaku_font_ratio() -> f32 { 0.04 }
 fn danmaku_color() -> [u8; 4] { [255, 255, 255, 255] }
-/// V-Trim 的弹幕基础不透明度。**默认取 V-Trim 的值而不是 1.0**：
+/// 参照实现 的弹幕基础不透明度。**默认取 参照实现 的值而不是 1.0**：
 /// 这是弹幕该有的样子，而不是"某个工程的偏好"。
 fn danmaku_opacity() -> f32 { 0.9 }
 /// 默认 0.0 = "宽度从字号推"（与 `SubtitleStyle::stroke_ratio` 同一条理由：
@@ -561,7 +620,7 @@ pub struct TrackV2 {
     /// **整条轨的音频增益**（线性倍数，1.0 = 原样）。
     ///
     /// 与 [`Layer::gain`] 的关系：轨道这个是**上限/母线**，图层那个是那一段自己的量，
-    /// 实际增益是两者**相乘**。V-Trim 的 `[sfx] volume` 就是母线
+    /// 实际增益是两者**相乘**。参照实现 的 `[sfx] volume` 就是母线
     /// （模板里 `var vol = ev.volume || CFG.sfx.volume || 0.1` —— 事件值**覆盖**母线，
     /// 所以转译器把它填成图层的 `gain`；这个字段留给"整条轨一起调"的工程）。
     ///
@@ -866,7 +925,7 @@ pub fn source_frame_looped(
 /// 两端各写一遍，迟早在某个边界上差一点点 —— 而"两端各自的都对"这件事
 /// 让人查不出来（预览里淡入看着正常、成片里快了一帧）。
 ///
-/// # 口径（抄 V-Trim 的 `getActiveSubs` / `getActiveDms`）
+/// # 口径（对齐参照实现的两条窗口判据）
 ///
 /// ```text
 /// 淡入：local < fade_in   -> p = local/fade_in，              opacity = pow2_out(p)
@@ -897,7 +956,7 @@ pub fn text_envelope(
 
     // # 两段是 **if / else if**，不是两段各算一次
     //
-    // V-Trim 原文（`templates/index.html` 的 `getActiveSubs`）：
+    // 参照实现 的窗口判据（原文）：
     //
     //     if (t - s.start < fadeIn) { … }
     //     else if (s.end - t < fadeOut) { … }
@@ -929,9 +988,9 @@ pub fn text_envelope(
     (opacity.clamp(0.0, 1.0), offset)
 }
 
-/// `pow2_out`：`1 - (1-p)^2`。V-Trim 的 `E.pow2_out`。
+/// `pow2_out`：`1 - (1-p)^2`。参照实现 的 `E.pow2_out`。
 fn pow2_out(p: f32) -> f32 { 1.0 - (1.0 - p) * (1.0 - p) }
-/// `pow2_in`：`p^2`。V-Trim 的 `E.pow2_in`。
+/// `pow2_in`：`p^2`。参照实现 的 `E.pow2_in`。
 fn pow2_in(p: f32) -> f32 { p * p }
 
 /// 素材帧号 → 秒。**用素材自己的时间基**，不是时间线的。
@@ -1956,7 +2015,7 @@ mod v2_tests {
 
     #[test]
     fn 淡入是从透明到不透且从下方浮上来() {
-        // V-Trim: fadeIn 0.35s、rise 20px、pow2_out(p)
+        // 参照实现: fadeIn 0.35s、rise 20px、pow2_out(p)
         let (o0, dy0) = text_envelope(0, 2000, 350, 0, 20.0, 0.0);
         assert_eq!(o0, 0.0, "淡入起点是全透明");
         assert_eq!(dy0, 20.0, "全透明时在最下方（+20px）");
@@ -1974,7 +2033,7 @@ mod v2_tests {
     #[test]
     fn 淡出是从不透到透明往上走() {
         // span 2000、fadeOut 200：最后 200ms 在淡出。
-        // V-Trim: opacity = pow2_in(p)，yOff = -8*(1-p)
+        // 参照实现: opacity = pow2_in(p)，yOff = -8*(1-p)
         let (o_end, _) = text_envelope(2000, 2000, 0, 200, 0.0, 8.0);
         assert_eq!(o_end, 0.0, "淡出终点是全透明");
 
@@ -2032,5 +2091,102 @@ mod v2_tests {
         for (index, (a, b)) in forward.iter().zip(backward.iter().rev()).enumerate() {
             assert_eq!(a, b, "第 {index} 帧正着算与倒着算必须一样");
         }
+    }
+
+    // ---- 文字阴影：**既有工程逐字节不变**的执行处 ----
+
+    /// **反向用例**：老工程（没写过阴影）重写一次，一个字节都不许多。
+    ///
+    /// 这条钉的是三个新键。少了 `skip_serializing_if`，老工程重写时会多出
+    /// `"shadow_color": null` / `"shadow_dx_px": 0.0` 三个键 —— 而"逐字节不变"
+    /// 是本仓一直拿它当硬判据的那条（T2/T7 系列都靠它）。
+    #[test]
+    fn 没写过阴影的样式重写出来一个字节都不多() {
+        let legacy = r#"{"font_ratio":0.055,"color":[255,255,255,255]}"#;
+        let style: SubtitleStyle = serde_json::from_str(legacy).expect("老样式要能读进来");
+        // 1. 读进来就是"不画阴影"。
+        assert_eq!(style.shadow_color, None);
+        assert_eq!(
+            (style.shadow_dx_px, style.shadow_dy_px, style.shadow_blur_ratio),
+            (0.0, 0.0, 0.0)
+        );
+        // 2. 写回去的键集**冻结**在这里：多一个键（哪怕值等于默认值）就是老工程变样，
+        //    少一个键就是有字段被吃掉了。两个方向都红。
+        //
+        //    ⚠️ `highlight_color` 在里面是**既有事实**，不是这一次加的：它当年没带
+        //    `skip_serializing_if`，于是 `None` 会写成 `null`。那与本条无关（影子字段
+        //    一个都不出现才是这里要的），所以照实列出来，不在这里顺手改它 ——
+        //    改它会让所有既有工程的重写结果少一个键，那是另一件事，得单独交代。
+        let again = serde_json::to_string(&style).expect("要能写回去");
+        let value: serde_json::Value = serde_json::from_str(&again).expect("自己写的要是合法 JSON");
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .expect("样式是个对象")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        // serde_json 的对象是 BTreeMap：键是**排序后**的，不是声明顺序。
+        keys.sort_unstable();
+        let mut expected = vec![
+            "font_ratio",
+            "bottom_margin",
+            "max_lines",
+            "color",
+            "outline",
+            "stroke_ratio",
+            "stroke_color",
+            "fade_in_ms",
+            "fade_out_ms",
+            "rise_in_px",
+            "rise_out_px",
+            "font_weight",
+            "line_height",
+            "safe_width_ratio",
+            "shrink_min_scale",
+            "keep_all_lines",
+            "highlight_color",
+        ];
+        expected.sort_unstable();
+        assert_eq!(keys, expected, "老工程的样式键集变了：{again}");
+        // 3. 而它与 `Default` 写出来的是**同一串**（老 JSON 里没写的那几项都取默认值）。
+        assert_eq!(
+            again,
+            serde_json::to_string(&SubtitleStyle::default()).expect("默认值也要能写"),
+            "老工程重写后与默认值写法不同"
+        );
+        // 4. 四个新键一个都不在里面 —— 前面那条键集断言已经覆盖，这里再点名一次：
+        //    坏法最可能的样子就是"多出 shadow_color: null"。
+        for key in ["shadow_color", "shadow_dx_px", "shadow_dy_px", "shadow_blur_ratio"] {
+            assert!(!again.contains(key), "老工程里不该出现 {key}：{again}");
+        }
+    }
+
+    /// 正面：写过阴影的样式要**原样往返** —— 四个字段谁被吃掉都不是"观感问题"。
+    #[test]
+    fn 写过阴影的样式原样往返() {
+        let json = r#"{"shadow_color":[0,0,0,102],"shadow_dx_px":0.0,"shadow_dy_px":2.0,"shadow_blur_ratio":0.011111111}"#;
+        let style: SubtitleStyle = serde_json::from_str(json).expect("要能读进来");
+        assert_eq!(style.shadow_color, Some([0, 0, 0, 102]));
+        assert_eq!(style.shadow_dy_px, 2.0);
+        assert_eq!(style.shadow_blur_ratio, 12.0 / 1080.0);
+        // `shadow_dx_px` 是 0：它与默认值相同，于是**不写进文件**（这一条不是丢字段）
+        // —— 读回默认值仍然是 0，语义一样。
+        let again = serde_json::to_string(&style).expect("要能写回去");
+        assert_eq!(
+            again,
+            r#"{"font_ratio":0.055,"bottom_margin":0.06,"max_lines":2,"color":[255,255,255,255],"outline":true,"stroke_ratio":0.0,"stroke_color":[64,60,59,255],"fade_in_ms":0,"fade_out_ms":0,"rise_in_px":0.0,"rise_out_px":0.0,"font_weight":400,"line_height":0.0,"safe_width_ratio":0.0,"shrink_min_scale":0.0,"keep_all_lines":false,"highlight_color":null,"shadow_color":[0,0,0,102],"shadow_dy_px":2.0,"shadow_blur_ratio":0.011111111}"#,
+            "往返结果与输入不一致"
+        );
+    }
+
+    /// 负零也要走"不写"那一支：它在 JSON 里是 `-0.0`，是个没意义的新键。
+    #[test]
+    fn 负零偏移不写进文件() {
+        let style = SubtitleStyle {
+            shadow_dx_px: -0.0,
+            ..SubtitleStyle::default()
+        };
+        let text = serde_json::to_string(&style).expect("要能写回去");
+        assert!(!text.contains("shadow_dx_px"), "负零写出了新键：{text}");
     }
 }

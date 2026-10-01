@@ -142,6 +142,26 @@ thread_local! {
     static PROJECT_HOST: RefCell<Option<ProjectHost>> = const { RefCell::new(None) };
 }
 
+/// **预渲染缓存整表作废**（阶段 5 的失效判据，唯一入口之一）。
+///
+/// 三个失效维度**都在这里点名**，因为它们各自的触发点散在三处，而漏掉任何一维的症状
+/// 都是"画面停在旧内容上"—— 看起来完全正常，只是慢了半拍：
+///   1. **工程编辑 / 载入**：`dhampir_project_open`、`edit`、`undo` / `redo`；
+///   2. **字幕 / 弹幕变化**：`dhampir_project_set_subtitles`
+///      （经 `ProjectHost::invalidate_text_uploads`）；
+///   3. **画布尺寸变化**：`dhampir_project_resize`
+///      （同上；`draw_impl` 开头另有一道尺寸/格式兜底 —— 这一维以前出过事：画面被裁切）。
+///
+/// **只能在没持有 `PROJECT_HOST` 借用的地方调**（它是从外面再去 `borrow_mut` 的）；
+/// 已经借着的上下文（`ProjectHost` 的方法里）直接把字段置 `None`。
+fn invalidate_frame_cache() {
+    PROJECT_HOST.with(|h| {
+        if let Some(host) = h.borrow_mut().as_mut() {
+            host.frame_cache = None;
+        }
+    });
+}
+
 thread_local! {
     /// 当前载入的工程。**只有通过校验的工程才会被记住**——
     /// 让一份有问题的工程留在里面，只会让后面每一步都要重新判断「它到底能不能用」。
@@ -221,6 +241,13 @@ struct TextLineSpec {
     /// 那三样数字，所以它们跟着条目一路带到清单里，而不是在报告那一层从别处再查一遍
     /// —— 再查一遍就是给「清单」与「报告」两次说法不一致的机会。
     danmaku: Option<DanmakuIdentity>,
+    /// **这一条的淡入淡出**（`text_envelope` 算的，1.0 = 完全不透明）。
+    ///
+    /// 为什么必须由宿主带过来：**浏览器这一侧是 JS 栅格化的** —— 与 CLI 一样，
+    /// 不透明度要**烤进那张 RGBA 位图**（`OverlayItem` 本身没有 alpha 字段，
+    /// 合成的混合方程用的是位图自己的 alpha）。以前这里没带，于是
+    /// **成片里字幕会淡入上浮、预览里一动不动** —— 预览与成片不一致的那一类。
+    opacity: f32,
     /// **这一条被整体缩了多少**（1.0 = 没缩）。
     ///
     /// JS 侧栅格化时**描边要乘它**（参照 `swEff = sw * wrapped.scale`）。
@@ -238,8 +265,304 @@ struct DanmakuIdentity {
     exit: i64,
 }
 
-/// 工程预览宿主。
+// ---------------------------------------------------------------------------
+// 阶段 4：位图不必每帧重交
+//
+// # 要解决的问题
+//
+// 贴纸（GIF / 图片序列）与位图模式下的视频，位图都由调用方每帧交进来；而**内容**
+// 只在"素材帧号"变的时候才变（一张 10fps 的 GIF 铺在 60fps 的时间线上，6 个时间线帧
+// 才换一个素材帧）。旧口径下 wasm 每帧清空 + 收下新位图 ⇒ 每帧一次 `create_texture`
+// + `copy_external_image_to_texture`（GPU 上传），白花。
+//
+// # 判"变没变"只能靠**调用方声明的标识**
+//
+// 按位图对象、按尺寸、按时间戳猜，都会在"新的一帧恰好长得一样"时误判成没变 ——
+// 于是画面停在上一帧的贴纸上，而那种画面**看起来完全正常**，只是"慢了半拍"。
+// 所以标识由调用方给（贴纸帧号 / 素材帧号），宿主只按它决定留还是扔。
+//
+// # 为什么是"放宽"而不是"收紧"
+//
+// 没有调用 [`dhampir_project_begin_frame`] 的宿主，`frame_ids` 恒空 ⇒ `plan_bitmap`
+// 永远给出 `Reload` ⇒ 每帧照旧重传，**行为与改前逐字节相同**。
+// 声明了集合的宿主，最坏情况也只是"某个源没被复用"（= 回到旧行为），
+// 因为 `set_bitmap` 不论集合怎么写都会把位图收下（只是可能省掉那次上传）。
+// ---------------------------------------------------------------------------
+
+/// 一个 source 的位图在 GPU 上的驻留：纹理 + 它是**从哪份内容**上传来的。
+///
+/// 标识一致 ⇒ 那份位图逐像素相同 ⇒ 纹理留着、**一次 copy 都不做**。
+struct SourceUpload {
+    /// 纹理与它的 view。纹理必须一起留着：它是这份驻留资源的根。
+    handle: (wgpu::Texture, wgpu::TextureView),
+    size: (u32, u32),
+    /// 上传时那份内容的内容标识。`None` = 调用方没声明 ⇒ **不许复用**（旧口径）。
+    id: Option<String>,
+}
+
+/// 阶段 4 的观测计数（只给人看，不参与任何判定）。
+#[derive(Default, Clone, Copy)]
+struct UploadStats {
+    /// 声明了标识、且纹理已在 ⇒ 这一帧**没有**重传的次数。
+    reused: u64,
+    /// 真的做了 `copy_external_image_to_texture` 的次数。
+    copied: u64,
+    /// `set_bitmap` 收下的次数。
+    submits: u64,
+    /// `set_bitmap` 因为"这张位图反正用不到"而直接关掉的次数。
+    submits_skipped: u64,
+}
+
+/// 一个 source 这一帧该怎么处理（**判据只有这一处**）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BitmapPlan {
+    /// 内容标识一致 + 手上有位图 ⇒ 留着，连 GPU 上传也不做。
+    Reuse,
+    /// 标识变了 / 还没有位图 / 调用方没给标识 ⇒ 丢掉手上那张，等调用方重交。
+    Reload,
+    /// 这一帧不需要这个源 ⇒ 丢掉。
+    Drop,
+}
+
+/// 这一帧要不要重传某个 source 的位图？
+///
+/// `frame_id` 恒为 `None` 就是**旧宿主**（只调 `clear_bitmaps`、不调 `begin_frame`）：
+/// 那时永远返回 `Reload`（除非这一帧根本不需要它）。这条不是实现细节，它是
+/// 「不调新导出的旧路径行为逐字节不变」的兑现方式 —— 有测试钉着（见文件末尾的
+/// `没有声明标识就永远重传`）。
+fn plan_bitmap(
+    in_frame: bool,
+    frame_id: Option<&str>,
+    held_id: Option<&str>,
+    has_bitmap: bool,
+) -> BitmapPlan {
+    if !in_frame {
+        return BitmapPlan::Drop;
+    }
+    // 没有标识就是没有判据。**不许猜**（见上面那段"为什么不能猜"）。
+    let Some(wanted) = frame_id else {
+        return BitmapPlan::Reload;
+    };
+    if !has_bitmap {
+        return BitmapPlan::Reload;
+    }
+    if held_id == Some(wanted) {
+        BitmapPlan::Reuse
+    } else {
+        BitmapPlan::Reload
+    }
+}
+
+/// [`dhampir_project_begin_frame`] 的入参解析结果。
+struct FramePlan {
+    /// 这一帧的帧号（`begin_frame` 回报缓存命中时要用）。
+    frame: Option<i64>,
+    /// 这一帧的来源集合：`(source, 内容标识)`。标识缺失 ⇒ 这一项必须重交。
+    sources: Vec<(String, Option<String>)>,
+    /// JS 对预渲染缓存的要求。**`None` ⇒ 不建表**（默认关）。
+    cache: Option<CacheRequest>,
+}
+
+/// JS 对预渲染缓存的要求。
+///
+/// **为什么是 JS 给的，而不是环境变量**：`dhampir-wasm` 跑在
+/// `wasm32-unknown-unknown` 上，那一侧**没有环境** —— `std::env::var` 恒返回 `Err`。
+/// 所以"用 `VTEDIT_PREVIEW_CACHE*` 调"这件事在浏览器里是**死代码**，
+/// 一个字的开关效果都不会有。配置必须从能看见它的那一侧（JS）递进来。
+#[derive(Debug, Clone, Copy)]
+struct CacheRequest {
+    enabled: bool,
+    /// 未来（预渲染要攒的那一段）秒数。
+    forward_seconds: f32,
+    /// 过去（回拖命中要交的那一段）秒数。
+    back_seconds: f32,
+    /// 内存硬上限（MB）。
+    max_mb: usize,
+}
+
+/// `begin_frame` 失败时的形状：**键一个都不少**（缺键在 JS 那边是 `undefined.length` 抛异常）。
+fn frame_plan_error(message: &str) -> String {
+    host_api::to_json(&serde_json::json!({
+        "ok": false,
+        "error": message,
+        "frame": serde_json::Value::Null,
+        "need": Vec::<String>::new(),
+        "reuse": Vec::<String>::new(),
+        "dropped": 0,
+    }))
+}
+
+/// 预渲染缓存的环形槽位表（阶段 5）。
+///
+/// **为什么单位是 GPU 纹理而不是 JS 里的 canvas**：预览那块 canvas 是 WebGPU canvas，
+/// 同一个 canvas 上 `getContext('2d')` 会是 `null`，所以"命中时把缓存 blit 回画布"
+/// 在 JS 侧做不到；而画布表面纹理通常只有 `RENDER_ATTACHMENT`（没有 `COPY_DST` / `COPY_SRC`），
+/// 既不能当 `copy_texture_to_texture` 的源，也不能当它的目的。
+/// **拥有 GPU 的这一侧**才是能放缓存的地方。
+///
+/// 中间帧纹理的用途：合成先落它，再 blit 到画布 —— 这样它同时有 `COPY_SRC`，
+/// 拷进 ring 是合法的（而画布纹理不行）。
+///
+/// # 开关与窗口由 JS 给
+///
+/// **默认关**：`ProjectHost::cache_request` 为 `None` 就不建表，`draw` 走"直渲画布"
+/// 的旧路（与阶段 5 之前逐字节相同）。理由与配置来源见 [`CacheRequest`]。
+struct FrameCache {
+    /// 每个槽位：`None` = 还没建。**惰性分配** —— 建表时按容量一次性申请几百上千张纹理
+    /// 会卡住第一帧，而多数槽位一辈子用不到。
+    slots: Vec<Option<(wgpu::Texture, wgpu::TextureView)>>,
+    /// 槽位 -> 它现在是哪一帧（`None` = 空）。**环形覆盖时必须靠它把旧帧号摘掉**：
+    /// 只 insert 不 remove，`index` 会指着一张已经被覆盖掉的纹理 ——
+    /// 那会交出一帧**别人的画面**，而画面本身完全正常。
+    slot_frame: Vec<Option<i64>>,
+    /// 帧号 -> 槽位下标。
+    index: HashMap<i64, usize>,
+    /// 下一个要写的槽位（环形覆盖）。
+    next: usize,
+    /// 建表时的目标尺寸与格式。**失效第三维（画布尺寸）就钉在这里**：
+    /// 对不上就整表作废 —— 拿尺寸不同的缓存去 blit 会被**裁切/放大**
+    /// （`BlitRenderer` 只在源与目标**逐像素同尺寸**时才是恒等搬运）。
+    size: (u32, u32),
+    format: wgpu::TextureFormat,
+    /// 窗口（秒）：往前能交多少、往后预渲染多远。只用来算容量与报告，不参与命中判定。
+    back_seconds: f32,
+    forward_seconds: f32,
+    /// 观测计数（命中 / 未命中 / 存过多少帧）。**只给人看，不参与任何判定。**
+    hits: u64,
+    misses: u64,
+    stored: u64,
+}
+
+impl FrameCache {
+    /// 建一个**空的**环形缓存（槽位惰性分配，见字段说明）。
+    fn new(
+        size: (u32, u32),
+        format: wgpu::TextureFormat,
+        capacity: usize,
+        back_seconds: f32,
+        forward_seconds: f32,
+    ) -> Self {
+        let capacity = capacity.max(1);
+        Self {
+            slots: (0..capacity).map(|_| None).collect(),
+            slot_frame: vec![None; capacity],
+            index: HashMap::new(),
+            next: 0,
+            size,
+            format,
+            back_seconds,
+            forward_seconds,
+            hits: 0,
+            misses: 0,
+            stored: 0,
+        }
+    }
+
+    /// 这个帧号在不在表里？在 ⇒ 返回槽位下标。
+    fn lookup(&self, frame: i64) -> Option<usize> {
+        self.index.get(&frame).copied()
+    }
+
+    /// 这个槽位里**真的有一张纹理**吗？（惰性分配 ⇒ "索引里有"不等于"纹理建过"）
+    fn ready(&self, slot: usize) -> bool {
+        self.slots.get(slot).map(|slot| slot.is_some()).unwrap_or(false)
+    }
+
+    /// 取第 `slot` 个槽位的纹理与 view；还没建就建。
+    fn slot_handle(
+        &mut self,
+        device: &wgpu::Device,
+        slot: usize,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        if let Some(handle) = self.slots.get(slot).and_then(|slot| slot.as_ref()) {
+            return handle.clone();
+        }
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("dhampir frame cache slot"),
+            size: wgpu::Extent3d {
+                width: self.size.0.max(1),
+                height: self.size.1.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.format,
+            // **COPY_DST 必须有**：槽位要接收从中间帧纹理来的拷贝。
+            // **TEXTURE_BINDING 也必须有**：命中时这张要被 `BlitRenderer` 绑进 bind group
+            // 采样 —— 少了它是**静默失效**（那一次 blit 什么都不画），本会话踩过一次。
+            // COPY_SRC 一起给上：以后要"槽位 → 别处"的搬运不用再改用途。
+            usage: wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let handle = (texture, view);
+        self.slots[slot] = Some(handle.clone());
+        handle
+    }
+
+    /// 取一个槽位来写 `frame`：环形覆盖最老的那个，并把**旧帧号从索引里摘掉**。
+    fn take_slot(&mut self, frame: i64) -> usize {
+        let slot = self.next;
+        self.next = (self.next + 1) % self.slots.len();
+        if let Some(previous) = self.slot_frame[slot].replace(frame) {
+            // 只有"这个槽位现在归这一帧"时才摘 —— 别的帧可能已经把自己记在同一个槽位上。
+            if self.index.get(&previous) == Some(&slot) {
+                self.index.remove(&previous);
+            }
+        }
+        self.index.insert(frame, slot);
+        slot
+    }
+}
+
+/// 缓存容量（槽位数）：**取「前后 N 秒」与「内存硬上限」里更严的那个**，
+/// 再兜一个 4096 的绝对上界（再大也没意义：4096 帧 ≈ 68 秒 @60fps）。
+///
+/// 窗口与 `max_mb` 都由 **JS** 递进来（见 [`CacheRequest`]）—— wasm 里读不到环境变量，
+/// 所以"用 `VTEDIT_PREVIEW_CACHE*` 环境变量调"那件事在浏览器里是死代码。
+fn frame_cache_capacity(
+    size: (u32, u32),
+    fps: f32,
+    back_seconds: f32,
+    forward_seconds: f32,
+    max_mb: usize,
+) -> usize {
+    let slots_by_time = if fps > 0.0 {
+        ((back_seconds + forward_seconds) * fps).ceil().max(1.0) as usize
+    } else {
+        1
+    };
+    let per_frame = (size.0 as usize)
+        .saturating_mul(size.1 as usize)
+        .saturating_mul(4);
+    let slots_by_mb = if per_frame == 0 {
+        1
+    } else {
+        (max_mb.saturating_mul(1024 * 1024) / per_frame).max(1)
+    };
+    slots_by_time.min(slots_by_mb).clamp(1, 4096)
+}
+
 pub struct ProjectHost {
+    /// ⑤ 缓存命中时把槽位搬回画布用的搬运管线。
+    /// 格式必须与画布一致（`BlitRenderer::new(&ctx.device, sink.format())`），
+    /// 否则 wgpu 会在校验时报错。
+    blit: dhampir_core::render::BlitRenderer,
+    /// ⑤ 预渲染缓存。`None` = **关**（默认）。开关与窗口见 [`CacheRequest`]。
+    frame_cache: Option<FrameCache>,
+    /// ⑤ 中间帧目标：`(纹理, view, 尺寸)`。合成先落它，再 blit 到画布。
+    ///
+    /// **为什么不能直接渲进画布**：画布表面纹理通常只有 `RENDER_ATTACHMENT` —— 既没有
+    /// `COPY_DST`，也不能当拷贝源。想缓存整帧，就必须先有一张**自己拥有**的纹理
+    /// （`RENDER_ATTACHMENT | COPY_SRC | COPY_DST | TEXTURE_BINDING`）。
+    ///
+    /// ⚠️ **它必须与 sink 逐像素同尺寸**：`BlitRenderer` 按目标像素中心取最近纹素，
+    /// 源与目标尺寸不同就是缩放 + 越界取 0 ⇒ 画面**被裁切/放大**（本会话踩过）。
+    /// 所以尺寸对不上就重建，见 `draw_impl` 里那一段。
+    frame_target: Option<(wgpu::Texture, wgpu::TextureView, (u32, u32))>,
     ctx: dhampir_core::gpu::GpuContext,
     sink: CanvasFrameSink,
     renderer: dhampir_core::render::TimelineRenderer,
@@ -309,6 +632,22 @@ pub struct ProjectHost {
     /// 而且复用时要按下标顺序取。
     text_uploads: Vec<Option<(wgpu::Texture, wgpu::TextureView, (u32, u32))>>,
     danmaku_uploads: Vec<Option<(wgpu::Texture, wgpu::TextureView, (u32, u32))>>,
+    /// stage 4：source -> **这一帧声明的内容标识**（只有 [`dhampir_project_begin_frame`] 会写）。
+    ///
+    /// 这张表的存在就是为了让"不调新导出的旧路径"有一个**结构上**的不变式：
+    /// 没有 `begin_frame` ⇒ 它恒空 ⇒ `set_bitmap` 盖不上标识 ⇒ 每帧照旧重传。
+    frame_ids: HashMap<String, String>,
+    /// stage 4：source -> 当前手上那份**位图**的内容标识。没有键 = 标识未知 ⇒ 不许复用。
+    bitmap_ids: HashMap<String, String>,
+    /// stage 4：source -> **已上传的纹理**（跨帧驻留）。
+    ///
+    /// 与 [`BoundVideos::textures`] 不是一回事：那一份的寿命只有一趟 `draw`，作用只是
+    /// "同一帧里同一个源被问两次"；这一份要**跨帧**活着才省得下上传。
+    source_uploads: HashMap<String, SourceUpload>,
+    /// stage 4 的观测计数。
+    upload_stats: UploadStats,
+    /// stage 5：JS 递进来的预渲染缓存要求。`None` ⇒ **不建表**（默认关）。
+    cache_request: Option<CacheRequest>,
 }
 
 /// 渲染期的解析器：不 seek，只取「当前停在哪一帧」的纹理。
@@ -320,7 +659,16 @@ struct BoundVideos<'a> {
     require_bitmap: bool,
     format: wgpu::TextureFormat,
     /// 一份源纹理的缓存。缓存的是**纹理**不是像素：每次渲染仍重新拷一次。
+    ///
+    /// ⚠️ 这一份的寿命是**一趟 `draw`**（每次 `draw_impl` 新建）。跨帧复用走
+    /// [`ProjectHost::source_uploads`]，两者分工不同，别把这里当成那个缓存。
     textures: HashMap<String, (wgpu::Texture, wgpu::TextureView, (u32, u32))>,
+    /// stage 4：**跨帧驻留**的源纹理。标识一致就一次 copy 都不做。
+    uploads: &'a mut HashMap<String, SourceUpload>,
+    /// stage 4：source -> 当前位图的内容标识（没有键 = 未知 ⇒ 不许复用）。
+    bitmap_ids: &'a HashMap<String, String>,
+    /// stage 4 的观测计数。
+    stats: &'a mut UploadStats,
 }
 
 impl BoundVideos<'_> {
@@ -371,14 +719,39 @@ impl SourceResolver for BoundVideos<'_> {
         // ---- 位图优先 ----
         // 见 ProjectHost::bitmaps 的说明：有的 WebGPU 实现不接受 <video>，
         // 而传进去的代价不是报错，是整个 wasm 死在那一句上。
+        //
+        // ---- 阶段 4①：标识一致 ⇒ **一次 copy 都不做** ----
+        //
+        // 这是这一阶段全部的收益所在：贴纸的素材帧号没变时，那份位图逐像素相同，
+        // 于是上一帧上传好的纹理直接顶用 —— 不 `create_texture`、不
+        // `copy_external_image_to_texture`，也**不碰位图对象**（连宽高都不读：
+        // 复用判据不需要它，少碰一次就少一次"它还能不能读"的问题）。
+        //
+        // 判据是**标识**，不是"位图对象换没换"：调用方每帧都会 `createImageBitmap`
+        // 出一个新对象（契约如此，wasm 换掉旧位图时会 close 它），按对象判等于永远不复用。
+        if let Some(id) = self.bitmap_ids.get(source) {
+            if let Some(upload) = self.uploads.get(source) {
+                if upload.id.as_deref() == Some(id.as_str()) {
+                    self.stats.reused += 1;
+                    return Some((upload.handle.1.clone(), upload.size));
+                }
+            }
+        }
+        // 这一帧真要把内容压上 GPU 时，它该盖的章（没有标识就不盖章 ⇒ 下一帧不许复用）。
+        let stamp = self.bitmap_ids.get(source).cloned();
         if let Some(bitmap) = self.bitmaps.get(source) {
             let width = bitmap.width();
             let height = bitmap.height();
             if width == 0 || height == 0 {
                 return None;
             }
-            self.ensure_texture(source, (width, height));
-            let (texture, view, size) = self.textures.get(source)?;
+            let size = (width, height);
+            self.ensure_texture(source, size);
+            let (texture, view, _) = self.textures.get(source)?;
+            // 先克隆出 owned 句柄：下面还要 `self.uploads.insert`（可变借用），
+            // 留着对 `self.textures` 的借用会打架。
+            let texture = texture.clone();
+            let view = view.clone();
             self.queue.copy_external_image_to_texture(
                 &wgpu::wgt::CopyExternalImageSourceInfo {
                     source: wgpu::wgt::ExternalImageSource::ImageBitmap(bitmap.clone()),
@@ -386,7 +759,7 @@ impl SourceResolver for BoundVideos<'_> {
                     flip_y: false,
                 },
                 wgpu::wgt::CopyExternalImageDestInfo {
-                    texture,
+                    texture: &texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
@@ -399,7 +772,17 @@ impl SourceResolver for BoundVideos<'_> {
                     depth_or_array_layers: 1,
                 },
             );
-            return Some((view.clone(), *size));
+            self.stats.copied += 1;
+            // ---- 阶段 4②：把这一次上传**记下来**（下一帧标识一致就靠它省掉重传）----
+            //
+            // 标识取自 `bitmap_ids`：没有它（旧宿主口径）就存 `None` —— 那张纹理
+            // 下一帧**不会**被复用（复用要求标识一致），于是旧路径一帧都不省，
+            // 行为与改前逐字节相同。
+            self.uploads.insert(
+                source.to_string(),
+                SourceUpload { handle: (texture, view.clone()), size, id: stamp },
+            );
+            return Some((view, size));
         }
 
         // JS 探过之后说「这个浏览器不接受 video」时**不许偷偷退回 video** ——
@@ -485,15 +868,20 @@ fn text_lines(
     };
     let mut specs = Vec::with_capacity(overlay.items.len());
     for item in &overlay.items {
-        let Some(placement) = place_line(item.rect, target, item.font_ratio) else {
+        let Some(mut placement) = place_line(item.rect, target, item.font_ratio) else {
             continue;
         };
+        // **淡入/上浮**：`evaluate_overlay` 那条路（CLI 也在用）已经算好了
+        // `opacity` 与 `dy_px`，以前这里直接丢掉 —— 于是预览里的字幕**一动不动**，
+        // 而成片里是动的。偏移是像素、正值向下，落点直接加就行（不必改位图）。
+        placement.y += item.dy_px.round() as i32;
         specs.push(TextLineSpec {
             text: item.text.clone(),
             rect: item.rect,
             placement,
             color: item.color,
             danmaku: None,
+            opacity: item.opacity,
             scale: item.scale,
         });
     }
@@ -521,9 +909,11 @@ fn danmaku_placements(
 ) -> Vec<TextLineSpec> {
     let mut specs = Vec::with_capacity(overlay.danmaku.len());
     for item in &overlay.danmaku {
-        let Some(placement) = place_line(item.rect, target, item.font_ratio) else {
+        let Some(mut placement) = place_line(item.rect, target, item.font_ratio) else {
             continue;
         };
+        // 弹幕的淡入淡出同理（`danmaku` 那份 spec 也有 fade_in_ms/fade_out_ms）。
+        placement.y += item.dy_px.round() as i32;
         specs.push(TextLineSpec {
             text: item.text.clone(),
             rect: item.rect,
@@ -534,6 +924,7 @@ fn danmaku_placements(
                 enter: item.enter,
                 exit: item.exit,
             }),
+            opacity: item.opacity,
             // **弹幕不缩字**（参照的弹幕路径没有缩字逻辑），恒 1。
             scale: 1.0,
         });
@@ -728,6 +1119,27 @@ impl ProjectHost {
         self.danmaku_uploads.clear();
         self.text_dirty.clear();
         self.danmaku_dirty.clear();
+        // ⑤ 预渲染缓存整体作废。
+        //
+        // 这里是**失效判据的一半**（另一半在 `dhampir_project_open` 里）：字幕/弹幕落点体系变了、
+        // 或画布尺寸变了，缓存里的整帧就不再成立。失效判据写错 = 画面停在旧内容上，
+        // 而那种画面**看起来完全正常** —— 这个项目管它叫"慢了半拍"，是最难查的一类。
+        //
+        // 故意**不**用 `text_dirty` 当版本号：它是"用完即清"的（下面两行就清了），
+        // 清掉之后再问它"变过没有"永远得到"没变"。
+        self.frame_cache = None;
+    }
+
+    /// 忘掉某个 source 的位图、内容标识与已上传的纹理（**一条都不留**）。
+    ///
+    /// 三样必须一起忘：留着标识而丢掉位图 ⇒ 下一帧会拿一张没有内容的纹理去画；
+    /// 留着纹理而丢掉标识 ⇒ 复用判据对不上（不会画错，只是白占显存）。
+    fn forget_source(&mut self, source: &str) {
+        if let Some(bitmap) = self.bitmaps.remove(source) {
+            bitmap.close();
+        }
+        self.bitmap_ids.remove(source);
+        self.source_uploads.remove(source);
     }
 
     fn invalidate_text(&mut self) {
@@ -743,6 +1155,16 @@ impl ProjectHost {
     }
 
     fn draw(&mut self, frame: i64) -> Result<(), String> {
+        self.draw_impl(frame, true)
+    }
+
+    /// **pre-roll**：与 `draw` 做完全一样的事，**只是最后不 blit 到画布**。
+    /// 差别只有这一个布尔。用会呈现的 `draw` 去提前算，画布会闪到那一帧上。
+    fn preroll(&mut self, frame: i64) -> Result<(), String> {
+        self.draw_impl(frame, false)
+    }
+
+    fn draw_impl(&mut self, frame: i64, present: bool) -> Result<(), String> {
         // **顺带把文档坐标系取出来。** 预览的渲染目标是画布，而契约里的像素量
         // （transform.x/y、调整图层的模糊半径）以 render_hints 度量 —— 两者不等时
         // 由 RenderSpace 按比例换算。少了这一步，同一个工程在不同画布尺寸下
@@ -762,10 +1184,18 @@ impl ProjectHost {
                     &doc.timeline.timebase,
                 )
                 .unwrap_or(0.0) as f32;
-                (composite, doc.sequence_size(), seconds)
+                // 缓存的容量要按**工程的帧率**算"前后各几帧"，所以顺带把它取出来。
+                // 取不到就退到 0 —— 那时容量退化成"只按内存上限"，不会算错。
+                let fps = doc
+                    .timeline
+                    .timebase
+                    .to_timebase()
+                    .map(|tb| tb.num as f32 / tb.den.max(1) as f32)
+                    .unwrap_or(0.0);
+                (composite, doc.sequence_size(), seconds, fps)
             })
         });
-        let Some((composite, sequence, seconds)) = loaded else {
+        let Some((composite, sequence, seconds, fps)) = loaded else {
             return Err("还没有载入通过校验的工程".to_string());
         };
 
@@ -787,10 +1217,148 @@ impl ProjectHost {
             danmaku_dirty,
             text_uploads,
             danmaku_uploads,
+            frame_target,
+            frame_cache,
+            blit,
+            // stage 4 的跨帧驻留纹理与标识要交给解析器 —— 它才是"这一帧要不要重传"的判据处。
+            bitmap_ids,
+            source_uploads,
+            upload_stats,
+            // 这两个在这一支里用不到（`frame_ids` 只由 `begin_frame` 写；
+            // `cache_request` 在阶段 5 接进缓存建表时才读）—— 但**必须点名**：
+            // 少了这个表态，编译器会报 E0027「pattern does not mention fields」，
+            // 那正是它该有的样子：**给这个结构体加了字段，就必须在拆借用处表态**。
+            frame_ids: _,
+            cache_request,
         } = self;
         let (width, height) = *size;
         let sink_format = sink.format();
-        let sink_view = sink.acquire(&ctx.device);
+        // ---- 阶段 5：建表 / 保表 / 作废 ------------------------------------------
+        //
+        // **默认关**：`cache_request` 为 `None` 或 `enabled == false` ⇒ 整表丢掉，
+        // 走"直渲画布"那条旧路（与阶段 5 之前逐字节相同）。
+        let cache_wanted = cache_request.map(|request| request.enabled).unwrap_or(false);
+        if !cache_wanted {
+            *frame_cache = None;
+        }
+        // 失效的**第三维（画布尺寸 / 格式）**：拿尺寸不同的缓存去 blit 会被裁切 ⇒ 整表作废。
+        // 这一维以前出过事，所以除了 `invalidate_text_uploads` 里那道之外，这里再写死一道
+        // —— 漏掉它的症状是"看起来完全正常的错"。
+        if let Some(cache) = frame_cache.as_ref() {
+            if cache.size != (width, height) || cache.format != sink_format {
+                *frame_cache = None;
+            }
+        }
+        if frame_cache.is_none() {
+            if let Some(request) = cache_request {
+                if request.enabled && width > 0 && height > 0 {
+                    let capacity = frame_cache_capacity(
+                        (width, height),
+                        fps,
+                        request.back_seconds,
+                        request.forward_seconds,
+                        request.max_mb,
+                    );
+                    *frame_cache = Some(FrameCache::new(
+                        (width, height),
+                        sink_format,
+                        capacity,
+                        request.back_seconds,
+                        request.forward_seconds,
+                    ));
+                }
+            }
+        }
+        // 缓存关着时 `pre-roll` 没有意义（它唯一的作用就是填表）—— 直接返回，
+        // 免得 acquire 一张画布纹理却又不呈现（那会让"这一帧上没上屏"变得说不清）。
+        if !present && frame_cache.is_none() {
+            return Ok(());
+        }
+
+        // ---- 命中：求值、渲染、文字三样**全跳过**，只把缓存那张搬到画布 ----
+        //
+        // 命中判据与 `begin_frame` 回报给 JS 的 `cached` 是**同一张表**，
+        // 于是 JS 在 `prepare` 之前就知道"这一帧不必准备"。
+        let cached_view = frame_cache.as_mut().and_then(|cache| {
+            let slot = cache.lookup(frame)?;
+            if !cache.ready(slot) {
+                // 惰性分配 ⇒ "索引里有"不等于"纹理建过"。这一层不靠"不可能"活着。
+                return None;
+            }
+            cache.slots.get(slot)?.as_ref().map(|handle| handle.1.clone())
+        });
+        if let Some(slot_view) = cached_view {
+            if let Some(cache) = frame_cache.as_mut() {
+                cache.hits += 1;
+            }
+            // **pre-roll 命中 ⇒ 什么也不做**：预渲染只是把未来帧攒进表，
+            // 上屏就变成了"画布闪到那一帧上"。
+            if !present {
+                return Ok(());
+            }
+            let sink_view = sink.acquire(&ctx.device);
+            let mut hit_encoder =
+                ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("dhampir cache hit"),
+                });
+            blit.render(&ctx.device, &mut hit_encoder, &slot_view, &sink_view);
+            ctx.queue.submit([hit_encoder.finish()]);
+            sink.finish(frame);
+            return Ok(());
+        }
+        if let Some(cache) = frame_cache.as_mut() {
+            cache.misses += 1;
+        }
+
+        // ---- 未命中：定这一帧的合成目标 ----
+        //
+        //   * 缓存**开着** ⇒ 用**自己拥有**的中间纹理（它同时有 `COPY_SRC`，拷进 ring 才合法），
+        //     画完再 blit 到画布。画布表面纹理只有 `RENDER_ATTACHMENT`，两样都做不到。
+        //   * 缓存**关着** ⇒ **直接画布**，与阶段 5 之前逐字节相同（不多一次搬运）。
+        //
+        // 这一帧的合成目标。底与文字**都必须**画进同一张 —— 只换一处会让文字画到画布上，
+        // 于是混色基准不再是"底"，字幕的颜色/透明度会错，而画面看起来还挺正常。
+        let mut target_texture: Option<wgpu::Texture> = None;
+        let frame_view: wgpu::TextureView = if frame_cache.is_some() {
+            if frame_target.as_ref().map(|target| target.2) != Some((width, height)) {
+                let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("dhampir frame target"),
+                    size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: sink_format,
+                    // **TEXTURE_BINDING 是必须的**：这张纹理要被 BlitRenderer 绑进 bind group 采样，
+                    // 少了它 WebGPU 报的是 "Uncaptured ... do not contain required usage flags
+                    // TextureUsages(TEXTURE_BINDING)" —— **不抛异常、只是那一趟 blit 静默无效**
+                    // （画布上就是空的）。用户实测的日志里正是这两条。
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::COPY_SRC
+                        | wgpu::TextureUsages::COPY_DST
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                });
+                let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                *frame_target = Some((texture, view, (width, height)));
+            }
+            let (texture, view, target_size) = frame_target
+                .as_ref()
+                .map(|target| (target.0.clone(), target.1.clone(), target.2))
+                .expect("帧目标刚刚确保过");
+            // **创建处断言相等**：`BlitRenderer` 只在源与目标**逐像素同尺寸**时才是恒等搬运；
+            // 不同尺寸会按目标像素中心取最近纹素 ⇒ 画面被裁切/放大（本会话出现过）。
+            // 这里**报错**，而不是画一帧比例不对的 —— 那种画面看起来"只是有点不对"。
+            if target_size != (width, height) {
+                return Err(format!(
+                    "中间帧目标 {}x{} 与画布 {}x{} 不一致 —— 拒绝画一帧比例不对的",
+                    target_size.0, target_size.1, width, height
+                ));
+            }
+            target_texture = Some(texture);
+            view
+        } else {
+            sink.acquire(&ctx.device)
+        };
         let space = RenderSpace { sequence: sequence, target: (width, height) };
         let mut resolver = BoundVideos {
             device: &ctx.device,
@@ -800,6 +1368,9 @@ impl ProjectHost {
             require_bitmap: *require_bitmap,
             format: sink_format,
             textures: HashMap::new(),
+            uploads: source_uploads,
+            bitmap_ids,
+            stats: upload_stats,
         };
         let mut encoder = ctx
             .device
@@ -810,7 +1381,7 @@ impl ProjectHost {
             &ctx.device,
             &ctx.queue,
             &mut encoder,
-            &sink_view,
+            &frame_view,
             space,
             &composite,
             &mut resolver,
@@ -867,13 +1438,51 @@ impl ProjectHost {
                 &ctx.device,
                 &ctx.queue,
                 &mut encoder,
-                &sink_view,
+                &frame_view,
                 (width, height),
                 &items,
             );
         }
+        // ---- 填充：把这一帧拷进 ring，供后续命中复用 ----
+        //
+        // **不在 `if present` 里**：pre-roll 要的正是"填进 ring"（它反正不上屏）。
+        // 源 = 中间帧纹理（有 COPY_SRC ✓）；目的 = 环形槽位（有 COPY_DST ✓）—— 两边都齐，
+        // 所以这一步合法。**画布纹理两样都没有**，这正是缓存必须放在这一侧的原因。
+        //
+        // `frame_cache` 与 `target_texture` 是**同时有或同时没有**的（缓存关着就不建中间纹理），
+        // 但这里不靠"不可能"活着：两个都判。
+        if let (Some(cache), Some(source)) = (frame_cache.as_mut(), target_texture.as_ref()) {
+            if cache.lookup(frame).is_none() {
+                let slot = cache.take_slot(frame);
+                let destination = cache.slot_handle(&ctx.device, slot).0;
+                encoder.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: source,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &destination,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                );
+                cache.stored += 1;
+            }
+        }
+        // ---- present：中间帧目标 → 画布（同格式、同尺寸 ⇒ 恒等搬运）----
+        if present && target_texture.is_some() {
+            let sink_view = sink.acquire(&ctx.device);
+            blit.render(&ctx.device, &mut encoder, &frame_view, &sink_view);
+        }
+        // 缓存关着的时候合成**已经直接落在画布上**（`frame_view` 就是它），无需再搬运。
         ctx.queue.submit([encoder.finish()]);
-        sink.finish(frame);
+        if present {
+            sink.finish(frame);
+        }
         Ok(())
     }
 }
@@ -1021,6 +1630,9 @@ pub fn dhampir_project_open(json: &str) -> String {
             // **换一份工程就是换一条历史**：不然撤销会退到上一份工程的某一帧上去，
             // 而那种状态既不是"新工程"也不是"旧工程"，只能靠猜。
             HISTORY.with(|h| h.borrow_mut().reset());
+            // ⑤ 预渲染缓存整体作废 —— 失效判据的**第一维**（工程换了）。
+            // 见 `invalidate_frame_cache` 的说明：三个维度各在哪儿点名。
+            invalidate_frame_cache();
         }
         // **校验不过时保留上一份可用工程。**
         // 旧实现这里写的是 None，而 engine.js 的注释一直写着"失败时保留上一份"——
@@ -1076,6 +1688,10 @@ pub fn dhampir_project_edit(op_json: &str) -> String {
             h.borrow_mut().push(label, doc.clone());
         });
         PROJECT.with(|slot| *slot.borrow_mut() = Some(outcome.doc.clone()));
+        // ⑤ 失效判据的**第一维**（工程被编辑）。预览模式下 参照实现 多半是
+        // "重新转译 → open"，但"编辑"这条路在别的调用方那里是活的
+        //（`web/app.js` 就调它）—— 漏掉这一句的后果是"编辑之后画面还是旧的"。
+        invalidate_frame_cache();
     }
     host_api::to_json(&serde_json::json!({
         "ok": outcome.is_ok(),
@@ -1118,6 +1734,8 @@ fn project_history_step(undo: bool) -> String {
         }));
     };
     PROJECT.with(|slot| *slot.borrow_mut() = Some(snapshot.doc));
+    // ⑤ 失效判据的**第一维**（工程被撤回 / 重做到另一份）。
+    invalidate_frame_cache();
     host_api::to_json(&serde_json::json!({
         "ok": true,
         "summary": if undo {
@@ -1471,6 +2089,10 @@ pub async fn dhampir_project_attach(canvas_id: String) -> Result<String, JsValue
     );
     PROJECT_HOST.with(|h| {
         *h.borrow_mut() = Some(ProjectHost {
+            // ⑤ 预渲染缓存的两件状态。格式与画布一致 —— 照 preview.rs 的写法。
+            blit: dhampir_core::render::BlitRenderer::new(&ctx.device, sink.format()),
+            frame_cache: None,
+            frame_target: None,
             ctx,
             sink,
             renderer,
@@ -1487,6 +2109,12 @@ pub async fn dhampir_project_attach(canvas_id: String) -> Result<String, JsValue
             danmaku_dirty: std::collections::HashSet::new(),
             text_uploads: Vec::new(),
             danmaku_uploads: Vec::new(),
+            frame_ids: HashMap::new(),
+            bitmap_ids: HashMap::new(),
+            source_uploads: HashMap::new(),
+            upload_stats: UploadStats::default(),
+            // 默认不建预渲染缓存：JS 要用得自己通过 `begin_frame` 明确要。
+            cache_request: None,
         });
     });
     Ok(json)
@@ -1526,6 +2154,12 @@ pub fn dhampir_project_set_bitmap_mode(required: bool) {
 ///
 /// **每帧都要先清。** 不清的话，这一帧不再出现的 source 会拿着上一帧的位图
 /// 被画出来 —— 而画面看起来完全正常，只是"慢了半拍"。那种错没人查得出来。
+///
+/// # 语义**没有收紧也没有放宽**（这是阶段 4 安全性的全部）
+///
+/// 它照旧把所有位图关掉，并且**连内容标识与已驻留的源纹理一起清干净**。
+/// 于是走这条路的宿主永远拿不到"内容标识"，而标识是复用纹理的唯一判据
+/// （见 [`plan_bitmap`]）⇒ 每帧照旧重传 ⇒ **与改前逐字节相同**。
 #[wasm_bindgen]
 pub fn dhampir_project_clear_bitmaps() {
     PROJECT_HOST.with(|h| {
@@ -1533,8 +2167,268 @@ pub fn dhampir_project_clear_bitmaps() {
             for (_, bitmap) in host.bitmaps.drain() {
                 bitmap.close();
             }
+            // 阶段 4 的三样**必须跟着一起清**：留着标识而丢掉位图，
+            // 下一帧就会拿一张没有内容的纹理去画（那时画面**看起来正常**，只是旧的）。
+            host.bitmap_ids.clear();
+            host.frame_ids.clear();
+            host.source_uploads.clear();
         }
     });
+}
+
+/// 声明**这一帧**的来源集合与内容标识（阶段 4 唯一的新增导出）。
+///
+/// # 入参
+///
+/// ```json
+/// { "frame": 42,
+///   "sources": [ {"source":"a.mp4","id":"42"}, {"source":"呆(贴纸)_1.gif","id":"7"} ],
+///   "cache": { "enabled": true, "seconds": [3, 2], "max_mb": 256 } }
+/// ```
+///
+/// 三种形状都收（调用方给的形状不该成为"复用生效与否"的开关）：
+/// `{"sources":[…]}`、裸数组 `[{…}]`、裸字符串数组 `["a.mp4"]`（**没有标识** ⇒ 全部按必须重交处理）。
+/// `cache` 缺省 = **不建预渲染缓存**（默认关）。
+///
+/// # 语义（三条，一一对应 [`BitmapPlan`]）
+///
+///   1. **不在集合里的源**：位图关掉、纹理丢掉、标识忘掉（与 `clear_bitmaps` 对那一个源等价）；
+///   2. **在集合里、标识与手上那份一致**：留着 —— 下一帧连 GPU 上传都省掉；
+///   3. 其余（标识变了 / 还没有位图 / 没给标识）：丢掉手上那张，等 JS 重交。
+///
+/// # 返回值
+///
+/// `{"ok":true,"frame":N,"need":[…],"reuse":[…],"dropped":N,"cached":bool, …}`
+///
+/// `need` 是**必须重交**的源（JS 照着它决定要不要重新做位图），`reuse` 是连
+/// `createImageBitmap` 都不必做的那些。`cached` 是这一帧在不在预渲染缓存里 ——
+/// JS 靠它决定要不要**整条准备路径都跳过**（只在 `draw` 里判的话，省下的只有渲染，
+/// "整圈"不会明显下降，缓存也就看不出有什么用）。
+///
+/// # 与 `clear_bitmaps` 的关系（安全性）
+///
+/// `clear_bitmaps` 的语义**一个字都没改**，而且它连新状态一起清 —— 所以没调这个
+/// 新导出的旧宿主永远拿不到内容标识 ⇒ 每帧照旧重传。见 [`plan_bitmap`]。
+/// 新导出不是"替换"它，而是**它旁边多出来的一档**。
+#[wasm_bindgen]
+pub fn dhampir_project_begin_frame(sources_json: &str) -> String {
+    let plan = match parse_frame_sources(sources_json) {
+        Ok(plan) => plan,
+        Err(error) => return frame_plan_error(&error),
+    };
+    PROJECT_HOST.with(|h| {
+        let mut borrowed = h.borrow_mut();
+        let Some(host) = borrowed.as_mut() else {
+            return frame_plan_error("工程预览宿主尚未初始化，先调 dhampir_project_attach");
+        };
+        // 1) 待判定的源 = **手上有的 ∪ 这一帧要的**，全部走同一张判据表。
+        //    分两处各写一遍"该不该留"就是给两个答案不一致的机会。
+        let wanted: HashMap<String, Option<String>> = plan.sources.into_iter().collect();
+        let mut candidates: Vec<String> = host.bitmaps.keys().cloned().collect();
+        for source in wanted.keys() {
+            if !host.bitmaps.contains_key(source) {
+                candidates.push(source.clone());
+            }
+        }
+        // 排序只为让 `need` / `reuse` 的次序稳定（HashMap 的顺序是不确定的）；
+        // 判定本身与次序无关。
+        candidates.sort();
+        candidates.dedup();
+        let mut need = Vec::new();
+        let mut reuse = Vec::new();
+        let mut dropped = 0_usize;
+        for source in candidates {
+            let frame_id = wanted.get(&source).and_then(|id| id.as_deref());
+            let held = host.bitmap_ids.get(&source).map(String::as_str);
+            let has_bitmap = host.bitmaps.contains_key(&source);
+            let in_frame = wanted.contains_key(&source);
+            match plan_bitmap(in_frame, frame_id, held, has_bitmap) {
+                // 内容标识一致 + 手上就有 ⇒ 留着，连 GPU 上传都省掉。
+                BitmapPlan::Reuse => reuse.push(source),
+                // 标识变了 / 还没有位图 / 没给标识 ⇒ 丢掉手上那张，**等 JS 重交**。
+                // 所以 `need` 这一份名单必须回报出去（少了它就是静默少画一层）。
+                BitmapPlan::Reload => {
+                    host.forget_source(&source);
+                    need.push(source);
+                }
+                // 这一帧不需要它 ⇒ 丢掉（与 `clear_bitmaps` 对这一个源等价）。
+                BitmapPlan::Drop => {
+                    host.forget_source(&source);
+                    dropped += 1;
+                }
+            }
+        }
+        // 3) 这一帧的标识记下来：`set_bitmap` 收下位图时要靠它盖章。
+        host.frame_ids = wanted
+            .into_iter()
+            .filter_map(|(source, id)| id.map(|id| (source, id)))
+            .collect();
+        // 4) 预渲染缓存的开关与窗口：**由 JS 给**（wasm 里读不到环境变量，见 `CacheRequest`）。
+        host.cache_request = plan.cache;
+        // 这一帧在不在表里？JS 靠它决定要不要**整条准备路径都跳过** ——
+        // 只在 `draw` 里判的话，省下的只有渲染，"整圈"不会明显下降，缓存也就看不出有什么用。
+        let cached = match (plan.frame, host.frame_cache.as_ref()) {
+            (Some(frame), Some(cache)) => {
+                cache.lookup(frame).map(|slot| cache.ready(slot)).unwrap_or(false)
+            }
+            _ => false,
+        };
+        // 缓存读数（**只给人看，不参与任何判定**）。走这个导出回报，是为了不给契约再加承诺面。
+        let cache_stats = match host.frame_cache.as_ref() {
+            Some(cache) => serde_json::json!({
+                "requested": true,
+                "enabled": true,
+                "hits": cache.hits,
+                "misses": cache.misses,
+                "stored": cache.stored,
+                "capacity": cache.slots.len(),
+                "size": [cache.size.0, cache.size.1],
+                "format": format!("{:?}", cache.format),
+                "back_seconds": cache.back_seconds,
+                "forward_seconds": cache.forward_seconds,
+            }),
+            None => serde_json::json!({
+                "requested": host.cache_request.is_some(),
+                "enabled": false,
+                "hits": 0,
+                "misses": 0,
+                "stored": 0,
+                "capacity": 0,
+                "size": [0, 0],
+                "format": "",
+                "back_seconds": 0.0,
+                "forward_seconds": 0.0,
+            }),
+        };
+        host_api::to_json(&serde_json::json!({
+            "ok": true,
+            "frame": plan.frame,
+            "need": need,
+            "reuse": reuse,
+            "dropped": dropped,
+            // 缓存建表是**惰性**的（在 draw 里按 sink 尺寸建），所以第一次问时 `enabled`
+            // 可能还是 false —— 下一帧就对了（`draw` 已经建过表）。
+            "cached": cached,
+            "cache": cache_stats,
+            // 阶段 4 的观测计数（**只给人看，不参与任何判定**）。
+            // 走这个导出回报，是为了不给 API 契约再加一个承诺面。
+            "uploads": {
+                "reused": host.upload_stats.reused,
+                "copied": host.upload_stats.copied,
+                "submits": host.upload_stats.submits,
+                "skipped": host.upload_stats.submits_skipped,
+            },
+        }))
+    })
+}
+
+/// 解析 `begin_frame` 的入参。**形状只有这一处**（测试钉着它）。
+fn parse_frame_sources(text: &str) -> Result<FramePlan, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|error| format!("这一帧的计划不是 JSON：{error}"))?;
+    let (frame, list, cache) = match &value {
+        serde_json::Value::Array(list) => (None, list.clone(), None),
+        serde_json::Value::Object(map) => {
+            let frame = match map.get("frame") {
+                Some(serde_json::Value::Number(number)) => number.as_i64(),
+                Some(serde_json::Value::Null) | None => None,
+                Some(_) => return Err("frame 得是整数".to_string()),
+            };
+            let list = match map.get("sources") {
+                Some(serde_json::Value::Array(list)) => list.clone(),
+                // **没有 `sources` 键是错误，不是"空集合"**：空集合的语义是
+                // "这一帧一个源都不要"（⇒ 清掉全部位图），静默地把一个写错的对象
+                // 当成那个意思，症状是**贴纸整层消失**，而调用方那边什么都没报。
+                // 真要清空就显式写 `[]`。
+                None => return Err("这一帧的计划对象里没有 sources 数组".to_string()),
+                Some(_) => return Err("sources 得是数组".to_string()),
+            };
+            let cache = match map.get("cache") {
+                Some(serde_json::Value::Object(cache)) => Some(parse_cache_request(cache)?),
+                None | Some(serde_json::Value::Null) => None,
+                Some(_) => return Err("cache 得是对象".to_string()),
+            };
+            (frame, list, cache)
+        }
+        _ => return Err("这一帧的计划得是数组，或带 sources 数组的对象".to_string()),
+    };
+    let mut sources = Vec::with_capacity(list.len());
+    for entry in list {
+        match entry {
+            serde_json::Value::String(source) => sources.push((source, None)),
+            serde_json::Value::Object(map) => {
+                let Some(serde_json::Value::String(source)) = map.get("source") else {
+                    return Err("来源项缺少 source 字符串".to_string());
+                };
+                // `id` 缺失 / null / 空串 一律当作"没有标识"（⇒ 必须重交）。
+                let id = match map.get("id") {
+                    Some(serde_json::Value::String(id)) if !id.is_empty() => Some(id.clone()),
+                    _ => None,
+                };
+                // **`source.clone()` 而不是 `source`**：`map.get` 给的是 `&String`，
+                // 字段要 `String`（上一任就是在这里写漏了 clone，一次 E0308）。
+                sources.push((source.clone(), id));
+            }
+            _ => return Err("来源项得是字符串或带 source 的对象".to_string()),
+        }
+    }
+    Ok(FramePlan { frame, sources, cache })
+}
+
+/// 解析 `cache` 那一层。**一个数只调"多大"，不改前/后的比**（3:2，与用户口径一致）。
+fn parse_cache_request(
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> Result<CacheRequest, String> {
+    let enabled = match map.get("enabled") {
+        Some(serde_json::Value::Bool(flag)) => *flag,
+        None | Some(serde_json::Value::Null) => true,
+        Some(_) => return Err("cache.enabled 得是布尔".to_string()),
+    };
+    let positive = |key: &str, fallback: f32| -> Result<f32, String> {
+        match map.get(key) {
+            Some(serde_json::Value::Number(value)) => value
+                .as_f64()
+                .map(|v| v as f32)
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .ok_or_else(|| format!("cache.{key} 得是正数")),
+            None | Some(serde_json::Value::Null) => Ok(fallback),
+            Some(_) => Err(format!("cache.{key} 得是数字")),
+        }
+    };
+    let max_mb = match map.get("max_mb") {
+        Some(serde_json::Value::Number(value)) => value
+            .as_u64()
+            .map(|v| v as usize)
+            .filter(|v| *v > 0)
+            .ok_or_else(|| "cache.max_mb 得是正整数".to_string())?,
+        None | Some(serde_json::Value::Null) => 256,
+        Some(_) => return Err("cache.max_mb 得是数字".to_string()),
+    };
+    let (forward_seconds, back_seconds) = match map.get("seconds") {
+        Some(serde_json::Value::Array(list)) if list.len() >= 2 => {
+            let read = |index: usize| -> Result<f32, String> {
+                let value = list[index]
+                    .as_f64()
+                    .map(|v| v as f32)
+                    .filter(|v| v.is_finite() && *v > 0.0);
+                value.ok_or_else(|| format!("cache.seconds[{index}] 得是正数"))
+            };
+            (read(0)?, read(1)?)
+        }
+        Some(serde_json::Value::Array(_)) => return Err("cache.seconds 得是两个正数".to_string()),
+        Some(serde_json::Value::Number(value)) => {
+            let total = value.as_f64().unwrap_or(0.0) as f32;
+            if !(total.is_finite() && total > 0.0) {
+                return Err("cache.seconds 得是正数".to_string());
+            }
+            (total * 0.6, total * 0.4)
+        }
+        None | Some(serde_json::Value::Null) => {
+            (positive("forward_seconds", 3.0)?, positive("back_seconds", 2.0)?)
+        }
+        Some(_) => return Err("cache.seconds 得是数字或两元数组".to_string()),
+    };
+    Ok(CacheRequest { enabled, forward_seconds, back_seconds, max_mb })
 }
 
 /// JS 把某个 source **当前帧**转成位图交给宿主。
@@ -1545,9 +2439,36 @@ pub fn dhampir_project_clear_bitmaps() {
 pub fn dhampir_project_set_bitmap(source: String, bitmap: web_sys::ImageBitmap) {
     PROJECT_HOST.with(|h| {
         if let Some(host) = h.borrow_mut().as_mut() {
-            if let Some(previous) = host.bitmaps.insert(source, bitmap) {
+            host.upload_stats.submits += 1;
+            if let Some(id) = host.frame_ids.get(&source).cloned() {
+                // 阶段 4：这一帧声明过标识、且位图与已驻留的纹理都是同一份内容 ⇒
+                // **新交进来的这张用不到**（复用判据走的是标识 + 那张纹理），
+                // 于是直接关掉，连一次 GPU 上传都不做。
+                //
+                // 这不是"丢数据"：标识就是调用方对"内容相同"的断言，而这一支的前提
+                // 正是标识一致、且位图与纹理都在。三样缺任何一样都会走下面的收下分支。
+                let held_same = host.bitmap_ids.get(&source) == Some(&id);
+                let upload_same = host
+                    .source_uploads
+                    .get(&source)
+                    .map(|upload| upload.id.as_deref() == Some(id.as_str()))
+                    .unwrap_or(false);
+                if held_same && upload_same {
+                    bitmap.close();
+                    host.upload_stats.submits_skipped += 1;
+                    return;
+                }
+                if let Some(previous) = host.bitmaps.insert(source.clone(), bitmap) {
+                    previous.close();
+                }
+                host.bitmap_ids.insert(source, id);
+                return;
+            }
+            // 没声明标识（旧口径）：收下，但**忘掉标识** —— 标识未知就不许复用。
+            if let Some(previous) = host.bitmaps.insert(source.clone(), bitmap) {
                 previous.close();
             }
+            host.bitmap_ids.remove(&source);
         }
     });
 }
@@ -1618,6 +2539,21 @@ pub fn dhampir_project_draw(frame: i32) -> Result<(), JsValue> {
             .as_mut()
             .ok_or_else(|| js_err("工程预览宿主尚未初始化，先调 dhampir_project_attach"))?;
         host.draw(i64::from(frame)).map_err(js_err)
+    })
+}
+
+/// 把某一帧算进预渲染缓存，**不呈现在画布上**。
+///
+/// 调用前同样要 `sources_for` + 把源 seek 到位 + 由宿主交好源位图 ——
+/// 否则灌进缓存的是**空帧**（比不缓存更糟：命中时会画出一帧空的）。
+#[wasm_bindgen]
+pub fn dhampir_project_preroll(frame: i32) -> Result<(), JsValue> {
+    PROJECT_HOST.with(|h| {
+        let mut borrowed = h.borrow_mut();
+        let host = borrowed
+            .as_mut()
+            .ok_or_else(|| js_err("工程预览宿主尚未初始化，先调 dhampir_project_attach"))?;
+        host.preroll(i64::from(frame)).map_err(js_err)
     })
 }
 
@@ -1828,8 +2764,20 @@ fn placement_json(line: &TextLineSpec) -> serde_json::Value {
     value["bitmap_width"] = serde_json::json!(line.placement.bitmap_width);
     value["bitmap_height"] = serde_json::json!(line.placement.bitmap_height);
     value["font_px"] = serde_json::json!(line.placement.font_px);
+    // **不透明度要发给 JS**：浏览器这一侧是 JS 栅格化的，alpha 得烤进位图
+    // （`OverlayItem` 没有 alpha 字段，合成用的是位图自己的 alpha）。
+    // 这条清单以前刻意不带它 —— 代价就是"成片有淡入、预览没有"。
+    value["opacity"] = serde_json::json!(line.opacity);
     // 描边宽度也来自共享几何 —— JS 侧照着画就行，不许自己推一遍。
     value["border_px"] = serde_json::json!(border_px(line.placement.font_px));
+    // **逐条颜色**：JS 侧是"逐条优先、缺失才回退样式色"（`engine.js` 的 `lineColor`）。
+    // ⚠️ 这一项**曾经没发**，于是预览永远用轨道默认色 —— ASS 里的 `\c`（逐条颜色）
+    // 在预览里白配了，而 `TextLineSpec.color` 也就成了一处 `dead_code`。
+    // 这不是"少一个键"，是**两端形状不一致**：形状本身就是契约的一部分。
+    value["color"] = serde_json::json!(line.color);
+    // **这一条的缩放**：描边宽度 = `border_px * scale`（参照 `swEff = sw * wrapped.scale`）。
+    // 同一处曾经也没发，同理。
+    value["scale"] = serde_json::json!(line.scale);
     // 全是空白字符的行：栅格化出来本来就是空的，判它等于判「空格没有墨迹」。
     value["visible"] = serde_json::json!(is_visible(&line.text));
     if let Some(danmaku) = line.danmaku {
@@ -1840,7 +2788,15 @@ fn placement_json(line: &TextLineSpec) -> serde_json::Value {
     value
 }
 
-/// `{text, rect}` —— 与 CLI 的 `cmd_subtitle` 同一形状（逐字段同名）。
+/// `{text, rect, opacity, dy_px, color, font_ratio, scale, parts}` —— 与 CLI 的
+/// `cmd_subtitle` **逐字段同名**。
+///
+/// ⚠️ **`color` / `font_ratio` / `scale` / `parts` 这四个键曾经漏在预览侧**，
+/// 而 `scripts/web-check.mjs` 的 `--verdict subtitle` 是**逐条**比 `color` 的 ⇒
+/// 那条判定通道在 HEAD 上一直是红的（报"一端没有、另一端有"），
+/// 而它此前还会在 `compareTextStyle` 上**直接崩**，所以没人读得到结论。
+///
+/// 这不是"少一个字段"，是**两端形状不一致** —— 形状本身就是契约的一部分。
 fn text_item_json(item: &dhampir_core::overlay::TextItem) -> serde_json::Value {
     serde_json::json!({
         "text": item.text,
@@ -1853,32 +2809,49 @@ fn text_item_json(item: &dhampir_core::overlay::TextItem) -> serde_json::Value {
         // 淡入淡出：两端都要能对账"这一帧多透明、偏了多少"。
         "opacity": item.opacity,
         "dy_px": item.dy_px,
+        // **逐条颜色**：同一轨里不同的条可以不一样（ASS 的 `\c`），求值层已经解析好。
+        "color": item.color,
+        // 字号与**这一条被缩了多少**：JS 侧栅格化要用（字号决定 `ctx.font`，
+        // 缩放决定描边宽度 —— 参照 `swEff = sw * scale`）。
+        "font_ratio": item.font_ratio,
+        "scale": item.scale,
+        // **高亮分段**（`.hl`），颜色已由求值层解析好。
+        // 空数组 = 没有标记，宿主走"一次画完"的老路（既有工程逐字节不变）。
+        "parts": item
+            .parts
+            .iter()
+            .map(|r| serde_json::json!({ "text": r.text, "color": r.color }))
+            .collect::<Vec<_>>(),
     })
 }
 
-/// `{text, rect, lane, enter, exit}` —— 与 CLI 的 `cmd_subtitle`、`host_api::DanmakuItemView`
-/// 三处同一形状（逐字段同名）。
+/// `{…字幕条目的全部键, lane, enter, exit, travel_frames}` —— 与 CLI 的
+/// `cmd_subtitle`、`host_api::DanmakuItemView` 三处同一形状（逐字段同名）。
 ///
 /// `lane`/`enter`/`exit` 一定要给：只比矩形的话，**泳道被分配错了**（两条换了位置）
 /// 在单帧里可能完全看不出来 —— 而那正是两端最容易漂的地方。
+///
+/// **这里复用 `text_item_json`（构造一个 `TextItem` 转过去）**，不再手拼第二遍：
+/// 上一版两边各手拼一份，于是字幕侧补键时弹幕侧不会跟着走 —— 这正是上面那四个键
+/// 漏掉的成因。**同一条形状不搞两份实现。**
 fn danmaku_item_json(item: &DanmakuTextItem) -> serde_json::Value {
-    // 与字幕条目**逐字段同名**（`text`/`rect`/`opacity`/`dy_px`），
-    // 再多三个弹幕独有的键。这里自己拼而不是复用 `text_item_json`：
-    // 那个函数收的是 `&TextItem`，两种条目是**不同的类型**。
-    let mut value = serde_json::json!({
-        "text": item.text,
-        "rect": {
-            "x": item.rect.x,
-            "y": item.rect.y,
-            "width": item.rect.width,
-            "height": item.rect.height,
-        },
-        "opacity": item.opacity,
-        "dy_px": item.dy_px,
+    let mut value = text_item_json(&dhampir_core::overlay::TextItem {
+        text: item.text.clone(),
+        rect: item.rect,
+        opacity: item.opacity,
+        dy_px: item.dy_px,
+        color: item.color,
+        font_ratio: item.font_ratio,
+        // 弹幕不缩字（参照的弹幕没有缩字逻辑）；这里是从弹幕条目转出来的。
+        scale: 1.0,
+        // 弹幕没有 `.hl` 标记（参照的弹幕路径也不解析它）。
+        parts: Vec::new(),
     });
     value["lane"] = serde_json::json!(item.lane);
     value["enter"] = serde_json::json!(item.enter);
     value["exit"] = serde_json::json!(item.exit);
+    // **逐条的滚动时长**：`rect` 是它的函数，两端要对账就得看得见它。
+    value["travel_frames"] = serde_json::json!(item.travel_frames);
     value
 }
 
@@ -1893,10 +2866,15 @@ fn text_style_view(style: &dhampir_core::overlay::TextStyle) -> host_api::TextSt
         outline: style.outline,
         stroke_px: style.stroke_px,
         stroke_color: style.stroke_color,
+        // **文字阴影**（v4 -> v5 的那四个键）。求值层已经解析完，这里只做形状转换。
+        shadow_color: style.shadow_color,
+        shadow_dx_px: style.shadow_dx_px,
+        shadow_dy_px: style.shadow_dy_px,
+        shadow_blur_px: style.shadow_blur_px,
     }
 }
 
-/// `{color, outline, stroke_px, stroke_color, family, weight}` —— 与 CLI 的
+/// `{color, outline, stroke_px, stroke_color, family, weight, shadow_*}` —— 与 CLI 的
 /// `--text-frame` **逐字段同名**。
 ///
 /// # `family` / `weight` 为什么必须在这里给
@@ -1906,8 +2884,15 @@ fn text_style_view(style: &dhampir_core::overlay::TextStyle) -> host_api::TextSt
 /// 但这条链以前**断在这里** —— 样式 JSON 不带它，于是浏览器侧的栅格化只能用一个
 /// 写死的 `sans-serif`，而**症状是"字体不对"**：字号对、位置对、颜色对，只有字形不对。
 ///
-/// 权重同理：V-Trim 的字幕是 `font-weight:700`、弹幕 600，而 canvas 不给权重时是 400
+/// 权重同理：参照实现 的字幕是 `font-weight:700`、弹幕 600，而 canvas 不给权重时是 400
 /// —— 看起来像"字重不太一样"。
+///
+/// # 阴影那四个键为什么也要给
+///
+/// `web/engine.js` 的 `rasterizeLine(line, style)` 是**照着这份样式**画的：
+/// canvas 的 `shadowColor` / `shadowOffsetX/Y` / `shadowBlur` 就从这四个键来。
+/// 不给的话症状是"**成片有阴影、预览没有**" —— 与当年 `opacity` 没带给 JS 时
+/// （成片有淡入、预览一动不动）是同一类错，而那种错看起来像"渲染没做完"。
 fn text_style_json(style: &dhampir_core::overlay::TextStyle) -> serde_json::Value {
     serde_json::json!({
         "color": style.color,
@@ -1916,6 +2901,10 @@ fn text_style_json(style: &dhampir_core::overlay::TextStyle) -> serde_json::Valu
         "stroke_color": style.stroke_color,
         "family": style.family,
         "weight": style.weight,
+        "shadow_color": style.shadow_color,
+        "shadow_dx_px": style.shadow_dx_px,
+        "shadow_dy_px": style.shadow_dy_px,
+        "shadow_blur_px": style.shadow_blur_px,
     })
 }
 
@@ -2123,6 +3112,11 @@ pub async fn dhampir_project_text_probe(frame: i32) -> Result<String, JsValue> {
             .iter()
             .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()))
             .collect();
+        // 判定路径**刻意不碰跨帧的源纹理**：它要的是"这一帧画出来长什么样"，
+        // 借用一份本地空表 ⇒ 每一层都现拷一次（与判定之前的行为一致）。
+        // 复用那一套的判据是"内容标识"，而判定关心的不是省没省，是**画出来一样不一样**。
+        let mut probe_uploads: HashMap<String, SourceUpload> = HashMap::new();
+        let mut probe_stats = UploadStats::default();
         let mut resolver = BoundVideos {
             device: &host.ctx.device,
             queue: &host.ctx.queue,
@@ -2131,6 +3125,10 @@ pub async fn dhampir_project_text_probe(frame: i32) -> Result<String, JsValue> {
             require_bitmap: host.require_bitmap,
             format,
             textures: HashMap::new(),
+            uploads: &mut probe_uploads,
+            // 标识照旧读宿主的：它不改变"现拷一次"这件事，只决定写不写进那份本地空表。
+            bitmap_ids: &host.bitmap_ids,
+            stats: &mut probe_stats,
         };
         let mut encoder = host.ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("dhampir project text probe encoder"),
@@ -2559,5 +3557,172 @@ mod tests {
         let nothing = step(true);
         assert!(!ok(&nothing), "{nothing}");
         assert_eq!(nothing["issues"][0]["code"], "nothing_to_undo", "{nothing}");
+    }
+
+    /// **不调新导出的旧路径行为不变** —— 阶段 4 全部安全性的依据。
+    ///
+    /// 旧宿主只会调 `clear_bitmaps`，从不声明内容标识。那时 `plan_bitmap` 必须
+    /// **永远给出 `Reload`**（除了一帧里根本不需要这个源）：否则贴纸那一层会被
+    /// 上一帧的纹理顶掉，而画面**看起来完全正常**（只是"慢了半拍"）。
+    ///
+    /// 这是"不改 `clear_bitmaps` 的语义"这句话在可执行层面的兑现方式 ——
+    /// 光靠注释说明是拦不住下一次改动的。
+    #[wasm_bindgen_test]
+    fn 没有声明标识就永远重传() {
+        // 手上有位图、也有一份标识 —— 但这一帧**没声明** ⇒ 必须重传。
+        assert_eq!(plan_bitmap(true, None, Some("7"), true), BitmapPlan::Reload);
+        // 反过来：声明了、且与手上那份一致 ⇒ 复用（**只有**有标识才有的那一档）。
+        assert_eq!(plan_bitmap(true, Some("7"), Some("7"), true), BitmapPlan::Reuse);
+        // 声明了但手上没有位图 ⇒ 必须重交。
+        assert_eq!(plan_bitmap(true, Some("7"), Some("7"), false), BitmapPlan::Reload);
+        // 没声明标识时"手上没有位图"也一样是重交（两条路殊途同归）。
+        assert_eq!(plan_bitmap(true, None, None, false), BitmapPlan::Reload);
+        // 标识变了 ⇒ 重交（内容不同，绝不许拿旧的顶）。
+        assert_eq!(plan_bitmap(true, Some("8"), Some("7"), true), BitmapPlan::Reload);
+        // 这一帧不需要它 ⇒ 丢掉（与 `clear_bitmaps` 对这一个源等价）。
+        assert_eq!(plan_bitmap(false, Some("7"), Some("7"), true), BitmapPlan::Drop);
+        assert_eq!(plan_bitmap(false, None, None, false), BitmapPlan::Drop);
+    }
+
+    /// `begin_frame` 的入参形状：三种都收，且"没给标识"必须落在**重交**那一档。
+    ///
+    /// 形状不该成为"复用生效与否"的开关 —— 那会让"调用方少写一个字段"变成
+    /// 一个**静默**的性能回归（而不是一个错误）。
+    #[wasm_bindgen_test]
+    fn 来源集合的三种形状都收() {
+        // 1) 裸数组：对象项带 id，字符串项**没有**标识。
+        let plan = parse_frame_sources(r#"[{"source":"a","id":"1"},"b"]"#).expect("裸数组");
+        assert_eq!(plan.sources.len(), 2);
+        assert_eq!(plan.sources[0].0, "a");
+        assert_eq!(plan.sources[0].1.as_deref(), Some("1"));
+        assert_eq!(plan.sources[1].0, "b");
+        assert_eq!(plan.sources[1].1, None, "裸字符串没有标识 ⇒ 必须重交");
+        assert!(plan.frame.is_none());
+        assert!(plan.cache.is_none(), "没给 cache ⇒ 默认**不建表**");
+
+        // 2) 带 sources 数组的对象 + frame + cache。
+        let plan = parse_frame_sources(
+            r#"{"frame":42,"sources":[{"source":"a","id":"42"}],"cache":{"enabled":true,"seconds":[3,2],"max_mb":64}}"#,
+        )
+        .expect("对象形状");
+        assert_eq!(plan.frame, Some(42));
+        assert_eq!(plan.sources.len(), 1);
+        let cache = plan.cache.expect("给了 cache 就该解析出来");
+        assert!(cache.enabled);
+        assert_eq!(cache.forward_seconds, 3.0);
+        assert_eq!(cache.back_seconds, 2.0);
+        assert_eq!(cache.max_mb, 64);
+
+        // 一个数只调"多大"，前/后按 3:2 摊（与用户口径一致）。
+        let plan = parse_frame_sources(r#"{"sources":[],"cache":{"seconds":5}}"#).expect("单数窗口");
+        let cache = plan.cache.expect("cache");
+        assert!((cache.forward_seconds - 3.0).abs() < 1e-6);
+        assert!((cache.back_seconds - 2.0).abs() < 1e-6);
+        assert_eq!(cache.max_mb, 256, "没给 max_mb 就是默认 256");
+
+        // 3) 空 id 当作"没有标识"（空串不是一份内容的名字）。
+        let plan = parse_frame_sources(r#"[{"source":"a","id":""}]"#).expect("空 id");
+        assert_eq!(plan.sources[0].1, None);
+
+        // 形状不对要**报错**，不能静默当成空集合（那会变成"清掉所有位图"）。
+        assert!(parse_frame_sources("不是 JSON").is_err());
+        assert!(parse_frame_sources(r#"{"nope":1}"#).is_err());
+        assert!(parse_frame_sources(r#"[{"id":"1"}]"#).is_err());
+    }
+
+    /// **逐条颜色与缩放必须真的发给 JS**（清单形状的接线判据）。
+    ///
+    /// `web/engine.js` 的 `rasterizeLine(line, style)` 读 `line.color`（**逐条优先**，
+    /// 缺失才回退 `style.color`）与 `line.scale`（描边宽度 = `border_px * scale`）。
+    /// 这两个键**曾经没发**，症状是：
+    ///
+    /// * 预览永远用**轨道默认色** —— ASS 里逐条写的 `\c` 在预览里白配了；
+    /// * 描边宽度永远按 `scale = 1` 算；
+    /// * 而 `scripts/web-check.mjs` 的 `--verdict subtitle` 是**逐条**比 `color` 的
+    ///   ⇒ 那条两端判定在 HEAD 上一直是红的（报"一端没有、另一端有"）。
+    ///
+    /// 与 `opacity` 当年没带给 JS（成片有淡入、预览一动不动）是同一类错：
+    /// **写好了没接上**。这里同时钉住**两份清单**（落点清单 `placement_json`
+    /// 与条目清单 `text_item_json`）—— 它们各自是 JS 的一个输入，缺哪个都不行。
+    #[wasm_bindgen_test]
+    fn 两份清单都把逐条颜色与缩放带给_js() {
+        let rect = NormalizedRect { x: 0.1, y: 0.2, width: 0.3, height: 0.4 };
+
+        let line = TextLineSpec {
+            text: "一条字幕".to_string(),
+            rect,
+            placement: LinePlacement { x: 8, y: 16, bitmap_width: 640, bitmap_height: 36, font_px: 20 },
+            color: [1, 2, 3, 4],
+            danmaku: None,
+            opacity: 0.5,
+            scale: 0.75,
+        };
+        let placed = placement_json(&line);
+        assert_eq!(placed["color"], serde_json::json!([1, 2, 3, 4]), "落点清单缺逐条颜色：{placed}");
+        assert_eq!(placed["scale"], serde_json::json!(0.75), "落点清单缺缩放：{placed}");
+
+        let item = dhampir_core::overlay::TextItem {
+            text: "一条字幕".to_string(),
+            rect,
+            opacity: 0.5,
+            dy_px: 3.0,
+            color: [1, 2, 3, 4],
+            font_ratio: 0.055,
+            scale: 0.75,
+            parts: Vec::new(),
+        };
+        let value = text_item_json(&item);
+        // 逐字段同名是**契约**，不是巧合：CLI 的 `cmd_subtitle` 发的是同一组键。
+        for key in ["color", "font_ratio", "scale", "parts"] {
+            assert!(value.get(key).is_some(), "条目清单缺 {key}：{value}");
+        }
+        assert_eq!(value["color"], serde_json::json!([1, 2, 3, 4]));
+        assert_eq!(value["scale"], serde_json::json!(0.75));
+    }
+
+    /// **样式的文字阴影四个键必须真的发给 JS**（B5）。
+    ///
+    /// 这条是浏览器那条路上的**接线判据**：`web/engine.js` 的
+    /// `rasterizeLine(line, style)` 就是照这份 JSON 画的（`ctx.shadowColor` /
+    /// `shadowBlur` / `shadowOffsetX/Y` 全从这四个键来）。少一个键的症状是
+    /// 「**成片有阴影、预览没有**」—— 与当年 `opacity` 没带给 JS 时
+    /// （成片有淡入、预览一动不动）是同一类错，而它在浏览器里看起来像"没渲染完"。
+    #[wasm_bindgen_test]
+    fn 样式清单把阴影四个键带给_js() {
+        let style = dhampir_core::overlay::TextStyle {
+            shadow_color: Some([0, 0, 0, 102]),
+            shadow_dx_px: 3.0,
+            shadow_dy_px: 2.0,
+            shadow_blur_px: 4.0,
+            ..Default::default()
+        };
+        let value = text_style_json(&style);
+        assert_eq!(value["shadow_color"], serde_json::json!([0, 0, 0, 102]));
+        assert_eq!(value["shadow_dx_px"], serde_json::json!(3.0));
+        assert_eq!(value["shadow_dy_px"], serde_json::json!(2.0));
+        assert_eq!(value["shadow_blur_px"], serde_json::json!(4.0));
+
+        // **不画阴影时四个键也照样在**（`null` / `0`）—— 这不是"多给几项"：
+        // 两端比对（`scripts/web-check.mjs` 的 `compareTextStyle`）把
+        // 「键在、值是 null」与「键根本不在」当同一件事，于是**缺键会被判据放过**。
+        // 要让"一端有一端无"能红，两边都必须有这几个键。
+        let plain = text_style_json(&dhampir_core::overlay::TextStyle::default());
+        for key in ["shadow_color", "shadow_dx_px", "shadow_dy_px", "shadow_blur_px"] {
+            assert!(plain.get(key).is_some(), "清单里缺了 {key}：{plain}");
+        }
+        assert_eq!(plain["shadow_color"], serde_json::Value::Null);
+        assert_eq!(plain["shadow_blur_px"], serde_json::json!(0.0));
+
+        // **宿主返回体（`dhampir_project_frame` 的 `overlay`）也带上它们** ——
+        // 那是「两端同一个形状」的另一半（v4 -> v5 升的就是它）。
+        let view = serde_json::to_value(text_style_view(&style)).expect("视图要能序列化");
+        assert_eq!(view["shadow_color"], serde_json::json!([0, 0, 0, 102]));
+        assert_eq!(view["shadow_blur_px"], serde_json::json!(4.0));
+        // 而缺省的视图**一个阴影键都不多**（老工程的形状逐字节不变）。
+        let plain = serde_json::to_value(text_style_view(&dhampir_core::overlay::TextStyle::default()))
+            .expect("视图要能序列化");
+        for key in ["shadow_color", "shadow_dx_px", "shadow_dy_px", "shadow_blur_px"] {
+            assert!(plain.get(key).is_none(), "缺省时不该出现 {key}：{plain}");
+        }
     }
 }

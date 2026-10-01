@@ -212,7 +212,20 @@ pub fn to_json<T: Serialize>(value: &T) -> String {
 /// **形状一个都没变**（两者都沿用编辑那套 `{ok, summary, issues}`）—— 升版本是因为
 /// 对端能看到的**导出面**变了：老前端不会知道有这两条路，而新前端对着老宿主调它们
 /// 会直接 `undefined`。这正是「问一次版本」要拦的那类错配。
-pub const HOST_API_VERSION: u32 = 4;
+/// ## v4 -> v5
+///
+/// **形状面**多了四个键，都在 `overlay.subtitle_style` 里：
+/// `shadow_color` / `shadow_dx_px` / `shadow_dy_px` / `shadow_blur_px`
+/// （文字阴影）。**导出面一个都没动。**
+///
+/// 为什么**必须**升（即使四个键都能缺省）：规矩是「**wasm 返回体加字段即视为 API 变更**」
+/// （T2.7 就是这么升到 2 的）—— 对端拿到的形状变了就是破坏性改动，不管变的是谁
+/// "觉得"重要的字段。T4.3 那次升版本的理由正好相反（形状没变、导出面变了），
+/// 两次合起来说明判据是"对端能看到的东西变了"，不是"某一类东西变了"。
+///
+/// 老工程**一个键都不多**：四个字段都带 `skip_serializing_if`，缺省值不进返回体
+/// （与"既有工程逐字节不变"同一条口径，有单测钉着）。
+pub const HOST_API_VERSION: u32 = 5;
 
 /// `dhampir_project_open` 的返回体。
 ///
@@ -330,6 +343,40 @@ pub struct TextStyleView {
     /// 描边宽度（**目标像素**）。0 = "从字号推"（老行为）。
     pub stroke_px: f32,
     pub stroke_color: [u8; 4],
+    /// **文字阴影的颜色**（`None` = 不画阴影，默认）。
+    ///
+    /// 求值层已经解析完（`None` 与"alpha = 0"是同一个答案），宿主只照用。
+    /// 契约里那个字段是 `SubtitleStyle::shadow_color`，这里**同名同形**。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow_color: Option<[u8; 4]>,
+    /// 阴影的水平偏移（**文档像素**，与 `transform.x/y` 同一坐标系）。
+    ///
+    /// 与 `stroke_px` 同一条量纲：求值层拿到的那个尺寸（默认路径上就是导出尺寸）。
+    /// 两边都**不**在这里再换算一次 —— 换算要文档尺寸与目标尺寸两个数，
+    /// 而这一层只有前者（见 `docs/host-api.md` 的 v4 -> v5 那一节）。
+    #[serde(default, skip_serializing_if = "is_zero_f32_view")]
+    pub shadow_dx_px: f32,
+    /// 阴影的垂直偏移（文档像素，**正数向下**）。
+    #[serde(default, skip_serializing_if = "is_zero_f32_view")]
+    pub shadow_dy_px: f32,
+    /// **阴影的模糊半径**（像素；0 = 硬阴影）。
+    ///
+    /// 契约里是 `shadow_blur_ratio`（占高的比例），求值层按高换算成像素带到这里 ——
+    /// 与 `stroke_ratio` -> `stroke_px` 的既有分工一致。
+    ///
+    /// **两端核不同**：浏览器是 canvas 的 `shadowBlur`，出片侧是 ffmpeg 的 `gblur`，
+    /// 只保证"观感近似"，不保证逐像素一致（见 `SubtitleStyle::shadow_blur_ratio`）。
+    #[serde(default, skip_serializing_if = "is_zero_f32_view")]
+    pub shadow_blur_px: f32,
+}
+
+/// `skip_serializing_if` 用：0 的浮点量不写进返回体。
+///
+/// 与契约层的 `is_zero_f32` 同款，但那个在 `dhampir-timeline::layer` 里是私有的
+/// （这一层与那一层各管各的形状）—— 不为了少写三行把它改成 `pub`。
+/// 比法用 `== 0.0`：`-0.0` 也走"不写"那一支，而它在 JSON 里是 `-0.0`，是个没意义的新键。
+fn is_zero_f32_view(value: &f32) -> bool {
+    *value == 0.0
 }
 
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
@@ -416,8 +463,8 @@ pub struct OverlayView {
     pub danmaku: Vec<DanmakuItemView>,
     /// **字幕**的画法。
     ///
-    /// 与 `danmaku_style` 分开：V-Trim 的字幕是暖色 `#dcbda0`、弹幕是白色
-    /// `#ffffff` —— 共用一个字段时**必然有一个错**，而"两边的字都看得见"
+    /// 与 `danmaku_style` 分开：**字幕与弹幕的默认色本来就不同**
+    /// —— 共用一个字段时**必然有一个错**，而"两边的字都看得见"
     /// 让人以为没问题。
     pub subtitle_style: TextStyleView,
     /// **弹幕**的画法。
@@ -646,12 +693,21 @@ mod tests {
                     outline: false,
                     stroke_px: 0.0,
                     stroke_color: [0, 0, 0, 255],
+                    shadow_color: None,
+                    shadow_dx_px: 0.0,
+                    shadow_dy_px: 0.0,
+                    shadow_blur_px: 0.0,
                 },
                 danmaku_style: TextStyleView {
                     color: [255, 255, 255, 255],
                     outline: true,
                     stroke_px: 0.0,
                     stroke_color: [0, 0, 0, 255],
+                    // 弹幕那半边**恒不画阴影**（`DanmakuSpec` 没有阴影字段）。
+                    shadow_color: None,
+                    shadow_dx_px: 0.0,
+                    shadow_dy_px: 0.0,
+                    shadow_blur_px: 0.0,
                 },
                 dropped_lines: 3,
                 dropped_danmaku: 2,
@@ -704,12 +760,21 @@ mod tests {
                     outline: true,
                     stroke_px: 0.0,
                     stroke_color: [0, 0, 0, 255],
+                    shadow_color: None,
+                    shadow_dx_px: 0.0,
+                    shadow_dy_px: 0.0,
+                    shadow_blur_px: 0.0,
                 },
                 danmaku_style: TextStyleView {
                     color: [255, 255, 255, 255],
                     outline: true,
                     stroke_px: 0.0,
                     stroke_color: [0, 0, 0, 255],
+                    // 弹幕那半边**恒不画阴影**（`DanmakuSpec` 没有阴影字段）。
+                    shadow_color: None,
+                    shadow_dx_px: 0.0,
+                    shadow_dy_px: 0.0,
+                    shadow_blur_px: 0.0,
                 },
                 dropped_lines: 0,
                 dropped_danmaku: 0,
@@ -746,12 +811,21 @@ mod tests {
                     outline: true,
                     stroke_px: 0.0,
                     stroke_color: [0, 0, 0, 255],
+                    shadow_color: None,
+                    shadow_dx_px: 0.0,
+                    shadow_dy_px: 0.0,
+                    shadow_blur_px: 0.0,
                 },
                 danmaku_style: TextStyleView {
                     color: [255, 255, 255, 255],
                     outline: true,
                     stroke_px: 0.0,
                     stroke_color: [0, 0, 0, 255],
+                    // 弹幕那半边**恒不画阴影**（`DanmakuSpec` 没有阴影字段）。
+                    shadow_color: None,
+                    shadow_dx_px: 0.0,
+                    shadow_dy_px: 0.0,
+                    shadow_blur_px: 0.0,
                 },
 
                 dropped_lines: 0,
@@ -776,6 +850,56 @@ mod tests {
         assert_eq!(value["text"], serde_json::json!("两行\n两行"));
         assert_eq!(value["rect"]["x"], serde_json::json!(0.125));
         assert_eq!(value["rect"]["height"], serde_json::json!(0.0625));
+    }
+
+    /// **文字阴影那四个键**：给出来时必须在，缺省时**一个都不许出现**。
+    ///
+    /// 这条同时钉两件事：
+    ///   1. 升到 v5 的那个形状变化是**真的**（对端能看见 shadow_* 四个键）；
+    ///   2. 老工程（没写过阴影）拿到的形状**与 v4 逐字节相同** —— 少了
+    ///      `skip_serializing_if`，这里会多出 `"shadow_color":null` 这种没意义的键。
+    #[test]
+    fn 文字阴影的四个键缺省时不出现() {
+        let plain = TextStyleView {
+            color: [255, 255, 255, 255],
+            outline: true,
+            stroke_px: 0.0,
+            stroke_color: [0, 0, 0, 255],
+            shadow_color: None,
+            shadow_dx_px: 0.0,
+            shadow_dy_px: 0.0,
+            shadow_blur_px: 0.0,
+        };
+        let value = serde_json::to_value(plain).unwrap();
+        assert_eq!(
+            keys(&value),
+            sorted(&["color", "outline", "stroke_px", "stroke_color"]),
+            "没有阴影时多出了键：{value}"
+        );
+
+        let shadowed = TextStyleView {
+            shadow_color: Some([0, 0, 0, 102]),
+            shadow_dy_px: 2.0,
+            shadow_blur_px: 12.0,
+            ..plain
+        };
+        let value = serde_json::to_value(shadowed).unwrap();
+        assert_eq!(
+            keys(&value),
+            sorted(&[
+                "color",
+                "outline",
+                "stroke_px",
+                "stroke_color",
+                "shadow_color",
+                "shadow_dy_px",
+                "shadow_blur_px",
+            ]),
+            "给了阴影却不出现键：{value}"
+        );
+        // `shadow_dx_px` 是 0：它与默认值相同，于是不写 —— 读回默认值仍然是 0。
+        assert_eq!(value["shadow_color"], serde_json::json!([0, 0, 0, 102]));
+        assert_eq!(value["shadow_blur_px"], serde_json::json!(12.0));
     }
 
     #[test]
