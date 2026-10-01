@@ -130,8 +130,8 @@ let uploaded =
   node scripts/check-dual-end.mjs --frames 0,30,89   # 必须仍是 SSIM 1.000000
   node scripts/run-guards.mjs                        # 18/20（红的两条照旧）
   out/textcost-probe.mjs（clip-25, from=1150, n=200） # textMs 应显著低于 3.3ms
-  #   注（2026-09-30）：那个探针是**未跟踪的草稿**（原在 out/），已\草稿一起移出本仓
-  #   （\ `target/dhampir-scratch/out-remaining/`）。要复跑先取回来，或按本文件的口径重写一个。
+  #   注（2026-09-30）：那个探针是**未跟踪的草稿**（原在 out/），已随下游侧草稿一起移出本仓
+  #   （在下游仓 `target/dhampir-scratch/out-remaining/`）。要复跑先取回来，或按本文件的口径重写一个。
 ```
 
 **基线已量**：`textMs = 3.3ms`（缓存开着）/ `3.7ms`（缓存关掉，双跑实测）。

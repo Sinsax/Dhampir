@@ -21,15 +21,15 @@
 
 **约束二：特效是"类型 + 参数"的声明式数据，不是代码**（README 铁律 3）。
 P9 的全部设计都服从这一条 —— 参照实现那边是 `Event` 枚举 15 个变体 + `EffectUniform`
-一个**定长 struct**（源码清单\ `docs/dhampir/p9-downstream-requirements.md`），
+一个**定长 struct**（源码清单见下游仓 `docs/dhampir/p9-downstream-requirements.md`），
 加一个特效要同时改枚举、改 enum 的 4 个方法、改 uniform 结构、改着色器。**那正是要摆脱的形状。**
 
 ---
 
-## 2. 参照实现需求全表 —— **已迁\**
+## 2. 参照实现需求全表 —— **已迁至下游仓**
 
 这一节原本是"下游精修出片需要什么"的收表：15 个事件变体、样式/布局/画布字段、
-复合结构三张表。**2026-09-30 整节迁\的
+复合结构三张表。**2026-09-30 整节迁到下游仓的
 `docs/dhampir/p9-downstream-requirements.md`** —— 那是参照实现，不该由底座维护。
 
 底座从它得出的结论留在本文件：§3（四条设计原则）、§4（泛用化设计）、§6（渲染侧设计）。
@@ -242,7 +242,7 @@ evaluate(layer, frame)
 
 判据一句话：**凡是"像素怎么算出来"的，归本仓；凡是"这个直播间怎么排版"的，归参照实现。**
 逐条清单（`polish.toml` 解析、九宫格 `Layout`、关键词过滤、去静音、`sticker_source`、
-`CoverConfig` 字段、`CameraStyle` 三档）已迁\
+`CoverConfig` 字段、`CameraStyle` 三档）已迁至下游仓
 `docs/dhampir/p9-downstream-requirements.md`（§7）。
 
 ## 8. 分阶段（对齐既有 T 段编号习惯，从 T8 起）
@@ -262,11 +262,11 @@ evaluate(layer, frame)
 
 ---
 
-## 9. 与下游的接口（**已迁\**）
+## 9. 与下游的接口（**已迁至下游仓**）
 
 **参照实现决定"画什么"，本仓决定"怎么画出来，且两端画得一样"。**
 
-管道形状与逐项分工表\ `docs/dhampir/p9-downstream-requirements.md`（§9）。
+管道形状与逐项分工表在下游仓 `docs/dhampir/p9-downstream-requirements.md`（§9）。
 
 ## 10. 边界（这次没做的，别当成做了）
 

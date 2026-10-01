@@ -2,7 +2,7 @@
 //
 //     node scripts/package.mjs [--out <目录>] [--clean-wasm] [--no-zip] [--bundle-licenses]
 //
-// 产物形状（这就是与下游宿主的**全部**契约；当前的下游是 V-Trim 仓，见 docs/dhampir/）：
+// 产物形状（这就是与下游宿主的**全部**契约；下游那边的接入文档在 `docs/dhampir/`）：
 //
 //     <out>/
 //       preview/
@@ -24,7 +24,7 @@
 //
 //   1. 下游宿主得知道本仓的**内部目录结构** —— 这里一挪目录，那边就断；
 //   2. 它读的是**活的源码树** —— "改了没生效 / 生效了又说不清是哪一版"，
-//      实测遇到的是"改完必须强刷新"（记在 V-Trim 仓 docs/dhampir/compare-loop.md）。
+//      实测遇到的是"改完必须强刷新"（记在下游仓 docs/dhampir/compare-loop.md）。
 //
 // 打成定版产物之后，下游宿主只需要知道**一个目录 + 一个版本号**。
 //
