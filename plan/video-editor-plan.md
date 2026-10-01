@@ -164,6 +164,10 @@
 
 - [x] **T0.1 命名落地（已收口）** —— 引擎名 `dhampir` 已定并落地到 crate 名 / 包名 / 文档
   - ✅ 已备好：`LICENSE-MIT` / `LICENSE-APACHE`（Apache 全文含 APPENDIX）、根 `README.md`（写明项目意图、crate 地图、版本对齐纪律），四个 crate 都是**能 `cargo build` 的真实最小 crate**，不是空占位
+  - ⚠️ **2026-09-30 变更：许可证收窄为 `Apache-2.0`（单一）**，`LICENSE-MIT` 已删。
+    未发布过任何版本 ⇒ 收窄零成本（许可证一旦发出就不可撤销，所以"要收窄就趁早"）；
+    Apache-2.0 §3 给下游的是**显式的专利授权**。每个 crate 目录各放一份 `LICENSE`
+    （与根 `LICENSE-APACHE` 逐字节相同，`scripts/licenses.mjs --check` 钉住）。
   - ✅ **发布与建仓已移出范围**（见 §2「范围」）：不发 crates.io、不建远端仓库、不查域名。
     因此 `[workspace.package] repository` 保持**不填**（不编造 URL），`cargo publish` 不做。
     这是**移除**，不是完成——别把它当成已验收的产物

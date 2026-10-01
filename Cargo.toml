@@ -27,7 +27,12 @@ members = [
 version = "0.0.1"
 edition = "2024"
 rust-version = "1.87" # = wgpu 30.0.1 的 MSRV
-license = "MIT OR Apache-2.0"
+# 许可证**唯一真相**：Apache-2.0（单许可）。
+#   2026-09-30 由 `MIT OR Apache-2.0` 收窄 —— 此前**没有发布过任何版本**，
+#   所以不存在"已按 MIT 授权出去的副本"（许可证一旦发出就不可撤销，所以要收窄就趁早）。
+#   依赖侧全部相容：157 个依赖都是宽松许可（MIT / Apache-2.0 / BSD / ISC / Zlib / Unlicense /
+#   Unicode-3.0），没有 copyleft。第三方清单由 `node scripts/licenses.mjs --check` 钉住。
+license = "Apache-2.0"
 authors = ["dhampir contributors"]
 # repository: 待 GitHub 建仓后回填（见 plan/video-editor-plan.md §2「仓库侧」），先留空不编造 URL。
 

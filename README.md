@@ -36,6 +36,7 @@
 | 阶段计划与依赖顺序 | [plan/roadmap.md](plan/roadmap.md) |
 | 为什么这样设计（决策真相） | [plan/video-editor-plan.md](plan/video-editor-plan.md)、[plan/video-editor-tech-guide.md](plan/video-editor-tech-guide.md) |
 | 历史交接记录 | [plan/remaining-work.md](plan/remaining-work.md) |
+| **下游怎么接**（转译器、缺口表、对比回路） | 下游仓的 `docs/dhampir/` —— 本仓不存放下游方言的内容 |
 
 **四份文档的分工**（别把它们混成一份）：
 
@@ -216,4 +217,10 @@ scripts/              守卫脚本、测量脚本、本地服务
 
 ## 许可证
 
-MIT OR Apache-2.0，见 [`LICENSE-MIT`](LICENSE-MIT) 与 [`LICENSE-APACHE`](LICENSE-APACHE)。
+**Apache-2.0** —— 全文见 [`LICENSE-APACHE`](LICENSE-APACHE)。
+
+第三方依赖的许可清单是**生成的**（[`THIRD-PARTY-LICENSES.md`](THIRD-PARTY-LICENSES.md)，
+由 `node scripts/licenses.mjs --check` 钉住不许漂）；分发时产物里会带上这两份。
+
+> 2026-09-30 由 `MIT OR Apache-2.0` **收窄为 `Apache-2.0`**：此前没有发布过任何版本，
+> 所以不存在"已按 MIT 授权出去的副本"。收窄给下游的是更明确的专利授权（Apache-2.0 §3）。
