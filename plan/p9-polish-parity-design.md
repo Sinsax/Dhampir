@@ -1,12 +1,12 @@
-# P9 —— 承接 V-Trim polish：功能收集与底座化设计
+# P9 —— 下游精修出片需求的功能收集与底座化设计
 
-> **这份文件是什么**：把 V-Trim `polish`（精修出片）所需的**全部功能**收齐，逐条对着
+> **这份文件是什么**：把 参照实现 `polish`（精修出片）所需的**全部功能**收齐，逐条对着
 > Dhampir 现有契约分类，并给出**泛用化之后**的底座设计。
 >
-> **它不是什么**：不是 V-Trim 的移植计划。V-Trim 的 `polish.toml ↔ 本工程文件` 的**转译留在
-> V-Trim 侧**（见 §7），本仓只管"把工程文件这条路做成能承接得下所有需求的样子"。
+> **它不是什么**：不是 参照实现 的移植计划。参照实现 的 `polish.toml ↔ 本工程文件` 的**转译留在
+> 参照实现 侧**（见 §7），本仓只管"把工程文件这条路做成能承接得下所有需求的样子"。
 >
-> **上游**：用户决策 2026-09（本项目立项即为替代 V-Trim 的 wgpu 渲染链路）。
+> **上游**：用户决策 2026-09（本项目立项即为替代 参照实现 的 wgpu 渲染链路）。
 > **改决策要改这份文件，不能只在代码里改。**
 
 ---
@@ -20,71 +20,29 @@
 两个宿主读同一份文本；采样一律 `textureLoad([wgsl-portable-subset.md](./wgsl-portable-subset.md))`。
 
 **约束二：特效是"类型 + 参数"的声明式数据，不是代码**（README 铁律 3）。
-P9 的全部设计都服从这一条 —— V-Trim 那边是 `Event` 枚举 15 个变体 + `EffectUniform`
-一个**定长 struct**（`vtrim-render-core/src/effects.rs:14-28`），加一个特效要同时改
-枚举、改 enum 的 4 个方法、改 uniform 结构、改着色器。**那正是要摆脱的形状。**
+P9 的全部设计都服从这一条 —— 参照实现那边是 `Event` 枚举 15 个变体 + `EffectUniform`
+一个**定长 struct**（源码清单\ `docs/dhampir/p9-downstream-requirements.md`），
+加一个特效要同时改枚举、改 enum 的 4 个方法、改 uniform 结构、改着色器。**那正是要摆脱的形状。**
 
 ---
 
-## 2. V-Trim polish 功能全表（从源码收齐）
+## 2. 参照实现需求全表 —— **已迁\**
 
-来源：`vtrim-render-core/src/types.rs`（`Event` 15 变体 + `StyleRoot`/`Layout`）、
-`vtrim-polish/src/project/config.rs`（`ProjectFile` 15 个 section）、
-`templates/index.html`（14 个 handler）、`render/native/mod.rs`（FramePipeline）。
+这一节原本是"下游精修出片需要什么"的收表：15 个事件变体、样式/布局/画布字段、
+复合结构三张表。**2026-09-30 整节迁\的
+`docs/dhampir/p9-downstream-requirements.md`** —— 那是参照实现，不该由底座维护。
 
-### 2.1 视觉事件（`Event`，15 个变体）
+底座从它得出的结论留在本文件：§3（四条设计原则）、§4（泛用化设计）、§6（渲染侧设计）。
 
-| # | V-Trim 变体 | 语义 | 起止 | Dhampir 现状 |
-|---|---|---|---|---|
-| 1 | `Camera` | 运镜：`中/近/远` 三档 + 聚焦点 `origin` + `anchor→anchor_to` 移动 + `cut` 硬切 + `handheld` 手持摇摆 | **持续**（跟到下一条） | ⚠️ 地基有（`Transform`+`Keyframe`），缺"keyframe 驱动 transform" |
-| 2 | `Sticker` | 贴纸：入/浮/出三段缓动 + `manual` 时间锁 | 持续 | ⚠️ `AssetKind::Image` 有（静态），**GIF 动图无** |
-| 3 | `Shake` | 抖动 | 瞬时 ~0.3s | ❌ 无 |
-| 4 | `Flash` | 闪白（可带色） | 瞬时 0.25s | ❌ 无 |
-| 5 | `Blur` | 模糊脉冲 `blur(8px)→0` | 瞬时 0.3s | ✅ **有** `gaussian_blur` |
-| 6 | `ZoomBounce` | 缩放弹跳 1.10 | 瞬时 0.4s | ❌ 无（`scale` 机制有） |
-| 7 | `Vignette` | 暗角 | 瞬时 0.4s | ❌ 无（V-Trim 自己也缺画） |
-| 8 | `HueShift` | 色相叠加 | 瞬时 0.35s | ⚠️ 有 `hue`，但语义不同（旋转 vs 叠色） |
-| 9 | `Stutter` | 卡顿（时间轴跳帧） | 瞬时 0.25s | ❌ 无（**时间轴层**，非像素） |
-| 10 | `Split` | 分屏：`scale/skew_x/x` | 瞬时 0.25s | ❌ 无 |
-| 11 | `Noise` | 噪声 | 瞬时 0.3s | ❌ 无 |
-| 12 | `Pulse` | 脉冲 | 瞬时 0.4s | ❌ 无 |
-| 13 | `ColorShift` | 色调偏移（sepia+saturate） | 瞬时 0.35s | ⚠️ 有 `saturation`，**无 sepia** |
-| 14 | `Overlay` | 覆盖层：纯色/渐变（linear/radial）+ 4 stop | 持续 1.5s | ⚠️ 有渐变着色器，**不在注册表** |
-| 15 | `Sfx` | 纯音效（无视觉） | 按文件长度 | ❌ 无（音频只拼轨） |
-
-### 2.2 样式 / 布局 / 画布
-
-| 组 | 字段（实测） | Dhampir 现状 |
-|---|---|---|
-| `SubtitleStyle` | font / size / color / stroke / highlight_color / entrance / position | ⚠️ 部分（`font_ratio`/`color`/`outline`/`max_lines`；**无 stroke/highlight/entrance**） |
-| `DanmakuStyle` | font_size / color / stroke / highlight_color / speed / area / scroll_direction | ⚠️ 部分（`lanes`/`duration_ms`/`font_ratio`；**无 highlight/direction**） |
-| `CameraStyle` | `zoom_mid=1.3` / `zoom_close=1.5` / `zoom_wide=0.55`（**只有这一张表**） | ❌ 无（但 `scale` 表达得了） |
-| `Layout` | liver / danmaku_area / sticker_area / reaction_zone / game_area，每个 = 九宫格 `grid` 或自由选框 `top_left`+`bottom_right` | ❌ 无（**这是 V-Trim 特有业务**） |
-| `CanvasConfig` + `StageConfig` | 方向 → 宽高；主画面位置；背景 `none/black/color/blur`；`blur_px`/`blur_img_scale`/`scale`/`padding` | ✅ `RenderHints{width,height,format}` 够 |
-| `CoverConfig` | 20+ 字段：帧位置 / 标题断行 / 字体 / 描边 / 渐变方向 / 暗角 / 阴影 / `CoverEffect[]` | ✅ **`dhampir frame` 就是截帧** + 上述特效齐了即可 |
-| `MuteRange` / `silence_ranges` | 屏蔽区间（去静音） | ⚪ **不属底座**（业务对时间轴的计算，见 §7） |
-| `SfxConfig` | volume / blacklist / reactions_enabled | ❌ 无 |
-| `FilterConfig` | danmaku/highlight 关键词 | ⚪ **不属底座**（LLM 业务） |
-| `StickerConfig` + `sticker_source` | 落点策略 + 来源 | ⚠️ 落点 = `Transform`，够 |
-
-### 2.3 复合结构（V-Trim 有、Dhampir 要能表达）
-
-- **同帧多事件叠加**：一条时间轴上 blur + shake + flash + vignette 同时生效 ——
-  所以特效**不能挤进一个定长 uniform**。
-- **调整图层**：Dhampir 已有（`Layer::is_adjustment`，`layer.rs:198`）。
-- **运镜是持续状态机**：跟到下一条运镜，不是一次性 —— 这正是 `Keyframe` 的形态。
-
----
-
-## 3. 设计原则（从 V-Trim 的坑里倒推出来的四条）
+## 3. 设计原则（从 参照实现 的坑里倒推出来的四条）
 
 1. **特效 = 数据行，不是枚举变体。** 每行 `{kind, params{...}, window, space, blend}`。
    加一个特效 = 注册表加一条 + 加一个管线 + 加一份 WGSL；**渲染主路径一行不改**。
-2. **参数是 map 不是 struct。** V-Trim 用 `EffectUniform`（定长、字段写死、注释里
+2. **参数是 map 不是 struct。** 参照实现 用 `EffectUniform`（定长、字段写死、注释里
    编号复用 `misc.xyz`）。改成"**一个参数缓冲区 + 按注册表布局**"，参数个数不受限。
 3. **时间窗只有两种**：`persistent`（跟到下一条/到 end）与 `transient`（有默认时长与上限）。
-   V-Trim 靠 `Event::default_end()` 一个 15 分支的 match 表达 —— 那也是一张要泛用的表。
-4. **两端同一份求值**：窗口函数**纯 `t` 的函数、无累积状态**（V-Trim 的 `handheld_sway`
+   参照实现 靠 `Event::default_end()` 一个 15 分支的 match 表达 —— 那也是一张要泛用的表。
+4. **两端同一份求值**：窗口函数**纯 `t` 的函数、无累积状态**（参照实现 的 `handheld_sway`
    就是这么写的，注释说明"跳帧/并行/seek 结果一样"）。本仓照此办理。
 
 ---
@@ -108,12 +66,12 @@ P9 的全部设计都服从这一条 —— V-Trim 那边是 `Event` 枚举 15 �
 - `params` 是 **`BTreeMap<String, f32>`**（**已经是**）→ 参数个数不受限，
   序列化**逐字节稳定**（与 `Recorded.tags` 同一个理由，`layer.rs:141`）。
   代价：**参数只能是 `f32`**。颜色、枚举、字符串**进不去** —— 见下面这条。
-- ⚠️ **`params: BTreeMap<String, f32>` 装不下颜色**：V-Trim 的 Flash / HueShift /
+- ⚠️ **`params: BTreeMap<String, f32>` 装不下颜色**：参照实现 的 Flash / HueShift /
   ColorShift / Overlay 都要颜色。**建议**：颜色拆成 4 个 `f32` 通道键
   （`color_r/g/b/a`，0~1），或给 `Effect` 加一个平行的
   `strings: BTreeMap<String, String>`。**这是 P9 要决策的第一件事**，
   倾向后者（一个字段一个含义，不靠键名约定）。
-- `window` 抽出**两种通用形态**，覆盖 V-Trim 15 个变体的全部时长语义：
+- `window` 抽出**两种通用形态**，覆盖 参照实现 15 个变体的全部时长语义：
   - `transient`：`attack/hold/release`（帧数）→ 一条**纯函数**包络；
   - `persistent`：`{kind:"persistent", fade_in, fade_out}` → 吃到 `end` 为止。
 - `space` 复用已存在的 `EffectSpace`（`schema.rs:270`）—— **它是已决策的字段，不要重造**。
@@ -129,13 +87,13 @@ pub struct EffectSpec {
     pub params: &'static [ParamSpec],   // 从 (name,min,max) 扩成带默认值
     pub space: EffectSpace,
     pub pipeline: EffectPipeline,
-    pub window_default: WindowDefault,  // 新增：transient 的默认时长（V-Trim 那张表）
+    pub window_default: WindowDefault,  // 新增：transient 的默认时长（参照实现 那张表）
 }
 ```
 
 `EffectPipeline` 枚举**加 4 个**（每个都是有独立数学性质的**算子族**，不是单个特效）：
 
-| pipeline | 性质 | 覆盖的 V-Trim 特效 |
+| pipeline | 性质 | 覆盖的 参照实现 特效 |
 |---|---|---|
 | `ColorAdjust`（已有） | 逐像素 | HueShift / ColorShift |
 | `SeparableBlur`（已有） | 邻域·两趟 | Blur |
@@ -183,7 +141,7 @@ pub fn channel_from(fallback: f32, keyframes: &[Keyframe], target: &str, local: 
 `target` 取值：`opacity` | `x` | `y` | `scale` | `rotation` | `effect.<index>.<param>`。
 最后一种让**特效参数本身可被动画化**，复合特效就自然出来了。
 
-- V-Trim 的 `zoom_mid/close/wide` 三档 = 三条 `scale` keyframe，**不需要 CameraStyle**。
+- 参照实现 的 `zoom_mid/close/wide` 三档 = 三条 `scale` keyframe，**不需要 CameraStyle**。
 - `handheld` = 一条**内建生成器**（数据上是一个带 `seed` 的 `Warp` 特效，或保存为
   关键帧序列）。**不写进契约**：它是观感，不是契约概念。
 - `cut` 硬切 = `easing: "linear"` + 两个 keyframe 同帧。
@@ -196,12 +154,12 @@ pub fn channel_from(fallback: f32, keyframes: &[Keyframe], target: &str, local: 
 | 复合方式 | 怎么做 | 例子 |
 |---|---|---|
 | **同层叠加** | 一个 `Layer.effects` 里放多条，按 pipeline 排序执行 | 模糊 + 闪白 + 暗角 |
-| **参数动画** | keyframe 的 `target = "effect.0.radius"` | 模糊从 0 涨到 8 再回落（= V-Trim 的 Blur 事件） |
+| **参数动画** | keyframe 的 `target = "effect.0.radius"` | 模糊从 0 涨到 8 再回落（= 参照实现 的 Blur 事件） |
 | **分层/调整图层的嵌套** | 已有 `Step::Draw` / `Step::Adjust` 交错 | 只对下半屏做特效：画 → 调整图层 → 再画 |
 
 **关键**：这三条**今天就已经是数据形状**，泛用化之后只是"可用的特效变多"，
 而**组合机制不用再设计**。这正是"泛用底座"相对于"15 个枚举变体"的差别 ——
-V-Trim 那边每加一种组合都要新写一个 `Event` 变体。
+参照实现 那边每加一种组合都要新写一个 `Event` 变体。
 
 ---
 
@@ -221,7 +179,7 @@ V-Trim 那边每加一种组合都要新写一个 `Event` 变体。
 | `Layer.effects` | 条目加 `window` + `opacity`（`kind`/`params` **已有，不动**） | 泛用 |
 | `Keyframe.target` | 新增字段，缺省 `"opacity"` | 兑现预留；**老文件逐字节不变** |
 | `EffectPipeline` | 加 `ColorMask`/`Warp`/`Composite` | 派发不改主路径 |
-| `EffectSpec.window_default` | 新增 | 替代 V-Trim 的 15 分支 match |
+| `EffectSpec.window_default` | 新增 | 替代 参照实现 的 15 分支 match |
 | `AssetKind` | **已有 `Image`**；补 `ImageSequence`（GIF/APNG/WebP 动图） | 贴纸动图 |
 | `Asset` | 已有 `frame_count`/`timebase`/`width`/`height` —— 动图直接复用 | **不必新字段** |
 | `Effect` | 颜色类特效要能带颜色（见 §4.1 的注） | Flash/HueShift/Overlay |
@@ -231,19 +189,19 @@ V-Trim 那边每加一种组合都要新写一个 `Event` 变体。
 ### 5.3 "格式整齐"的具体做法
 
 1. **参数名一致**：幅度类一律 `amount`，半径类一律 `radius`，颜色一律 `color`（RGBA 数组）。
-2. **绝不复用字段槽**。V-Trim 的 `misc: [_, vignette, noise, grad_stops.len()]` 是反例
+2. **绝不复用字段槽**。参照实现 的 `misc: [_, vignette, noise, grad_stops.len()]` 是反例
    （注释里靠编号记用途）——本仓**一个字段一个含义**，宁可多一层结构。
 3. **时间单位**：进度用**帧**（整数，铁律 1）；素材内偏移用**帧**；样式比例用 **0~1 浮点**
    （`font_ratio` 已是此形）；**秒只出现在 `assets[].timebase` 与宿主的换算边界**。
 4. **可省略的默认值**：`skip_serializing_if` —— 老工程不会被重写成噪音
-   （V-Trim 的 `is_false` 就是这个动机，`types.rs:274`）。
+   （参照实现 省略默认值就是这个动机）。
 5. **`BTreeMap` 而非 `HashMap`** 用于任何进序列化的 map → 逐字节稳定。
 
 ---
 
 ## 6. 渲染侧设计（怎么做到"加特效不改主路径"）
 
-### 6.1 求值 → 计划 → 提交（三段，与 V-Trim 的 `FrameState` 对齐但泛用）
+### 6.1 求值 → 计划 → 提交（三段，与 参照实现 的 `FrameState` 对齐但泛用）
 
 ```
 evaluate(layer, frame)
@@ -282,21 +240,10 @@ evaluate(layer, frame)
 
 ## 7. 边界：什么**不**进本仓
 
-用户已定：`polish.toml ↔ 工程文件` 的**转译交给 V-Trim 那边**。据此，以下**明确不做**：
-
-| 不进本仓 | 为什么 | 谁做 |
-|---|---|---|
-| `polish.toml`（TOML）解析 | 那是 V-Trim 的格式；本仓只有一种工程文件（JSON） | V-Trim：`polish.toml → dhampir ProjectDoc` 转译器 |
-| `Layout` 九宫格 / 自由选框 | **V-Trim 特有的直播布局概念**，不是通用能力。转译时落成 `Transform` | V-Trim 转译器 |
-| `FilterConfig` 关键词 | LLM 业务 | V-Trim |
-| `MuteRange` / 去静音 | 对时间轴的计算，与渲染无关 | V-Trim |
-| `sticker_source` 来源策略 | 素材挑选业务 | V-Trim |
-| `CoverConfig` 的 20 个字段 | 封面是"截帧 + 上述特效"的组合；**字段是 V-Trim 的排版预设** | V-Trim 转译成一次 `frame` 调用 + 特效条目 |
-| `CameraStyle` 三档倍率 | 转译成 `scale` keyframe | V-Trim |
-
-**判断准则**：**凡是"这个直播间怎么排版"的，归 V-Trim；凡是"像素怎么算出来"的，归本仓。**
-
----
+判据一句话：**凡是"像素怎么算出来"的，归本仓；凡是"这个直播间怎么排版"的，归参照实现。**
+逐条清单（`polish.toml` 解析、九宫格 `Layout`、关键词过滤、去静音、`sticker_source`、
+`CoverConfig` 字段、`CameraStyle` 三档）已迁\
+`docs/dhampir/p9-downstream-requirements.md`（§7）。
 
 ## 8. 分阶段（对齐既有 T 段编号习惯，从 T8 起）
 
@@ -315,22 +262,11 @@ evaluate(layer, frame)
 
 ---
 
-## 9. 与 V-Trim 的接口（一次性说清）
+## 9. 与下游的接口（**已迁\**）
 
-```
-V-Trim 侧（下游）                      本仓（底座）
-─────────────────                     ──────────────
-polish.toml ──┐
-              ├─→ 转译器 ──→ ProjectDoc(JSON) ──→ dhampir（预览 wasm / 出片 native）
-clip.json  ───┘                 ▲
-                                └── V-Trim 负责：布局→Transform、运镜→keyframes、
-                                    封面→frame+effects、去静音→时间轴裁剪、
-                                    关键词→已求值的事件列表
-```
+**参照实现决定"画什么"，本仓决定"怎么画出来，且两端画得一样"。**
 
-**分工一句话**：**V-Trim 决定"画什么"，本仓决定"怎么画出来，且两端画得一样"。**
-
----
+管道形状与逐项分工表\ `docs/dhampir/p9-downstream-requirements.md`（§9）。
 
 ## 10. 边界（这次没做的，别当成做了）
 
@@ -351,9 +287,9 @@ clip.json  ───┘                 ▲
 - **本文是设计，不是实现**。§8 的 T8–T14 全部**未开工**。
 - **没有量过任何性能**。`Warp`/`Composite` 的 pass 数与带宽影响**未测**；
   `Composite` 需要 ping-pong，那是"另一个数量级的改动"（`layer.rs:48` 原话）。
-- **V-Trim 侧的转译器未设计**（只定了边界与分工）。
-- **§2 的表是从源码读出来的**，但**没有跑过** V-Trim 的任何一条链路
-  （本会话 shell 不可用）——"V-Trim 有 14 个 handler"来自 `templates/index.html`
+- **参照实现 侧的转译器未设计**（只定了边界与分工）。
+- **§2 的表是从源码读出来的**，但**没有跑过** 参照实现 的任何一条链路
+  （本会话 shell 不可用）——"参照实现 有 14 个 handler"来自对它模板的
   的 grep，不是运行结果。
 - **`EffectPipeline` 的五个算子族是否真的够**，要等 T10/T11 落地才知道；
   不够就再扩一个变体，**不要**退回去按 kind 字符串派发。
@@ -363,7 +299,7 @@ clip.json  ───┘                 ▲
 ## 11. 落地记录（T8–T12，逐条附证据）
 
 **T8–T13 已完成并提交**（`6f77973`、`f63ac31`、`32b0097`、`6fc35aa`、`374f9c1`、`33e14d4`）。
-五个算子族**够用**：V-Trim 那 8 个缺失特效全部落进了 `ColorMask` / `Warp`，
+五个算子族**够用**：参照实现 那 8 个缺失特效全部落进了 `ColorMask` / `Warp`，
 没有出现"退回去按 kind 字符串派发"的需要。
 
 **收口读数**（本会话真跑，不是推断）：
@@ -419,7 +355,7 @@ ffmpeg（现有命令）解出     = 20 帧       <- 2 帧按 10fps 铺成 0.2 �
 **浏览器侧不受这条影响**：`<img>`/`ImageBitmap` 自己按动画时序给帧，
 `bitmaps` 那条路已经通了（`timeline_host.rs:347`）。
 
-**这一条没做**，所以 §9 的"V-Trim 贴纸"**还不能算承接完毕**。
+**这一条没做**，所以 §9 的"参照实现 贴纸"**还不能算承接完毕**。
 
 - **颜色怎么进 `Effect`**（§4.1 那条注）**尚未决策**，是 T9 的第一件事。
 

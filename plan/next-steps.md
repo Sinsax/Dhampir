@@ -390,7 +390,7 @@ T7.4 Linux 守卫 / T7.5 派生面同步 + 守卫清单落仓库）全部落地�
 | `node scripts/run-guards.mjs` | **18 / 18 全绿**（含每一条的 `--self-test`）—— 清单本身也**落仓库**了 |
 | `node scripts/run-wasm-tests.mjs` | **15 / 15**，与源码 `#[wasm_bindgen_test]` 属性条数对账一致 |
 | `node scripts/api-surface.mjs` | 绿：6 个模块 / 62 个导出，版本 4，`docs/host-api.md` 列了 26 个导出 |
-| `node scripts/check-cli.mjs` | **30 / 30 条判据**（14 个子命令） |
+| `node scripts/check-cli.mjs` | **30 / 30 条判据**（14 个子命令） —— **2026-10-01 更新：现在是 33 条**（另两条在这次之前加的，第 33 条是交接单 D2 修复时加的 `frame-from-only-to-end`）。**数量以脚本自己的输出为准**，别从这行抄 |
 | `node scripts/check-local-backend.mjs` | **22 / 22 条判据** |
 | `node scripts/check-dual-end.mjs` | 绿：**最差 SSIM = 1.000000** |
 | 文本卫生 | 绿：194 个文本文件全 LF、无 BOM、合法 UTF-8 |
@@ -429,7 +429,7 @@ T7.4 Linux 守卫 / T7.5 派生面同步 + 守卫清单落仓库）全部落地�
 
 ---
 
-## 九、P9（承接 V-Trim polish）收口时的复核 —— **边界 1 与 3 已收掉**
+## 九、P9（承接下游精修出片）收口时的复核 —— **边界 1 与 3 已收掉**
 
 **背景**：本会话拿到了 `danger-full-access` 的文件策略，于是"编码器吃 stdin 管道"
 那条环境限制**不再成立**（坑 19 是**会话级**的限制，不是仓库级的）。

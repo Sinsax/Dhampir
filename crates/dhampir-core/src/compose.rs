@@ -364,7 +364,7 @@ fn resolve_effects(element: &LayerV2, local_frame: Frame, duration: Frame) -> Ve
         //
         // 走 `Effect::strength` 而不是在这里现写一遍乘法 ——
         // "这条特效这一帧多强"只能有**一个**定义，否则求值层与别处
-        // （比如 V-Trim 直接读强度时）会算出两个数。
+        // （比如 参照实现 直接读强度时）会算出两个数。
         effect.opacity = effect.strength(local_frame, duration, None);
     }
     if !has_effect_target {

@@ -37,7 +37,7 @@ pub struct Cue {
     ///
     /// # 为什么这个值该在 cue 上，而不是在轨道规格上
     ///
-    /// V-Trim 的滚动进度是 `progress = (el - fadeIn) / travel`，而 **`travel` 逐条不同**
+    /// 参照实现 的滚动进度是 `progress = (el - fadeIn) / travel`，而 **`travel` 逐条不同**
     /// （它按文本字节数算：实测四条是 20.21 / 16.37 / 16.80 / 14.24 秒）。
     /// 而契约里的 `DanmakuSpec::duration_ms` 是**轨道级**的一个值 —— 它只能取平均，
     /// 于是长句滚得太快、短句滚得太慢。
@@ -636,7 +636,7 @@ mod tests {
 
     #[test]
     fn 逐条颜色从覆盖标签里抽出来() {
-        // V-Trim 的实测形状：`{\c&HFF3FE3}还能续约吗`
+        // 参照实现 的实测形状：`{\c&HFF3FE3}还能续约吗`
         // 注意 ASS 是 **BGR**：`FF3FE3` -> B=FF, G=3F, R=E3 -> RGB(E3,3F,FF)。
         let text = "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n\
                     Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,{\\c&HFF3FE3}还能续约吗\n";

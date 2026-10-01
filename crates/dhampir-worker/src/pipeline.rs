@@ -1657,7 +1657,7 @@ pub fn render_plan(
     } else {
         // ---- 分块并行 ----
         //
-        // 每块一个线程、一套 GPU 上下文、一个 ffmpeg 进程 —— 与 V-Trim 的
+        // 每块一个线程、一套 GPU 上下文、一个 ffmpeg 进程 —— 与 参照实现 的
         // `render/pipeline.rs:173`（`parallelism` 块各一个 `thread::spawn`）同一个形状。
         // 本仓先前是单线程逐帧 `submit` + 同步读回 + 同步写管道，三者完全不重叠。
         let bounds: Vec<(Frame, Frame)> =
@@ -1797,7 +1797,7 @@ struct RangeReport {
 /// 这块要开几个 worker。
 ///
 /// `plan.chunk_workers`：`1` = 不分块（**默认**，产物逐字节与从前相同）；
-/// `0` = 自动（按可用并行度，最多 8，与 V-Trim 的上限一致）；`n` = 指定 n。
+/// `0` = 自动（按可用并行度，最多 8，与 参照实现 的上限一致）；`n` = 指定 n。
 ///
 /// # 为什么默认不分块
 ///
@@ -1997,8 +1997,8 @@ fn concat_video(parts: &[PathBuf], output: &Path) -> Result<(), String> {
         // **必须是绝对路径。**
         //
         // concat demuxer 把 `file` 行里的相对路径按**清单文件所在目录**解析 ——
-        // 而清单就放在输出旁边（`out/vtrim2/`），于是 `out/vtrim2/.x.chunk_0.mp4`
-        // 会被拼成 `out/vtrim2/out/vtrim2/.x.chunk_0.mp4`。
+        // 而清单就放在输出旁边（`out/chunks/`），于是 `out/chunks/.x.chunk_0.mp4`
+        // 会被拼成 `out/chunks/out/chunks/.x.chunk_0.mp4`。
         // 报出来的错是"Impossible to open"，看起来像"分块没生成"，其实路径被叠了一次。
         let absolute = std::fs::canonicalize(part)
             .map_err(|error| format!("分块 {} 不在：{error}", part.display()))?;

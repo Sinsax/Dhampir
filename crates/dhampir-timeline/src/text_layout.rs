@@ -42,7 +42,7 @@ use crate::layer::SubtitleStyle;
 /// 行高与字号的比例。1.2 是常见的默认值（比 1.0 松，比 1.5 紧）。
 pub const LINE_HEIGHT_EM: f32 = 1.2;
 
-/// 缩字公式里的 `MAX_LINES`（参照 `wrapCaptionParts` 的 `MAX_LINES = 3`）。
+/// 缩字公式里的 `MAX_LINES`（参照实现 的 `MAX_LINES = 3`）。
 ///
 /// **它不是截断阈值** —— 参照从不丢行，这个 3 只出现在
 /// `scale = maxLineW * 3 / tw` 里，作用是"缩到恰好三行装得下"。
@@ -92,7 +92,7 @@ pub struct TextLine {
     /// [`place_line`] 原先写的是 `font_px = 行盒高 / LINE_HEIGHT_EM` ——
     /// 行盒是这里按 `line_px = font_px * line_em` 造的，两边用**同一个**
     /// `line_em` 时才成立。加了可配的行高之后就不是了：
-    /// V-Trim 的 `line-height:1.5` 让行盒变成 `72 * 1.5 = 108`，
+    /// 参照实现 的 `line-height:1.5` 让行盒变成 `72 * 1.5 = 108`，
     /// 而反推那边仍除以常量 1.2 —— 算出 `90`，**字号大了 1.25 倍**。
     ///
     /// 在 30s 那一帧上肉眼就看得出来：同一句「就是有人在他的那个」，
@@ -434,7 +434,7 @@ pub fn layout(text: &str, style: &SubtitleStyle, sequence: (u32, u32)) -> TextLa
     let sequence_width = sequence.0.max(1) as f32;
     let sequence_height = sequence.1.max(1) as f32;
     let font_px = style.font_ratio.max(0.0) * sequence_height;
-    // 轨道可以覆盖行高（V-Trim 的字幕 CSS 是 line-height:1.5，本仓默认 1.2）。
+    // 轨道可以覆盖行高（参照实现 的字幕 CSS 是 line-height:1.5，本仓默认 1.2）。
     // 默认 0 = 老行为，既有工程一字不变。
     let line_em = if style.line_height > 0.0 { style.line_height } else { LINE_HEIGHT_EM };
     let line_px = font_px * line_em;
@@ -456,7 +456,7 @@ pub fn layout(text: &str, style: &SubtitleStyle, sequence: (u32, u32)) -> TextLa
     let eps_em = 0.5 / font_px;
 
     // ---------------------------------------------------------------------
-    // 装不下时**整体缩字号**（参照 `wrapCaptionParts` 的闭式）
+    // 装不下时**整体缩字号**（参照实现 的闭式）
     // ---------------------------------------------------------------------
     //
     //     var scale = 1;
@@ -935,7 +935,7 @@ mod tests {
     /// 反推那边却除以常量 `LINE_HEIGHT_EM`（1.2）——
     /// `line-height:1.5` 之下算出 `72 * 1.5 / 1.2 = 90`，**字号大了 1.25 倍**。
     /// 同一句字幕在成片里肉眼就看得出来比参照大一圈。
-    /// **装不下时整体缩字号**（参照 `wrapCaptionParts` 的闭式）。
+    /// **装不下时整体缩字号**（参照实现 的闭式）。
     ///
     /// 参照：`scale = clamp(maxLineW * 3 / tw, 0.7, 1)`，`tw` 是基准字号下的总宽。
     /// 缩完之后 `tw * scale == maxLineW * 3` —— 恰好三行，所以折行结果必然 <= 3 行。
@@ -1069,7 +1069,7 @@ mod tests {
         //
         // 参照的闭式只保证 `总宽 × scale == 可用宽 × 3`，而**贪心折行每行会浪费**
         // （可用宽 46.67 em 的一行只装得下 46 个全宽字）—— 所以实际折出 **4 行**。
-        // 参照那边不丢，是因为它**根本不截断**（`wrapCaptionParts` 把折出来的全画了）。
+        // 参照那边不丢，是因为它**根本不截断**（它把折出来的全画了）。
         // 这里要两件事一起：缩字 **+ 不截断**。
         assert!(
             shrunk.dropped_lines < no_shrink.dropped_lines,

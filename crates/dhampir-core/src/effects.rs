@@ -29,7 +29,7 @@ pub const GAUSSIAN_BLUR: EffectSpec = EffectSpec {
     // 而"该缩没缩"长得像"模糊得不够"—— 后者正是本项目最要避免的**静默偏差**。
     space: EffectSpace::Document,
     pipeline: EffectPipeline::SeparableBlur,
-    // 瞬时模糊（V-Trim 的 blur 事件）：涨 2 帧、满 3 帧、落 5 帧 ≈ 0.33 秒 @30fps。
+    // 瞬时模糊（参照实现 的 blur 事件）：涨 2 帧、满 3 帧、落 5 帧 ≈ 0.33 秒 @30fps。
     window_default: Some(WindowDefault { attack: 2, hold: 3, release: 5 }),
 };
 
@@ -104,7 +104,7 @@ pub const REGISTRY: &[EffectSpec] = &[
 // ===== ColorMask 管线（T10）：用常量色叠加的逐像素算子 =====
 //
 // 与 ColorAdjust 的区别见 EffectPipeline::ColorMask 的注释。这四个都是
-// V-Trim 里真有的事件（flash / vignette / noise / overlay），不是凭空加的。
+// 参照实现 里真有的事件（flash / vignette / noise / overlay），不是凭空加的。
 //
 // **颜色一律拆成 r/g/b/a 四个参数**，不引第二个 map：
 // `params` 是 `BTreeMap<String, f32>`，一个字段一个含义，靠键名约定
@@ -112,7 +112,7 @@ pub const REGISTRY: &[EffectSpec] = &[
 
 /// 闪白（可带色）。`amount` 是覆盖强度，颜色由 r/g/b 给。
 ///
-/// V-Trim 的 flash 默认白色、0.25 秒。这里用同一个默认窗。
+/// 参照实现 的 flash 默认白色、0.25 秒。这里用同一个默认窗。
 pub const FLASH: EffectSpec = EffectSpec {
     kind: "flash",
     params: &[
@@ -271,7 +271,7 @@ mod tests {
     fn 瞬时特效都要给默认时长() {
         // 这条守的是"加了特效但忘了说它能不能当瞬时事件用"。
         // 没有 window_default 的特效在 UI 上插不进"第 30 帧闪一下"那类事件，
-        // 而那正是 V-Trim polish 的主要用法 —— 漏了会表现为"这个特效点不出来"。
+        // 而那正是 参照实现 polish 的主要用法 —— 漏了会表现为"这个特效点不出来"。
         for spec in REGISTRY {
             if spec.is_transient_capable() {
                 let window = spec.window_default.expect("刚判过有");

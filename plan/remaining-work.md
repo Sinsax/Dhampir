@@ -284,6 +284,9 @@ M2 这次还没发起。产出 `records/m2/review-independent.md`，守卫对它
   registry 可达（`npm ping` 有响应），所以 `npm i -g pnpm` 是修复路径；但 M3 的预览链路harness
   沿用 M2/S3.1 那套**纯 HTML + 本地服务 + 无头 Chrome**，**不依赖任何打包器**——React/Vite 骨架属下游 UI，不在本仓库交付。
 
+  > **注（2026-09-30 加）**：上面那条 `C:\Users\…\pnpm.exe` 是**当时的取证原文**，按记录规矩不改。
+  > 它只说明"那台机器当时是这样"，**不是本仓的依赖** —— 换台机器不受影响。
+
 - 逻辑一律用 **Node**，不用 PowerShell 做判定；判据看 `$LASTEXITCODE`；跑工具时 `$ErrorActionPreference='Continue'`。
 - **不跑 `cargo fmt` / `clippy --fix`** 之类批量改写命令（会和在建改动互相踩）；清理用 `rm`。
 - `git status --porcelain` / `record-acceptance` 的 `dirty` 都**剔除 `records/`**。
