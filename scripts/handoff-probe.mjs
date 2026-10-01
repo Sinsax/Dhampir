@@ -374,8 +374,10 @@ function probeShadow(cli) {
   }
 
   // 字体：本仓不猜系统字体，这里按候选列表挑一个**存在**的；一个都没有就跳过（不自作主张）。
+  // 发行版布局不同：Debian 在 truetype/dejavu，Arch/Fedora 在 TTF/，openSUSE 在 dejavu/。
   const FONTS = ['C:/Windows/Fonts/msyh.ttc', 'C:/Windows/Fonts/simhei.ttf',
-    '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'];
+    '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', '/usr/share/fonts/TTF/DejaVuSans.ttf',
+    '/usr/share/fonts/dejavu/DejaVuSans.ttf'];
   const font = FONTS.find((f) => existsSync(f));
   if (!font) { console.log('  · 找不到可用字体（--font-file 的候选都不在）—— **跳过**'); return; }
 

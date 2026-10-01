@@ -392,18 +392,22 @@ T6 之前这份文件里**一个音频的数都没有** —— 完全没有那�
 
 `cargo tree --target x86_64-unknown-linux-gnu -p dhampir-worker` 与默认（Windows）目标对比：
 
-| 目标 | 依赖数（去重） | ffmpeg / sherpa / onnx |
-|---|---|---|
-| `x86_64-unknown-linux-gnu` | **116** | **一个都不在** |
-| 默认（Windows） | **134** | 都在 |
+| 目标 | 依赖数（去重） |
+|---|---|
+| `x86_64-unknown-linux-gnu` | **116** |
+| 默认（Windows） | **134** |
 
-也就是说：**交叉 `cargo check` 通过，但它没检查到原生媒体那一栈** ——
-那一栈按平台门控，在 Linux 图上根本不存在。这次「绿」的范围就是
-「本仓那 5 个 crate 的 Rust 代码能过 Linux 的编译检查」，仅此而已。
+⚠️ **2026-10-01 更正**：这张表原来还有一列「ffmpeg / sherpa / onnx」，写着 Linux 侧「一个都不在」、
+Windows 侧「都在」。**那一列是错的**：本仓的 `Cargo.toml` 与 `Cargo.lock` 里这三个**一个都没有**
+（0 命中；`sherpa` / `onnx` 全仓只出现在文档里；ffmpeg 是**子进程调用**——
+`crates/dhampir-worker/src/pipeline.rs` 7 处、`text_raster.rs` 等）。116 vs 134 的差更可能来自
+wgpu 的后端 crate（dx12/metal 与 windows 系）。**数字不变、结论也不变**：交叉 `cargo check` 覆盖的
+仍然只是「本仓那 5 个 crate 能过 Linux 的类型检查」——只是当初给这个差找的原因站不住。
 做了正向对照：故意写坏 `dhampir-core` 一行，交叉 check 当场变红，源码还原后逐字节相同。
 
-边界：**这不是「Linux 上能跑」**。真正的 Linux 腿（链接、运行时、文件系统语义）仍然没跑过，
-属 D13 的范围。结论与理由写在 `plan/t7-evidence.md` 的 T7.4。
+边界：**交叉 check 不能替代「Linux 上能跑」**。（2026-10-01：真正的 Linux 腿已经在容器里跑过并归档，
+见 [records/m1/README.md](../records/m1/README.md) 的「补记」——但那是**另一次**证据，不是这一节的。）
+结论与理由写在 `plan/t7-evidence.md` 的 T7.4。
 
 ### 这一段**没量到**的
 

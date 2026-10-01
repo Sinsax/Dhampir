@@ -23,8 +23,15 @@ M1 = 「服务端 headless wgpu 基线」。它要回答的只有一件事：**h
 3. **预算**：1080p 单帧最慢一趟「渲染 + 读回」往返 DX12 `2.289 ms` / Vulkan `2.217 ms`，
    预算 `10 ms`，`verdict: true`。
 
-**缺口**：Linux 那两条腿（Linux/GPU、Linux/lavapipe）还没跑——本机没有 docker、
-WSL 里没有发行版，**⏳ 待补**。退出标准要求四种环境全部记录，所以这一条现在只是 2/4。
+**两条 Linux 腿已补**（2026-10-01）：`linux-gpu/`（AMD Radeon 680M / RADV）与
+`linux-lavapipe/`（llvmpipe 软渲染）。两条腿各 80 帧，**两次独立运行逐字节一致**
+（各自的 `compare.json`：`identical: true`、`matched_frames: 80`），`probe_digest` 与
+golden 相同。退出标准要的四种环境因此**齐了（4/4）**。
+
+⚠️ **它们与 Windows 那两条腿的 `frames_digest` 不同**：`679b249510eea426`（RADV）、
+`e2291e1bf32ddef6`（llvmpipe），而 Windows 的两条都是 `71ecc80cade3d73d`。**换了 GPU
+与驱动，字节不必相同** —— 退出标准①说的是「**重复运行**逐字节一致」，那由每条腿自己的
+`compare.json` 给出；跨机器/跨驱动的逐字节一致**不是**这份记录的主张（见下面「不证明什么」）。
 
 ---
 
@@ -40,7 +47,32 @@ WSL 里没有发行版，**⏳ 待补**。退出标准要求四种环境全部�
 | wgpu / naga | 30.0.1 / 30.0.1（从 `Cargo.lock` 读；后端 feature 只在宿主开） |
 | 构建 | `cargo build --release -p dhampir-worker --bin dhampir-render` → `7710208` 字节 |
 | 跑 corpus 的可执行文件 | `target/release/dhampir-render.exe` |
-| 本机没有的东西 | docker、WSL 发行版（所以 Linux 两条腿 ⏳） |
+| 本机没有的东西 | ~~docker、WSL 发行版~~（2026-10-01 起本机有 docker；两条 Linux 腿已补，见下） |
+
+### 补记（2026-10-01）：Linux 两条腿的现场
+
+| 项 | 值 |
+|---|---|
+| OS | Arch Linux（内核 7.2.3，**裸机**，非虚拟化） |
+| CPU | 16 核（x86_64） |
+| GPU（`linux-gpu/`） | AMD Radeon 680M `RADV REMBRANDT`（集成显卡，驱动 `radv` / Mesa `26.2.3-arch1.1`） |
+| GPU（`linux-lavapipe/`） | `llvmpipe (LLVM 22.1.8, 256 bits)`（CPU 软渲染，驱动 `llvmpipe`） |
+| rustc / cargo | **1.98.1**（发行版系统包。本机没有 rustup，**没有**按 `rust-toolchain.toml` 的 1.97.0 跑） |
+| Node | v26.10.0 |
+| wgpu / naga | 30.0.1 / 30.0.1（从 `Cargo.lock` 读，与 Windows 那条一致） |
+| 构建 | `cargo build --release -p dhampir-worker --bin dhampir-render` → `7652728` 字节 |
+| 运行环境 | Arch 容器（`--device=/dev/dri` 直通，`VK_ICD_FILENAMES` 选后端）；核外宿主**没有** Mesa/ffmpeg |
+| 运行语料 | `--scene all --frames 0..16 --backend vulkan`，两条腿各跑**两次**（第二次带 `--compare-run`） |
+
+**两条腿的读数**（`timing.json` / `run.json`）：
+
+| 腿 | 整表摘要 | 1080p 最慢往返 | 预算 10 ms | 重复运行 |
+|---|---|---|---|---|
+| `linux-gpu`（RADV） | `679b249510eea426` | **2.421 ms** | `verdict: true` | 逐字节一致（80/80） |
+| `linux-lavapipe` | `e2291e1bf32ddef6` | **29.581 ms** | `verdict: false` | 逐字节一致（80/80） |
+
+lavapipe 超预算**是设计使然**：plan 写明它是 CPU 软渲染、「性能掉一个数量级，只用于链路验证」。
+数字照记，门槛不套 —— 拿预算判它等于把设计选择当成回归（守卫的 `checkLinuxLegs` 就是这么写的）。
 
 ---
 
@@ -79,6 +111,23 @@ PNG 一共 160 张、259238 字节（单张 823–2194 字节）。文件名三�
 
 ---
 
+### ③ 两条 Linux 腿：`linux-gpu/` 与 `linux-lavapipe/`（各 5 份文件 + 80 张 PNG）
+
+与 ① 的 Windows 两条腿**同形**（同样五个文件 + `frames/`），只是跑在不同的机器与驱动上：
+
+| 腿 | 适配器 | `frames_digest` | `compare.json` | `build_profile` |
+|---|---|---|---|---|
+| `linux-gpu/` | AMD Radeon 680M（RADV，Mesa 26.2.3） | `679b249510eea426` | `identical: true`（80/80） | `release` |
+| `linux-lavapipe/` | llvmpipe（LLVM 22.1.8，CPU） | `e2291e1bf32ddef6` | `identical: true`（80/80） | `release` |
+
+**两条腿的整表摘要与 Windows 那两条不同**（`71ecc80cade3d73d`）—— 换 GPU/驱动不保证逐字节一致，
+所以守卫对这两条腿**另有一套口径**（`scripts/check-m1-record.mjs` 的 `checkLinuxLegs`）：不跟 Windows
+比字节、不套 10 ms 预算（lavapipe 是 CPU 软渲染），只判形状与自证——帧数与场景集、`probe_digest`
+等于 golden、`build_profile` 是 `release`、以及 `compare.json` 必须说两次运行逐字节一致。
+
+归档时用的是 `--backend vulkan`：`--scene all` 在 Linux 上会把不存在的 DX12 腿也跑一遍并因此退 1。
+
+---
 ## 数字（每个都能被重新算出来）
 
 | 项 | DX12 | Vulkan |
@@ -116,12 +165,11 @@ PNG 一共 160 张、259238 字节（单张 823–2194 字节）。文件名三�
 
 | # | 原文 | 状态 |
 |---|---|---|
-| ① | 目标环境（含 Linux 容器）能跑出 PNG，且重复运行逐字节一致 | **Win 两条腿达成**；Linux 容器 **⏳ 待补** |
-| ② | 四种环境（Win/DX12、Win/Vulkan、Linux/GPU、Linux/lavapipe）的 adapter 与通过情况全部记录 | **2/4**：两条腿的 `adapter.json` 已归档；Linux 两条 **⏳ 待补** |
-| ③ | 1080p 单帧渲染 ≤ 10ms（不含读回）——起始值，按实测定档 | **达成**：判的是「渲染 + 读回」往返（含 GPU，故为渲染时间的**高估**），最慢 2.289 ms ≤ 10 ms；预算仍留 10 ms（见下面的坑 3） |
+| ① | 目标环境（含 Linux 容器）能跑出 PNG，且重复运行逐字节一致 | **达成（4/4）**：Windows 两条腿（见上）+ Linux 两条腿（`linux-gpu/`、`linux-lavapipe/`）各自两次运行逐字节一致 |
+| ② | 四种环境（Win/DX12、Win/Vulkan、Linux/GPU、Linux/lavapipe）的 adapter 与通过情况全部记录 | **4/4**：四条腿的 `adapter.json` / `timing.json` / `run.json` / `compare.json` 都已归档 |
+| ③ | 1080p 单帧渲染 ≤ 10ms（不含读回）——起始值，按实测定档 | **Windows 达成**（最慢 2.289 ms）；**Linux/GPU 达成**（2.421 ms）；**Linux/lavapipe 超预算**（29.581 ms）—— CPU 软渲染的设计使然，plan 只把它当链路验证 |
 
-`plan/video-editor-plan.md` §4 里，只有真做完的才勾：Linux 相关的那两条**没有勾**，
-旁边写了 ⏳ 与缺口原因。
+`plan/video-editor-plan.md` §4 里，Linux 相关的那两条**已勾上**（2026-10-01）。
 
 ---
 
@@ -150,6 +198,46 @@ node scripts/check-m1-record.mjs --self-test
 
 `--backend` 默认 `all`，所以 1) 与 2) 各自**一个进程**就跑完两个后端。corpus 路径
 **必须显式给 `--out`**：默认值 `records/m0` 是已归档的记录，不给就被拦下来。
+
+---
+
+### Linux 两条腿（2026-10-01 补）
+
+```bash
+# 0) 容器：要 Vulkan ICD（RADV + lavapipe）与 /dev/dri 直通；挂在**同一绝对路径**上
+#    （测试产物里烤着 CARGO_MANIFEST_DIR，挂到别处会让草稿目录变成别的地方而 EACCES）
+docker run -d --name dhampir-linux --network host --device=/dev/dri \
+  -v "$PWD":"$PWD" -w "$PWD" archlinux:latest sleep infinity
+docker exec dhampir-linux pacman -Sy --noconfirm mesa vulkan-radeon vulkan-icd-loader vulkan-swrast
+
+# 1) release 二进制（宿主上编，容器里跑）
+cargo build --release -p dhampir-worker --bin dhampir-render
+
+# 2) linux-gpu：第一次 → 临时目录；第二次 → 归档目录，并逐帧比第一次
+docker exec -u 1000:1000 -w "$PWD" dhampir-linux \
+  target/release/dhampir-render --scene all --frames 0..16 --backend vulkan --out target/m1-linux-gpu-p1
+docker exec -u 1000:1000 -w "$PWD" dhampir-linux \
+  target/release/dhampir-render --scene all --frames 0..16 --backend vulkan \
+  --out target/m1-linux-gpu-p2 --compare-run target/m1-linux-gpu-p1
+
+# 3) linux-lavapipe：同一套流程，只把 ICD 指到软件渲染那条
+docker exec -u 1000:1000 -w "$PWD" -e VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
+  dhampir-linux target/release/dhampir-render --scene all --frames 0..16 --backend vulkan \
+  --out target/m1-linux-lvp-p1
+docker exec -u 1000:1000 -w "$PWD" -e VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
+  dhampir-linux target/release/dhampir-render --scene all --frames 0..16 --backend vulkan \
+  --out target/m1-linux-lvp-p2 --compare-run target/m1-linux-lvp-p1
+
+# 4) 归档：把第二次那份 <out>/vulkan/ 原样拷成腿目录（工具固定写 <out>/<slug>/）
+cp -a target/m1-linux-gpu-p2/vulkan/. records/m1/linux-gpu/
+cp -a target/m1-linux-lvp-p2/vulkan/. records/m1/linux-lavapipe/
+
+# 5) 复核
+node scripts/check-m1-record.mjs --record records/m1   # linux-legs 这条判据会按它们自己的口径查
+```
+
+**为什么不用 `--scene all` 的默认（两个后端都跑）**：Linux 上没有 DX12，那条腿会红；
+`--backend vulkan` 让这一趟只跑存在的那个后端，退出码才是 0。
 
 ---
 
@@ -200,8 +288,12 @@ node scripts/check-m1-record.mjs --self-test
 
 ## 这份记录**不**证明什么
 
-- **不证明 Linux 上跑得通。** 只有两条 Windows 腿；Linux/GPU 与 Linux/lavapipe **⏳ 待补**。
-  退出标准的第 ① ② 条因此还没闭合。
+- **不证明"换台机器也逐字节一样"。** 四条腿的 `frames_digest` 是两组：Windows 两条都是
+  `71ecc80cade3d73d`，Linux 两条分别是 `679b249510eea426`（RADV）与 `e2291e1bf32ddef6`（llvmpipe）。
+  这份记录主张的是「**同一环境重复运行一致**」，不是「跨 GPU/驱动一致」。
+- **不证明 Linux/lavapipe 的 10 ms 预算。** 它 29.581 ms —— CPU 软渲染本来就只用于链路验证。
+- **不证明 Windows 与 Linux 能力对等**：Linux 那两条腿跑在**容器**里（Vulkan ICD 来自容器），
+  核外宿主没有 Mesa；而且构建用的是发行版 cargo 1.98.1，不是 `rust-toolchain.toml` 钉的 1.97.0。
 - **不证明"单帧纯渲染 ≤ 10 ms"。** 判据是往返（含读回）——这是**高估**，
   高估只漏报不误报；真要测纯 GPU 时间需要 `TIMESTAMP_QUERY`，那不是到处都有的能力。
 - **不证明别的 GPU / 别的驱动上的表现。** 这些数来自一块 RTX 4070 与两台驱动；
@@ -223,7 +315,7 @@ node scripts/check-m1-record.mjs --self-test
   直接红，缺腿的 ⏳ 还必须与 Linux **同一行**；`crates/` 下每个目录都必须在 members 里。
   4 条低问题是数字与措辞，已改：`键不重叠`→ 实测 10 键同名（见上面的坑 6）、
   `183 文件`→ 185、`254 行`→ 253（`wc -l` 口径）；`docker` 那条经实测确认本机确实
-  没有 docker，原结论成立（可关闭）
+  没有 docker，原结论在写下时成立；**2026-10-01 起本机有 docker，两条 Linux 腿已补**（见上面的补记）—— 这条的前提已经不在了（可关闭）
 - 记录格式的上一份：`records/m0/README.md`（M0 的产物与坑）
 - 项目总览与构建方式：`README.md`（仓库根）
 - 守卫与记录工具：`scripts/`（`record-acceptance.mjs`、`check-m1-record.mjs`、

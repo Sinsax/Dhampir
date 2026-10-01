@@ -137,13 +137,21 @@ function valueOf(name, fallback) {
 }
 
 function findChrome() {
+  // 浏览器的**安装路径是发行版相关的**：Debian/Ubuntu 是 google-chrome，
+  // Arch / Fedora / openSUSE 是 chromium。只列一个的话，装了浏览器也会报
+  // 「找不到 Chrome」—— 那是**环境差异**，不是代码坏了，但现象一模一样。
+  // 所以：候选表覆盖两种命名，另外给一个显式出口（--chrome / DHAMPIR_CHROME）。
+  const explicit = valueOf('--chrome', process.env.DHAMPIR_CHROME || null);
   const candidates = [
+    explicit,
     'C:/Program Files/Google/Chrome/Application/chrome.exe',
     'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
     '/usr/bin/google-chrome',
-  ];
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+  ].filter((path) => typeof path === 'string' && path.length > 0);
   for (const path of candidates) if (existsSync(path)) return path;
-  throw new Error('找不到 Chrome');
+  throw new Error('找不到 Chrome（装了别的发行版的浏览器就用 --chrome <路径> 或 DHAMPIR_CHROME）');
 }
 
 tryRemove(OUT_DIR);
@@ -481,6 +489,19 @@ if (mode === 'serve') {
       'user_pref("media.hardware-video-decoding.force-enabled", true);',
     ].join(String.fromCharCode(10)) + String.fromCharCode(10), 'utf8');
   }
+  // 容器里 Chrome 的 zygote 沙箱起不来（实测报
+  // Failed to move to new namespace ... Operation not permitted），
+  // 这时必须显式关掉沙箱。**不默认关**：桌面机上开着是对的，悄悄关掉就是把
+  // 「环境差异」变成「少一层隔离」。所以走显式开关（--chrome-no-sandbox 或 DHAMPIR_CHROME_NO_SANDBOX=1）。
+  const noSandbox = argv.includes('--chrome-no-sandbox') || process.env.DHAMPIR_CHROME_NO_SANDBOX === '1';
+  if (noSandbox) console.log('  · 已按调用方要求关掉 Chrome 沙箱（--no-sandbox）');
+  // 还有一类是**容器里没有显示服务器**：实测 GPU 进程挂在
+  // 「Could not open the default X display」/「eglInitialize OpenGLES failed」，
+  // 页面于是报「Failed to create WebGPU Context Provider」。不同容器的解法不一样
+  // （--use-angle=vulkan、--ozone-platform=headless、--use-gl=angle…），所以不给死值，
+  // 只开一个显式通道：调用方把自己的那串额外开关递进来。
+  const extraArgs = (process.env.DHAMPIR_CHROME_EXTRA_ARGS || '').split(/\s+/).filter((token) => token.length > 0);
+  if (extraArgs.length > 0) console.log('  · 追加 Chrome 开关：' + extraArgs.join(' '));
   const browserArgs = isFirefox
     // Firefox 没有 CDP。读不到脚印时靠页面自己的 beacon，
     // 所以这一条照样能用，只是「页面卡点」那一行会显示读不到。
@@ -488,6 +509,8 @@ if (mode === 'serve') {
     : [
         '--headless=new', '--disable-gpu-sandbox', '--no-first-run', '--no-default-browser-check',
         '--user-data-dir=' + profile, '--enable-unsafe-webgpu', '--use-angle=default',
+        ...(noSandbox ? ['--no-sandbox'] : []),
+        ...extraArgs,
         // **把调试端口开起来**：卡住的时候要靠它读页面里的脚印，而不是等页面自己上报。
         '--remote-debugging-port=0',
         // **把页面的 console 转到 stderr** —— 没有它，页面里抛的错在外面看不到，

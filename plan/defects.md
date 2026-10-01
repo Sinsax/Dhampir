@@ -97,11 +97,11 @@
   验收: 驱动检测到陈旧时自动重建一次，并保持"真的坏了仍然红"
   证据: plan/t7-evidence.md
 
-- [D13] status=wontfix phase=-
-  症状: M1 的环境矩阵缺 Linux 两条腿（本机无 docker、WSL 无发行版）
+- [D13] status=done phase=-
+  症状: M1 的环境矩阵缺 Linux 两条腿（当时的判据是本机无 docker、WSL 无发行版）
   根因: plan/p1-p5-status.md:1
-  验收: 用户决定不跑腿 —— 但**设计必须考虑**（Linux 相关考虑由 D16 覆盖），台账如实记为已知缺口
-  证据: -
+  验收: 两条 Linux 腿各归档 5 份文件 + 80 张 PNG，两次独立运行逐字节一致（compare.json identical），probe 摘要等于 golden；守卫按它们自己的口径复核（不跨机器比字节、不套 10 ms 预算）。复核：node scripts/check-m1-record.mjs --record records/m1
+  证据: records/m1/linux-gpu records/m1/linux-lavapipe records/m1/README.md
 
 - [D14] status=wontfix phase=-
   症状: 色彩矩阵两端不同源（后端显式 bt709，浏览器由 WebCodecs 决定）

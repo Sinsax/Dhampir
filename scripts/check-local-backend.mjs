@@ -18,7 +18,7 @@
 //
 //   node scripts/check-local-backend.mjs
 //   node scripts/check-local-backend.mjs --self-test
-//   node scripts/check-local-backend.mjs --port 8799 --cli target/debug/dhampir.exe
+//   node scripts/check-local-backend.mjs [--port 8799 --cli target/debug/dhampir]
 
 import { spawn } from 'node:child_process';
 import { runToolSync } from './spawn-tool.mjs';
@@ -31,6 +31,7 @@ export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** 每一条判据的名字。**改这里就必须改采集端**，judge 会把差异指出来。 */
 export const EXPECTED = [
+  'backend-self-test',
   'health',
   'capabilities',
   'project-is-doc',
@@ -127,6 +128,17 @@ async function collect(port) {
   const record = (name, ok, detail) => {
     observed.push({ name: name, ok: !!ok, detail: detail === undefined ? '' : String(detail) });
   };
+
+  // 后端模块**自己的自检**先跑。它盯的是纯函数（资产索引的绝对路径判定、NDJSON 归约、
+  // 任务状态机形状），端到端这条路走不到那些分支。
+  // 起因是它在 Linux 上红过一次（「C:/abs/c.mp4」被当成相对路径挂到 asset_root 下面），
+  // 而当时**没有任何守卫会跑它** —— 自检红了也没人知道。这条把它接进来。
+  const moduleSelfTest = runToolSync(process.execPath, ['scripts/dhampir-local.mjs', '--self-test'], {
+    cwd: REPO_ROOT,
+  });
+  const moduleLog = (moduleSelfTest.stdout || '') + (moduleSelfTest.stderr || '');
+  record('backend-self-test', moduleSelfTest.status === 0,
+    moduleSelfTest.status === 0 ? '' : moduleLog.trim().slice(-300));
 
   const child = spawn(process.execPath, ['scripts/dhampir-local.mjs', '--port', String(port)], {
     cwd: REPO_ROOT,
@@ -321,7 +333,8 @@ async function main() {
     const index = argv.indexOf(name);
     return index >= 0 ? argv[index + 1] : fallback;
   };
-  const cli = value('--cli', join(REPO_ROOT, 'target', 'debug', 'dhampir.exe'));
+  // 默认按**当前平台**的可执行名找（Windows 是 dhampir.exe，Linux/macOS 是 dhampir）。
+  const cli = value('--cli', join(REPO_ROOT, 'target', 'debug', process.platform === 'win32' ? 'dhampir.exe' : 'dhampir'));
   if (!existsSync(cli)) {
     console.error('找不到 dhampir 可执行文件：' + cli);
     console.error('先跑：cargo build -p dhampir-worker --bin dhampir');

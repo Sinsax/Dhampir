@@ -38,6 +38,9 @@ export const FONT_CANDIDATES = [
   'C:/Windows/Fonts/simsun.ttc',
   'C:/Windows/Fonts/NotoSansSC-VF.ttf',
   '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+  '/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc',
+  '/usr/share/fonts/TTF/DejaVuSans.ttf',
+  '/usr/share/fonts/dejavu/DejaVuSans.ttf',
   '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
   '/System/Library/Fonts/PingFang.ttc',
 ];

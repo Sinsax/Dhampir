@@ -17,7 +17,7 @@
 // 用法：
 //   node scripts/check-cli.mjs
 //   node scripts/check-cli.mjs --self-test
-//   node scripts/check-cli.mjs --cli target/debug/dhampir.exe
+//   node scripts/check-cli.mjs [--cli target/debug/dhampir]
 
 import { runToolSync } from './spawn-tool.mjs';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
@@ -571,7 +571,11 @@ function main() {
   const argv = process.argv.slice(2);
   if (argv.includes('--self-test')) { runSelfTest(); return; }
   const index = argv.indexOf('--cli');
-  const cli = index >= 0 ? argv[index + 1] : join(REPO_ROOT, 'target', 'debug', 'dhampir.exe');
+  // 默认按**当前平台**的可执行名找（Windows 是 dhampir.exe，Linux/macOS 是 dhampir）。
+  // 写死 .exe 的后果是：装对了二进制也报「先跑 cargo build」——那是环境差异，不是契约不成立。
+  const cli = index >= 0
+    ? argv[index + 1]
+    : join(REPO_ROOT, 'target', 'debug', process.platform === 'win32' ? 'dhampir.exe' : 'dhampir');
   if (!existsSync(cli)) {
     console.error('找不到 dhampir 可执行文件：' + cli);
     console.error('先跑：cargo build -p dhampir-worker --bin dhampir');

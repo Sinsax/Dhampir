@@ -1079,6 +1079,66 @@ export function checkHonesty({ readmeText, subdirNames, completeLegDirs = [], in
   return messages;
 }
 
+/**
+ * Linux 两条腿的复核口径。**与 Windows 那两条不是一套判据**，三条理由：
+ *
+ *   1. **不与 Windows 逐字节比**：换了 GPU 与驱动，字节不必相同 —— 本仓实测
+ *      RADV 679b249510eea426、lavapipe e2291e1bf32ddef6，而 Windows 两条都是 71ecc80cade3d73d。
+ *      退出标准①要的是「**重复运行**逐字节一致」，那由这条腿自己的 compare.json 给出。
+ *   2. **不判 10 ms 预算**：lavapipe 是 CPU 软渲染，plan 写明「性能掉一个数量级，只用于链路验证」
+ *      —— 拿预算判它等于把设计选择当成回归。数字照旧记在 timing.json 里，只是不拿它当门槛。
+ *   3. 判的是**形状与自证**：帧数与场景集对得上、probe 摘要等于 golden、build_profile 是 release
+ *      （debug 的计时没有意义）、adapter 能看出跑在什么上、而且 compare.json 必须说 identical。
+ *
+ * 完整 Linux 腿**不足两条**时返回 applicable=false —— 那种情况归 checkHonesty 的
+ * 「README 里必须有同行 ⏳」管，不在这里重复判（否则同一条缺口会报两次）。
+ */
+export function checkLinuxLegs(recordDir, completeLegDirs) {
+  const expected = ['linux-gpu', 'linux-lavapipe'];
+  const present = completeLegDirs.filter((name) => /^linux/i.test(name));
+  if (present.length < LINUX_LEGS) return { applicable: false, messages: [] };
+  const messages = [];
+  const wantFrames = EXPECTED.framesPerScene * EXPECTED.scenes.length;
+  for (const slug of expected) {
+    if (!present.includes(slug)) {
+      messages.push('完整的 Linux 腿是 ' + present.join('、') + '，缺 ' + slug +
+        '/ —— 四种环境的腿名是约定：linux-gpu（真 GPU）、linux-lavapipe（CPU 软渲染）');
+      continue;
+    }
+    const leg = loadLeg(recordDir, slug);
+    const { adapter, run, backend, scenes } = parts(leg);
+    if (leg.frameNames.length !== wantFrames) {
+      messages.push(slug + ' 有 ' + leg.frameNames.length + ' 张 PNG，期望 ' + wantFrames);
+    }
+    const sceneNames = scenes.map((scene) => scene.name).join(',');
+    if (sceneNames !== EXPECTED.scenes.join(',')) {
+      messages.push(slug + ' 的场景集是 ' + JSON.stringify(sceneNames));
+    }
+    if (adapter.probe_digest !== EXPECTED.probeDigest) {
+      messages.push(slug + ' 的 probe_digest=' + JSON.stringify(adapter.probe_digest) +
+        '，golden 是 ' + EXPECTED.probeDigest);
+    }
+    if (adapter.build_profile !== 'release') {
+      messages.push(slug + ' 的 build_profile=' + JSON.stringify(adapter.build_profile) +
+        ' —— Linux 腿要 release（debug 的计时说明不了任何事）');
+    }
+    const adapterInfo = adapter.adapter ?? {};
+    if (typeof adapterInfo.name !== 'string' || adapterInfo.name.length === 0) {
+      messages.push(slug + '/adapter.json 看不出跑在什么适配器上');
+    }
+    const compare = leg.compare;
+    if (!compare || compare.__error !== undefined || compare.identical !== true) {
+      messages.push(slug + '/compare.json 没说两次运行逐字节一致（' +
+        JSON.stringify(compare && compare.__error ? compare.__error : compare && compare.identical) +
+        '）—— 退出标准①要的正是这一条');
+    }
+    if (typeof backend.frames_digest !== 'string' || backend.frames_digest.length === 0) {
+      messages.push(slug + '/run.json 里没有 frames_digest');
+    }
+  }
+  return { applicable: true, messages };
+}
+
 // ---------------------------------------------------------------------------
 // 自检
 // ---------------------------------------------------------------------------
@@ -1724,6 +1784,48 @@ function runSelfTest() {
   );
   expect('README 空要报', checkHonesty({ readmeText: '', subdirNames: ['dx12'] }).length === 1, '空 README 放行了');
 
+  // ---- Linux 两条腿的复核口径 ----
+  expect(
+    '不足两条完整 Linux 腿时这条判据不适用（缺口归 ⏳ 那条管）',
+    checkLinuxLegs('records/m1', ['dx12', 'vulkan']).applicable === false
+      && checkLinuxLegs('records/m1', ['dx12', 'vulkan', 'linux-gpu']).applicable === false,
+    '把"还没归档"当成了"归档了但不合格"',
+  );
+  const linuxProbe = mkdtempSync(join(tmpdir(), 'm1-linux-legs-'));
+  try {
+    for (const slug of ['linux-gpu', 'linux-lavapipe']) {
+      const dir = join(linuxProbe, slug);
+      mkdirSync(join(dir, 'frames'), { recursive: true });
+      writeFileSync(join(dir, 'frames', 'frame-0000.png'), 'not-a-png');
+      writeFileSync(join(dir, 'adapter.json'), JSON.stringify({
+        probe_digest: 'deadbeefdeadbeef', build_profile: 'debug', adapter: { name: '' },
+      }));
+      writeFileSync(join(dir, 'run.json'), JSON.stringify({ scenes: ['gradient'], backends: [{}] }));
+      writeFileSync(join(dir, 'readings.txt'), 'x');
+      writeFileSync(join(dir, 'timing.json'), '{}');
+      writeFileSync(join(dir, 'compare.json'), JSON.stringify({ identical: false }));
+    }
+    const bad = checkLinuxLegs(linuxProbe, ['dx12', 'vulkan', 'linux-gpu', 'linux-lavapipe']);
+    expect('两条完整但内容不合格的 Linux 腿必须逐条报出来', bad.applicable && bad.messages.length > 0,
+      '不合格的 Linux 腿被放行了');
+    expect('要点名 probe 摘要对不上 golden',
+      bad.messages.some((m) => m.includes('probe_digest')), bad.messages.join(' | '));
+    expect('要点名 compare 没说逐字节一致',
+      bad.messages.some((m) => m.includes('identical') || m.includes('逐字节一致')), bad.messages.join(' | '));
+    expect('要点名 build_profile 不是 release',
+      bad.messages.some((m) => m.includes('build_profile')), bad.messages.join(' | '));
+    expect('腿名换了（linux-x/linux-y）也要报',
+      checkLinuxLegs(linuxProbe, ['dx12', 'vulkan', 'linux-x', 'linux-y']).messages.length > 0,
+      '腿名不对却放行');
+  } finally {
+    rmSync(linuxProbe, { recursive: true, force: true });
+  }
+  if (existsSync(join(DEFAULT_RECORD, 'linux-gpu'))) {
+    const real = checkLinuxLegs(DEFAULT_RECORD, ['dx12', 'vulkan', 'linux-gpu', 'linux-lavapipe']);
+    expect('真记录里的两条 Linux 腿按自己的口径全绿',
+      real.applicable && real.messages.length === 0, real.messages.join(' | '));
+  }
+
   return { failures, count };
 }
 
@@ -1861,6 +1963,17 @@ function main() {
     ok: honestyMessages.length === 0,
     detail: honestyMessages.slice(0, 6).join('；'),
   });
+
+  // Linux 两条腿归档之后，按**它们自己的口径**复核（见 checkLinuxLegs）。
+  const linuxVerdict = checkLinuxLegs(recordDir, completeLegDirs);
+  if (linuxVerdict.applicable) {
+    results.push({
+      id: 'linux-legs',
+      where: 'Linux 两条腿',
+      ok: linuxVerdict.messages.length === 0,
+      detail: linuxVerdict.messages.slice(0, 6).join('；'),
+    });
+  }
 
   // ---- 报 ----
   const failed = results.filter((result) => !result.ok);

@@ -107,6 +107,27 @@ export function canTransition(from, to) {
 }
 
 /**
+ * 判定素材 `uri` 是不是「绝对位置」。**按书写形态判，不按当前平台判。**
+ *
+ * `path.isAbsolute()` 是平台语义：Windows 上 `C:/x` 是绝对的，Linux 上它只是
+ * 一个普通相对路径（`C:` 是个普通目录名）。工程文件是跨宿主走的，所以同一份 uri
+ * 在两个宿主上必须得到**同一个答案** —— 否则 Windows 上写的 `C:/abs/b.mp4` 在
+ * Linux 出片时会被挂到 assetRoot 下面，变成 `target/s3/C:/abs/b.mp4`。
+ *
+ * 规则与 Rust 侧 `is_absolute_uri`（crates/dhampir-worker/src/bin/dhampir.rs）逐条对应，
+ * **不许只改一边**：
+ * 1. 当前平台的绝对路径（`path.isAbsolute`，覆盖 POSIX 的 `/…`）；
+ * 2. 盘符绝对：字母 + ':' + 紧跟 '/' 或 '\\'（`C:foo` 是盘符相对，Windows 也不认它绝对）；
+ * 3. UNC：以两个反斜杠开头（Linux 上它只是一个普通组件，只能看文本）。
+ */
+export function isAbsoluteUri(uri) {
+  if (typeof uri !== 'string' || uri.length === 0) return false;
+  if (isAbsolute(uri)) return true;
+  if (/^[A-Za-z]:[\\/]/.test(uri)) return true;
+  return uri.startsWith('\\\\');
+}
+
+/**
  * 从「工程文件文本」与「兜底登记表文本」拼出 id -> 文件。
  *
  * 优先级是有意的：**工程文件的 assets 先来，兜底表只补缺**。
@@ -121,7 +142,7 @@ export function parseAssetIndex(projectTexts, fallbackText, assetRoot) {
     if (resolved.has(id)) return;
     resolved.set(id, {
       id: id,
-      file: isAbsolute(uri) ? uri : join(assetRoot, uri),
+      file: isAbsoluteUri(uri) ? uri : join(assetRoot, uri),
       source: source,
     });
   };
@@ -947,9 +968,15 @@ function runSelfTest() {
   expect('兜底表补工程文件没登记的 id', index.get('b.mp4').source === 'fallback');
   expect('裸契约不进索引', parseAssetIndex([JSON.stringify({ schema: 1, tracks: [] })], '', 'x').size === 0);
   expect('坏 JSON 不让索引整体崩', parseAssetIndex(['{oops'], '{"assets":{"z.mp4":{"file":"z.mp4"}}}', 'x').size === 1);
-  expect('绝对 uri 原样', parseAssetIndex(
-    [JSON.stringify({ project_schema: 1, assets: [{ id: 'c', uri: 'C:/abs/c.mp4' }] })], '', 'x'
-  ).get('c').file.replace(/\\/g, '/') === 'C:/abs/c.mp4');
+  // ---- 「绝对」按**书写形态**判，不按平台判（Linux 上 path.isAbsolute('C:/…') 是 false）----
+  const shown = (assets, id) => parseAssetIndex(
+    [JSON.stringify({ project_schema: 1, assets })], '', 'x'
+  ).get(id).file.replaceAll('\\', '/');
+  expect('盘符绝对原样（正斜杠）', shown([{ id: 'c', uri: 'C:/abs/c.mp4' }], 'c') === 'C:/abs/c.mp4');
+  expect('盘符绝对原样（反斜杠）', shown([{ id: 'd', uri: 'D:\\abs\\d.mp4' }], 'd') === 'D:/abs/d.mp4');
+  expect('盘符大小写不敏感', shown([{ id: 'e', uri: 'c:/abs/e.mp4' }], 'e') === 'c:/abs/e.mp4');
+  expect('UNC 原样', shown([{ id: 'g', uri: '\\\\server\\share\\g.mp4' }], 'g') === '//server/share/g.mp4');
+  expect('盘符相对仍挂根（C:foo 不是绝对）', shown([{ id: 'f', uri: 'C:rel.mp4' }], 'f') === 'x/C:rel.mp4');
 
   // ---- NDJSON 与进度 ----
   const ndjson = '{"event":"start","total":90}\nnot json\n{"event":"progress","done":45,"total":90}\n\n{"event":"done","frames":90}\n';

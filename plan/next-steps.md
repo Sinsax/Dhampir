@@ -142,7 +142,9 @@ T5 收口时更新（T5 整段完成，2026-09-24）—— 数字在 measurement
 3. **预览侧的编辑路径**只验过「同一次编辑，两端给出逐字段相同的工程」这一条；
    界面本身（按钮、拖拽、素材库面板）只有冒烟级验证。
 4. **出片吞吐是下界**：四个 asset 指向同一个文件。
-5. **M1 的环境矩阵是 2/4**（Linux 两条腿不跑）。
+5. ~~**M1 的环境矩阵是 2/4**（Linux 两条腿不跑）~~ —— **2026-10-01 已补齐 4/4**：
+   Linux 两条腿（RADV + lavapipe）跑通并归档进 `records/m1/`（见那里的「补记」）。
+   **仍然没验的是别的发行版 / 别的 GPU**：这一轮只在一台 Arch + AMD Radeon 680M 上跑过。
 6. **宿主 API 的版本号只证明「对端能问、文档与代码一致」**：本仓没有第二个独立实现来消费
    那个数字，所以「对端按版本分支处理了」没有被证到（`dhampir_host_api_version` + docs/host-api.md）。
 7. **侧挂导出的口径**（T2.7）：不看 `tracks[].enabled`；轨内元素重叠时两条都列出、按起点排序；
@@ -419,10 +421,13 @@ T7.4 Linux 守卫 / T7.5 派生面同步 + 守卫清单落仓库）全部落地�
    而那个管道在本会话起不来。`check-cli` 的 30 条判据能过是因为它走的是**不喂 stdin** 的路径；
    整条出片腿要在**普通终端**里跑才算数。**拿"音轨拼出来了、时长对得上"冒充"整条腿出片成功"，
    正是那种"看起来成功、其实没验"。**
-2. **Linux "能跑"仍未验证**：交叉 `cargo check --target x86_64-unknown-linux-gnu` **真跑了**（退出码 0），
-   但 Linux 依赖图里**没有** ffmpeg / sherpa / onnx（116 个 crate 对 Windows 的 134 个），
-   所以它只证明「我们自己的代码在 Linux cfg 下类型正确」，**不等于"Linux 上能跑"**。
-   D16 的守卫只兜住静态那三类，且"禁盘符"那半条量完后按"会造假红"驳回（理由见 t7-evidence.md）。
+2. ~~**Linux "能跑"仍未验证**~~ —— **2026-10-01 在 Linux 本机上跑过了**：
+   `cargo check --workspace --all-targets` **0 warning**、`cargo test --workspace --no-fail-fast`
+   **686 passed / 1 failed / 30 ignored**（那条失败是**真缺陷**：`asset.uri` 的绝对判定按平台语义，
+   已修并加了 Linux 守卫 R5）、**30 条 ignored 测试全绿**（Vulkan + ffmpeg + 字体路径齐备）、
+   以及 **M1 的两条 Linux 腿**跑通归档。**仍未验**：别的发行版、别的 GPU/驱动、链接与运行时语义。
+   （顺带更正：原来说「Linux 依赖图里没有 ffmpeg / sherpa / onnx」——本仓 `Cargo.lock` 里这三个
+   一个都没有，见 [measurements.md](./measurements.md) §9.3 的更正。）
 3. **`decoding` 代价表与第五项的 14.56 ms/帧 仍未对账**（T5 留下的那条待办，40.90 对 14.56），
    也要在能起编码器的终端里重跑 `node scripts/measure-export.mjs` 才说得清。
    **在有人重跑之前，两边的数都别当结论用。**
@@ -495,10 +500,13 @@ T7.4 Linux 守卫 / T7.5 派生面同步 + 守卫清单落仓库）全部落地�
 **但我没有回去逐行核对 40.90 那张表的口径**，所以**这条不算收掉**，
 只能说"第三个读数在，且它与另外两个的差异像是量纲差异"。要对账得先读表。
 
-### 9.3 边界 2（Linux）—— **未动**
+### 9.3 边界 2（Linux）—— **2026-10-01 收掉了**
 
-交叉 `cargo check` 仍然只是"类型正确"，不等于"Linux 上能跑"。
-本会话没碰它。
+原来写的是「交叉 `cargo check` 仍然只是类型正确」。这一轮在 Linux 本机上直接跑了：
+`cargo check --workspace --all-targets`（0 warning）、`cargo test --workspace`（**689 passed / 0 failed / 30 ignored**；
+修 `asset.uri` 那条缺陷之前是 686 passed / 1 failed）、
+30 条 ignored 测试（GPU / ffmpeg / 字体齐备）、M1 的两条 Linux 腿归档，`check-cli` 33/33、`check-local-backend` 25/25。
+**剩下的边界**：别的发行版与别的 GPU/驱动没验过——这一轮只在一台 Arch + AMD Radeon 680M 上跑。
 
 ### 9.4 P9 自身的完成度
 
@@ -515,3 +523,37 @@ T7.4 Linux 守卫 / T7.5 派生面同步 + 守卫清单落仓库）全部落地�
 **测试数**：547（T7 收口）→ **609**。
 **守卫**：20 / 20 全绿（含 `check-effect-registry` 现在认 13 个特效、4 条管线）。
 
+---
+
+## 十、2026-10-01 Linux 全量读数（Arch + AMD 680M，容器里）
+
+这一轮把「Linux 上到底能不能跑」真的跑了一遍。环境：Arch Linux（裸机）+ docker 容器
+（`--network host --device=/dev/dri`，工作区挂在**同一绝对路径**上），容器里装了 Mesa（RADV + lavapipe）、
+ffmpeg、chromium、rustup + wasm32 target、wasm-pack、gcc。
+
+| 跑什么 | 结果 |
+|---|---|
+| `cargo check --workspace --all-targets` | **0 warning** |
+| `cargo test --workspace --no-fail-fast` | **689 passed / 0 failed / 30 ignored** |
+| 30 条 ignored（GPU / ffmpeg / 字体） | **全绿**（要 Vulkan + ffmpeg + 字体；字体候选表已补发行版路径） |
+| `node scripts/run-guards.mjs`（全套 20 条） | **18 / 20** —— 红的两条见下 |
+| `check-cli.mjs` | **33 / 33**（含往编码器 stdin 写帧的整条出片腿） |
+| `check-local-backend.mjs` | **25 / 25** |
+| `run-wasm-tests.mjs`（wasm32 运行时） | **19 / 19**（与源码 `#[wasm_bindgen_test]` 条数对账一致） |
+| M1 的 Linux 两条腿 | **已归档**（RADV `679b249510eea426` / llvmpipe `e2291e1bf32ddef6`，各 80 帧、两次运行逐字节一致） |
+
+**两条红的，都不是「坏代码」，也都不是 runner 头里那两类环境问题**：
+
+1. **`check-m2-record.mjs`** —— 自检基线红在 `diff-images`：记录里的放大差异图**重编码后与盘上不是同一份字节**，
+   其余基线项全绿。用 **Node 22 复跑，字节数一模一样** ⇒ 不是 Node/zlib 版本问题，更像
+   「写入方 `dhampir-framediff.mjs` 与守卫 `check-m2-record.mjs` 的编码字节不可互推」。
+   **后果**：`records/m2` 在这台机器上无法复核（fail-closed 退 2）。**待查**。
+2. **`check-dual-end.mjs`** —— 跑通了（浏览器 Dawn ↔ native wgpu 都在），但 **SSIM 0.998654**，
+   达不到 1.000000 的通过线（4 帧里第 60 帧其实是 1.000000 / PSNR=inf）。差异是精度级的
+   （MAE ≈ 0.1/255、PSNR ≈ 57–59 dB），最可能是**两端着色器编译器不同**（Tint vs naga）。
+   没改通过线（那是「SSIM 容差表单独成文件」那条铁律的事），只记录：**这条判据的通过线是环境相关的**。
+   详见 [consistency-criteria.md](./consistency-criteria.md) 的补记。
+
+**同一轮修掉的三处跨平台问题**（都是「在 Windows 上永远不会变红」的那一类）：
+`asset.uri` 的绝对路径判定（Rust `is_absolute_uri` + JS `isAbsoluteUri` + Linux 守卫 **R5**）、
+字体候选表与 Chrome 候选表只列了 Debian 布局、两个守卫的 `--cli` 默认值写死 `.exe`。

@@ -121,14 +121,17 @@ cargo run -q -p dhampir-worker --bin dhampir -- --help
 预览能编辑、能拖拽、能撤销重做、能出片，字幕与弹幕两个宿主都画得出来，
 素材通路不怕倒放与同源多帧，**片子现在也带声音了**。
 
-### 还差什么（三条诚实的边界，不是待办）
+### 还差什么（诚实的边界，不是待办）
 
-1. **"GPU 渲染的 90 帧 + 音轨整条出片"没验过**——渲染要往编码器 stdin 写帧，
-   而那个管道在 agent 会话里起不来。要在**普通终端**跑 `node scripts/check-cli.mjs` 才算数。
-2. **Linux"能跑"没验过**——交叉 `cargo check --target x86_64-unknown-linux-gnu` 真跑了（退出码 0），
-   但 Linux 依赖图里没有 ffmpeg/sherpa/onnx（116 vs 134 crate），只证"类型正确"。
-3. **解码代价表与 14.56 ms/帧 未对账**（40.90 对 14.56），要在能起编码器的终端重跑
-   `node scripts/measure-export.mjs`。
+1. ~~"GPU 渲染的 90 帧 + 音轨整条出片"没验过~~ —— **2026-10-01 在 Linux 上验过了**：
+   容器里 `node scripts/check-cli.mjs` **33 / 33**、`node scripts/check-local-backend.mjs` **25 / 25**，
+   整条出片腿（含往编码器 stdin 写帧）真的跑通。
+2. ~~Linux"能跑"没验过~~ —— **2026-10-01 在 Linux 上跑过了**：`cargo check --workspace --all-targets`
+   **0 warning**、`cargo test --workspace` **686 passed / 1 failed / 30 ignored**（失败那条是**真缺陷**，
+   已修：`asset.uri` 的绝对判定不能按平台语义）、**30 条 ignored 测试全绿**、M1 的两条 Linux 腿
+   （RADV + lavapipe）归档进 [`records/m1/`](records/m1/README.md)。**仍未验**：别的发行版、别的 GPU。
+3. **解码代价表与 14.56 ms/帧 未对账**（40.90 对 14.56）——**这个前置现在有了**：Linux 容器里有 ffmpeg，
+   只等有人跑 `node scripts/measure-export.mjs`。
 
 另外 **A9（续渲）是"决策为不做"**，不是"做完了"——理由与重审触发条件见
 [plan/t7-evidence.md](plan/t7-evidence.md) 的 T7.3。

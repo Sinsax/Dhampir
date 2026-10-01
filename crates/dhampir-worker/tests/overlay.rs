@@ -93,6 +93,12 @@ fn font_file() -> PathBuf {
         "C:/Windows/Fonts/simsun.ttc",
         "/System/Library/Fonts/PingFang.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        // 发行版的字体布局不一样：Debian 是 opentype/noto 与 truetype/dejavu，Arch / Fedora
+        // 是 noto-cjk 与 TTF/，openSUSE 是 dejavu/。只列一种的话，装了字体也会报「一个候选字体
+        // 都没有」—— 那是**环境差异**，不是测试坏了（同一类问题还出现在 Chrome 候选表上）。
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     ];
     for candidate in CANDIDATES {

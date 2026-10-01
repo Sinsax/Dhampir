@@ -30,7 +30,7 @@
 | # | 里程碑 | 目标（一句话） | 状态 | 前置 |
 |---|---|---|---|---|
 | **M0** | 骨架与双编译贯通 | 同一份源码在两个 target 上编译并输出一致 | ✅ **已收官**（退出标准 3/3） | 环境准备 |
-| **M1** | 服务端 headless wgpu | 目标环境能离屏出图且可复现 | ✅ **已收官**（1/3；Linux 两条腿延期，属已知缺口） | M0 |
+| **M1** | 服务端 headless wgpu | 目标环境能离屏出图且可复现 | ✅ **已收官**（**3/3**；Linux 两条腿 2026-10-01 补跑并归档） | M0 |
 | **M2** | **双运行时同帧 SSIM**（架构命门） | 同一份 WGSL，两端渲染同一帧结果一致 | ✅ **已收官**：退出标准 4/4 ｜ 记录自证 `EXIT=0` ｜ 验收快照 13/13 ｜ **独立复核「通过」** | M1 + M0 的 wasm 壳 |
 | **M3** | 浏览器预览链路 | proxy 硬解 → 拷贝上 GPU → 出画面 | ✅ **已收官**：退出标准 **4/4**（播放 532 fps／丢帧 0；scrub p95 20.5 ms；4K 两级账不越界） | M0（可与 M1/M2 并行） |
 | **M4** | 契约闭环 | 时间线 JSON 驱动两端，出片与预览一致 | ✅ **已收官**：契约冻结 + 渲染图 v1 + 宿主接时间线 + **双端逐字节相同**（T4.4 编码/mux 归下游） | M2 + M3 |
@@ -282,14 +282,15 @@ FFmpeg 绑定（先造假帧源）、WebCodecs、任务队列、任何 UI、任�
   - ✅ 预测表两张网：`PINNED` 逐点相等 + 整周期整表的 FNV-1a 64 摘要 `fff8d28ff54c24d8`；模型测试**必须包含"缺陷模型"的距离断言**，否则"模型正确"只是自说自话
   - ✅ 踩坑：`fs_blur_h` / `fs_blur_v` 首版用 `frag.xy` 当纹理坐标直接采样，**编译期全绿、真跑 GPU 才暴露**；修成 `texel_of(frag.xy)` 后由 160 帧 corpus 全绿确认
   - ✅ `alpha_stack` 是直通 alpha 的 source-over，**不能用 `PREMILLIPLIED_ALPHA_BLENDING`**；blur 权重按 6 位小数四舍五入、Σ = 1.000000
-- [x] **T1.4 环境探针与复现性** —— Windows 两条腿全达成；Linux 两条腿 **⏳ 待补**（缺的是环境，不是代码路径）
+- [x] **T1.4 环境探针与复现性** —— **四条腿全达成**（Windows 两条 + Linux 两条，后者 2026-10-01 补齐）
   - 记录 `adapter.get_info()`（name / backend / driver）+ wgpu 版本 + 时间戳 → `adapter.json`
     - ✅ 记的是 `describe_adapter` 的人类可读输出（name / backend / driver / device_type / subgroup / limits 摘要），不是 `wgpu::AdapterInfo` 的 Debug；`adapter.json` 与 `timing.json` **刻意拆开**（"几乎不变" vs "每次都变"），两份**共用同一个** `unix_epoch_millis`（守卫会真的比对这两个数，并校验 `unix_epoch_seconds === floor(ms / 1000)`）。**"拆开"不等于"键不重叠"**——先前这里写作"且键不重叠"，复核实测后改正：两份实测 18 / 15 个键里有 **10 个同名**，其中 `kind`（`"adapter"` vs `"timing"`）与 `nondeterministic_fields`（各自的非确定项清单）两键**值不同**，其余 8 个（`adapter_name`、`backend_slug`、`build_profile`、`milestone`、`requested_backends`、`schema`、`unix_epoch_millis`、`unix_epoch_seconds`）刻意取同值。"拆开"说的是**非确定项各归各**，不是"没有同名键"
   - 复现性检查：同机同后端，同帧渲染两次（同进程 + 跨进程）**逐字节相同**
     - ✅ 同进程：每帧渲染两次比字节，两条腿各 80 帧，`repeat_mismatches: []`；真不一致时**照记不误**、该帧不做颜色判定（`passed` 三态），不是失败而是发现
     - ✅ 跨进程：第二条腿带 `--compare-run` 与第一条腿比，`identical: true`、`matched_frames: 80`，两条腿整表摘要同为 `71ecc80cade3d73d`
     - ✅ 顺带拿到一条计划外结论：**DX12 与 Vulkan 的同名 PNG 逐字节相同（80/80）**——同一份 WGSL 在两个驱动栈上出了同样的字节
-  - 依次跑：Windows/DX12 ✅ → Windows/Vulkan ✅ → Linux 容器 GPU ⏳ → Linux/lavapipe ⏳（本机无 docker、WSL 无发行版）
+  - 依次跑：Windows/DX12 ✅ → Windows/Vulkan ✅ → Linux/GPU（RADV）✅ → Linux/lavapipe ✅
+    - ✅ Linux 那两条（2026-10-01）：Arch 容器 + `/dev/dri` 直通，ICD 分别是 RADV 与 lavapipe；各 80 帧、两次独立运行逐字节一致
 - [x] **T1.5 性能基线**：Init 时间、单帧渲染时间、读回时间（1080p）—— 每场景 24 次取**中位数**，极值照记
   - ✅ DX12：init `268.345 ms`；「渲染 + 读回」往返中位 2.119–2.289 ms、纯 CPU 提交中位 0.103–0.124 ms
   - ✅ Vulkan：init `126.412 ms`；往返中位 2.099–2.217 ms、纯 CPU 提交中位 0.058–0.074 ms
@@ -297,7 +298,7 @@ FFmpeg 绑定（先造假帧源）、WebCodecs、任务队列、任何 UI、任�
 
 ### 产出物
 
-`frames/*.png` + `adapter.json` + 计时表 + 四种环境矩阵结果（**2/4，Linux 两条 ⏳**）。
+`frames/*.png` + `adapter.json` + 计时表 + 四种环境矩阵结果（**4/4**）。
 
 里程碑记录见 [`records/m1/`](../records/m1/README.md)：两条腿各 5 份 JSON/TXT + 80 张 PNG（全目录 185 文件 / 1169175 字节，含本里程碑的独立复核报告 `review-independent.md`）、9 条判据的原始 stdout/stderr 与退出码、native 侧 72 行纯逻辑探针报告（摘要 `c3f0da6b37577e55`，与 M0 归档的那份**逐字节相同**——M1 往 core 里加了一整个渲染模块，这就是"探针契约没被碰坏"的直接证据）。
 
@@ -309,16 +310,19 @@ FFmpeg 绑定（先造假帧源）、WebCodecs、任务队列、任何 UI、任�
 
 - [x] 目标环境（含 Linux 容器）能跑出 PNG，且重复运行**逐字节一致**
   - ✅ Windows 两条腿达成：同进程（每帧渲染两次）与跨进程（`--compare-run`）都逐字节一致，两腿整表摘要同为 `71ecc80cade3d73d`
-  - ⏳ Linux 容器未跑（本机无 docker、WSL 无发行版），**这一条没有勾**
-- [ ] 四种环境（Win/DX12、Win/Vulkan、Linux/GPU、Linux/lavapipe）的 adapter 与通过情况全部记录 —— 当前 **2/4**
+  - ✅ Linux 两条腿达成（2026-10-01）：`linux-gpu/`（RADV 680M）与 `linux-lavapipe/`（llvmpipe）各 80 帧，两次独立运行逐字节一致（各自 `compare.json` 的 `identical: true`、`matched_frames: 80`）
+- [x] 四种环境（Win/DX12、Win/Vulkan、Linux/GPU、Linux/lavapipe）的 adapter 与通过情况全部记录 —— **4/4**
   - ✅ `records/m1/dx12/` 与 `records/m1/vulkan/` 的 5 份文件 + 80 张 PNG 已归档
-  - ⏳ Linux 两条腿的记录缺（同上）
+  - ✅ `records/m1/linux-gpu/` 与 `records/m1/linux-lavapipe/` 的 5 份文件 + 80 张 PNG 已归档
+    （整表摘要 `679b249510eea426` / `e2291e1bf32ddef6`，与 Windows 的 `71ecc80cade3d73d` **不同**——换 GPU/驱动不保证逐字节一致，这一点写在记录里）
 - [x] 1080p 单帧渲染 ≤ 10ms（不含读回）——**起始值，按实测定档** —— ✅ 实测后 `FRAME_BUDGET_MS` 仍留 10 ms：判的是「渲染 + 读回」往返（含 GPU，数字比"纯渲染"更大，是**高估**），最慢 2.289 ms；不含 GPU 的 CPU 提交另记 0.124 ms。预算不参与退出码
 
 > 第 1 条是这一步真正的目的：headless wgpu 出图**稳定可复现**。而它最不确定的部分从来不是渲染逻辑，
 > 是**容器里的 GPU 注入**——所以 Windows 两条腿只是把链路先钉住了，Linux 两条腿（上面两处 ⏳）
 > 才是这条判据真正的考点。**2026-09-22 用户明确决定：Linux 两条腿延期（⏳），以 Windows 两条腿的
-> 结论先进 M2**；有 Linux 环境时补跑并回填 ① ②（补跑命令见 `records/m1/README.md`「怎么重跑」）。
+> 结论先进 M2**；**2026-10-01 已补跑并回填 ① ②**（补跑命令见 `records/m1/README.md`「怎么重跑」）。
+> 补跑时的读数：`linux-gpu` 1080p 最慢往返 **2.421 ms**（预算内）；`linux-lavapipe` **29.581 ms**
+> （CPU 软渲染，超预算——plan 只把它当链路验证，所以守卫对 Linux 腿**不套 10 ms 预算**）。
 > 本机部分已由 `node scripts/record-acceptance.mjs --milestone m1` 落进 `records/m1/acceptance.json`
 > （9 条判据全绿，每条都留了原始 stdout/stderr 与退出码）。
 

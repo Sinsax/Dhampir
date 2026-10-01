@@ -308,8 +308,13 @@ MP4 基本流不能从第二个进程接着写，所以"续渲"最多只能是�
 
 ## 跨平台（Linux）考虑
 
-**已决定**：Linux 的两条取证腿**不跑**（D13，状态 wontfix）——本机没有 docker，WSL 也没有发行版。
-**但没有取消考虑**：不跑腿意味着**只能靠静态检查兜住**，所以 D16 要求补齐三类检查：
+**2026-10-01 更新：Linux 的两条取证腿已补跑并归档**（D13 由 `wontfix` 转 `done`）。
+原先的判据是「本机没有 docker、WSL 也没有发行版」，而**那个前提已经不在了**：本机有 docker，
+`/dev/dri` 可直通，Vulkan（RADV + lavapipe）与 ffmpeg 都能在容器里拿到。两条腿的现场、读数与
+复跑命令见 [records/m1/README.md](../records/m1/README.md) 的「补记」；复核口径见
+`scripts/check-m1-record.mjs` 的 `checkLinuxLegs`（不跨机器比字节、不套 10 ms 预算，只判形状与自证）。
+
+**不跑腿时的那条纪律仍然有效**：静态检查兜住「在 Windows 上写、在 Linux 上崩」的那一类。所以 D16 要求：
 
 1. 路径一律用 join/resolve 拼接，**不许**手写反斜杠或盘符；
 2. 行尾统一 LF（已由 check-text-hygiene.mjs 覆盖），新增文件不得引入 CRLF；
@@ -329,6 +334,18 @@ MP4 基本流不能从第二个进程接着写，所以"续渲"最多只能是�
 原生媒体栈按平台门控，在 Linux 依赖图里**根本不存在**（116 个 crate，对 Windows 的 134 个），
 所以这**不等于"Linux 上能跑"**。正向对照做了：故意写坏一行 -> 交叉 check 变红，源码还原后逐字节相同。
 
+**2026-10-01 补记**：在 Linux 上直接跑了 `cargo check --workspace --all-targets`（**0 warning**）与
+`cargo test --workspace --no-fail-fast`（**686 passed / 1 failed / 30 ignored**）。那条失败是**真缺陷**：
+`asset.uri` 的「绝对」判定走的是 `Path::is_absolute()`，Linux 上会把 `C:/abs/b.mp4` 当成相对路径、
+挂到 `--asset-root` 下面（见 D13 那条腿之外的独立缺口）。已修：Rust 加 `is_absolute_uri`、JS 加
+`isAbsoluteUri`，并给 Linux 守卫加了 **R5**（解释素材位置的地方不许只用平台语义判绝对）。
+同一轮里 **30 条 ignored 测试在 Linux 上全绿**（需要 Vulkan + ffmpeg + 字体路径三者齐备）。
+
+⚠️ **同一节里那句「Linux 依赖图里没有 ffmpeg/sherpa/onnx」要更正**：本仓 `Cargo.lock` 里
+**这三个一个都没有**（0 命中）—— ffmpeg 是**子进程调用**（`pipeline.rs` 等 7 处），
+116 vs 134 的差更可能来自 wgpu 的后端 crate（dx12/metal + windows 系）。改数字不改结论：
+「交叉 check 只证类型正确」仍然成立。详见 [measurements.md](./measurements.md) §9.3 的更正。
+
 ---
 
 ## 明确不做（写进台账，不假装）
@@ -337,9 +354,10 @@ MP4 基本流不能从第二个进程接着写，所以"续渲"最多只能是�
 |---|---|---|
 | D9 | 素材上传与素材 UI | 单机可用、远端不可用；属下游工程 |
 | D10 | 真实远端部署与 CI | 已移出范围；--remote 只证明代码路径跨源 |
-| D13 | Linux 两条取证腿 | 用户决定不跑（考虑见上一节） |
 | D14 | 与浏览器逐像素对齐的色彩矩阵 | 后端 bt709 与 WebCodecs 不同源，记为架构限制 |
 | D15 | 含解码的逐像素双端比对 | 两端解码路径不同，**架构性不可测**，不是待办 |
+
+> **D13 已于 2026-10-01 转 `done`**：Linux 两条腿补跑并归档（见上一节），因此从这张表里移出去了。
 
 ---
 

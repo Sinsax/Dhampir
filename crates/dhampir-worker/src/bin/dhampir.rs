@@ -968,8 +968,37 @@ fn load_project_or_usage(path: &str) -> Result<ProjectDoc, ExitCode> {
     }
 }
 
+/// 判定素材 `uri` 是不是「绝对位置」。**按书写形态判，不按当前平台判。**
+///
+/// `Path::is_absolute()` 是**平台语义**：Windows 上 `C:/x` 是绝对的，Linux 上它只是
+/// 一个普通相对路径（`C:` 是个普通目录名）。而工程文件是跨宿主走的 —— 同一份工程
+/// 在预览与出片两侧都要能解释 —— 所以同一份 uri 在两个宿主上必须得到**同一个答案**。
+/// 否则 Windows 上写的 `C:/abs/b.mp4` 在 Linux 出片时会被悄悄挂到 `--asset-root` 下面，
+/// 变成 `target/s3/C:/abs/b.mp4`：不是报错，是**换了个地方去找**。
+///
+/// 规则（与 `scripts/dhampir-local.mjs` 的 `isAbsoluteUri` 逐条对应，不许只改一边）：
+/// 1. 当前平台的绝对路径（`Path::is_absolute`，覆盖 POSIX 的 `/…`）；
+/// 2. 盘符绝对：字母 + `':` + 紧跟 `'/'` 或 `'\\'`（`C:foo` 是**盘符相对**，Windows 也不认它绝对）；
+/// 3. UNC：以两个反斜杠开头（在 Linux 上它只是**一个**普通组件，只能看文本）。
+pub fn is_absolute_uri(raw: &Path) -> bool {
+    if raw.is_absolute() {
+        return true;
+    }
+    let text = raw.to_string_lossy();
+    let bytes = text.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'/' || bytes[2] == b'\\')
+    {
+        return true;
+    }
+    text.starts_with(r"\\")
+}
+
 /// 读兜底资产登记表。形状与 fixtures/local-assets.json 一致：
 /// {"assets":{"<id>":{"file":"...","kind":"..."}}}，file 相对 asset_root 解析。
+/// **「绝对」按 `is_absolute_uri` 的书写形态判** —— 登记表也可能是别的宿主写的。
 pub fn load_asset_map(path: &str, asset_root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|error| format!("读不了兜底登记表 {path}：{error}"))?;
@@ -990,7 +1019,7 @@ pub fn load_asset_map(path: &str, asset_root: &Path) -> Result<Vec<(String, Path
         let raw = Path::new(file);
         rows.push((
             id.clone(),
-            if raw.is_absolute() {
+            if is_absolute_uri(raw) {
                 raw.to_path_buf()
             } else {
                 asset_root.join(raw)
@@ -1001,6 +1030,10 @@ pub fn load_asset_map(path: &str, asset_root: &Path) -> Result<Vec<(String, Path
 }
 
 /// 素材表：id -> 文件。**位置由宿主解释**，所以相对 uri 要挂到 --asset-root 上。
+///
+/// 「绝对」按 [`is_absolute_uri`] 的**书写形态**判，不按当前平台判 ——
+/// 工程文件是跨宿主走的，Windows 上写的 `C:/abs/b.mp4` 在 Linux 出片时
+/// 不能被挂到 asset_root 下面去。
 ///
 /// 优先级：**工程文件的 assets 先来，兜底表只补缺**。
 /// 反过来的话，兜底表会悄悄盖掉工程文件里写的真实位置，而用户看不到。
@@ -1015,7 +1048,7 @@ fn build_sources(
             continue;
         }
         let raw = Path::new(&asset.uri);
-        let file = if raw.is_absolute() {
+        let file = if is_absolute_uri(raw) {
             raw.to_path_buf()
         } else {
             asset_root.join(raw)
@@ -3198,6 +3231,51 @@ mod tests {
         );
         // uri 为空的不进表 —— 位置未知就不假装知道。
         assert!(table.file_for("c.mp4").is_none());
+    }
+
+    #[test]
+    fn 绝对_uri_按书写形态判而不按平台判() {
+        // `Path::is_absolute()` 是**平台语义**：Linux 上 `C:/abs/b.mp4` 会被判成**相对**，
+        // 于是被挂到 --asset-root 下面（`target/s3/C:/abs/b.mp4`）—— 不是报错，是换个地方找。
+        // 工程文件会跨宿主走，所以判定必须按**书写形态**，两个宿主给同一个答案。
+        for raw in [
+            "/abs/a.mp4",
+            "C:/abs/b.mp4",
+            "C:\\abs\\b.mp4",
+            "c:/abs/b.mp4",
+            "\\\\server\\share\\c.mp4",
+        ] {
+            assert!(is_absolute_uri(Path::new(raw)), "{raw} 应当按绝对处理");
+        }
+        for raw in ["rel.mp4", "C:rel.mp4", "sub/dir/x.mp4", ""] {
+            // `C:rel.mp4` 是**盘符相对**：Windows 自己也不认它绝对，别替它猜。
+            assert!(!is_absolute_uri(Path::new(raw)), "{raw} 应当按相对处理");
+        }
+    }
+
+    #[test]
+    fn 素材表里的绝对_uri_在_linux_上也不挂到_asset_root_() {
+        // 工程文件是别的宿主写的，所以这条判据必须在**两个平台上都成立**。
+        let doc = load_doc(
+            r#"{"project_schema":1,"timeline":{"schema":2,"timebase":{"num":30,"den":1},"tracks":[]},
+                "assets":[{"id":"d.mp4","kind":"video","uri":"C:\\abs\\d.mp4"},
+                          {"id":"e.mp4","kind":"video","uri":"c:/abs/e.mp4"},
+                          {"id":"f.mp4","kind":"video","uri":"C:rel.mp4"},
+                          {"id":"g.mp4","kind":"video","uri":"\\\\server\\share\\g.mp4"}]}"#,
+        )
+        .expect("能载入");
+        let table = build_sources(&doc, Path::new("target/s3"), &[]);
+        let shown = |id: &str| {
+            table
+                .file_for(id)
+                .map(|path| path.to_string_lossy().replace('\\', "/"))
+        };
+        // 盘符绝对、大小写不敏感、UNC：原样（三种都是「别的宿主写的」形态）。
+        assert_eq!(shown("d.mp4"), Some("C:/abs/d.mp4".to_string()));
+        assert_eq!(shown("e.mp4"), Some("c:/abs/e.mp4".to_string()));
+        assert_eq!(shown("g.mp4"), Some("//server/share/g.mp4".to_string()));
+        // 盘符相对：仍然挂根 —— 它本来就相对。
+        assert_eq!(shown("f.mp4"), Some("target/s3/C:rel.mp4".to_string()));
     }
 
     #[test]

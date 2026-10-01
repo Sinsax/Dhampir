@@ -1,0 +1,33 @@
+{
+  "adapter": {
+    "backend": "Vulkan",
+    "device": "5761",
+    "device_type": "IntegratedGpu",
+    "driver": "radv",
+    "driver_info": "Mesa 26.2.3-arch1.1",
+    "name": "AMD Radeon 680M (RADV REMBRANDT)",
+    "vendor": "4098"
+  },
+  "adapter_name": "AMD Radeon 680M (RADV REMBRANDT)",
+  "backend_slug": "vulkan",
+  "build_profile": "release",
+  "corpus_target_size": "256x256",
+  "crate_version": "0.0.1",
+  "kind": "adapter",
+  "milestone": "M1",
+  "naga_version": "30.0.1",
+  "nondeterministic_fields": [
+    "unix_epoch_seconds",
+    "unix_epoch_millis",
+    "build_profile（换构建就变）",
+    "adapter.* / adapter_name（换机器就变）"
+  ],
+  "probe_digest": "c3f0da6b37577e55",
+  "probe_format_version": 1,
+  "requested_backends": "VULKAN",
+  "schema": 1,
+  "target_format": "Rgba8UnormSrgb",
+  "unix_epoch_millis": 1790847843461,
+  "unix_epoch_seconds": 1790847843,
+  "wgpu_version": "30.0.1"
+}

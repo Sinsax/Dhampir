@@ -22,6 +22,11 @@
 //        对**扩展名 / 格式名**做小写化是允许的，所以判据要求"同一行还有文件系统调用"。
 //   * R3 不许假定路径一定是 UTF-8（`.to_str().unwrap()` 那一类 —— Linux 上会 panic）。
 //   * R4 出现 `cfg(windows)` 时，同一文件必须有 `cfg(unix)` / `cfg(not(windows))` / `cfg(any(`。
+//   * R5 在**解释素材位置**的文件里（提到 asset_root / assetRoot），判定「绝对路径」
+//        不许只看平台语义：`Path::is_absolute()` / `path.isAbsolute()` 在 Windows 上
+//        认 `C:/x`、在 Linux 上不认 —— 而 asset.uri 是**跨宿主**的（同一份工程、两个宿主）。
+//        只看平台会让 Windows 上写的 `C:/abs/b.mp4` 在 Linux 出片时被挂到 --asset-root
+//        下面：不是报错，是**换个地方去找**。要按书写形态判，并落在具名 helper 上。
 //
 // # 两件事决定了这条守卫写起来的手感
 //
@@ -44,6 +49,9 @@
 //     Chrome 候选表（同时列了 `/usr/bin/google-chrome`）、以及单测里当输入的假路径。
 //     禁掉它们会造出一堆假红，而**假红比没有守卫更坏**（人会开始无视它）。
 //   * **不判 mtime / 权限 / 符号链接**：那些要真在 Linux 上跑才说得清，属 D13 的范围。
+//   * **R5 只管「解释素材位置」的地方**。静态文件的越界校验（`scripts/web-static.mjs`）、
+//     记录路径的归属判断（`scripts/dhampir-framediff.mjs`）也在用平台判定，但那是
+//     **本机自己的输入**，按平台语义判是对的 —— 一刀切会造出一批假红，而假红比没有守卫更坏。
 //   * **不做交叉编译**：能不能装 `x86_64-unknown-linux-gnu` 与这台机器上的链接器有关，
 //     能不能装、装了能不能 check，结论记在 plan/t7-evidence.md —— **不在这里假装跑过**。
 //   * **词法不求完备**：`stripComments` 不单独处理正则字面量（`/[/*]/` 这种罕见写法会误判），
@@ -191,6 +199,20 @@ export const UTF8_ASSUMPTION = [TO_STR + '.unwrap()', TO_STR + '.expect('];
 export const WINDOWS_CFG = 'cfg(windows)';
 export const OTHER_PLATFORM_CFG = ['cfg(unix)', 'cfg(not(windows))', 'cfg(any(', 'cfg(target_os'];
 
+/**
+ * R5：**解释素材位置**的地方，判定「绝对路径」必须按**书写形态**，不许只看平台语义。
+ *
+ * 平台语义与书写形态在 Windows 上是重合的，在 Linux 上不是 —— 也正是**在 Windows 上
+ * 永远不会自己变红**的那一类。判据限定在「提到 asset_root / assetRoot」的文件里：
+ * 别处（静态文件越界校验、记录路径归属判断）用的是**本机自己的输入**，按平台判是对的，
+ * 一刀切会造假红，而假红比没有守卫更坏。
+ *
+ * 记号同样**拆开拼**：直写会让守卫举报自己（它扫的就是 scripts/ 与 crates/）。
+ */
+export const PLATFORM_ABSOLUTE_TOKENS = ['is' + 'Absolute(', '.is' + '_absolute()'];
+export const ASSET_ROOT_TOKENS = ['asset_root', 'assetRoot'];
+export const CROSS_PLATFORM_ABSOLUTE_TOKENS = ['is' + '_absolute_uri', 'is' + 'AbsoluteUri'];
+
 /** 要扫哪些文件。**两种语言分开列**，因为判据不完全一样。 */
 export function scannedFiles() {
   const rust = [];
@@ -261,6 +283,17 @@ export function judge(sources) {
         if (!hasOther) {
           problems.push(name + ' 有 ' + WINDOWS_CFG + ' 却没有另一平台的分支 —— ' +
             '在 Linux 上那个东西**根本不存在**（补 cfg(unix) / cfg(not(windows))）');
+        }
+      }
+
+      // --- R5：解释素材位置的地方，绝对路径判定要按书写形态 ---
+      const platformJudge = PLATFORM_ABSOLUTE_TOKENS.find((token) => bare.includes(token));
+      if (platformJudge !== undefined && ASSET_ROOT_TOKENS.some((token) => bare.includes(token))) {
+        const hasHelper = CROSS_PLATFORM_ABSOLUTE_TOKENS.some((token) => bare.includes(token));
+        if (!hasHelper) {
+          problems.push(name + ' 在解释素材位置的地方只用平台语义判「绝对路径」（' + platformJudge +
+            '）—— Windows 上写的 C:/abs/a.mp4 在 Linux 上会被当成相对路径、挂到 asset_root 下面；' +
+            '要按书写形态判，并落在具名 helper 上（本仓两处：Rust is_absolute_uri / JS isAbsoluteUri）');
         }
       }
     }
@@ -357,6 +390,18 @@ function runSelfTest() {
   expect('有配对分支 -> 放过', judge(rust(paired)), true);
   const negated = '#[cfg(windows)]\nfn a() {}\n#[cfg(not(windows))]\nfn a() {}';
   expect('cfg(not(windows)) 也算配对', judge(rust(negated)), true);
+
+  // --- R5 ---
+  const assetAbs = 'const p = is' + 'Absolute(uri) ? uri : join(assetRoot, uri);';
+  expect('素材位置只用平台语义判绝对 -> 必须红', judge(script(assetAbs)), false);
+  const assetAbsHelper = 'export function is' + 'AbsoluteUri(u) { return is' + 'Absolute(u); }\n' + assetAbs;
+  expect('同文件里有跨平台 helper -> 放过', judge(script(assetAbsHelper)), true);
+  const hostLocal = 'const ok = rel === ' + SQ + SQ + ' || is' + 'Absolute(rel);';
+  expect('本机自己的输入（不提 asset_root）-> 放过，别造假红', judge(script(hostLocal)), true);
+  const rustAssetAbs = 'if raw.is' + '_absolute() { asset_root.join(raw) }';
+  expect('Rust 侧在素材位置只用平台语义 -> 必须红', judge(rust(rustAssetAbs)), false);
+  const rustAssetHelper = 'fn is' + '_absolute_uri(p: &Path) -> bool { p.is' + '_absolute() }\n' + rustAssetAbs;
+  expect('Rust 侧有跨平台 helper -> 放过', judge(rust(rustAssetHelper)), true);
 
   // --- 空集纪律 ---
   expect('空集 -> 必须红（不能空转）', judge({ rust: [], script: [] }), false);
