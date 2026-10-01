@@ -175,10 +175,56 @@ for (const p of need) console.log('    ' + p.replace(REPO + '\\', '').replace(RE
 if (!has('--no-zip')) {
   const zip = out + '.zip';
   rmSync(zip, { force: true });
-  // 用 PowerShell 的 Compress-Archive（Windows 自带）；stdio 继承，不捕获管道。
-  run('powershell', ['-NoProfile', '-Command',
-    'Compress-Archive -Path ' + JSON.stringify(join(out, '*')) + ' -DestinationPath ' + JSON.stringify(zip) + ' -Force']);
+  makeZip(out, zip);
   console.log('  zip : ' + zip);
+}
+
+/// 打 zip。
+///
+/// # 为什么不用 `Compress-Archive`
+///
+/// 它在 Windows PowerShell 5.1 上会因为**某个文件的 LastWriteTime 转不成
+/// DateTimeOffset** 而中途失败（实测：报一句 `ErrorWhenSetting`，
+/// **zip 根本不生成**）。而它是**非终止错误** —— 脚本继续往下跑，
+/// 最后打印一行 `zip : <路径>`，那个路径却不存在。
+///
+/// 那正是最难查的一类失败：产物清单说打了包，实际没有。
+/// 所以这里换成 .NET 的 `ZipFile.CreateFromDirectory`（同一台机器的 API，
+/// 不吃时间戳），并在**压完立刻验一次文件在不在** —— 少一个「应该成功了」。
+function makeZip(from, zip) {
+  const script = join(REPO, 'target', 'make-zip.ps1');
+  mkdirSync(dirname(script), { recursive: true });
+  writeFileSync(
+    script,
+    [
+      'Add-Type -AssemblyName System.IO.Compression.FileSystem',
+      '$src = ' + psQuote(from),
+      '$dst = ' + psQuote(zip),
+      'if (Test-Path $dst) { Remove-Item $dst -Force }',
+      '[System.IO.Compression.ZipFile]::CreateFromDirectory($src, $dst, [System.IO.Compression.CompressionLevel]::Optimal, $false)',
+      'if (Test-Path $dst) { exit 0 } else { exit 1 }',
+      '',
+    ].join('\n'),
+  );
+  try {
+    execFileSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script], {
+      cwd: REPO,
+      stdio: 'inherit',
+    });
+  } catch (e) {
+    console.error('✗ 压 zip 失败：' + zip);
+    process.exit(1);
+  }
+  // 退出码 0 还不足以说明它在 —— 上面踩的就是「说了但没做」。
+  if (!existsSync(zip)) {
+    console.error('✗ 压 zip 报成功但文件不在：' + zip);
+    process.exit(1);
+  }
+}
+
+/// PowerShell 单引号字符串里，单引号自己要用两个表示。
+function psQuote(value) {
+  return "'" + String(value).replace(/'/g, "''") + "'";
 }
 
 console.log('');
