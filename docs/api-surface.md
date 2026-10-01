@@ -30,6 +30,7 @@
 
 - `dhampir_host_api_version`
 - `dhampir_project_attach`
+- `dhampir_project_begin_frame`
 - `dhampir_project_bind_source`
 - `dhampir_project_clear_bitmaps`
 - `dhampir_project_doc`
@@ -40,6 +41,7 @@
 - `dhampir_project_frame`
 - `dhampir_project_open`
 - `dhampir_project_precheck`
+- `dhampir_project_preroll`
 - `dhampir_project_redo`
 - `dhampir_project_render_probe`
 - `dhampir_project_resize`

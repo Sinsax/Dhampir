@@ -1,0 +1,555 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>Dhampir 预渲染缓存探针</title></head>
+<body>
+<!--
+  阶段 4 / 5 的**预览通路**探针。
+
+  # 为什么必须有它（而不是只看 check-dual-end）
+  `scripts/check-dual-end.mjs` 的浏览器腿走的是 `web/synthetic.html` →
+  `dhampir_sample_project_render_png` —— 那是**离屏合成**，与
+  `dhampir_project_draw`（预览画布这条链）是两个不同的出口。
+  所以"1.000000"证明不了这一层：阶段 4/5 改的正是预览这条链。
+
+  # 它量什么（每一步都给自己留一条"探针本身有效吗"的判据）
+  S  有效性自检：改贴纸内容再画同一帧，画面必须变 —— 不变说明**取到的不是画面**
+     （headless 软件 WebGPU 上 `toDataURL` 有可能拿不到内容），那样所有像素判据都不算数
+  R  参考帧：缓存**关**，逐帧 draw，存下 PNG（"改前那条路"的像素基准）
+  P4 阶段 4：同一批帧、同一份贴纸内容 ⇒ 宿主应当**跳过 GPU 上传**
+     （读数一律用**本段增量**，累计值会被前一段污染）
+  C  阶段 5：同一批帧要第二遍 ⇒ **命中**（`cacheHit` / `cache.hits` / 整圈）
+  D  串行：不 await 连发三次 seek + 混一条 pre-roll ⇒ 不许出现 wasm panic
+  E  长跑：1800 帧（60s @30fps）连续播放 ⇒ 无错、无 panic，并报命中数
+
+  # 为什么用 `?src=bitmap`
+  视频源在这台机器上是**软件适配器**（`AdapterInfo.device_type = Other`）。那种适配器上
+  `<video>` 直传（零拷贝）会**静默产出空内容** —— 不报错、只是那一层什么都没有，
+  于是"每一帧都长得一样"，像素判据就没法用了。走 `bitmap` 那条路（每帧
+  `createImageBitmap`）拿得到真画面。这条正是 engine.js 注释里记过的坑。
+-->
+<canvas id="c" width="640" height="360"></canvas>
+<video id="v" muted playsinline preload="auto" src="/media/test.mp4"></video>
+<pre id="log"></pre>
+<script type="module">
+import { loadEngine } from "/engine.js";
+
+const query = new URLSearchParams(location.search);
+const log = (m) => { document.getElementById("log").textContent += m + "\n"; };
+const report = { ok: false, tool: "preview-cache-probe", phases: {}, errors: [] };
+const errors = [];
+window.addEventListener("error", (event) => errors.push(String(event.message)));
+window.addEventListener("unhandledrejection", (event) => {
+  const reason = event.reason;
+  errors.push("rejection: " + String(reason && reason.message ? reason.message : reason));
+});
+
+/**
+ * 探针用的工程：**两个源**。
+ *
+ *   * `a.mp4`    —— 真视频（每帧都要 seek / 取帧，这是"整圈"里最贵的那一段）；
+ *   * `stick.png` —— 贴纸：素材时基 **1/1**，于是工程帧 0..29 全都映射到素材帧 0
+ *     ⇒ `sources_for` 给出的 `source_frame` 在这一段里**不变** ⇒ 内容标识不变
+ *     ⇒ 正是阶段 4 要省掉重传的那种情况（真工程里对应"GIF 帧号没变"）。
+ *
+ * 素材时基那一条不能省：时基与工程一样（30/1）的话素材帧号逐帧都变，
+ * 内容标识也就逐帧都变 —— 那样量出来的"没有复用"是**测错了**，不是没生效。
+ *
+ * `frame_count` 也不能写成 1：校验会算"这一层要取多少个素材帧"，
+ * 1 帧的素材盖不住 1800 个时间线帧（实测报 `source_range_exceeded`）。
+ * 1 fps 的素材要盖 60 秒，`frame_count` 至少 60 —— 这里给 1860，与视频那份对齐。
+ */
+const PROJECT = {
+  project_schema: 1,
+  generator: { app: "dhampir-cache-probe", version: "0" },
+  meta: { title: "预渲染缓存探针", created_at: null, modified_at: null },
+  assets: [
+    { id: "a.mp4", kind: "video", name: "主片", uri: "test.mp4", frame_count: 1860,
+      timebase: { num: 30, den: 1 }, width: 320, height: 180, content_hash: null, tags: {}, note: "" },
+    { id: "stick.png", kind: "image", name: "贴纸", uri: "stick.png", frame_count: 1860,
+      timebase: { num: 1, den: 1 }, width: 96, height: 96, content_hash: null, tags: {}, note: "" },
+  ],
+  timeline: {
+    schema: 3,
+    timebase: { num: 30, den: 1 },
+    markers: [],
+    tracks: [
+      { id: "v1", kind: "video", layers: [
+        { id: "a", start: 0, end: 1800, source: { asset_id: "a.mp4", source_in: 0 } },
+      ] },
+      { id: "v2", kind: "video", layers: [
+        { id: "st", start: 0, end: 1800, source: { asset_id: "stick.png", source_in: 0 } },
+      ] },
+    ],
+  },
+  view: { playhead: 0, selection: null, zoom: 1 },
+  render_hints: { width: 640, height: 360, format: "mp4" },
+  extensions: {},
+};
+
+/** 贴纸的**内容**：一次画好，之后每帧只 `createImageBitmap` 一个新对象（契约如此）。 */
+function makeStickerCanvas(color, inner) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 96;
+  canvas.height = 96;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = color;
+  ctx.fillRect(8, 8, 80, 80);
+  ctx.fillStyle = inner;
+  ctx.fillRect(24, 24, 48, 48);
+  return canvas;
+}
+
+const median = (xs) => {
+  if (xs.length === 0) return null;
+  const s = xs.slice().sort((a, b) => a - b);
+  return Number(s[Math.floor(s.length / 2)].toFixed(2));
+};
+const delta = (now, before) => {
+  if (now === null || before === null) return null;
+  const out = {};
+  for (const key of Object.keys(now)) out[key] = Number((now[key] - (before[key] || 0)).toFixed(2));
+  return out;
+};
+
+try {
+  const canvas = document.getElementById("c");
+  const video = document.getElementById("v");
+  await new Promise((resolve, reject) => {
+    video.addEventListener("loadeddata", resolve, { once: true });
+    video.addEventListener("error", () => reject(new Error("视频加载失败")), { once: true });
+  });
+  video.pause();
+
+  const engine = await loadEngine("/pkg/dhampir_wasm.js");
+  engine.timing = true;
+  const opened = engine.open(PROJECT);
+  if (opened.ok !== true) {
+    throw new Error("探针工程没通过校验：" + JSON.stringify(opened.issues || []).slice(0, 400));
+  }
+  report.attach = await engine.attach("c");
+  report.sourceMode = engine.sourceMode;
+  engine.resize(canvas.width, canvas.height);
+  engine.bindSource("a.mp4", "v");
+  const stickerA = makeStickerCanvas("#20c060", "#ffffff");
+  const stickerB = makeStickerCanvas("#e03040", "#101010");
+  let sticker = stickerA;
+
+  /** 画一批帧并记账。`sticker` = 每帧按 PolishPreview 的做法交一张**新**位图。 */
+  const drawPass = async (frames, options = {}) => {
+    const rows = [];
+    for (const frame of frames) {
+      const t0 = performance.now();
+      await engine.seek(frame, options.sticker === true
+        ? { onPrepared: async () => { engine.setSourceBitmap("stick.png", await createImageBitmap(sticker)); } }
+        : {});
+      const total = performance.now() - t0;
+      const bd = engine.lastPrepareBreakdown;
+      rows.push({
+        frame,
+        totalMs: Number(total.toFixed(2)),
+        seekMs: bd ? bd.seekMs : null,
+        createBitmapMs: bd ? bd.createBitmapMs : null,
+        drawMs: Number((engine.lastSeekCost ? engine.lastSeekCost.drawMs : 0).toFixed(2)),
+        cacheHit: bd ? bd.cacheHit : null,
+        uploads: bd ? bd.hostUploads : null,
+        cache: bd ? bd.cache : null,
+      });
+    }
+    return rows;
+  };
+  const png = (frame) => canvas.toDataURL("image/png");
+  /**
+   * 取一张画面。**必须先等一帧 rAF**。
+   *
+   * `dhampir_project_draw` 最后做的是 `queue.present(frame)` —— 那是"交给合成器"，
+   * 不是"已经画到可读的那块存储上"。立刻 `toDataURL` 拿到的是**上一次合成的结果**
+   * （实测：同一帧只换贴纸颜色，两张 PNG 逐字节相同 —— 差的就是这一帧等待）。
+   * 所有"从外面看画面"的手段都有这个性质，所以等待写进这一个入口，不靠每处记得。
+   */
+  const capture = async () => {
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    return canvas.toDataURL("image/png");
+  };
+  /**
+   * 画面的**像素摘要**（FNV-1a over RGBA）—— 与 `toDataURL` 走的是两条不同的取回路径。
+   *
+   * 为什么两条都要有：headless 软件 WebGPU 上 `toDataURL` 实测拿不到画面
+   * （换内容也不变），而 `createImageBitmap(canvas)` + `getImageData` 是另一条路。
+   * 两条里只要有一条能跟着内容变，像素判据就成立；两条都不变就只能说"这一条测不了"。
+   */
+  const pixelHash = async () => {
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    const bitmap = await createImageBitmap(canvas);
+    const scratch = document.createElement("canvas");
+    scratch.width = bitmap.width;
+    scratch.height = bitmap.height;
+    const context = scratch.getContext("2d");
+    context.drawImage(bitmap, 0, 0);
+    bitmap.close();
+    return hashOf(context.getImageData(0, 0, scratch.width, scratch.height).data);
+  };
+  /** 像素摘要（FNV-1a over RGBA）+ 墨迹计数 + 三个采样点。 */
+  const hashOf = (data) => {
+    let hash = 2166136261 >>> 0;
+    let ink = 0;
+    let maxAlpha = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i] || data[i + 1] || data[i + 2] || data[i + 3]) ink += 1;
+      if (data[i + 3] > maxAlpha) maxAlpha = data[i + 3];
+      hash ^= data[i]; hash = Math.imul(hash, 16777619) >>> 0;
+      hash ^= data[i + 1]; hash = Math.imul(hash, 16777619) >>> 0;
+      hash ^= data[i + 2]; hash = Math.imul(hash, 16777619) >>> 0;
+      hash ^= data[i + 3]; hash = Math.imul(hash, 16777619) >>> 0;
+    }
+    const pixels = data.length / 4;
+    const samples = [0, Math.floor(pixels / 2), pixels - 1]
+      .map((index) => Array.from(data.subarray(index * 4, index * 4 + 4)));
+    return { hash: hash.toString(16), ink, maxAlpha, samples };
+  };
+  /**
+   * 第三条取回路径：`toDataURL` → `<img>` 解码 → 2D `getImageData`。
+   *
+   * 为什么要第三条：在无头/回退适配器上实测 `createImageBitmap(<webgpu canvas>)`
+   * 与 `toDataURL` **互相矛盾**（前者交全透明，后者交 52KB 的图像）。
+   * 两条都不跟内容变的话，就不能只说"测不了"，得先把"到底哪条能反映内容"找出来。
+   */
+  const pngHash = async () => {
+    const url = await capture();
+    const image = new Image();
+    await new Promise((resolve, reject) => {
+      image.onload = resolve;
+      image.onerror = () => reject(new Error("PNG 解码失败"));
+      image.src = url;
+    });
+    const scratch = document.createElement("canvas");
+    scratch.width = image.width;
+    scratch.height = image.height;
+    const context = scratch.getContext("2d");
+    context.drawImage(image, 0, 0);
+    return hashOf(context.getImageData(0, 0, scratch.width, scratch.height).data);
+  };
+  /** 2D 画布对照：`toDataURL` 这条路本身到底能不能反映内容变化。 */
+  const control2d = () => {
+    const scratch = document.createElement("canvas");
+    scratch.width = 8;
+    scratch.height = 8;
+    const context = scratch.getContext("2d");
+    context.fillStyle = "#ff0000";
+    context.fillRect(0, 0, 8, 8);
+    const red = scratch.toDataURL();
+    context.fillStyle = "#00ff00";
+    context.fillRect(0, 0, 8, 8);
+    return red !== scratch.toDataURL();
+  };
+  const uploadsOf = (rows) => (rows.length ? rows[rows.length - 1].uploads : null);
+  const cacheOf = (rows) => (rows.length ? rows[rows.length - 1].cache : null);
+  const videoState = () => ({
+    readyState: video.readyState,
+    width: video.videoWidth,
+    height: video.videoHeight,
+    currentTime: Number(video.currentTime.toFixed(3)),
+  });
+
+  // ---- P4：阶段 4。**在 `video` 模式下量** ----
+  //
+  // 为什么必须换模式：`bitmap` 模式下连视频源也要每帧 `createImageBitmap` + 上传，
+  // 于是"贴纸省下几次"被它淹掉（实测每帧 +2 次，看不出贴纸那一半）。
+  // `video` 模式下只有**调用方交的位图**（这里就是贴纸）走上传，读数是干净的。
+  // 画面在软件适配器上可能是空的 —— 这一段不判画面，只判上传次数。
+  engine.setSourceMode("video");
+  // 20 帧全落在同一个"素材帧桶"里：1 fps 的贴纸 ⇒ 每 30 个工程帧换一次素材帧，
+  // 所以 100..119 这一段素材帧号恒为 3 ⇒ "该不该复用"有确定答案。
+  const P4_FRAMES = [];
+  for (let f = 100; f < 120; f += 1) P4_FRAMES.push(f);
+
+  // P4a **改前**口径：`followPlayback = true` ⇒ 引擎不给内容标识
+  //（这正是产品里的设置，也是"没调新导出"时的行为）。
+  engine.followPlayback = true;
+  const beforeRows = await drawPass(P4_FRAMES, { sticker: true });
+  const beforeEnd = uploadsOf(beforeRows);
+  report.phases.P4_before = { rows: beforeRows, uploads: beforeEnd, uploadsDelta: beforeEnd };
+
+  // P4b **改后**口径：`followPlayback = false` ⇒ 声明内容标识 ⇒ 同标识的那些可以复用。
+  engine.followPlayback = false;
+  const afterRows = await drawPass(P4_FRAMES, { sticker: true });
+  const afterEnd = uploadsOf(afterRows);
+  report.phases.P4_after = {
+    rows: afterRows,
+    uploads: afterEnd,
+    uploadsDelta: delta(afterEnd, beforeEnd),
+  };
+  log("P4 位图上传：改前 20 帧拷 " + (beforeEnd ? beforeEnd.copied : "?")
+    + " 次；改后这 20 帧拷 " + (report.phases.P4_after.uploadsDelta
+      ? report.phases.P4_after.uploadsDelta.copied : "?"));
+
+  // ---- 回到 `bitmap` 模式：下面的像素与缓存判据都要有真画面 ----
+  engine.setSourceMode("bitmap");
+
+  // ---- S：探针有效性自检（取到的到底是不是"画面"）----
+  //
+  // 同一帧、只换贴纸内容：画面**必须**变。不变只有两种解释 ——
+  // ① 取到的不是画面（`toDataURL` 没等到合成）；② 贴纸那一层根本没画上去。
+  // 两种都会让后面所有"逐字节相同"变成空话，所以先在这儿判掉。
+  engine.setPreviewCache(false);
+  engine.followPlayback = false;
+  // 画面为空时，第一件要弄清的事是"这一帧到底该画几层"——
+  // 空画面既可能是画错了，也可能是这一帧本来就没有层。
+  // （直接问宿主：engine.js 没有暴露 plan 的通道，这一条只读、不改状态。）
+  const plan120 = JSON.parse(engine.mod.dhampir_project_frame(120));
+  sticker = stickerA;
+  await drawPass([120], { sticker: true });
+  const pngStickerA = await capture();
+  const hashStickerA = await pixelHash();
+  const pngHashStickerA = await pngHash();
+  const videoAtCapture = videoState();
+  sticker = stickerB;
+  await drawPass([120], { sticker: true });
+  const pngStickerB = await capture();
+  const hashStickerB = await pixelHash();
+  const pngHashStickerB = await pngHash();
+  sticker = stickerA;
+  report.phases.S = {
+    control2d: control2d(),
+    frame120: {
+      layers: (plan120.layers || []).map((layer) => ({
+        source: layer.source, opacity: layer.opacity, source_frame: layer.source_frame,
+      })),
+      sources: engine.sourcesFor(120).map((entry) => ({
+        source: entry.source, source_frame: entry.source_frame, seconds: entry.seconds,
+      })),
+    },
+    pngFollowsContent: pngStickerA !== pngStickerB,
+    hashFollowsContent: hashStickerA.hash !== hashStickerB.hash,
+    pngHashFollowsContent: pngHashStickerA.hash !== pngHashStickerB.hash,
+    pngLength: [pngStickerA.length, pngStickerB.length],
+    hash: [hashStickerA, hashStickerB],
+    pngHash: [pngHashStickerA, pngHashStickerB],
+    video: videoAtCapture,
+    sourceMode: engine.sourceMode,
+  };
+  // **取回路径的可用性**：三条里只要有一条跟着内容变，像素判据就能用。
+  report.phases.S.captureWorks = report.phases.S.pngFollowsContent
+    || report.phases.S.hashFollowsContent
+    || report.phases.S.pngHashFollowsContent;
+  log("S 自检：换贴纸内容画面会变 = " + report.phases.S.captureWorks
+    + "（toDataURL " + report.phases.S.pngFollowsContent
+    + "，createImageBitmap " + report.phases.S.hashFollowsContent
+    + "，PNG 解码 " + report.phases.S.pngHashFollowsContent
+    + "，2D 对照 " + report.phases.S.control2d
+    + "，视频 " + videoAtCapture.width + "x" + videoAtCapture.height
+    + " readyState " + videoAtCapture.readyState + "）");
+
+  // ---- S2：**环境对照** —— 不经过 Dhampir，用原生 WebGPU 把一张画布清成红色 ----
+  //
+  // 为什么必须有这一条：S 里画布取回来是**全黑**（`ink = 0`）。那既可能是
+  // "Dhampir 没画上去"，也可能是"这个环境上 WebGPU 画布根本呈现不出来"。
+  // 两者要做的事完全不同，所以拿一段**十行、与 Dhampir 无关**的原生 WebGPU 来分开它们：
+  // 它红不了 ⇒ 是环境（这台机器上 WebGPU 画布不呈现），Dhampir 那条链在这里测不了画面。
+  report.phases.S2 = await (async () => {
+    const raw = document.createElement("canvas");
+    raw.width = 64;
+    raw.height = 64;
+    raw.style.cssText = "width:64px;height:64px";
+    document.body.appendChild(raw);
+    const adapter = await navigator.gpu.requestAdapter();
+    const device = await adapter.requestDevice();
+    const context = raw.getContext("webgpu");
+    const format = navigator.gpu.getPreferredCanvasFormat();
+    context.configure({ device: device, format: format, alphaMode: "opaque" });
+    const encoder = device.createCommandEncoder();
+    encoder.beginRenderPass({
+      colorAttachments: [{
+        view: context.getCurrentTexture().createView(),
+        clearValue: { r: 1, g: 0, b: 0, a: 1 },
+        loadOp: "clear",
+        storeOp: "store",
+      }],
+    }).end();
+    device.queue.submit([encoder.finish()]);
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    const bitmap = await createImageBitmap(raw);
+    const scratch = document.createElement("canvas");
+    scratch.width = bitmap.width;
+    scratch.height = bitmap.height;
+    const ctx = scratch.getContext("2d");
+    ctx.drawImage(bitmap, 0, 0);
+    bitmap.close();
+    const first = Array.from(ctx.getImageData(0, 0, 1, 1).data);
+    const middle = Array.from(ctx.getImageData(32, 32, 1, 1).data);
+    const result = { format: String(format), first: first, middle: middle, opaqueRed: first[0] > 200 && first[1] < 60 };
+    raw.remove();
+
+    // ② **这一条才是关键**：`copyExternalImageToTexture` 在这台机器的适配器上到底交不交像素。
+    //    Dhampir 的位图那条路（贴纸 / bitmap 模式的视频）全靠它；它要是不交，
+    //    画布必然是空的 —— 那种"空"是**环境**的空，不是画错了。
+    const source = document.createElement("canvas");
+    source.width = 64;
+    source.height = 64;
+    const painter = source.getContext("2d");
+    painter.fillStyle = "#00ff00";
+    painter.fillRect(0, 0, 64, 64);
+    const bitmap2 = await createImageBitmap(source);
+    const texture = device.createTexture({
+      size: [64, 64, 1],
+      format: "rgba8unorm",
+      usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC
+        | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    device.queue.copyExternalImageToTexture({ source: bitmap2 }, { texture: texture }, [64, 64]);
+    const buffer = device.createBuffer({ size: 64 * 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const copyEncoder = device.createCommandEncoder();
+    copyEncoder.copyTextureToBuffer({ texture: texture }, { buffer: buffer, bytesPerRow: 256 }, [64, 64, 1]);
+    device.queue.submit([copyEncoder.finish()]);
+    await buffer.mapAsync(GPUMapMode.READ);
+    const external = Array.from(new Uint8Array(buffer.getMappedRange().slice(0, 4)));
+    buffer.unmap();
+    result.externalCopyPixel = external;
+    result.externalCopyWorks = external[1] > 200 && external[0] < 60;
+    return result;
+  })();
+  log("S2 环境对照：原生 WebGPU 清成红色，取回 = " + JSON.stringify(report.phases.S2));
+
+  // ---- S3：**同一条合成链、只是 sink 换成离屏纹理**（诊断用，默认不开）----
+  //
+  // `dhampir_project_render_probe` 走的是"求值 → 合成 → 读回"，与预览只差 sink。
+  // 拿它当对照就能把两种"画布是空的"分开：离屏也有内容 ⇒ 内容没问题，是**画布这一侧**；
+  // 离屏也空 ⇒ 这一帧本来就没画出东西（与预览那条链无关）。
+  //
+  // ⚠️ **默认不开**：实测把它接进长跑那一段之后，页面会在长跑里不再回报结果
+  // （离屏读回把宿主留在一个后续调用不返回的状态）。要单独看它加 `?s3=1`。
+  if (query.get("s3") === "1") {
+    report.phases.S3 = await (async () => {
+      const out = {};
+      for (const frame of [120, 121, 122]) {
+        try {
+          out[frame] = JSON.parse(await engine.mod.dhampir_project_render_probe("v", frame, 640, 360));
+        } catch (error) {
+          out[frame] = { error: String(error && error.message ? error.message : error) };
+        }
+      }
+      return out;
+    })();
+    log("S3 离屏对照：" + JSON.stringify(report.phases.S3));
+  }
+
+  // ---- R：参考帧（缓存**关** ⇒ 与阶段 5 之前逐字节相同的那条路）----
+  //
+  // 参考帧必须取**与阶段 5 同一批帧号**（120/121/122）：拿别的帧当参照，
+  // 比出来的"相同"没有任何意义（那是两张不同的画面）。
+  const refRows = await drawPass([120, 121, 122], { sticker: true });
+  const refPng = {};
+  const refHash = {};
+  const refInk = {};
+  for (const frame of [120, 121, 122]) {
+    refPng[frame] = await capture();
+    const viaPng = await pngHash();
+    refHash[frame] = viaPng.hash;
+    refInk[frame] = { ink: viaPng.ink, maxAlpha: viaPng.maxAlpha, samples: viaPng.samples };
+  }
+  report.phases.R = {
+    rows: refRows,
+    uploads: uploadsOf(refRows),
+    pngLength: Object.fromEntries(Object.entries(refPng).map(([k, v]) => [k, v.length])),
+    hash: refHash,
+    ink: refInk,
+    // 相邻两帧的画面必须不同：相同说明取到的其实是同一张（后面所有判据都作废）。
+    distinctFrames: refHash[120] !== refHash[121] && refHash[121] !== refHash[122],
+  };
+  log("R 参考：缓存关，" + refRows.length + " 帧；相邻帧不同 = " + report.phases.R.distinctFrames);
+
+  // ---- C：阶段 5（缓存开：第一遍未命中并填表，第二遍应当命中）----
+  engine.setPreviewCache(true, { seconds: [3, 2], maxMb: 256 });
+  const FRAMES = [];
+  for (let f = 120; f < 144; f += 1) FRAMES.push(f);
+  const cacheStart = cacheOf(afterRows);
+  const missRows = await drawPass(FRAMES, { sticker: true });
+  const missHash = {}; for (const frame of [120, 121, 122]) missHash[frame] = (await pngHash()).hash;
+  const cacheAfterMiss = cacheOf(missRows);
+  const hitRows = await drawPass(FRAMES, { sticker: true });
+  const hitHash = {}; for (const frame of [120, 121, 122]) hitHash[frame] = (await pngHash()).hash;
+  const cacheAfterHit = cacheOf(hitRows);
+  report.phases.C = {
+    miss: {
+      rows: missRows,
+      medianTotalMs: median(missRows.map((r) => r.totalMs)),
+      medianSeekMs: median(missRows.map((r) => r.seekMs)),
+      cache: cacheAfterMiss,
+      cacheDelta: delta(cacheAfterMiss, cacheStart),
+    },
+    hit: {
+      rows: hitRows,
+      medianTotalMs: median(hitRows.map((r) => r.totalMs)),
+      medianSeekMs: median(hitRows.map((r) => r.seekMs)),
+      cache: cacheAfterHit,
+      cacheDelta: delta(cacheAfterHit, cacheAfterMiss),
+    },
+    hitsInSecondPass: hitRows.filter((r) => r.cacheHit === true).length,
+    // **像素判据**：同一帧在"缓存关 / 未命中 / 命中"三条路上像素相同（比的是像素摘要）。
+    // 再加一条反向判据：**不同帧的命中结果必须不同** —— 少了它，
+    // "全都相同"有可能是"全都取到了同一张"，那样这个判据什么也没证明。
+    hash: { ref: refHash, miss: missHash, hit: hitHash },
+    pixels: Object.fromEntries([120, 121, 122].map((f) => [f, {
+      missEqualsRef: missHash[f] === refHash[f],
+      hitEqualsRef: hitHash[f] === refHash[f],
+    }])),
+    distinctHits: hitHash[120] !== hitHash[121] && hitHash[121] !== hitHash[122],
+  };
+  log("C 缓存：未命中中位 " + report.phases.C.miss.medianTotalMs + "ms，命中中位 "
+    + report.phases.C.hit.medianTotalMs + "ms，第二遍命中 " + report.phases.C.hitsInSecondPass + " 帧");
+
+  // ---- D：串行（不 await 连发三次 seek + 一条 pre-roll）----
+  engine.prerollBudgetMs = 200;
+  const pending = [engine.seek(200), engine.seek(201), engine.seek(202)];
+  engine.schedulePreroll(203);
+  await Promise.all(pending);
+  // **还能接着画**才算没 panic（wasm 的 panic 抓不住，会把 RefCell 永久借住）。
+  await engine.seek(204);
+  report.phases.D = { ok: true, errorsSoFar: errors.slice() };
+
+  // ---- E：长跑 1800 帧（0..1799 = 60s @30fps），每三帧排一条 pre-roll ----
+  if (query.get("skipE") === "1") {
+    report.phases.E = { skipped: true };
+  } else {
+    const started = performance.now();
+    const hitMs = [];
+    const missMs = [];
+    let frames = 0;
+    let maxMs = 0;
+    for (let f = 0; f < 1800 && performance.now() - started < 240000; f += 1) {
+      const t0 = performance.now();
+      const sources = await engine.seek(f);
+      const spent = performance.now() - t0;
+      const bd = engine.lastPrepareBreakdown;
+      if (bd && bd.cacheHit === true) hitMs.push(spent); else missMs.push(spent);
+      if (spent > maxMs) maxMs = spent;
+      if (f % 3 === 0) engine.schedulePreroll(f + 3);
+      frames += 1;
+      void sources;
+      if (frames % 300 === 0) log("E 长跑 " + frames + " 帧，用时 " + Math.round(performance.now() - started) + "ms");
+    }
+    const lastBd = engine.lastPrepareBreakdown;
+    report.phases.E = {
+      frames,
+      wallMs: Math.round(performance.now() - started),
+      maxFrameMs: Number(maxMs.toFixed(2)),
+      medianHitMs: median(hitMs),
+      medianMissMs: median(missMs),
+      hitFrames: hitMs.length,
+      missFrames: missMs.length,
+      cache: lastBd ? lastBd.cache : null,
+      uploads: lastBd ? lastBd.hostUploads : null,
+    };
+    log("E 长跑 " + frames + " 帧完成：命中 " + hitMs.length + " / 未命中 " + missMs.length
+      + "，最坏一帧 " + report.phases.E.maxFrameMs + "ms");
+  }
+
+  report.errors = errors;
+  report.ok = true;
+} catch (error) {
+  report.error = String(error && error.message ? error.message : error);
+  report.stack = error && error.stack ? String(error.stack).slice(0, 800) : null;
+  report.errors = errors;
+}
+log(report.ok ? "完成" : "失败：" + report.error);
+await fetch("/verdict", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(report) });
+</script>
+</body></html>

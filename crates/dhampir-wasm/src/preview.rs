@@ -184,6 +184,20 @@ impl CanvasFrameSink {
     pub fn format(&self) -> wgpu::TextureFormat {
         self.config.format
     }
+
+    /// 当前这张 canvas 纹理（`acquire` 里存下来的那张）。
+    ///
+    /// 预渲染缓存（候选 ⑤）命中时要拿它当**呈现目标**：不必重新合成，只要把缓存纹理
+    /// **blit** 到这张上来（BlitRenderer 就在这个文件里，格式也已经对齐 —— 见上面那条）。
+    ///
+    /// ⚠️ **不要把它当 `copy_texture_to_texture` 的源或目的**：画布表面纹理通常只有
+    /// `RENDER_ATTACHMENT`，没有 `COPY_DST` —— 拷贝会被拒绝。所以路径只能是
+    /// "缓存纹理 →（BlitRenderer）→ 这张"。
+    ///
+    /// 没 `acquire` 过时是 `None`（那时本来也没有可呈现的目标）。
+    pub fn texture(&self) -> Option<&wgpu::Texture> {
+        self.current.as_ref().map(|frame| &frame.texture)
+    }
 }
 
 

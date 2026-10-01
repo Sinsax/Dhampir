@@ -2,14 +2,14 @@
   "schema": 1,
   "milestone": "M0",
   "purpose": "M0 浏览器宿主自检页的整页截图，以及这次运行的硬结论——用于人工复核截图里的绿是不是真的。",
-  "captured_at": "2026-09-21T19:35:02.958Z",
-  "page_url": "http://127.0.0.1:49439/?autorun=1&expect=85bbc2017f35dda9",
+  "captured_at": "2026-09-30T04:04:04.811Z",
+  "page_url": "http://127.0.0.1:57071/?autorun=1&expect=85bbc2017f35dda9",
   "browser": {
     "kind": "chrome",
     "path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-    "product": "Chrome/153.0.8010.50",
-    "revision": "@583c5b4655acea7450a3b5224ea5121ae8caca9b",
-    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36",
+    "product": "Chrome/154.0.8037.59",
+    "revision": "@b5a24985a2f5ed35909845221b7203c5d8995c8f",
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/154.0.0.0 Safari/537.36",
     "headless": true
   },
   "viewport": {
@@ -22,8 +22,8 @@
   },
   "screenshot": {
     "file": "screenshot-browser-harness.png",
-    "bytes": 88779,
-    "sha256": "e845a011f9a83fd72dadd902a43e4873ac414af2da61b38535da761869880da0"
+    "bytes": 89146,
+    "sha256": "5e357b1d19d26e2d9f484ee15d8ebfb42ee77127db2ab6f518e3a97f6ac54081"
   },
   "status_bar": {
     "className": "ok",
