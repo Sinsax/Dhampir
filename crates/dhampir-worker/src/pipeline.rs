@@ -55,7 +55,7 @@ use dhampir_core::compose;
 use dhampir_core::gpu::NATIVE_BACKENDS;
 use dhampir_core::overlay::{SubtitleTable, evaluate_overlay};
 use dhampir_core::readback;
-use dhampir_core::render::{RenderSpace, SourceResolver, TimelineRenderer};
+use dhampir_core::render::{AnimationTextures, RenderSpace, SourceResolver, TimelineRenderer};
 use dhampir_core::timeline::layer::{AssetTimebases, TimelineV2, seconds_at_sequence_frame};
 use dhampir_core::timeline::schema::{Frame, Issue, TimebaseDto};
 use dhampir_core::wgpu;
@@ -831,6 +831,56 @@ impl SourcePool {
     }
 }
 
+
+/// 把**动图解码器读出来的延迟表**并进资产时间表（方案 §8.3-2「时间真值归一」）。
+///
+/// # 为什么在**建计划**的时候就要做
+///
+/// 求值（`evaluate_v2_with_assets`）与渲染（resolver）是两处，而它们必须用**同一张表**：
+/// 一张决定"第几帧"、一张决定"那一帧长什么样"。只在渲染那一侧用解码真值，
+/// 就会出现"帧号按工程 JSON 算、像素按解码帧数给"——那正是要消灭的那种漂移。
+///
+/// 所以计划里那张表就该是解码真值。**两侧用的是同一个解码器**，
+/// 于是 resolver 里的惰性加载与这里算出来的是同一份东西（缓存命中，不重复解码）。
+///
+/// # 只认 magic，不认 kind
+///
+/// 登记表里的 kind 是录入时的猜测，magic 是事实（方案 §9.3-4）。
+/// 但**只读文件头**：视频几百 MB，为了判断"是不是动图"整个读进来是不能接受的。
+/// 解不开的动图**不改表**也**不在这里报错** —— 报错归渲染那一侧
+/// （`ensure_animation` 记 issue），这里只负责"能解的就用它的真值"。
+pub fn asset_timebases_with_animations(
+    base: &AssetTimebases,
+    sources: &SourceTable,
+) -> AssetTimebases {
+    let mut merged = base.clone();
+    for (asset_id, file) in sources.sorted() {
+        let mut head = [0u8; 12];
+        let is_animation = match std::fs::File::open(&file) {
+            Ok(mut handle) => match handle.read(&mut head) {
+                Ok(read) => dhampir_core::animation::detect_format(&head[..read]).is_some(),
+                Err(_) => false,
+            },
+            Err(_) => false,
+        };
+        if !is_animation {
+            continue;
+        }
+        let Some(timebase) = merged.get(&asset_id).copied() else {
+            // 登记表里没有时间基：那是"这个素材还没被登记"，不是这里能补的。
+            continue;
+        };
+        let Ok(bytes) = std::fs::read(&file) else {
+            continue;
+        };
+        let Ok(animation) = dhampir_core::animation::decode(&bytes) else {
+            continue;
+        };
+        merged.insert_with_delays(asset_id, timebase, animation.delays_ms());
+    }
+    merged
+}
+
 // ---------------------------------------------------------------------------
 // 按工程解析源的 resolver
 // ---------------------------------------------------------------------------
@@ -848,6 +898,15 @@ pub struct DecodingSources<'a> {
     failed: BTreeSet<String>,
     log: IssueLog,
     current_frame: Frame,
+    /// 动图（GIF / 动画 WebP）的逐帧纹理：**引擎自己解码、自己供帧**。
+    ///
+    /// 出片这一侧与预览那一侧用的是**同一份** core 解码器（方案 §4.6）：
+    /// 「同一个贴纸在预览里第 30 帧不透明、在成片里第 31 帧」这类错在
+    /// 结构上就不存在。
+    animations: AnimationTextures,
+    /// 已经**试过**当动图加载的源（成或不成都算）：避免每帧重读一次文件头，
+    /// 也避免同一个坏文件每帧刷一条 issue。
+    animation_tried: BTreeSet<String>,
 }
 
 impl<'a> DecodingSources<'a> {
@@ -866,6 +925,8 @@ impl<'a> DecodingSources<'a> {
             failed: BTreeSet::new(),
             log: IssueLog::new(),
             current_frame: 0,
+            animations: AnimationTextures::new(device.clone(), queue.clone(), 0),
+            animation_tried: BTreeSet::new(),
         }
     }
 
@@ -910,6 +971,78 @@ impl<'a> DecodingSources<'a> {
         format!("frame[{}].source[{}]", self.current_frame, source)
     }
 
+
+    /// 需要时才把这一路**当动图**加载：读文件头认 magic，是动图就整段解码。
+    ///
+    /// 返回「现在动图缓存里有它」。三条规矩：
+    ///
+    /// 1. **先看 magic 再决定读不读整个文件**：视频动辄几百 MB，
+    ///    为了判断"是不是动图"把它整个读进来是不能接受的。头 12 字节足够
+    ///    （GIF8 与 `RIFF????WEBP` 都在前 12 字节里）。
+    /// 2. **只试一次**（成功或失败都记进 `animation_tried`）：失败的文件每帧重试
+    ///    会把出片日志刷成一堵墙，而失败原因一帧与一万帧是同一个。
+    /// 3. **失败不改路由**：认不出 magic 就返回 false，交给下面 ffmpeg 那条路
+    ///    （契约：动图这条路只收动图，别的素材照旧）。
+    fn ensure_animation(&mut self, source: &str) -> bool {
+        if self.animations.contains(source) {
+            return true;
+        }
+        if !self.animation_tried.insert(source.to_string()) {
+            return false;
+        }
+        let Some(file) = self.table.file_for(source).map(Path::to_path_buf) else {
+            // 素材表里没有它 —— 这是 `ensure_stream` 会报的那种情况，
+            // 不在这里重复报（同一个源会由 ffmpeg 那条路给出 `unknown_asset`）。
+            return false;
+        };
+        let mut head = [0u8; 12];
+        let is_animation = match std::fs::File::open(&file) {
+            Ok(mut handle) => {
+                match handle.read(&mut head) {
+                    Ok(read) => dhampir_core::animation::detect_format(&head[..read]).is_some(),
+                    Err(_) => false,
+                }
+            }
+            Err(_) => false,
+        };
+        if !is_animation {
+            return false;
+        }
+        let bytes = match std::fs::read(&file) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let path = self.path_of(source);
+                self.log.record(
+                    "asset_unavailable",
+                    &path,
+                    format!("读不了素材文件 {}：{error}", file.display()),
+                );
+                return false;
+            }
+        };
+        let animation = match dhampir_core::animation::decode(&bytes) {
+            Ok(animation) => animation,
+            Err(error) => {
+                let path = self.path_of(source);
+                // 记 issue 而不是让它掉到 ffmpeg 那条路：ffmpeg 对着一张**坏掉的动图**
+                // 的报错（"没有视频流"）会把病因指错方向。
+                self.log.record("animation_decode_failed", &path, error.to_string());
+                return false;
+            }
+        };
+        // 时间真值走**解码器读出来的那份**：与 wasm 侧同一个口径（方案 §8.3-2）。
+        // 出片这一侧不经过宿主，所以直接把它并进 demand 用的资产表交给求值层
+        // —— 见 `render_frames_png` 那一层对 `asset_timebases` 的处理。
+        match self.animations.upload(source, &animation) {
+            Ok(()) => true,
+            Err(error) => {
+                let path = self.path_of(source);
+                self.log.record("animation_upload_failed", &path, error.to_string());
+                false
+            }
+        }
+    }
+
     /// 需要时才开解码器。开失败就记一次并进 failed。
     fn ensure_stream(&mut self, source: &str) -> bool {
         if self.streams.contains_key(source) {
@@ -951,6 +1084,18 @@ impl SourceResolver for DecodingSources<'_> {
         source: &str,
         source_frame: Frame,
     ) -> Option<(wgpu::TextureView, (u32, u32))> {
+        // ---- 动图优先 ----
+        // 顺序是有讲究的：动图的帧号由求值层算，**不是**「按时间 seek 一个视频」。
+        // 拿它去喂 ffmpeg 会得到一个"能解码但内容不是这一帧"的结果 ——
+        // 画面看起来完全正常，只是贴纸的相位是错的。
+        if let Some(hit) = self.animations.texture_for(source, source_frame) {
+            return Some(hit);
+        }
+        if self.ensure_animation(source) {
+            if let Some(hit) = self.animations.texture_for(source, source_frame) {
+                return Some(hit);
+            }
+        }
         if !self.ensure_stream(source) {
             return None;
         }

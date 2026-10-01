@@ -71,6 +71,26 @@ function projectSchemaVersion() {
   return Number(m[1]);
 }
 
+
+/// **宿主 API 版本**（`HOST_API_VERSION`，同一个来源：Rust 常量）。
+///
+/// 为什么要和 project_schema 分开记：两者是**两条独立的兼容线**。
+/// project_schema 管工程文件能不能读；HOST_API_VERSION 管 wasm 导出面/形状对不对得上。
+/// 动图这一版（v6）正是**只动了后者**：工程文件形状一个键都没变，
+/// 但多了两条导出 —— 下游拿老版本号放行就会调到 `undefined`。
+///
+/// 同一条纪律：读不到就**失败**，不猜。猜出来的版本号比没有更坏。
+function hostApiVersion() {
+  const src = readFileSync(join(REPO, 'crates/dhampir-timeline/src/host_api.rs'), 'utf8');
+  const m = src.match(/pub const HOST_API_VERSION:\s*u32\s*=\s*(\d+)\s*;/);
+  if (!m) {
+    console.error('✗ 读不出 HOST_API_VERSION（在 crates/dhampir-timeline/src/host_api.rs）——');
+    console.error('  它是 wasm 导出面与下游宿主之间的契约版本，读不到就**不许猜**，直接失败。');
+    process.exit(1);
+  }
+  return Number(m[1]);
+}
+
 function gitSha() {
   try {
     return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: REPO, encoding: 'utf8' }).trim();
@@ -80,13 +100,14 @@ function gitSha() {
 }
 
 const schema = projectSchemaVersion();
+const hostApi = hostApiVersion();
 const sha = gitSha();
 const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 const version = schema + '+' + sha;
 const out = resolve(arg('--out', join(REPO, 'dist', 'dhampir-' + version)));
 
 console.log('产物目录 : ' + out);
-console.log('契约版本 : project_schema = ' + schema + '  (git ' + sha + ')');
+console.log('契约版本 : project_schema = ' + schema + '   host_api = ' + hostApi + '  (git ' + sha + ')');
 console.log('');
 
 // ---------------------------------------------------------------- 构建
@@ -121,6 +142,7 @@ if (has('--bundle-licenses')) run('node', ['scripts/licenses.mjs', '--bundle', o
 
 writeFileSync(join(out, 'VERSION'), [
   'project_schema=' + schema,
+  'host_api=' + hostApi,
   'license=Apache-2.0',
   'git=' + sha,
   'built_at=' + stamp,

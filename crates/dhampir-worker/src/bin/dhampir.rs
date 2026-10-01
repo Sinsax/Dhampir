@@ -43,7 +43,10 @@ use dhampir_core::timeline::schema::{Frame, TimebaseDto, TrackKind};
 use dhampir_core::timeline::subtitle::{
     AssStyle, Cue, CueStyle, ms_at_frame, parse_ass, parse_srt, to_ass, to_srt,
 };
-use dhampir_worker::pipeline::{AudioMode, RenderPlan, SourceTable, render_frames_png, render_plan};
+use dhampir_worker::pipeline::{
+    AudioMode, RenderPlan, SourceTable, asset_timebases_with_animations, render_frames_png,
+    render_plan,
+};
 
 const USAGE: &str = "\
 用法：dhampir <子命令> [选项]
@@ -1304,7 +1307,9 @@ fn cmd_frame(args: &Args) -> Result<ExitCode, CommandError> {
     let output = PathBuf::from(out).join("frame.png");
     // **把资产时间基带上。** 少了它就会退回恒等换算（素材帧率按时间线算），
     // 而 60fps 素材放进 30fps 工程的表现是**半速播放**。
-    let asset_timebases = doc.asset_timebases();
+    // 动图那几条再按**解码器读出来的延迟**覆盖一次：出片与预览要用同一份时间真值。
+    let asset_timebases =
+        asset_timebases_with_animations(&doc.asset_timebases(), &sources);
     let (first_frame, last_frame) = (
         frames.first().copied().expect("frame_range 一定给至少一帧"),
         frames.last().copied().expect("frame_range 一定给至少一帧"),
@@ -1513,7 +1518,9 @@ fn cmd_render(args: &Args) -> Result<ExitCode, CommandError> {
         })
     );
 
-    let asset_timebases = doc.asset_timebases();
+    // 同上：动图的时间真值走解码器那一份（出片与预览同一个口径）。
+    let asset_timebases =
+        asset_timebases_with_animations(&doc.asset_timebases(), &sources);
     let plan = RenderPlan {
         timeline: &doc.timeline,
         sources: &sources,

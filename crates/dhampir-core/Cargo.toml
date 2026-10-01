@@ -17,6 +17,16 @@ log = { workspace = true }
 # 比对在编码后的字节上进行，两端编码器不同的话归因就无从下手。
 # `png` 是纯 Rust，wasm32 上原样可用。
 png = "0.17"
+# 动图（GIF / 动画 WebP）的整段解码 —— 见 src/animation.rs。
+# **放 core 的唯一理由与 `png` 完全一样：两端要同一个实现。**
+# 出片（native）与预览（wasm）各写一遍解码器，迟早在 disposal / 延迟钳制这些
+# 地方漂开，而那种漂移在单帧里看不出来（表现为"动图慢了半拍"或"某一帧是空的"）。
+# 两个都是纯 Rust、零 unsafe、宽松许可（MIT/Apache-2.0），wasm32 上原样可用：
+#   * `gif` —— LZW + 调色板；**帧的合并不在它里面**（画布与 disposal 由我们做，见 animation.rs）
+#   * `image-webp` —— lossy/lossless/alpha/动画全支持，且**动画合成在它内部完成**
+#     （依赖只有 byteorder-lite 与 quick-error，体积代价比 `gif` 还小）
+gif = "0.14"
+image-webp = "0.2"
 # 记录（`run.json` 那一套）的形状也归 core：M2 的两端要产出**同一张表**，
 # 而"同一张表"如果由两个宿主各拼一遍 JSON，比出来的就不只是渲染差异了。
 # `serde_json` 是纯 Rust，wasm32 上原样可用，且不引入任何执行器。

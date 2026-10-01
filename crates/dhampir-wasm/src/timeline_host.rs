@@ -112,14 +112,15 @@
 //! 由 `set_text_bitmap`（留着）与 `text_frame` 的作废语义共同兑现。
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use dhampir_core::compose::{self, Composite};
 use dhampir_core::io::{FrameSink, FrameSource};
 use dhampir_core::overlay::{DanmakuTextItem, SubtitleTable, evaluate_overlay};
 use dhampir_core::readback::Rgba8Image;
+use dhampir_core::animation::{detect_format, decode as decode_animation};
 use dhampir_core::render::{
-    OverlayItem, RenderSpace, SourceResolver, compose_overlay, ink_report,
+    AnimationTextures, OverlayItem, RenderSpace, SourceResolver, compose_overlay, ink_report,
 };
 // 宿主 API 的返回体形状：**有名字、有测试钉住**，不再用宏手写。
 use dhampir_core::timeline::history::History;
@@ -141,6 +142,51 @@ thread_local! {
     /// 工程预览宿主。与 PROJECT 分开：工程可以在没有 canvas 时先载入并校验。
     static PROJECT_HOST: RefCell<Option<ProjectHost>> = const { RefCell::new(None) };
 }
+thread_local! {
+    /// **解码器读出来的动图延迟真值**：asset_id -> 逐帧延迟表。
+    ///
+    /// # 为什么单独一份、而不是只放在 ProjectHost 里
+    ///
+    /// 求值发生在**六个**地方（draw / sources_for / text_frame / preroll / probe …），
+    /// 其中四个是不持有宿主的自由函数。把真值放在宿主里，就得给每个求值点都开一条
+    /// 借宿主的通道 —— 而漏掉任何一处的症状是「这一路按工程 JSON 的表算、那一路按解码的表算」，
+    /// 也就是同一帧里两个不同的贴纸相位。一张表、一个取数口，这种错在结构上就不存在。
+    ///
+    /// 纹理不在这里：那一份要 device，跟着 [`ProjectHost`] 走。**两份的寿命一起管**
+    /// （`open()` 同时清）。
+    static ANIMATION_TIMING: RefCell<BTreeMap<String, Vec<u32>>> = const { RefCell::new(BTreeMap::new()) };
+}
+
+/// 资产时间表：**工程登记的那份**，但动图那几条用**解码器读出来的延迟**覆盖。
+///
+/// 这是方案 §8.3-2「时间真值归一」在 wasm 这一侧的唯一落点。
+/// 覆盖而不是并存：并存就是「映射用一张表、像素用另一张表」，
+/// 而那种漂移的表现是动图越播越偏 —— 单帧看不出来。
+fn assets_with_animation_truth(doc: &ProjectDoc) -> dhampir_core::timeline::layer::AssetTimebases {
+    let mut assets = doc.asset_timebases();
+    ANIMATION_TIMING.with(|slot| {
+        for (asset_id, delays) in slot.borrow().iter() {
+            // 时间基取登记表里的那份（只在「新登记、还没有任何时间基」时才用不到它）——
+            // 有了延迟表，取帧就不再走单一时间基那条换算（见 source_frame_at_delays）。
+            let Some(timebase) = assets.get(asset_id).copied() else {
+                continue;
+            };
+            assets.insert_with_delays(asset_id.clone(), timebase, delays.clone());
+        }
+    });
+    assets
+}
+
+/// **动图缓存整表作废**（换工程时与 `PROJECT` 一起清）。
+fn clear_animations() {
+    ANIMATION_TIMING.with(|slot| slot.borrow_mut().clear());
+    PROJECT_HOST.with(|h| {
+        if let Some(host) = h.borrow_mut().as_mut() {
+            host.animations.clear();
+        }
+    });
+}
+
 
 /// **预渲染缓存整表作废**（阶段 5 的失效判据，唯一入口之一）。
 ///
@@ -648,6 +694,12 @@ pub struct ProjectHost {
     upload_stats: UploadStats,
     /// stage 5：JS 递进来的预渲染缓存要求。`None` ⇒ **不建表**（默认关）。
     cache_request: Option<CacheRequest>,
+    /// 动图（GIF / 动画 WebP）的**逐帧纹理**：引擎自己解码、自己供帧。
+    ///
+    /// 有它之后，贴纸层在 `sources_for` 里照旧出现（求值是同一份），
+    /// 但宿主**不再为它 `set_bitmap`** —— 见 `dhampir_asset_load_animation`。
+    /// 寿命跟着 `open()` 走（换一份工程 = 换一批素材）。
+    animations: AnimationTextures,
 }
 
 /// 渲染期的解析器：不 seek，只取「当前停在哪一帧」的纹理。
@@ -669,6 +721,12 @@ struct BoundVideos<'a> {
     bitmap_ids: &'a HashMap<String, String>,
     /// stage 4 的观测计数。
     stats: &'a mut UploadStats,
+    /// 动图缓存：**它排在最前面**（引擎自己供帧的源根本不走 video / 位图那两条路）。
+    ///
+    /// 为什么放最前而不是兜底：动图的帧号由求值层算，宿主提供的位图永远只有
+    /// 「当前这一张」—— 让位图抢先，贴纸就会**永远停在宿主给的那一帧**，
+    /// 而画面看起来是「动图不动了」，不像接线错了。
+    animations: &'a AnimationTextures,
 }
 
 impl BoundVideos<'_> {
@@ -711,8 +769,15 @@ impl SourceResolver for BoundVideos<'_> {
     fn texture_for(
         &mut self,
         source: &str,
-        _source_frame: i64,
+        source_frame: i64,
     ) -> Option<(wgpu::TextureView, (u32, u32))> {
+        // ---- 动图优先：引擎自己解码、自己供帧 ----
+        // 这里**按 source_frame 定位**，而且必须按它定位：动图的帧号是求值层算出来的，
+        // 与 JS 无关。命中就返回，连位图都不碰。
+        if let Some(hit) = self.animations.texture_for(source, source_frame) {
+            return Some(hit);
+        }
+
         // 这里**不**按 source_frame 定位：那一帧已经由 JS 侧 seek 好了。
         // source_frame 的意义体现在 sources_for 返回的秒数上。
 
@@ -1171,7 +1236,7 @@ impl ProjectHost {
         // 位移的相对位置就不一样，也就是「预览所见 != 成片所得」。
         let loaded = PROJECT.with(|slot| {
             slot.borrow().as_ref().map(|doc| {
-                let assets = doc.asset_timebases();
+                let assets = assets_with_animation_truth(doc);
                 let composite =
                     compose::evaluate_v2_with_assets(&doc.timeline, frame, Some(&assets));
                 // **序列时间**（秒）：Warp 的位移场以它为自变量。
@@ -1230,6 +1295,7 @@ impl ProjectHost {
             // 那正是它该有的样子：**给这个结构体加了字段，就必须在拆借用处表态**。
             frame_ids: _,
             cache_request,
+            animations: _,
         } = self;
         let (width, height) = *size;
         let sink_format = sink.format();
@@ -1371,6 +1437,7 @@ impl ProjectHost {
             uploads: source_uploads,
             bitmap_ids,
             stats: upload_stats,
+            animations: &self.animations,
         };
         let mut encoder = ctx
             .device
@@ -1633,6 +1700,10 @@ pub fn dhampir_project_open(json: &str) -> String {
             // ⑤ 预渲染缓存整体作废 —— 失效判据的**第一维**（工程换了）。
             // 见 `invalidate_frame_cache` 的说明：三个维度各在哪儿点名。
             invalidate_frame_cache();
+            // **动图缓存也整体作废**：换一份工程就是换一批素材。
+            // 不换的话，新旧工程里同名的 asset_id 会拿到旧文件解出来的帧 ——
+            // 而症状是「换了个贴纸但画面还是老的」。
+            clear_animations();
         }
         // **校验不过时保留上一份可用工程。**
         // 旧实现这里写的是 None，而 engine.js 的注释一直写着"失败时保留上一份"——
@@ -1641,6 +1712,132 @@ pub fn dhampir_project_open(json: &str) -> String {
     });
     host_api::to_json(&host_api::OpenResult::from_doc_issues(&issues))
 }
+/// **把一张动图（GIF / 动画 WebP）交给引擎**：解码 + 传上 GPU，之后这一层由引擎供帧。
+///
+/// # 契约（方案 §3 / §9.3）
+///
+/// * 字节由**宿主负责取**（浏览器 = fetch）。**格式按 magic 认**，不看扩展名 ——
+///   登记表里的 kind 是录入时的猜测，字节是事实（不一致以字节为准）。
+/// * 引擎把整段解成帧序列常驻，此后**播放期零请求、零逐帧 set_bitmap**。
+/// * `asset_id` 必须是这一层在求值里用的那个源标识（= 工程里的 asset_id）：
+///   引擎按它接管这一路的纹理。
+/// * **重复调用同 id 是替换**（幂等）：编辑里换了素材文件时重新 load 必须生效。
+/// * 失败**不改路由**：没解开的资产照旧走宿主位图那条路，也就是「这一层画不出来」，
+///   而不是把工程弄坏。
+/// * 返回体的形状是钉死的（见 `AnimLoadResult`）：成功只出 parsed/ok/info，
+///   失败只出 parsed/ok/error。
+#[wasm_bindgen]
+pub fn dhampir_asset_load_animation(asset_id: String, bytes: &[u8]) -> String {
+    let parsed = detect_format(bytes).is_some();
+    let animation = match decode_animation(bytes) {
+        Ok(animation) => animation,
+        Err(error) => {
+            return host_api::to_json(&host_api::AnimLoadResult {
+                parsed,
+                ok: false,
+                info: None,
+                error: Some(error.to_string()),
+            });
+        }
+    };
+    // 先落**时间真值**（求值要用它），再传纹理 —— 反过来会有一段窗口是
+    // 「帧号按解码的表、时间按工程 JSON 的表」，而那正是要消灭的漂移。
+    let delays = animation.delays_ms();
+    ANIMATION_TIMING.with(|slot| {
+        slot.borrow_mut().insert(asset_id.clone(), delays);
+    });
+
+    let uploaded = PROJECT_HOST.with(|h| {
+        let mut borrowed = h.borrow_mut();
+        let Some(host) = borrowed.as_mut() else {
+            return Err("还没 attach 上 canvas：动图现在只能先记账".to_string());
+        };
+        host.animations.upload(&asset_id, &animation).map_err(|error| error.to_string())
+    });
+
+    let bytes_used = PROJECT_HOST.with(|h| {
+        h.borrow().as_ref().map(|host| host.animations.memory_bytes()).unwrap_or(0)
+    });
+    let info = host_api::AnimInfoView {
+        format: animation.format.as_str().to_string(),
+        width: animation.width,
+        height: animation.height,
+        frame_count: animation.frame_count(),
+        loop_count: animation.loop_count,
+        total_ms: animation.total_ms,
+        frame_delays_ms: animation.delays_ms(),
+        bytes: bytes_used,
+    };
+
+    match uploaded {
+        Ok(()) => host_api::to_json(&host_api::AnimLoadResult {
+            parsed: true,
+            ok: true,
+            info: Some(info),
+            error: None,
+        }),
+        Err(error) => {
+            // 传不上去就把时间真值也撤掉：**要么两条都立着，要么都不立**。
+            // 留着它会让求值按一张「有延迟表但取不到纹理」的资产算 ——
+            // 那一层的帧号正确、像素没有，看起来像贴纸丢了。
+            ANIMATION_TIMING.with(|slot| {
+                slot.borrow_mut().remove(&asset_id);
+            });
+            host_api::to_json(&host_api::AnimLoadResult {
+                parsed: true,
+                ok: false,
+                info: None,
+                error: Some(error),
+            })
+        }
+    }
+}
+
+/// **问一句「这个动图现在在不在引擎里」**，不加载、不传字节。
+///
+/// 用途是幂等与诊断：页面重放或宿主重建之后，调用方想知道要不要重新 load，
+/// 而不想为了确认这件事再传一遍几十 MB。
+///
+/// 返回体是钉死的 `AnimQueryResult`：查得到出 loaded/info，查不到只出 loaded。
+#[wasm_bindgen]
+pub fn dhampir_asset_animation_info(asset_id: String) -> String {
+    let timing = ANIMATION_TIMING.with(|slot| slot.borrow().get(&asset_id).cloned());
+    let Some(delays) = timing else {
+        return host_api::to_json(&host_api::AnimQueryResult {
+            loaded: false,
+            info: None,
+            error: None,
+        });
+    };
+    let described = PROJECT_HOST.with(|h| {
+        let borrowed = h.borrow();
+        let host = borrowed.as_ref()?;
+        let format = host.animations.format(&asset_id)?;
+        Some(host_api::AnimInfoView {
+            format: format.as_str().to_string(),
+            width: 0,
+            height: 0,
+            frame_count: host.animations.frame_count(&asset_id).unwrap_or(delays.len()),
+            loop_count: host.animations.loop_count(&asset_id).unwrap_or(0),
+            total_ms: host.animations.total_ms(&asset_id).unwrap_or(0),
+            frame_delays_ms: delays,
+            bytes: host.animations.memory_bytes(),
+        })
+    });
+    match described {
+        Some(info) => host_api::to_json(&host_api::AnimQueryResult {
+            loaded: true,
+            info: Some(info),
+            error: None,
+        }),
+        None => host_api::to_json(&host_api::AnimQueryResult {
+            loaded: true,
+            info: None,
+            error: Some("有时间真值但没有纹理（attach 之前 load 过，或宿主被重建）".to_string()),
+        }),
+    }
+}
+
 
 /// 执行一次编辑操作。**与 CLI 走同一份实现**（dhampir_core::timeline::edit）。
 ///
@@ -1786,7 +1983,7 @@ pub fn dhampir_project_frame(frame: i32) -> String {
                 error: Some("还没有载入通过校验的工程".to_string()),
             }),
             Some(doc) => {
-                let assets = doc.asset_timebases();
+                let assets = assets_with_animation_truth(doc);
                 host_api::to_json(&composite_result(
                     &compose::evaluate_v2_with_assets(
                         &doc.timeline,
@@ -1839,7 +2036,7 @@ pub async fn dhampir_project_render_probe(
         slot.borrow()
             .as_ref()
             .map(|doc| {
-                let assets = doc.asset_timebases();
+                let assets = assets_with_animation_truth(doc);
                 compose::evaluate_v2_with_assets(&doc.timeline, i64::from(frame), Some(&assets))
             })
     })
@@ -1947,7 +2144,7 @@ pub async fn dhampir_sample_project_render_png(
         )));
     }
 
-    let assets = doc.asset_timebases();
+    let assets = assets_with_animation_truth(&doc);
     let composite =
         compose::evaluate_v2_with_assets(&doc.timeline, i64::from(frame), Some(&assets));
     let instance = new_instance();
@@ -2082,6 +2279,8 @@ pub async fn dhampir_project_attach(canvas_id: String) -> Result<String, JsValue
     let sink = CanvasFrameSink::new(surface, &ctx.adapter, &ctx.device, &ctx.queue, size)
         .map_err(js_err)?;
     let renderer = dhampir_core::render::TimelineRenderer::new(&ctx.device, sink.format());
+    // 动图缓存与渲染器共用同一个 device/queue：纹理跨容器传会被当成两个类型。
+    let animations = AnimationTextures::new(ctx.device.clone(), ctx.queue.clone(), 0);
     let info = ctx.adapter.get_info();
     let json = format!(
         "{{\"name\":\"{}\",\"backend\":\"{:?}\",\"size\":\"{}x{}\"}}",
@@ -2115,6 +2314,7 @@ pub async fn dhampir_project_attach(canvas_id: String) -> Result<String, JsValue
             upload_stats: UploadStats::default(),
             // 默认不建预渲染缓存：JS 要用得自己通过 `begin_frame` 明确要。
             cache_request: None,
+            animations,
         });
     });
     Ok(json)
@@ -2496,7 +2696,7 @@ pub fn dhampir_project_sources_for(frame: i32) -> String {
                 error: Some(error.to_string()),
             });
         }
-        let assets = doc.asset_timebases();
+        let assets = assets_with_animation_truth(doc);
         let composite =
             compose::evaluate_v2_with_assets(&doc.timeline, i64::from(frame), Some(&assets));
         // 去重：同一个 (source, 帧) 只该 seek 一次。
@@ -3083,7 +3283,7 @@ pub async fn dhampir_project_text_probe(frame: i32) -> Result<String, JsValue> {
         }
         let (width, height) = host.size;
         let sequence = doc.sequence_size();
-        let assets = doc.asset_timebases();
+        let assets = assets_with_animation_truth(&doc);
         let composite =
             compose::evaluate_v2_with_assets(&doc.timeline, frame_number, Some(&assets));
         let format = host.sink.format();
@@ -3129,6 +3329,7 @@ pub async fn dhampir_project_text_probe(frame: i32) -> Result<String, JsValue> {
             // 标识照旧读宿主的：它不改变"现拷一次"这件事，只决定写不写进那份本地空表。
             bitmap_ids: &host.bitmap_ids,
             stats: &mut probe_stats,
+            animations: &host.animations,
         };
         let mut encoder = host.ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("dhampir project text probe encoder"),

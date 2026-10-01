@@ -225,7 +225,19 @@ pub fn to_json<T: Serialize>(value: &T) -> String {
 ///
 /// 老工程**一个键都不多**：四个字段都带 `skip_serializing_if`，缺省值不进返回体
 /// （与"既有工程逐字节不变"同一条口径，有单测钉着）。
-pub const HOST_API_VERSION: u32 = 5;
+///
+/// ## v5 -> v6
+///
+/// **导出面**多了两条：`dhampir_asset_load_animation` 与
+/// `dhampir_asset_animation_info` —— 引擎自己解码动图（GIF / 动画 WebP），
+/// 宿主不再逐帧喂位图。**既有形状一个键都没动。**
+///
+/// 与 v3 -> v4 同一类：形状没变、**导出面变了**。老前端不会知道有这两条路，
+/// 新前端对着老宿主调会拿到 `undefined` —— 这正是「问一次版本」要拦的错配。
+///
+/// 为什么不攒一个更大的版本：动图这条路的契约面就是这两条导出加
+/// [`AnimInfoView`]，而版本号的作用是**拦住两端错配**，不是攒够一批才升。
+pub const HOST_API_VERSION: u32 = 6;
 
 /// `dhampir_project_open` 的返回体。
 ///
@@ -512,6 +524,70 @@ pub struct SourcesResult {
     pub error: Option<String>,
 }
 
+/// 一张动图的元信息（`dhampir_asset_load_animation` 与 `dhampir_asset_animation_info` 的 `info`）。
+///
+/// # 这些数是**解码器读出来的事实**，不是登记表里的申报
+///
+/// `frame_count` 与 `frame_delays_ms` 在工程 JSON 里也有一份（宿主录入时探测的）。
+/// 两份不一致时**以这里为准**（方案 §8.3-2）：解码器读的是文件本身，
+/// 而「映射用一张表、像素用另一张表」会把漂移请回来 —— 症状是动图越播越偏。
+///
+/// 宿主拿到后应当把它写回资产表（`insert_with_delays` 那条路）。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnimInfoView {
+    /// "gif" 或 "webp" —— **按 magic 认出来的**，不是按扩展名。
+    pub format: String,
+    /// 画布宽（动图每一帧都是整张画布）。
+    pub width: u32,
+    /// 画布高。
+    pub height: u32,
+    pub frame_count: usize,
+    /// 文件里写的循环次数；**0 = 无限循环**（两个格式同语义）。
+    pub loop_count: u32,
+    /// 一圈总时长（毫秒）。
+    pub total_ms: u64,
+    /// 逐帧延迟表 —— 就是 `frame_delays_ms` 的真值，长度等于 `frame_count`。
+    pub frame_delays_ms: Vec<u32>,
+    /// 传到显存后占多少字节（估算，不含驱动对齐）。宿主拿它记账。
+    pub bytes: u64,
+}
+
+/// `dhampir_asset_load_animation` 的返回体。
+///
+/// 形状与 [`OpenResult`] 同款（`parsed` / `ok` / 成功键 / 失败键），
+/// 理由也一样：**每个形态只出现自己那几个键** —— 少一个 `null` 就少一类
+/// 「对端读到 `undefined.length`」的崩。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnimLoadResult {
+    /// 容器认出来了没有（magic 对上）。**认出来但解不开**时它是 true、`ok` 是 false。
+    pub parsed: bool,
+    /// 整张图解完并传上 GPU 了没有。false 时 `error` 一定有。
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info: Option<AnimInfoView>,
+    /// 失败原因（人读的）。**这一层不返回 issues 数组**：动图加载是「成或不成」
+    /// 一件事，不是一串可忽略的警告 —— 与 `open()` 那种「载入了但有毛病」不同。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// `dhampir_asset_animation_info` 的返回体：**只查，不加载**。
+///
+/// 用途是诊断与幂等：宿主在重放/重连之后想知道「这个资产现在在不在引擎里、
+/// 帧数是多少」，而不想再传一遍几十 MB 的字节。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnimQueryResult {
+    /// 引擎现在**手里有没有**这个动图（有 = 这一层由引擎供帧，宿主别再 set_bitmap）。
+    pub loaded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info: Option<AnimInfoView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,6 +610,67 @@ mod tests {
         let mut out: Vec<String> = items.iter().map(|s| s.to_string()).collect();
         out.sort();
         out
+    }
+
+    /// v6 的三个形状：**成功形态只出自己那几个键**（与 OpenResult 同一条口径）。
+    #[test]
+    fn 动图信息形状的键集是钉死的() {
+        let info = AnimInfoView {
+            format: "gif".to_string(),
+            width: 280,
+            height: 280,
+            frame_count: 66,
+            loop_count: 0,
+            total_ms: 2200,
+            frame_delays_ms: vec![30, 30, 200],
+            bytes: 20_684_800,
+        };
+        let info_keys = sorted(&[
+            "format",
+            "width",
+            "height",
+            "frame_count",
+            "loop_count",
+            "total_ms",
+            "frame_delays_ms",
+            "bytes",
+        ]);
+        assert_eq!(keys(&serde_json::to_value(&info).unwrap()), info_keys);
+
+        let loaded = AnimLoadResult {
+            parsed: true,
+            ok: true,
+            info: Some(info.clone()),
+            error: None,
+        };
+        let value = serde_json::to_value(&loaded).unwrap();
+        assert_eq!(keys(&value), sorted(&["parsed", "ok", "info"]));
+        assert_eq!(keys(&value["info"]), info_keys);
+
+        // 失败形态：不许出现 info，也不许出现 null。
+        let failed = AnimLoadResult {
+            parsed: true,
+            ok: false,
+            info: None,
+            error: Some("动图解不开：截断了".to_string()),
+        };
+        let value = serde_json::to_value(&failed).unwrap();
+        assert_eq!(keys(&value), sorted(&["parsed", "ok", "error"]));
+        assert!(value.get("info").is_none(), "失败形态不该有 info 键");
+
+        // 查得到 / 查不到两种形态。
+        let found = AnimQueryResult { loaded: true, info: Some(info), error: None };
+        assert_eq!(keys(&serde_json::to_value(&found).unwrap()), sorted(&["loaded", "info"]));
+        let missing = AnimQueryResult { loaded: false, info: None, error: None };
+        assert_eq!(keys(&serde_json::to_value(&missing).unwrap()), sorted(&["loaded"]));
+    }
+
+    /// 版本常量与 docs/host-api.md 那一行由 scripts/api-surface.mjs 比对；
+    /// 这里再钉一遍**这一版是 6** —— 免得有人改了导出面却忘了升版本，
+    /// 而「忘了升」正是版本号要防的那件事。
+    #[test]
+    fn 动图导出把版本推到六() {
+        assert_eq!(HOST_API_VERSION, 6);
     }
 
     #[test]

@@ -12,28 +12,28 @@ node scripts/licenses.mjs --bundle <目录>  # 抽取每个依赖自带的 LICEN
 分发（例如 `node scripts/package.mjs` 打的产物）时，必须**随附**本文件与 `LICENSE-APACHE`，
 并保留各依赖的版权与许可声明；`--bundle` 就是替你把每个依赖自带的文本抽出来的那一步。
 
-共 **157** 个第三方 crate。
+共 **163** 个第三方 crate。
 
 ## 按许可表达式汇总
 
 | 许可表达式 | crate 数 |
 |---|---|
-| `MIT OR Apache-2.0` | 100 |
-| `MIT` | 14 |
+| `MIT OR Apache-2.0` | 103 |
+| `MIT` | 15 |
 | `Apache-2.0 OR MIT` | 9 |
+| `Unlicense OR MIT` | 8 |
 | `Zlib OR Apache-2.0 OR MIT` | 8 |
-| `Unlicense OR MIT` | 7 |
 | `Apache-2.0/MIT` | 4 |
 | `Apache-2.0` | 2 |
 | `BSD-2-Clause OR Apache-2.0 OR MIT` | 2 |
 | `MIT OR Zlib OR Apache-2.0` | 2 |
+| `MIT/Apache-2.0` | 2 |
 | `Unlicense/MIT` | 2 |
 | `Zlib` | 2 |
 | `(MIT OR Apache-2.0) AND Unicode-3.0` | 1 |
 | `0BSD OR MIT OR Apache-2.0` | 1 |
 | `ISC` | 1 |
 | `MIT OR Apache-2.0 OR Zlib` | 1 |
-| `MIT/Apache-2.0` | 1 |
 
 ## 明细
 
@@ -60,11 +60,13 @@ node scripts/licenses.mjs --bundle <目录>  # 抽取每个依赖自带的 LICEN
 | `bumpalo` | 3.20.3 | `MIT OR Apache-2.0` |
 | `bytemuck` | 1.25.2 | `Zlib OR Apache-2.0 OR MIT` |
 | `bytemuck_derive` | 1.12.1 | `Zlib OR Apache-2.0 OR MIT` |
+| `byteorder-lite` | 0.1.0 | `Unlicense OR MIT` |
 | `cast` | 0.3.0 | `MIT OR Apache-2.0` |
 | `cc` | 1.4.7 | `MIT OR Apache-2.0` |
 | `cfg_aliases` | 0.2.2 | `MIT` |
 | `cfg-if` | 1.0.5 | `MIT OR Apache-2.0` |
 | `codespan-reporting` | 0.13.1 | `Apache-2.0` |
+| `color_quant` | 1.1.0 | `MIT` |
 | `colorchoice` | 1.0.5 | `MIT OR Apache-2.0` |
 | `console_error_panic_hook` | 0.1.7 | `Apache-2.0/MIT` |
 | `crc32fast` | 1.5.2 | `MIT OR Apache-2.0` |
@@ -84,10 +86,12 @@ node scripts/licenses.mjs --bundle <目录>  # 抽取每个依赖自带的 LICEN
 | `futures-core` | 0.3.34 | `MIT OR Apache-2.0` |
 | `futures-task` | 0.3.34 | `MIT OR Apache-2.0` |
 | `futures-util` | 0.3.34 | `MIT OR Apache-2.0` |
+| `gif` | 0.14.2 | `MIT OR Apache-2.0` |
 | `gpu-allocator` | 0.28.0 | `MIT OR Apache-2.0` |
 | `half` | 2.7.1 | `MIT OR Apache-2.0` |
 | `hashbrown` | 0.16.1 | `MIT OR Apache-2.0` |
 | `hashbrown` | 0.17.1 | `MIT OR Apache-2.0` |
+| `image-webp` | 0.2.4 | `MIT OR Apache-2.0` |
 | `indexmap` | 2.14.2 | `Apache-2.0 OR MIT` |
 | `is_terminal_polyfill` | 1.70.2 | `MIT OR Apache-2.0` |
 | `itoa` | 1.0.18 | `MIT OR Apache-2.0` |
@@ -131,6 +135,7 @@ node scripts/licenses.mjs --bundle <目录>  # 抽取每个依赖自带的 LICEN
 | `presser` | 0.3.1 | `MIT OR Apache-2.0` |
 | `proc-macro2` | 1.0.107 | `MIT OR Apache-2.0` |
 | `profiling` | 1.0.18 | `MIT OR Apache-2.0` |
+| `quick-error` | 2.0.1 | `MIT/Apache-2.0` |
 | `quote` | 1.0.47 | `MIT OR Apache-2.0` |
 | `range-alloc` | 0.1.5 | `MIT OR Apache-2.0` |
 | `raw-window-handle` | 0.6.2 | `MIT OR Apache-2.0 OR Zlib` |
@@ -172,6 +177,7 @@ node scripts/licenses.mjs --bundle <目录>  # 抽取每个依赖自带的 LICEN
 | `wasm-bindgen-test-macro` | 0.3.78 | `MIT OR Apache-2.0` |
 | `wasm-bindgen-test-shared` | 0.2.128 | `MIT OR Apache-2.0` |
 | `web-sys` | 0.3.105 | `MIT OR Apache-2.0` |
+| `weezl` | 0.1.12 | `MIT OR Apache-2.0` |
 | `wgpu` | 30.0.1 | `MIT OR Apache-2.0` |
 | `wgpu-core` | 30.0.1 | `MIT OR Apache-2.0` |
 | `wgpu-core-deps-apple` | 30.0.1 | `MIT OR Apache-2.0` |
@@ -197,4 +203,4 @@ node scripts/licenses.mjs --bundle <目录>  # 抽取每个依赖自带的 LICEN
 | `zlib-rs` | 0.6.8 | `Zlib` |
 | `zmij` | 1.0.23 | `MIT` |
 
-<!-- 生成时 HEAD：8e98abf -->
+<!-- 生成时 HEAD：7907c22 -->

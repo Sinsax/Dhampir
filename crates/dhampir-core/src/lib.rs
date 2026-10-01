@@ -41,6 +41,7 @@
 //! 否则 `wgpu::Texture` 这种类型在跨 crate 边界时会被当成两个不同的类型。
 //! 宿主写 `dhampir_core::wgpu::...` 而不是自己 `use wgpu`，版本就不可能对不上。
 
+pub mod animation;
 pub mod cache;
 pub mod compose;
 pub mod overlay;
