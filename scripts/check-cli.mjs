@@ -28,7 +28,7 @@ import { fileURLToPath } from 'node:url';
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const TMP = join(REPO_ROOT, 'target', 'p6', 'cli-contract');
 const PROJECT = 'fixtures/sample-project.doc.json';
-const ASSET = 'target/s3/proxy1080p.mp4';
+const ASSET = 'target/s3/proxy1080p.mp4'; // gitignore 的草稿素材：node scripts/make-test-media.mjs 生成
 
 /** CLI 的子命令名单。**必须与 crates/dhampir-worker/src/bin/dhampir.rs 的 COMMANDS 表一致** ——
  * 这是一条真判据：「加了命令但没登记」和「登记了但 --help 没列出来」都要红。
@@ -76,6 +76,10 @@ export const EXPECTED = [
   'usage-error-exit-code',
   // frame 从前只出单帧，而多给的 --to 会被静默收下（用户以为出了一段）。
   'frame-range',
+  // 只给 `--from` 是「**到工程结尾**」—— `docs/api.md` §2.2 的承诺。
+  // 从前实现是 `to = args.to.unwrap_or(from)` ⇒ 只出一帧、退出码还是 0（下游交接单 D2）。
+  // 这一条钉的是「参数 -> 工程长度」这段**接线**：单测盖不到它，而 D2 的错正好出在这里。
+  'frame-from-only-to-end',
 ];
 
 /**
@@ -254,6 +258,30 @@ function collect(cli) {
     'exit=' + ranged.code + ' 帧数=' + (rangedBody === null || !rangedBody.frames ? 'none' : rangedBody.frames.length)
       + ' 落盘=' + rangeFiles.filter((file) => existsSync(file)).length + '/5'
       + ' 混给 --frame 的 exit=' + bothWays.code);
+
+  // 只给 `--from` ⇒ **到工程结尾**（`docs/api.md` §2.2）。判据取工程自己的结尾：
+  // 所有**启用的 video 层**的最大 `end`（`end` 左闭右开 ⇒ 最后一帧是 `end - 1`）——
+  // 与实现用的是同一条口径（`compose::end_frame_v2`）。取 end-3 起，正好应当出 3 张。
+  const fixture = JSON.parse(readFileSync(join(REPO_ROOT, PROJECT), 'utf8'));
+  const seqEnd = Math.max(...fixture.timeline.tracks
+    .filter((track) => track.kind === 'video')
+    .flatMap((track) => track.layers
+      .filter((layer) => layer.enabled !== false)
+      .map((layer) => layer.end)));
+  const tailFrom = seqEnd - 3;
+  const tailDir = join(TMP, 'frame-from-only');
+  const tail = run(cli, ['frame', '--project', PROJECT, '--from', String(tailFrom), '--out', tailDir]);
+  let tailBody = null;
+  try { tailBody = JSON.parse(tail.stdout); } catch (error) { tailBody = null; }
+  const tailFiles = [tailFrom, tailFrom + 1, tailFrom + 2]
+    .map((n) => join(tailDir, 'frame-' + String(n).padStart(4, '0') + '.png'));
+  record('frame-from-only-to-end',
+    tail.code === 0 && tailBody !== null && Array.isArray(tailBody.frames)
+      && tailBody.count === 3 && tailBody.frames.length === 3
+      && tailFiles.every((file) => existsSync(file) && statSync(file).size > 1000),
+    'exit=' + tail.code + ' 帧数=' + (tailBody === null || !tailBody.frames ? 'none' : tailBody.frames.length)
+      + ' 落盘=' + tailFiles.filter((file) => existsSync(file)).length + '/3'
+      + '（工程 end=' + seqEnd + '，--from ' + tailFrom + '）');
 
   // ---- render ----
   const outPath = join(TMP, 'out.mp4');

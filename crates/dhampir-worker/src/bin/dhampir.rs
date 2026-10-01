@@ -1165,9 +1165,19 @@ fn project_frames(doc: &ProjectDoc) -> usize {
 /// 这里却不读）—— 用户以为出了一段，实际只出了一帧，退出码还是 0。
 /// 这正是本文件开头在防的那件事，所以现在把它变成一条真的路。
 ///
+/// 参数层的意图。**缺的那一头不在这里补** —— 补它要知道工程有多长，而这时工程还没载入。
+///
 /// 两种写法**互斥**：同时给 `--frame` 与 `--from` / `--to` 是用法错。
 /// 让后者悄悄赢（或让前者悄悄赢）都会产出与用户预期不同的那一份。
-fn frame_range(args: &Args) -> Result<Vec<Frame>, Usage> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameSpec {
+    /// 出一帧，就是它。
+    Single(Frame),
+    /// 出一段；`None` = 那一头没给，由 [`resolve_frames`] 按工程补。
+    Span { from: Option<Frame>, to: Option<Frame> },
+}
+
+fn frame_spec(args: &Args) -> Result<FrameSpec, Usage> {
     let explicit = args.frame.is_some();
     let ranged = args.from.is_some() || args.to.is_some();
     if explicit && ranged {
@@ -1176,22 +1186,34 @@ fn frame_range(args: &Args) -> Result<Vec<Frame>, Usage> {
         ));
     }
     if explicit {
-        return Ok(vec![args.frame.expect("刚刚判过它存在")]);
+        return Ok(FrameSpec::Single(args.frame.expect("刚刚判过它存在")));
     }
     if !ranged {
         return Err(usage_error(
             "frame 要 --frame <N>，或者 --from <N> / --to <N> 出一段".to_string(),
         ));
     }
-    // 只给一头是**有意的**，但两头的含义**不对称** —— 这是这里唯一容易写错的地方：
-    //
-    //   * 只给 `--from 10`：“从第 10 帧起，到工程结尾”；
-    //   * 只给 `--to 5` ：“从第 0 帧到第 5 帧”。
-    //
-    // 两头都缺省成"另一头"的话，`--to 5` 会变成 `from=5, to=5`（只出第 5 帧）——
-    // 一个看着成功、实际少了 5 帧的结果。缺的那一头固定取 0，不做对称处理。
-    let from = args.from.unwrap_or(0);
-    let to = args.to.unwrap_or(from);
+    Ok(FrameSpec::Span { from: args.from, to: args.to })
+}
+
+/// 把参数层的意图与工程的 `[first, end)` 合起来。**纯函数**（口径好单测）。
+///
+/// 两头的缺省**不对称**，这是这里唯一容易写错的地方：
+///
+///   * 只给 `--from 10`：“从第 10 帧起，**到工程结尾**”（= 缺的 `--to` 取工程最后一帧）；
+///   * 只给 `--to 5` ：“从工程第一帧到第 5 帧”（= 缺的 `--from` 取工程第一帧）。
+///
+/// 两头都缺省成"另一头"的话，`--to 5` 会变成 `from=5, to=5` —— 只出第 5 帧，
+/// 一个看着成功、实际少了 5 帧的结果。**把只给 `--from` 也算成"到它自己"是同一个错的镜像**：
+/// 用户以为出了一段，实际只有一帧、退出码还是 0（下游交接单 D2 报的就是这一条）。
+///
+/// 口径与 [`resolve_range`] 一致 —— 别的子命令（`subtitle` 等）本来就按工程那一头补，
+/// 这里只是让 `frame` 与它们对齐；**同一条规矩不搞两份实现**。
+fn resolve_frames(spec: FrameSpec, first: Frame, end: Frame) -> Result<Vec<Frame>, Usage> {
+    let (from, to) = match spec {
+        FrameSpec::Single(frame) => (frame, frame),
+        FrameSpec::Span { from, to } => (from.unwrap_or(first), to.unwrap_or(end.saturating_sub(1))),
+    };
     if to < from {
         return Err(usage_error(format!(
             "帧区间是空的：from={from} to={to}（--to 要比 --from 大）"
@@ -1209,7 +1231,8 @@ fn cmd_frame(args: &Args) -> Result<ExitCode, CommandError> {
         .out
         .as_ref()
         .ok_or_else(|| usage_error("frame 要 --out <目录>".to_string()))?;
-    let frames = frame_range(args)?;
+    // 参数层先判（互斥 / 至少给一头）—— 与 I/O 无关的用法错优先报出来。
+    let spec = frame_spec(args)?;
     let doc = match load_project_or_usage(project) {
         Ok(doc) => doc,
         Err(code) => return Ok(code),
@@ -1217,6 +1240,12 @@ fn cmd_frame(args: &Args) -> Result<ExitCode, CommandError> {
     if let Some(code) = gate(&doc) {
         return Ok(code);
     }
+    // **缺的那一头要等工程载入才知道**（交接单 D2）：只给 `--from` 就是"到工程结尾"。
+    let frames = resolve_frames(
+        spec,
+        compose::first_frame_v2(&doc.timeline).unwrap_or(0),
+        compose::end_frame_v2(&doc.timeline).unwrap_or(0),
+    )?;
     let (width, height) = resolve_size(args, &doc);
     let root = PathBuf::from(
         args.asset_root
@@ -1968,13 +1997,20 @@ fn cmd_subtitle(args: &Args) -> Result<ExitCode, CommandError> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// `{color, outline, stroke_px, stroke_color}` —— 三处同名。
+/// `{color, outline, stroke_px, stroke_color, shadow_*}` —— 三处同名。
+///
+/// 阴影那四个键与 wasm 的 `text_style_json`、`host_api::TextStyleView` **逐字段同名**：
+/// 两端比对靠的就是这一份同名（`scripts/web-check.mjs` 的 `compareTextStyle`）。
 fn text_style_json(style: &dhampir_core::overlay::TextStyle) -> serde_json::Value {
     serde_json::json!({
         "color": style.color,
         "outline": style.outline,
         "stroke_px": style.stroke_px,
         "stroke_color": style.stroke_color,
+        "shadow_color": style.shadow_color,
+        "shadow_dx_px": style.shadow_dx_px,
+        "shadow_dy_px": style.shadow_dy_px,
+        "shadow_blur_px": style.shadow_blur_px,
     })
 }
 
@@ -2996,36 +3032,70 @@ mod tests {
         // 让其中一个悄悄赢，产出的就不是用户要的那一份。
         let both = parse(&argv(&["frame", "--project", "p.json", "--frame", "1", "--from", "0"]))
             .expect("解析这一关不该拦（--from 不是 clip 专用开关）");
-        assert!(matches!(frame_range(&both), Err(_)), "同时给应当是用法的错");
+        assert!(matches!(frame_spec(&both), Err(_)), "同时给应当是用法的错");
+
+        // 工程的量纲：48 帧的片子（[0, 48)），最后一帧是 47。
+        const FIRST: Frame = 0;
+        const END: Frame = 48;
 
         // 单帧：就是那一个帧号，原样。
         let one = parse(&argv(&["frame", "--project", "p.json", "--frame", "30"]))
             .expect("合法");
-        assert_eq!(frame_range(&one).expect("合法"), vec![30]);
+        assert_eq!(
+            resolve_frames(frame_spec(&one).expect("合法"), FIRST, END).expect("合法"),
+            vec![30]
+        );
 
         // 区间：闭区间，两头都算上。
         let span = parse(&argv(&["frame", "--project", "p.json", "--from", "0", "--to", "2"]))
             .expect("合法");
-        assert_eq!(frame_range(&span).expect("合法"), vec![0, 1, 2]);
+        assert_eq!(
+            resolve_frames(frame_spec(&span).expect("合法"), FIRST, END).expect("合法"),
+            vec![0, 1, 2]
+        );
 
-        // **两头的缺省不对称**：只给 --from 是「从这里到它自己」，
-        // 只给 --to 是「从第 0 帧到这里」。写成 `from.unwrap_or(to)` 的话
-        // `--to 5` 会退化成只出第 5 帧 —— 一个看着成功、实际少了 5 帧的结果。
+        // **两头的缺省不对称，而且两头都要"补工程那一头"**：
+        //
+        //   只给 `--from 3` ⇒ 3..=47（**到工程结尾**，`docs/api.md` 的承诺）；
+        //   只给 `--to 2`   ⇒ 0..=2 （从工程第一帧起）。
+        //
+        // 写成 `to = args.to.unwrap_or(from)`（本仓 2026-10-01 之前就是）会让
+        // `--from 3` 只出第 3 帧 —— 一个**看着成功、实际少了 44 帧**的结果（下游交接单 D2）。
         let tail = parse(&argv(&["frame", "--project", "p.json", "--from", "3"]))
             .expect("合法");
-        assert_eq!(frame_range(&tail).expect("合法"), vec![3]);
+        let tail_frames = resolve_frames(frame_spec(&tail).expect("合法"), FIRST, END).expect("合法");
+        assert_ne!(tail_frames.len(), 1, "只给 --from 不该只出一帧（那正是 D2）");
+        assert_eq!(tail_frames.first(), Some(&3), "只给 --from 应当从它开始");
+        assert_eq!(tail_frames.last(), Some(&47), "只给 --from 应当到工程最后一帧");
+        assert_eq!(tail_frames.len(), 45, "3..=47 一共 45 帧");
+
         let head = parse(&argv(&["frame", "--project", "p.json", "--to", "2"]))
             .expect("合法");
-        assert_eq!(frame_range(&head).expect("合法"), vec![0, 1, 2]);
+        assert_eq!(
+            resolve_frames(frame_spec(&head).expect("合法"), FIRST, END).expect("合法"),
+            vec![0, 1, 2]
+        );
 
         // 一头都不给：**不猜**要哪几帧，报用法错。
         let none = parse(&argv(&["frame", "--project", "p.json"])).expect("合法");
-        assert!(matches!(frame_range(&none), Err(_)), "都没给应当是用法的错");
+        assert!(matches!(frame_spec(&none), Err(_)), "都没给应当是用法的错");
 
         // 区间反了：在这里判掉，而不是等渲染时发现一帧都没出。
         let reversed = parse(&argv(&["frame", "--project", "p.json", "--from", "9", "--to", "2"]))
             .expect("合法");
-        assert!(matches!(frame_range(&reversed), Err(_)), "反区间应当是用法的错");
+        assert!(
+            matches!(resolve_frames(frame_spec(&reversed).expect("合法"), FIRST, END), Err(_)),
+            "反区间应当是用法的错"
+        );
+
+        // 只给 `--from` 而且起点在工程之外：补出来的 `to` 比它小 ⇒ 同样是用法错，
+        // 而不是"一帧都不出但退 0"。
+        let beyond = parse(&argv(&["frame", "--project", "p.json", "--from", "500"]))
+            .expect("合法");
+        assert!(
+            matches!(resolve_frames(frame_spec(&beyond).expect("合法"), FIRST, END), Err(_)),
+            "起点越过工程结尾应当是用法错"
+        );
     }
 
     #[test]

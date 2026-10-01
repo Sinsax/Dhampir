@@ -381,3 +381,235 @@ fn 调整图层模糊下方而不影响上方() {
         "调整图层影响了画在它上面的层 —— 那它就不是「影响下方」了"
     );
 }
+
+// ============================================================================
+// Document space 的 ColorMask：`overlay` 与 `vignette`
+// ============================================================================
+//
+// 为什么补这两条（2026-10-01，处理下游交接单 D1）：
+// 下游报「`overlay` 调整层整层不出图」。在**本仓当前 HEAD 复现不出来** ——
+// 用交接单那份 doc 出帧，带 overlay 与不带 overlay 的结果**不同**，且逐像素与解析值吻合。
+// 但"复现不出来"不是结论：这一族（Document space + ColorMask）此前**没有任何用例**，
+// 所以它到底跑没跑过，没人证过。这两条就是把它钉死：
+//
+//   * `overlay`：逐像素对**解析值** `mix(底, 渐变, amount)`，并单独钉住渐变两端
+//     （angle=0 左=color_a、右=color_b；angle=45 左上=color_a、右下=color_b
+//      —— 后者正是下游 §5.2 用来核对 `overlay.angle` 换算的那一条）；
+//   * `vignette`：中心不动、角落压暗，同样对解析值。
+//
+// 判据是解析值而不是"与上一版图相同"：后者只能证明"没变"，证明不了"对"。
+
+fn color_mask_effect(kind: &str, params: &[(&str, f32)]) -> Effect {
+    let mut map = BTreeMap::new();
+    for (key, value) in params {
+        map.insert((*key).to_string(), *value);
+    }
+    Effect { kind: kind.to_string(), params: map, ..Default::default() }
+}
+
+/// 底图像素：与 `make_opaque_source` 用的是同一份序列（alpha 全 255，混合是全覆盖）。
+fn opaque_base_pixels() -> Vec<u8> {
+    let mut pixels = synthetic_source_rgba8(SIZE, SIZE, 7);
+    for pixel in pixels.chunks_mut(4) {
+        pixel[3] = 255;
+    }
+    pixels
+}
+
+fn pixel_at(pixels: &[u8], x: u32, y: u32) -> [f32; 3] {
+    let i = ((y * SIZE + x) * 4) as usize;
+    [pixels[i] as f32, pixels[i + 1] as f32, pixels[i + 2] as f32]
+}
+
+/// `color_mask.wgsl` 第 4 段（overlay）的数学，逐行抄成一份**可算的期望值**。
+///
+/// **单位**：`color_a/color_b` 是契约里的 0..1 浮点（`overlay` 的 `r/g/b` 就是这么写的），
+/// 而读回来的 `base` 是 0..255 —— 这里必须显式 ×255 对齐，否则差的是 255 倍里的一截。
+///
+/// **分片着色器里 `position.xy` 是像素中心**（`(x+0.5, y+0.5)`），这里必须同口径 ——
+/// 差半个像素会让 45° 那条对角判据刚好落在边界上。
+fn overlay_expected(
+    base: [f32; 3],
+    x: u32,
+    y: u32,
+    shape: f32,
+    angle_deg: f32,
+    amount: f32,
+    color_a: [f32; 3],
+    color_b: [f32; 3],
+) -> [f32; 3] {
+    let size = SIZE as f32;
+    let u = (x as f32 + 0.5) / size - 0.5;
+    let v = (y as f32 + 0.5) / size - 0.5;
+    // `shape=0`（纯色）⇒ `grad_t = 0` ⇒ 取 `color_a`。**这一项 2026-10-01 修过**：
+    // 以前写成 `is_solid + …`，纯色会落到 `color_b`（`r2/g2/b2`），与 `OVERLAY` 的文档矛盾。
+    let is_linear = if (0.5..1.5).contains(&shape) { 1.0 } else { 0.0 };
+    let is_radial = if shape >= 1.5 { 1.0 } else { 0.0 };
+    let angle = angle_deg.to_radians();
+    let (dx, dy) = (angle.cos(), angle.sin());
+    let linear_t = (u * dx + v * dy + 0.5).clamp(0.0, 1.0);
+    let radial_t = ((u * u + v * v).sqrt() * 2.0).clamp(0.0, 1.0);
+    let grad_t = (is_linear * linear_t + is_radial * radial_t).clamp(0.0, 1.0);
+    let mut out = [0.0f32; 3];
+    for c in 0..3 {
+        let color = (color_a[c] + (color_b[c] - color_a[c]) * grad_t) * 255.0;
+        out[c] = base[c] + (color - base[c]) * amount;
+    }
+    out
+}
+
+/// `color_mask.wgsl` 第 2 段（暗角）的数学。
+fn vignette_expected(base: [f32; 3], x: u32, y: u32, amount: f32, radius: f32, softness: f32) -> [f32; 3] {
+    let size = SIZE as f32;
+    let u = (x as f32 + 0.5) / size - 0.5;
+    let v = (y as f32 + 0.5) / size - 0.5;
+    let dist = (u * u + v * v).sqrt() * 1.414_213_6;
+    let edge = ((dist - radius) / softness.max(1e-4)).clamp(0.0, 1.0);
+    let factor = 1.0 - edge * amount;
+    [base[0] * factor, base[1] * factor, base[2] * factor]
+}
+
+fn assert_close(got: [f32; 3], want: [f32; 3], label: &str, tol: f32) {
+    for c in 0..3 {
+        assert!(
+            (got[c] - want[c]).abs() <= tol,
+            "{label}：通道 {c} 实得 {}，期望 {}（容差 {tol}）",
+            got[c], want[c]
+        );
+    }
+}
+
+#[test]
+#[ignore = "需要真 GPU；跑：cargo test -p dhampir-worker --test timeline -- --ignored"]
+fn 调整图层的_overlay_逐像素对上解析渐变() {
+    // 交接单 D1 的那一组参数（0..1 的浮点色，与 doc 里写的一致）。
+    const AMOUNT: f32 = 0.16;
+    const A: [f32; 3] = [0.0784, 0.0392, 0.1569]; // == (20, 10, 40) / 255
+    const B: [f32; 3] = [0.1569, 0.0784, 0.2353]; // == (40, 20, 60) / 255
+
+    let (ctx, _init) = open_leg(NATIVE_BACKENDS).expect("拿不到 GPU 上下文");
+    let source = make_opaque_source(&ctx);
+    let base = opaque_base_pixels();
+
+    let bottom = layer("bottom", 1.0, 1.0, Vec::new());
+    let plain = Composite { frame: 0, layers: vec![bottom.clone()] };
+    let plain_pixels = render(&ctx, &source, &plain);
+
+    for (label, angle) in [("angle=0", 0.0f32), ("angle=45", 45.0f32)] {
+        let mut adjustment = layer("adj", 1.0, 1.0, vec![color_mask_effect("overlay", &[
+            ("amount", AMOUNT),
+            ("r", A[0]), ("g", A[1]), ("b", A[2]),
+            ("r2", B[0]), ("g2", B[1]), ("b2", B[2]),
+            ("shape", 1.0), ("angle", angle),
+        ])]);
+        adjustment.is_adjustment = true;
+        adjustment.source = String::new();
+
+        let with = render(&ctx, &source, &Composite {
+            frame: 0,
+            layers: vec![bottom.clone(), adjustment],
+        });
+        assert_ne!(plain_pixels, with, "{label}：挂上 overlay 后画面没变 —— Document space 那一趟没跑到");
+
+        // 逐像素对解析值（每 3 个像素采一个，够密也够快）。
+        for y in (0..SIZE).step_by(3) {
+            for x in (0..SIZE).step_by(3) {
+                let want = overlay_expected(pixel_at(&base, x, y), x, y, 1.0, angle, AMOUNT, A, B);
+                assert_close(pixel_at(&with, x, y), want, &format!("{label} 像素({x},{y})"), 2.0);
+            }
+        }
+
+        // 单独钉住方向（这两条是**契约**，不是公式的副产品）：
+        let left = pixel_at(&with, 1, SIZE / 2);
+        let right = pixel_at(&with, SIZE - 2, SIZE / 2);
+        if angle == 0.0 {
+            // 水平渐变：左右两端各自贴近 color_a / color_b。
+            let base_left = pixel_at(&base, 1, SIZE / 2);
+            let base_right = pixel_at(&base, SIZE - 2, SIZE / 2);
+            for c in 0..3 {
+                let want_l = base_left[c] + (A[c] * 255.0 - base_left[c]) * AMOUNT;
+                let want_r = base_right[c] + (B[c] * 255.0 - base_right[c]) * AMOUNT;
+                assert!((left[c] - want_l).abs() <= 2.0, "angle=0 左端通道 {c} 不是 color_a 那一端");
+                assert!((right[c] - want_r).abs() <= 2.0, "angle=0 右端通道 {c} 不是 color_b 那一端");
+            }
+        } else {
+            // 45°：按下游 §5.2 的换算，应当是**从左上到右下**。
+            let tl = pixel_at(&with, 1, 1);
+            let br = pixel_at(&with, SIZE - 2, SIZE - 2);
+            let base_tl = pixel_at(&base, 1, 1);
+            let base_br = pixel_at(&base, SIZE - 2, SIZE - 2);
+            for c in 0..3 {
+                let want_tl = base_tl[c] + (A[c] * 255.0 - base_tl[c]) * AMOUNT;
+                let want_br = base_br[c] + (B[c] * 255.0 - base_br[c]) * AMOUNT;
+                assert!((tl[c] - want_tl).abs() <= 2.0, "angle=45 左上角通道 {c} 不是 color_a 那一端");
+                assert!((br[c] - want_br).abs() <= 2.0, "angle=45 右下角通道 {c} 不是 color_b 那一端");
+            }
+        }
+    }
+    // D4（2026-10-01 修）：`shape=0`（纯色）取的是 **`color_a`（`r/g/b`）**，不是 `color_b`。
+    // 参数**故意让 r2≠r**：`r2` 缺省回落到 `r` 时，两种实现看不出区别 —— 那正是它活了这么久的原因。
+    let mut solid = layer("adj", 1.0, 1.0, vec![color_mask_effect("overlay", &[
+        ("amount", 1.0),
+        ("r", 0.8), ("g", 0.0), ("b", 0.0),
+        ("r2", 0.0), ("g2", 0.0), ("b2", 0.8),
+        ("shape", 0.0), ("angle", 0.0),
+    ])]);
+    solid.is_adjustment = true;
+    solid.source = String::new();
+    let solid_px = render(&ctx, &source, &Composite {
+        frame: 0,
+        layers: vec![bottom.clone(), solid],
+    });
+    // amount = 1 ⇒ 整幅都该是 color_a = (0.8, 0, 0) × 255 = (204, 0, 0)
+    let center = pixel_at(&solid_px, SIZE / 2, SIZE / 2);
+    assert!(
+        center[0] > 200.0 && center[2] < 5.0,
+        "shape=0 应当取 color_a（r/g/b = 204,0,0），实得 {center:?} —— 若取到 color_b 就是 D4 复发"
+    );
+}
+
+#[test]
+#[ignore = "需要真 GPU；跑：cargo test -p dhampir-worker --test timeline -- --ignored"]
+fn 调整图层的_vignette_中心不动而角落压暗() {
+    const AMOUNT: f32 = 1.0;
+    // 半径取得小：这样"中心不动、角落全黑"两半都落在可判的区间里。
+    // （半径 1.0 时角落的归一化距离只有 0.707 ⇒ **按定义**本来就不该有暗角，
+    //   拿那个参数测会得到一条恒真的假判据。）
+    const RADIUS: f32 = 0.2;
+    const SOFTNESS: f32 = 0.3;
+
+    let (ctx, _init) = open_leg(NATIVE_BACKENDS).expect("拿不到 GPU 上下文");
+    let source = make_opaque_source(&ctx);
+    let base = opaque_base_pixels();
+
+    let bottom = layer("bottom", 1.0, 1.0, Vec::new());
+    let mut adjustment = layer("adj", 1.0, 1.0, vec![color_mask_effect("vignette", &[
+        ("amount", AMOUNT), ("radius", RADIUS), ("softness", SOFTNESS),
+    ])]);
+    adjustment.is_adjustment = true;
+    adjustment.source = String::new();
+
+    let plain = render(&ctx, &source, &Composite { frame: 0, layers: vec![bottom.clone()] });
+    let with = render(&ctx, &source, &Composite {
+        frame: 0,
+        layers: vec![bottom, adjustment],
+    });
+    assert_ne!(plain, with, "挂上 vignette 后画面没变 —— Document space 那一趟没跑到");
+
+    for y in (0..SIZE).step_by(3) {
+        for x in (0..SIZE).step_by(3) {
+            let want = vignette_expected(pixel_at(&base, x, y), x, y, AMOUNT, RADIUS, SOFTNESS);
+            assert_close(pixel_at(&with, x, y), want, &format!("vignette 像素({x},{y})"), 2.0);
+        }
+    }
+
+    // 两半都钉住：只测"角落变暗"的话，一个把整幅图乘 0 的实现也能通过。
+    let center = pixel_at(&with, SIZE / 2, SIZE / 2);
+    let base_center = pixel_at(&base, SIZE / 2, SIZE / 2);
+    assert_close(center, base_center, "中心不该被压暗", 2.0);
+    let corner = pixel_at(&with, 0, 0);
+    assert!(
+        corner[0] + corner[1] + corner[2] < 3.0,
+        "角落应当被压到接近全黑（amount=1 且角落已越过半径+软化带），实得 {corner:?}"
+    );
+}

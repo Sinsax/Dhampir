@@ -126,17 +126,23 @@ fn fs_color_mask(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f3
   // ---- 4) 覆盖层：纯色 / 线性渐变 / 径向渐变。----
   //
   // shape 用**权重**表达而不是分支：
-  //   solid  = 1
-  //   linear = 投影到 angle 方向
-  //   radial = 到中心的距离
+  //   solid  = **0**（沿用 `color_a`，即 `r/g/b`）
+  //   linear = 投影到 angle 方向（0 → color_a，1 → color_b）
+  //   radial = 到中心的距离（同上）
   // 三者各自算完，按"是不是这个 shape"加权 —— 没有 if。
-  let is_solid = select(0.0, 1.0, mask.overlay_shape < 0.5);
+  //
+  // ⚠️ **`solid` 不复用 `is_solid` 这个权重**（2026-10-01 修）：它以前写成
+  // `grad_t = is_solid + …`，于是纯色落到 `mix` 的 1 端 ⇒ 取的是 **`color_b`（`r2/g2/b2`）**，
+  // 与 `OVERLAY` 文档"渐变的第二个颜色用 r2/g2/b2"矛盾。平时看不出来，是因为参数打包让
+  // `r2` 缺省回落到 `r`（`color_mask_params`），只有"纯色 + 显式 r2≠r"才露。
+  // 实测下游转译器的纯色把两组写成一样（`polish-to-dhampir.mjs` 的 `solidEffect`），
+  // 所以这条修正**不改变任何现有工程的画面**。
   let is_linear = select(0.0, 1.0, mask.overlay_shape >= 0.5 && mask.overlay_shape < 1.5);
   let is_radial = select(0.0, 1.0, mask.overlay_shape >= 1.5);
   let dir = vec2<f32>(cos(mask.overlay_angle), sin(mask.overlay_angle));
   let linear_t = clamp(dot(uv, dir) + 0.5, 0.0, 1.0);
   let radial_t = clamp(length(uv) * 2.0, 0.0, 1.0);
-  let grad_t = is_solid + is_linear * linear_t + is_radial * radial_t;
+  let grad_t = is_linear * linear_t + is_radial * radial_t;
   let color_a = vec3<f32>(mask.overlay_r, mask.overlay_g, mask.overlay_b);
   let color_b = vec3<f32>(mask.overlay_r2, mask.overlay_g2, mask.overlay_b2);
   let overlay_color = mix(color_a, color_b, clamp(grad_t, 0.0, 1.0));

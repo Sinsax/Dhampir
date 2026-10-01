@@ -10,15 +10,21 @@
 //! 所以：分配与落点都只在本模块实现一份，宿主只负责把字**画**进给定的矩形里。
 //! 这与 `text_layout`（字幕的行盒）是同一条分工。
 //!
-//! # 时间口径：在屏时长来自 [`DanmakuSpec`]，不是素材的 End
+//! # 时间口径：在屏时长**逐条优先**，回退才是 [`DanmakuSpec`] 的 `duration_ms`
 //!
-//! 一条弹幕在屏多久由 `duration_ms` 说了算，素材里 Dialogue 的 `End` **不参与**。
+//! 一条弹幕在屏多久，取的是**它自己的** `travel_ms`（素材里 `\move` 的 6 参数形式给了就用它）；
+//! **读不到才回退到轨道级的 `duration_ms`**。素材里 Dialogue 的 `End` **始终不参与**。
+//!
+//! 这条"逐条优先"值得写清楚，因为它正是"同一份素材、不同条不同滚速"的来源；
+//! 而静态 cue（只有 `\pos`、没有 `\move`）**读不到 `travel_ms`**，
+//! 于是回退到轨道级那一个值 —— 两条路都合法，但读数的人得知道自己在哪条路上。
+//!
 //! 这不是偷懒：同一条弹幕素材配 6 秒还是 8 秒是**播放器的参数**（弹幕池的常态），
 //! 而 ASS 的 `End` 是语法的必填位、多数工具随手填。让素材的 End 生效，等于让
 //! "这份素材是从别处抓来的"决定这一趟出片的观感。
 //!
 //! 进入帧取素材的 `Start`（毫秒按序列时间基换成帧号，与字幕同一条换算），
-//! 离开帧取 `Start + duration_ms`。**两者都算不出来时那一条被丢弃并计数**。
+//! 离开帧取 `Start + 上面那条算出来的时长`。**两者都算不出来时那一条被丢弃并计数**。
 //!
 //! # 落点是时间的函数，不是结构的一部分
 //!
@@ -70,16 +76,16 @@ pub struct DanmakuItem {
     /// 它在**结构**里而不是在"画法"里：一条弹幕有没有自己的颜色，
     /// 与"泳道分到几号"一样是**素材本身的事实**，不是渲染目标的事。
     ///
-    /// 实测需要它：V-Trim 的 `danmaku.json` 里同一条轨上的
+    /// 实测需要它：参照实现 的 `danmaku.json` 里同一条轨上的
     /// `还能续约吗` 是 `#E33FFF`，其余是白色。
     pub color: Option<[u8; 4]>,
     /// **起滚的帧**（= `enter` + 淡入帧数）。
     ///
-    /// 与 [`Self::enter`] 分开：V-Trim 的滚动是 `progress = (el - fadeIn) / travel`
+    /// 与 [`Self::enter`] 分开：参照实现 的滚动是 `progress = (el - fadeIn) / travel`
     /// —— **淡入期间 x 钉在右边缘**（`x = CW`），淡入走完才开始滚。
     /// 把这两件事合成一个就会让弹幕"一进场就在滚"。
     pub scroll_start: Frame,
-    /// **滚完要多少帧**（`travel`）。滚到左边就**停住**（V-Trim 的 `min(progress,1)`）。
+    /// **滚完要多少帧**（`travel`）。滚到左边就**停住**（参照实现 的 `min(progress,1)`）。
     ///
     /// 为什么不在这里存毫秒：`rect_at` 是**不拿时间基**的纯函数
     /// （两端拿同一份素材、同一组帧号就必须算出同一个矩形）。
@@ -122,12 +128,12 @@ pub fn layout(cues: &[Cue], spec: &DanmakuSpec, timebase: &TimebaseDto) -> Danma
         };
         // # 在屏窗口 = **cue 自己的** [start, end)，不是 `start + travel`
         //
-        // V-Trim 的 `getActiveDms` 第一行就是 `if (t < d.start || t >= d.end) continue;`
+        // 参照实现 的窗口判据第一行就是 `if (t < d.start || t >= d.end) continue;`
         // —— `travel` 只决定**滚多快**（`progress = (el - fadeIn) / travel`）。
         //
         // 这条先前写错了：`exit` 取的是 `start + spec.duration_ms`（travel），
         // 于是一条 cue 窗口 5 秒、travel 10.4 秒的弹幕会在屏上**待 10.4 秒**。
-        // 实测 55s 那一帧：V-Trim 什么都没有，本仓还挂着品红的「还能续约吗」。
+        // 实测 55s 那一帧：参照实现 什么都没有，本仓还挂着品红的「还能续约吗」。
         let Some(end_exclusive) = frame_at_ms(cue.end_ms, timebase) else {
             result.dropped += 1;
             continue;
@@ -135,13 +141,13 @@ pub fn layout(cues: &[Cue], spec: &DanmakuSpec, timebase: &TimebaseDto) -> Danma
         // 闭区间：`end` 是开边界，最后在屏的一帧是它前一帧。
         // 时长为 0（或时间基碎到算不出前进）仍然让它占**一帧**。
         let exit = end_exclusive.saturating_sub(1).max(enter);
-        // 淡入走完才起滚（V-Trim 的 `el - fadeIn`）。
+        // 淡入走完才起滚（参照实现 的 `el - fadeIn`）。
         let fade_frames = frames_for_ms(spec.fade_in_ms, cue.start_ms, timebase);
         let scroll_start = enter.saturating_add(fade_frames);
         // **滚动时长优先用这条 cue 自己的**（`\move(...,t1,t2)` 的 `t2-t1`），
         // 读不到才回退到轨道级的 `duration_ms`。
         //
-        // V-Trim 的 `progress = (el - fadeIn) / travel`，而 **`travel` 逐条不同**
+        // 参照实现 的 `progress = (el - fadeIn) / travel`，而 **`travel` 逐条不同**
         // （它按文本字节数算：实测四条 20.21 / 16.37 / 16.80 / 14.24 秒）。
         // 轨道级那一个值只能取平均，于是**长句滚得太快、短句滚得太慢** ——
         // 症状是"同一时刻参照的弹幕在左边、本仓的还在右边"。
@@ -229,14 +235,14 @@ pub fn rect_at(
     // 这两件事先前被混成一个：`exit` 曾经等于 `enter + duration_ms`，
     // 于是滚动正好铺满在屏区间 —— **看起来自洽**。
     //
-    // 但 V-Trim 是分开的（`templates/index.html` 的 `getActiveDms`）：
+    // 但 参照实现 是分开的（窗口判据各写各的）：
     //
     //     if (t < d.start || t >= d.end) continue;          // 在屏窗口 = cue 自己的
     //     var progress = max(0, (el - fadeIn) / travel);    // travel 只决定滚多快
     //     var x = CW - min(progress, 1) * (CW + textW);     // 滚到左边就停
     //
     // 混起来之后，一条 cue 窗口 5 秒、travel 10.4 秒的弹幕会在屏上**待 10.4 秒**
-    // —— 实测 55s 那一帧：V-Trim 什么都没有，本仓还挂着一条品红的
+    // —— 实测 55s 那一帧：参照实现 什么都没有，本仓还挂着一条品红的
     // 「还能续约吗」（它的 cue 早在 50.03s 就结束了）。
     let progress = if span > 0 {
         ((frame - item.scroll_start) as f32 / span as f32).clamp(0.0, 1.0)
@@ -250,7 +256,7 @@ pub fn rect_at(
     // 默认（两个都是 0）就是老规则：**0 号泳道贴着画面最上面**、
     // 间距取行盒高（`font_ratio * LINE_HEIGHT_EM`）—— 既有工程的产物一字不变。
     //
-    // 实测需要可配：V-Trim 的弹幕带从 **0.0781** 开始、间距 **0.0521**
+    // 实测需要可配：参照实现 的弹幕带从 **0.0781** 开始、间距 **0.0521**
     // （它的 `TRACK_YS = [300, 500, 700…]` 在 1920 宽的日志坐标里，
     // 换算是 `y / 3840`）。本仓老规则是 0 起、间距 0.048 ——
     // 差值是**肉眼可见的一整条**（1080p 下约 84px）。
@@ -370,7 +376,7 @@ mod tests {
 
     /// 一条弹幕条：起点给毫秒，`End` 默认落在 1 秒后。
     ///
-    /// **`End` 参与在屏窗口**（V-Trim 的 `getActiveDms` 用 `[start, end)`）——
+    /// **`End` 参与在屏窗口**（参照实现 用 `[start, end)`）——
     /// 这条注释先前写的是"反正不参与在屏时长"，而那个前提是错的。
     fn cue(start_ms: u64, text: &str) -> Cue {
         Cue {
@@ -408,7 +414,7 @@ mod tests {
     const SEQUENCE: (u32, u32) = (640, 360);
     /// **滚动时长用这条 cue 自己的，不是轨道级的。**
     ///
-    /// V-Trim 的 `progress = (el - fadeIn) / travel`，而 **`travel` 逐条不同**
+    /// 参照实现 的 `progress = (el - fadeIn) / travel`，而 **`travel` 逐条不同**
     /// （它按文本字节数算）。轨道级那一个值只能取平均，于是长句滚得太快、短句滚得太慢。
     ///
     /// 这条用例盯的是 `layout` 里那一行的**取值来源** —— 先前没有用例，
@@ -454,13 +460,13 @@ mod tests {
         // 老版本叫「在屏时长来自 spec 而不是素材的 end」，断言 `exit == 240`
         // （= `start + spec.duration_ms`），还写着"素材的 End 不该生效"。
         //
-        // V-Trim 的源码正相反（`templates/index.html` 的 `getActiveDms` 第一行）：
+        // 参照实现 的源码正相反（它的窗口判据第一行）：
         //
         //     if (t < d.start || t >= d.end) continue;
         //
         // **在屏窗口是 cue 自己的 [start, end)**；`travel` 只决定滚多快。
         // 老写法让"cue 窗口 5 秒、travel 10.4 秒"的弹幕在屏上待 10.4 秒 ——
-        // 实测 55s 那一帧 V-Trim 什么都没有，本仓还挂着一条。
+        // 实测 55s 那一帧 参照实现 什么都没有，本仓还挂着一条。
         //
         // 30fps：素材 End=5000ms（第 150 帧）是开边界，最后在屏的是第 149 帧。
         // 而 spec 的 8000ms **不该**拉长窗口。
@@ -575,7 +581,7 @@ mod tests {
         let base = rect_at(&item, 0, &plain, SEQUENCE).expect("能算");
         assert!((base.y - 2.0 * (0.04 * LINE_HEIGHT_EM)).abs() < 1e-6, "默认是 0 起、间距取行盒高");
 
-        // 配了之后按配的算（V-Trim 的实测值：0.0781 起、0.0521 间距）。
+        // 配了之后按配的算（参照实现 的实测值：0.0781 起、0.0521 间距）。
         let mut banded = spec(8, 8000);
         banded.lane_top_ratio = 300.0 / 3840.0;
         banded.lane_spacing_ratio = 200.0 / 3840.0;
@@ -665,7 +671,7 @@ mod tests {
     #[test]
     fn 横滚从右边缘到移出左边且纵向不动() {
         // 30fps，travel 1000ms（30 帧）。**在屏窗口拉长到 2 秒**：
-        // 窗口比 travel 长的时候才会"滚到左边就停住"（V-Trim 的 min(progress,1)），
+        // 窗口比 travel 长的时候才会"滚到左边就停住"（参照实现 的 min(progress,1)），
         // 而这正是最该被钉住的那一种 —— 窗口与 travel 相等时两者分不开。
         let laid = layout(&[cue_span(0, 2000, "abc")], &spec(8, 1000), &tb(30, 1));
         let text =
