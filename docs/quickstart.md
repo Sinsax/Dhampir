@@ -38,7 +38,11 @@ cargo run -q -p dhampir-worker --bin dhampir -- --help
 
 ## 三、出一份片（单机，CLI）
 
-样本工程与素材都在仓库里，不用自己准备：
+样本**工程**在仓库里（`fixtures/`），**素材**不在 —— 它是 gitignore 的草稿，先生成一次就够：
+
+```bash
+node scripts/make-test-media.mjs      # 生成 target/s3/*.mp4（要 ffmpeg；`--check` 只核对）
+```
 
 ```bash
 # 1. 先看工程能不能过校验（不要 GPU、不要 ffmpeg）

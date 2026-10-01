@@ -1,0 +1,165 @@
+// 打**发布产物**：Dhampir 只出两样东西，下游宿主只吃这两样。
+//
+//     node scripts/package.mjs [--out <目录>] [--clean-wasm] [--no-zip] [--bundle-licenses]
+//
+// 产物形状（这就是与下游宿主的**全部**契约；当前的下游是 V-Trim 仓，见 docs/dhampir/）：
+//
+//     <out>/
+//       preview/
+//         engine.js                      ← web/engine.js
+//         pkg/dhampir_wasm.js            ← wasm-pack 输出
+//         pkg/dhampir_wasm_bg.wasm
+//       bin/
+//         dhampir(.exe)                  ← release 二进制（出片用）
+//       VERSION                          ← git sha + 构建时间 + **project_schema** + license
+//       LICENSE                          ← LICENSE-APACHE（Apache-2.0 §4：分发要随附全文）
+//       THIRD-PARTY-LICENSES.md          ← 生成的第三方清单（scripts/licenses.mjs）
+//       licenses/                        ← 只有加 --bundle-licenses 时才在（每个依赖自带的文本）
+//     <out>.zip
+//
+// # 为什么要有这个脚本
+//
+// 现在下游宿主是**指着本仓的源码树**跑的（`VTEDIT_DHAMPIR_WASM=<仓根>`，然后去读
+// `web/` 与 `crates/dhampir-wasm/www/pkg/`）。那条路有两个已经踩到的坑：
+//
+//   1. 下游宿主得知道本仓的**内部目录结构** —— 这里一挪目录，那边就断；
+//   2. 它读的是**活的源码树** —— "改了没生效 / 生效了又说不清是哪一版"，
+//      实测遇到的是"改完必须强刷新"（记在 V-Trim 仓 docs/dhampir/compare-loop.md）。
+//
+// 打成定版产物之后，下游宿主只需要知道**一个目录 + 一个版本号**。
+//
+// # `--clean-wasm` 是什么、为什么默认不开
+//
+// `cargo clean -p dhampir-wasm` **清不掉 wasm 目标的依赖** —— 它只清 host 目标，
+// 于是依赖（`dhampir-core` / `dhampir-timeline`）的改动**进不去**，
+// 而 `wasm-pack build` 会报 `Finished in 0.13s` **装作没事**（实测踩过）。
+// 真清是 `cargo clean --target wasm32-unknown-unknown` —— 但它会把整个 wasm 目标
+// 清掉（实测 41283 个文件 / 20 GiB，重建 29s），所以**默认不开**，需要时显式加。
+//
+// 另一条纪律：`cargo build` 与 `wasm-pack` 的输出**一律走 stdio: inherit** ——
+// 在受限环境下捕获子进程管道会 EPERM，而那种失败看起来像"命令没跑"。
+
+import { execFileSync } from 'node:child_process';
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
+function arg(name, fallback) {
+  const i = process.argv.indexOf(name);
+  return i >= 0 && process.argv[i + 1] && !process.argv[i + 1].startsWith('--') ? process.argv[i + 1] : fallback;
+}
+const has = (name) => process.argv.includes(name);
+
+const run = (cmd, args) => {
+  console.log('  $ ' + cmd + ' ' + args.join(' '));
+  execFileSync(cmd, args, { cwd: REPO, stdio: 'inherit' });
+};
+
+// ---------------------------------------------------------------- 版本信息
+// **契约版本从 Rust 常量里读，不写死** —— 写死的话，改了契约而忘了改脚本，
+//下游宿主会拿一个"看起来对"的版本号去放行一个不兼容的产物。
+function projectSchemaVersion() {
+  const src = readFileSync(join(REPO, 'crates/dhampir-timeline/src/project.rs'), 'utf8');
+  const m = src.match(/pub const PROJECT_SCHEMA_VERSION:\s*u32\s*=\s*(\d+)\s*;/);
+  if (!m) {
+    console.error('✗ 读不出 PROJECT_SCHEMA_VERSION（在 crates/dhampir-timeline/src/project.rs）——');
+    console.error('  它是产物与下游宿主之间的契约版本，读不到就**不许猜**，直接失败。');
+    process.exit(1);
+  }
+  return Number(m[1]);
+}
+
+function gitSha() {
+  try {
+    return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: REPO, encoding: 'utf8' }).trim();
+  } catch (e) {
+    return 'unknown';
+  }
+}
+
+const schema = projectSchemaVersion();
+const sha = gitSha();
+const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+const version = schema + '+' + sha;
+const out = resolve(arg('--out', join(REPO, 'dist', 'dhampir-' + version)));
+
+console.log('产物目录 : ' + out);
+console.log('契约版本 : project_schema = ' + schema + '  (git ' + sha + ')');
+console.log('');
+
+// ---------------------------------------------------------------- 构建
+if (has('--clean-wasm')) {
+  // 见文件头的说明：不清的话依赖改动进不去，而 wasm-pack 会假装成功。
+  run('cargo', ['clean', '--target', 'wasm32-unknown-unknown']);
+}
+
+rmSync(out, { recursive: true, force: true });
+mkdirSync(join(out, 'preview', 'pkg'), { recursive: true });
+mkdirSync(join(out, 'bin'), { recursive: true });
+
+run('cargo', ['build', '--release', '--bin', 'dhampir']);
+run('wasm-pack', ['build', 'crates/dhampir-wasm', '--target', 'web', '--release', '--out-dir', join(out, 'preview', 'pkg')]);
+
+// ---------------------------------------------------------------- 摊平
+cpSync(join(REPO, 'web/engine.js'), join(out, 'preview', 'engine.js'));
+const exe = process.platform === 'win32' ? 'dhampir.exe' : 'dhampir';
+cpSync(join(REPO, 'target/release', exe), join(out, 'bin', exe));
+
+// ---------------------------------------------------------------- 许可证
+// Apache-2.0 §4：**分发时**要随附许可证全文、保留声明、并如实列出第三方组件。
+// 所以产物里固定带这两份；`--bundle-licenses` 再把每个依赖自带的文本抽进 licenses/。
+cpSync(join(REPO, 'LICENSE-APACHE'), join(out, 'LICENSE'));
+const thirdParty = join(REPO, 'THIRD-PARTY-LICENSES.md');
+if (!existsSync(thirdParty)) {
+  console.error('✗ 缺 THIRD-PARTY-LICENSES.md —— 先跑 `node scripts/licenses.mjs --write`');
+  process.exit(1);
+}
+cpSync(thirdParty, join(out, 'THIRD-PARTY-LICENSES.md'));
+if (has('--bundle-licenses')) run('node', ['scripts/licenses.mjs', '--bundle', out]);
+
+writeFileSync(join(out, 'VERSION'), [
+  'project_schema=' + schema,
+  'license=Apache-2.0',
+  'git=' + sha,
+  'built_at=' + stamp,
+  'platform=' + process.platform + '-' + process.arch,
+  '',
+].join('\n'));
+
+// ---------------------------------------------------------------- 自检
+// 只报"产出了什么"不算数 —— 这里按下游宿主启动时会做的三条检查先自检一遍：
+const need = [
+  join(out, 'preview', 'engine.js'),
+  join(out, 'preview', 'pkg', 'dhampir_wasm.js'),
+  join(out, 'preview', 'pkg', 'dhampir_wasm_bg.wasm'),
+  join(out, 'bin', exe),
+  join(out, 'VERSION'),
+  join(out, 'LICENSE'),
+  join(out, 'THIRD-PARTY-LICENSES.md'),
+];
+const missing = need.filter((p) => !existsSync(p));
+if (missing.length > 0) {
+  console.error('✗ 产物不齐，缺：');
+  for (const p of missing) console.error('    ' + p);
+  process.exit(1);
+}
+
+console.log('');
+console.log('✓ 产物齐全：');
+for (const p of need) console.log('    ' + p.replace(REPO + '\\', '').replace(REPO + '/', ''));
+
+if (!has('--no-zip')) {
+  const zip = out + '.zip';
+  rmSync(zip, { force: true });
+  // 用 PowerShell 的 Compress-Archive（Windows 自带）；stdio 继承，不捕获管道。
+  run('powershell', ['-NoProfile', '-Command',
+    'Compress-Archive -Path ' + JSON.stringify(join(out, '*')) + ' -DestinationPath ' + JSON.stringify(zip) + ' -Force']);
+  console.log('  zip : ' + zip);
+}
+
+console.log('');
+console.log('交给下游宿主：把整个目录放到 <程序目录>/dhampir/ ，然后设');
+console.log('    VTEDIT_DHAMPIR_PREVIEW=<程序目录>/dhampir/preview');
+console.log('    VTEDIT_DHAMPIR_CLI=<程序目录>/dhampir/bin/' + exe);
