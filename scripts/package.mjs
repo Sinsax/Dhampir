@@ -54,7 +54,11 @@ const has = (name) => process.argv.includes(name);
 
 const run = (cmd, args) => {
   console.log('  $ ' + cmd + ' ' + args.join(' '));
-  execFileSync(cmd, args, { cwd: REPO, stdio: 'inherit' });
+  // `DHAMPIR_GIT_SHA` 让产物能自报"是哪一次构建"（`dhampir_build_id` 读它）。
+  // 为什么必须注入：`HOST_API_VERSION` 只在导出面变化时才 +1，一次纯实现修复
+  // （例如 2026-10-02 的动图上传改数组纹理）**不改版本号** —— 没有这个 sha，
+  // "浏览器里跑的是不是修好的那份"就无从判断（那次排查正是卡在这里）。
+  execFileSync(cmd, args, { cwd: REPO, stdio: 'inherit', env: { ...process.env, DHAMPIR_GIT_SHA: sha } });
 };
 
 // ---------------------------------------------------------------- 版本信息

@@ -1678,6 +1678,31 @@ pub fn dhampir_host_api_version() -> u32 {
     host_api::HOST_API_VERSION
 }
 
+/// 这份产物是**哪一次构建**。
+///
+/// # 为什么需要它（而不是复用 `host_api_version`）
+///
+/// `HOST_API_VERSION` 只在**导出面/形状**变化时才 +1。一次纯粹的实现修复
+/// （比如 2026-10-02 把动图上传从逐帧改成一张数组纹理）**不改版本号** ——
+/// 于是"浏览器里跑的是修好的那份还是旧的"从版本号上**根本看不出来**。
+///
+/// 那次排查就卡在这里：宿主侧的优化在 `crates/dhampir-wasm/www/pkg`，而预览其实是
+/// 服务端从 `<程序目录>/dhampir/preview/pkg` 发的 —— **是两份不同的文件**，
+/// 但两者的 `host_api_version` 都是 6。
+///
+/// 判据用**构建输入**，不用时间戳：
+///   * `git` —— 构建时的短 sha（`DHAMPIR_GIT_SHA`，`scripts/package.mjs` 注入；
+///     没注入时是 `"unknown"`，开发树直接 `cargo build` 就走这条）；
+///   * `api` —— `HOST_API_VERSION`。
+///
+/// 形状是**一句话**而不是 JSON：它要能在控制台里与另一份产物直接对比，
+/// 多一层解析就多一次"比错了"的机会。
+#[wasm_bindgen]
+pub fn dhampir_build_id() -> String {
+    let sha = option_env!("DHAMPIR_GIT_SHA").unwrap_or("unknown");
+    format!("git={sha} api={}", host_api::HOST_API_VERSION)
+}
+
 /// 载入一份工程：解析 + 校验，返回结构化结果。
 ///
 /// 返回形如 `{"parsed":true,"ok":false,"issues":[…]}`。**问题清单直接来自 timeline 的校验**，

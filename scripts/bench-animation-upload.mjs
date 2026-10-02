@@ -31,8 +31,11 @@ import { Cdp, buildBrowserArgs, fetchPageTarget, findBrowser, freePort, sleep, w
 
 const HERE = new URL('.', import.meta.url).pathname.replace(/^\//, '');
 const REPO = HERE + '..';
-const PORT = Number(process.argv[2] || 8899);
-const GIF_DIR = process.argv[3] || 'F:/para/Code/V-Trim/target/debug/stickers/ysyk';
+const ARGV = process.argv.slice(2);
+const HEADLESS = !ARGV.includes('--headed');
+const positional = ARGV.filter((a) => !a.startsWith('--'));
+const PORT = Number(positional[0] || 8899);
+const GIF_DIR = positional[1] || 'F:/para/Code/V-Trim/target/debug/stickers/ysyk';
 
 if (!existsSync(GIF_DIR)) {
   console.error('✗ 找不到素材目录 ' + GIF_DIR);
@@ -71,7 +74,13 @@ const all = readdirSync(GIF_DIR).filter((f) => f.toLowerCase().endsWith('.gif'))
   .sort((a, b) => b.frames - a.frames);
 if (!all.length) { console.error('✗ ' + GIF_DIR + ' 里没有 GIF'); process.exit(2); }
 // 最大 + 中位 + 最小
-const picks = [all[0], all[Math.floor(all.length / 2)], all[all.length - 1]];
+// `--same-as-app` 用用户报的那五张（而不是按帧数挑），并先 open 一份真工程 ——
+// 那是应用的真实顺序（attach -> open -> bindSource -> load_animation）。
+const APP_FIVE = ['打招呼_1.gif', '生气.gif', '问号.gif', '思考(认真地).gif', '笑.gif'];
+const SAME_AS_APP = ARGV.includes('--same-as-app');
+const picks = SAME_AS_APP
+  ? APP_FIVE.map((n) => all.find((g) => g.name === n)).filter(Boolean)
+  : [all[0], all[Math.floor(all.length / 2)], all[all.length - 1]];
 console.log('素材 ' + GIF_DIR);
 console.log('挑了 ' + picks.map((p) => p.name + '(' + p.frames + '帧)').join('  '));
 
@@ -84,15 +93,31 @@ const { mkdirSync, cpSync } = await import('node:fs');
 mkdirSync(join(www, gifSub), { recursive: true });
 for (const p of picks) cpSync(p.path, join(www, gifSub, p.name));
 
+let projectJson = null;
+if (SAME_AS_APP) {
+  const pj = join(REPO, 'fixtures', 'sample-project.json');
+  projectJson = readFileSync(pj, 'utf8');
+  try { cpSync(pj, join(www, 'bench-project.json')); } catch {}
+}
 const page = `<!doctype html>
 <meta charset="utf-8"><body>
 <canvas id="gl" width="640" height="360"></canvas>
 <pre id="out">running…</pre>
 <script type="module">
-import init, { dhampir_project_attach, dhampir_asset_load_animation } from './pkg/dhampir_wasm.js';
+import init, { dhampir_project_attach, dhampir_project_open, dhampir_asset_load_animation } from './pkg/dhampir_wasm.js';
 const lines = []; const out = document.getElementById('out');
 const say = (s) => { lines.push(s); out.textContent = lines.join('\\n'); };
-try { await init(); await dhampir_project_attach('gl'); } catch (e) { say('init/attach 失败: ' + e); }
+try {
+  await init();
+  const att = JSON.parse(await dhampir_project_attach('gl'));
+  say('适配器 ' + JSON.stringify(att));
+  if (${SAME_AS_APP}) {
+    const pj = await (await fetch('./bench-project.json')).text();
+    const t = performance.now();
+    const o = JSON.parse(dhampir_project_open(pj));
+    say('open(project) ' + (o.ok ? 'OK' : 'FAIL') + '  ' + Math.round(performance.now() - t) + ' ms');
+  }
+} catch (e) { say('init/attach 失败: ' + e); }
 const FILES = ${JSON.stringify(picks.map((p) => p.name))};
 let sum = 0;
 for (const name of FILES) {
@@ -129,7 +154,7 @@ if (!browser) {
   const profileDir = mkdtempSync(join(tmpdir(), 'dhampir-bench-prof-'));
   const devtoolsPort = await freePort();
   const url = 'http://127.0.0.1:' + PORT + '/' + pageName;
-  const child = spawn(browser.path, buildBrowserArgs({ profileDir, url, width: 900, height: 600, headless: true, devtoolsPort }), {
+  const child = spawn(browser.path, buildBrowserArgs({ profileDir, url, width: 900, height: 600, headless: HEADLESS, devtoolsPort }), {
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   try {
@@ -141,6 +166,11 @@ if (!browser) {
     }), 15000, '连 DevTools');
     const cdp = new Cdp(ws);
     await cdp.send('Runtime.enable');
+    // ⚠️ 这里**不要**调 `SystemInfo.getInfo`：那是**浏览器级**域，页面级连接发它会被回
+    // `-32000 only supported on the browser target`（我第一版就踩了这个，白跑一轮）。
+    // 要看宿主设备表得另开一条 `/json/version` 的 WebSocket —— 那条本仓的
+    // `run-browser-corpus.mjs` 已经有了，这里不重复。
+    // 页面能自报的是 `dhampir_project_attach` 的返回（含 backend），已经打在上面了。
     const deadline = Date.now() + 180000;
     while (Date.now() < deadline) {
       const r = await cdp.send('Runtime.evaluate', {
@@ -160,7 +190,8 @@ if (!browser) {
 try { server.kill(); } catch {}
 try { rmSync(join(www, gifSub), { recursive: true, force: true }); } catch {}
 try { rmSync(join(www, pageName), { force: true }); } catch {}
+try { rmSync(join(www, 'bench-project.json'), { force: true }); } catch {}
 try { rmSync(stage, { recursive: true, force: true }); } catch {}
 
-console.log('\n===== 浏览器实测（真素材）=====');
+console.log('\n===== 浏览器实测（真素材）=====' + (HEADLESS ? ' [无头]' : ' [有头]'));
 console.log(result || '（没等到结果）');
