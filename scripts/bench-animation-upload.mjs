@@ -68,8 +68,14 @@ function frameCount(p) {
   return n;
 }
 
-const all = readdirSync(GIF_DIR).filter((f) => f.toLowerCase().endsWith('.gif'))
-  .map((f) => ({ name: f, path: join(GIF_DIR, f), frames: frameCount(join(GIF_DIR, f)) }))
+// ⚠️ **不许把名字小写化之后拿去访问文件系统**（Linux 上大小写敏感，会直接找不到文件）。
+// 判后缀时用 `toLowerCase()` 比一下**副本**，真正去访问的永远是 `readdirSync` 给的原名。
+const all = readdirSync(GIF_DIR)
+  .filter((f) => f.toLowerCase().endsWith('.gif'))
+  .map((name) => {
+    const path = join(GIF_DIR, name);
+    return { name, path, frames: frameCount(path) };
+  })
   .filter((g) => g.frames > 0)
   .sort((a, b) => b.frames - a.frames);
 if (!all.length) { console.error('✗ ' + GIF_DIR + ' 里没有 GIF'); process.exit(2); }

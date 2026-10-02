@@ -15,7 +15,13 @@ Version: 6
 而这里的形状是钉死的（每条都有键集断言）—— 启动时问一次，记住就够了。
 
 * 对端要判断对面是哪个版本，调 `dhampir_host_api_version`：返回整数，与
-  `host_api::HOST_API_VERSION` 是同一个数（现在等于 5）。
+  `host_api::HOST_API_VERSION` 是同一个数（现在等于 6）。
+* **但版本号答不了"这是哪一次构建"**：它只在导出面/形状变化时才 +1，
+  一次纯实现修复（例如把动图上传从逐帧改成一张数组纹理）**不改它**。
+  这种时候问 `dhampir_build_id` —— 返回一句话 `git=<短 sha> api=<n>`，
+  sha 由 `scripts/package.mjs` 在构建时经 `DHAMPIR_GIT_SHA` 注入
+  （开发树直接 `cargo build` 时是 `git=unknown`）。
+  **它不是契约**：形状不承诺，只为"浏览器里跑的到底是哪份产物"这一个问题存在。
 * 版本的真值在 Rust 源码那一行常量里；这个函数的返回值、这份文档的 `Version:` 行
   与文末名单，都由守卫跟源码比对 —— **「升了常量忘了改文档」不会静默通过**。
 
@@ -199,6 +205,7 @@ Version: 6
 
 - `dhampir_asset_animation_info`
 - `dhampir_asset_load_animation`
+- `dhampir_build_id`
 - `dhampir_host_api_version`
 - `dhampir_project_attach`
 - `dhampir_project_begin_frame`

@@ -30,6 +30,7 @@
 
 - `dhampir_asset_animation_info`
 - `dhampir_asset_load_animation`
+- `dhampir_build_id`
 - `dhampir_host_api_version`
 - `dhampir_project_attach`
 - `dhampir_project_begin_frame`
