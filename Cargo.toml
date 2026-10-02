@@ -34,10 +34,7 @@ rust-version = "1.87" # = wgpu 30.0.1 的 MSRV
 #   Unicode-3.0），没有 copyleft。第三方清单由 `node scripts/licenses.mjs --check` 钉住。
 license = "Apache-2.0"
 authors = ["dhampir contributors"]
-# repository —— ⚠️ **上传 GitHub 后必须回填这一行**（现在刻意留空，不编造 URL）。
-#   五个 crate 全部继承这里（各自写 `repository.workspace = true`），所以只需改这一处。
-#   回填后 crates.io / docs.rs / `cargo package` 才能把源码链接指对。
-#   例：repository = "https://github.com/<你的账号>/dhampir"
+repository = "https://github.com/Sinsax/Dhampir"  # 五个 crate 各自 `repository.workspace = true` 继承这里
 
 [workspace.dependencies]
 dhampir-timeline = { version = "0.1.0", path = "crates/dhampir-timeline" }

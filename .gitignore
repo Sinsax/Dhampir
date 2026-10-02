@@ -24,3 +24,7 @@ Thumbs.db
 dist/
 # WorkBuddy 的工作区数据（记忆、技能），不是源码。
 /.workbuddy/
+
+# gh / 工具的机器本地状态：`gh` 在环境变量不全时会把 device-id 写到 cwd 下。
+# 它不是源码，别提交（2026-10-03 误提交过一次）。
+/.local/
