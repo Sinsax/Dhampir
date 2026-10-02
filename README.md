@@ -16,7 +16,38 @@
 **本仓库不做**（那是下游工程的形态）：API 网关 / 任务队列 / 对象存储 / 部署与容器化 /
 分布式分片编排 / 编辑 UI 产品化。
 
-> **范围**：本项目**只做本地开发与本地验证**——不发布包、不建远端仓库、不接远端 CI。
+> **范围**：本项目**只做本地开发与本地验证** —— 不发布到 crates.io、不接远端 CI。
+> **但发 GitHub Release**：产物 zip 是下游宿主钉固依赖的那个东西（见下「版本与发布」）。
+
+---
+
+## 版本与发布
+
+**当前发布版本：`0.1.0`**（唯一真相 = 根 `Cargo.toml` 的 `[workspace.package] version`）。
+
+产物名 = **`dhampir-<产品版本>+<git sha>`**，另出一份**不带 sha 的稳定名**
+`dhampir-<产品版本>-<平台>.zip` + 同名 `.sha256.txt` —— **下载地址写稳定名那个**。
+
+⚠️ **两个"版本"是两回事，别混**（2026-10-03 拆开）：
+
+| | 是什么 | 谁在用 |
+|---|---|---|
+| `version` | **产品版本**（0.1.0） | 人读、产物名、Release 资产名 |
+| `project_schema` | 工程文件**能不能读**（1） | 底座拿它拒错版工程 |
+| `host_api` | wasm **导出面对不对得上**（6） | `dhampir_host_api_version()`，只增不减 |
+
+在此之前产物名叫 `dhampir-<schema>+<sha>` —— 名字里那个号是 **schema 版本**，而 schema
+在兼容变更时**根本不动**，于是一堆内容不同的产物共用一个名字，"下载地址该写哪个"没有答案。
+
+发布流程：
+
+```bash
+# 1. 改 [workspace.package] version → 2. 打包（产出稳定名 + sha256 侧车）
+node scripts/package.mjs
+# 3. 打 tag（tag 名与产品版本对齐）
+git tag -a v0.1.0 -m 'dhampir v0.1.0' && git push origin main --tags
+# 4. 挂 Release：dist/dhampir-0.1.0-win32-x64.zip + .sha256.txt
+```
 
 ---
 

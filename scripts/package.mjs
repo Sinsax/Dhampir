@@ -11,11 +11,24 @@
 //         pkg/dhampir_wasm_bg.wasm
 //       bin/
 //         dhampir(.exe)                  ← release 二进制（出片用）
-//       VERSION                          ← git sha + 构建时间 + **project_schema** + license
+//       VERSION                          ← **产品版本** + project_schema + host_api + git sha + 构建时间 + license
 //       LICENSE                          ← LICENSE-APACHE（Apache-2.0 §4：分发要随附全文）
 //       THIRD-PARTY-LICENSES.md          ← 生成的第三方清单（scripts/licenses.mjs）
 //       licenses/                        ← 只有加 --bundle-licenses 时才在（每个依赖自带的文本）
-//     <out>.zip
+//     <out>.zip                           ← 构建身份（名字带 +<sha>）
+//     dhampir-<产品版本>-<平台>.zip        ← **稳定名**，下载地址写它
+//     dhampir-<产品版本>-<平台>.zip.sha256.txt
+//
+// # 两个"版本"是两回事（2026-10-03 拆开）
+//
+//     version         产品版本（0.1.0）  ← 根 Cargo.toml [workspace.package]
+//     project_schema  工程文件契约（1）   ← dhampir-timeline/src/project.rs
+//     host_api        wasm 导出面契约（6）← dhampir-timeline/src/host_api.rs
+//
+// 产物目录以前叫 `dhampir-<schema>+<sha>`（如 `dhampir-1+9db716b`）—— 名字里的 `1` 是
+// **schema 版本**。问题是 schema **兼容变更时根本不动**，于是一堆内容不同的产物共用一个名字，
+// 「下载地址该写哪个」没有答案。现在名字跟**产品版本**走，`+<sha>` 保留可追溯性；
+// 另出一份不带 sha 的稳定名，专供下载地址。
 //
 // # 为什么要有这个脚本
 //
@@ -40,6 +53,7 @@
 // 在受限环境下捕获子进程管道会 EPERM，而那种失败看起来像"命令没跑"。
 
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -95,6 +109,28 @@ function hostApiVersion() {
   return Number(m[1]);
 }
 
+/// **发布版本**（产品版本，语义化）—— 唯一来源是根 `Cargo.toml` 的 `[workspace.package] version`。
+///
+/// ⚠️ **它与 `project_schema` 是两回事，2026-10-03 才拆开**：
+///   产物目录以前叫 `dhampir-<schema>+<sha>`（例如 `dhampir-1+9db716b`）—— 那个 `1` 是
+///   **schema 版本**，不是产品版本。后果是"下载地址该写哪个"没有答案：名字跟着 schema 走，
+///   而 schema 在兼容变更时**根本不动**，于是一堆不同内容的产物共用一个名字。
+///   现在：名字跟**产品版本**走，`+<sha>` 保留可追溯性。
+///
+/// 同一条纪律：读不到就**失败**，不猜。
+function productVersion() {
+  const src = readFileSync(join(REPO, 'Cargo.toml'), 'utf8');
+  // 只认 `[workspace.package]` 段里那个 version，别匹配到 `rust-version` / `wgpu = "30.0.1"`。
+  const pkg = src.match(/\[workspace\.package\]([\s\S]*?)(?:\n\[|$)/);
+  const m = pkg && pkg[1].match(/^version\s*=\s*"([^"]+)"/m);
+  if (!m) {
+    console.error('✗ 读不出 [workspace.package] version（根 Cargo.toml）——');
+    console.error('  它是发布版本，决定产物名与 Release 资产名，读不到就**不许猜**，直接失败。');
+    process.exit(1);
+  }
+  return m[1];
+}
+
 function gitSha() {
   try {
     return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: REPO, encoding: 'utf8' }).trim();
@@ -105,13 +141,17 @@ function gitSha() {
 
 const schema = projectSchemaVersion();
 const hostApi = hostApiVersion();
+const release = productVersion();
 const sha = gitSha();
 const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-const version = schema + '+' + sha;
+// 目录名 = `dhampir-<产品版本>+<sha>`（与 V-Trim 的 `vtrim-v<版本>-win-x64` 同一套思路：
+// 产品版本在前、构建身份在后）。zip 名另出一份不带 sha 的（见文件末），那个才是**下载地址用的**。
+const version = release + '+' + sha;
 const out = resolve(arg('--out', join(REPO, 'dist', 'dhampir-' + version)));
 
 console.log('产物目录 : ' + out);
-console.log('契约版本 : project_schema = ' + schema + '   host_api = ' + hostApi + '  (git ' + sha + ')');
+console.log('发布版本 : ' + release + '  (git ' + sha + ')');
+console.log('契约版本 : project_schema = ' + schema + '   host_api = ' + hostApi);
 console.log('');
 
 // ---------------------------------------------------------------- 构建
@@ -145,6 +185,11 @@ cpSync(thirdParty, join(out, 'THIRD-PARTY-LICENSES.md'));
 if (has('--bundle-licenses')) run('node', ['scripts/licenses.mjs', '--bundle', out]);
 
 writeFileSync(join(out, 'VERSION'), [
+  // `version` 与 `project_schema` **必须都在、且是两回事**：
+  //   version        产品版本（0.1.0）—— 人读、"这一版是哪一版"、Release 资产名
+  //   project_schema 工程文件契约（1）—— 底座拿它拒错版工程
+  // 合成一条会让"兼容变更"（schema 不动、产品动了）表达不出来。
+  'version=' + release,
   'project_schema=' + schema,
   'host_api=' + hostApi,
   'license=Apache-2.0',
@@ -181,6 +226,19 @@ if (!has('--no-zip')) {
   rmSync(zip, { force: true });
   makeZip(out, zip);
   console.log('  zip : ' + zip);
+
+  // 再出一份**不带 sha** 的稳定名：`dhampir-<产品版本>-<平台>.zip`。
+  // 为什么需要它：下载地址要能**写死在钉固文件里**，而带 sha 的名字每提交一次就变。
+  // 带 sha 的那份留着 —— 它是"这批字节出自哪次构建"的凭据，两者用途不同，都别删。
+  const stable = join(REPO, 'dist',
+    'dhampir-' + release + '-' + process.platform + '-' + process.arch + '.zip');
+  rmSync(stable, { force: true });
+  cpSync(zip, stable);
+  console.log('  zip : ' + stable + '   ← 稳定名（下载地址用这个）');
+  // sha256 侧车：与 V-Trim 的 `<zip>.sha256.txt` 同一约定，让"拉取"可被验证。
+  const hex = sha256File(stable);
+  writeFileSync(stable + '.sha256.txt', hex + '  ' + stable.split(/[\\/]/).pop() + '\n');
+  console.log('  sha256: ' + hex);
 }
 
 /// 打 zip。
@@ -224,6 +282,16 @@ function makeZip(from, zip) {
     console.error('✗ 压 zip 报成功但文件不在：' + zip);
     process.exit(1);
   }
+}
+
+/// 文件的 sha256（十六进制小写）。
+///
+/// 为什么自己算、不调 `certutil`/`Get-FileHash`：那两个的**输出格式随平台与语言变**
+/// （certutil 会带 "SHA256 hash of ..." 一行前缀，中文系统还是中文），而这份值要写进
+/// 侧车文件、被下游宿主与用户逐字比对 —— 差一个空格就是"校验失败"。
+/// `node:crypto` 在哪台机器上都是同一个字符串。
+function sha256File(path) {
+  return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
 /// PowerShell 单引号字符串里，单引号自己要用两个表示。

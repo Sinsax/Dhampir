@@ -1,6 +1,8 @@
 # 动图（GIF / 动画 WebP）原生解码 —— 宿主接入指南
 
-**适用产物**：`dist/dhampir-1+2fd7d96`（`project_schema=1`、**`host_api=6`**、git `2fd7d96`）
+**适用产物**：`dhampir-0.1.0+`（`project_schema=1`、**`host_api=6`**）。
+> 产物名 = `dhampir-<产品版本>+<git sha>`。**契约版本是 `project_schema` / `host_api`，不是名字里那个号** ——
+> 两者 2026-10-03 才拆开（此前名字里是 schema 版本，兼容变更时它不动，于是不同内容共用一个名字）。
 
 这份文件只回答一件事：**宿主要把动图交出去、要看它动起来、要保证预览与成片一致，
 分别该调什么、注意什么。** 设计理由在 [../plan/dhampir-gif-native-decode-proposal.md](../plan/dhampir-gif-native-decode-proposal.md),
@@ -302,13 +304,13 @@ Chrome 里怎么测都是 540~750 ms。我一度怀疑软件光栅（SwiftShader
 ## 八、附：产物内容与接入方式
 
 ```
-dhampir-1+2fd7d96/
+dhampir-0.1.0+<sha>/
   preview/
     engine.js                 ← 浏览器入口（不变量：不依赖任何前端框架）
     pkg/dhampir_wasm.js       ← wasm-pack 输出
     pkg/dhampir_wasm_bg.wasm
   bin/dhampir.exe             ← 出片用
-  VERSION                     ← project_schema=1 / host_api=6 / git / 构建时间 / 平台
+  VERSION                     ← version=0.1.0 / project_schema=1 / host_api=6 / git / 构建时间 / 平台
   LICENSE  THIRD-PARTY-LICENSES.md  licenses/
 ```
 
