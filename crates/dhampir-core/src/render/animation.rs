@@ -35,8 +35,22 @@ use crate::wgpu;
 
 /// 一张动图上传后的账目与句柄。
 struct Entry {
-    /// 保住纹理对象：`TextureView` 不持有它的生命周期。
-    textures: Vec<(wgpu::Texture, wgpu::TextureView)>,
+    /// **一张 `D2Array` 纹理装下所有帧**（第 N 层 = 第 N 帧），不是每帧一张纹理。
+    ///
+    /// 为什么合成一张：`queue.write_texture` 在 **wasm/WebGPU** 宿主上要跨
+    /// wasm↔JS 边界拷贝 —— 每帧一次的话，77 帧的贴纸就是 77 趟往返。
+    /// 实测（500x500x77，73.4 MiB）：native 6 ms，**浏览器 1699 ms（283x）**
+    /// —— 同一台机器、同一批素材、同一个无头 Chrome（`scripts/bench-animation-upload.mjs`）。
+    /// 而两端的解码合成是同一份代码、纯合成实测 0 ms ⇒ 差距全在这个循环上。
+    /// 一次 `create_texture` + 一次 `write_texture` 把跨边界次数从"帧数"降到 1。
+    ///
+    /// 保住纹理对象：`TextureView` 不持有它的生命周期，视图全丢了纹理才能释放。
+    ///
+    /// 它**没有读点**（视图已经够用），这是刻意的 —— 见下面 `#[allow]` 的说明。
+    #[allow(dead_code)]
+    texture: wgpu::Texture,
+    /// 逐层的视图（与帧号一一对应）。层号 = 帧号。
+    views: Vec<wgpu::TextureView>,
     width: u32,
     height: u32,
     format: AnimFormat,
@@ -48,7 +62,7 @@ struct Entry {
 
 impl Entry {
     fn frame_count(&self) -> usize {
-        self.textures.len()
+        self.views.len()
     }
 
     fn bytes(&self) -> u64 {
@@ -101,59 +115,103 @@ impl AnimationTextures {
         }
 
         let stride = (animation.width as usize) * 4;
-        let mut textures = Vec::with_capacity(animation.frame_count());
-        for frame in &animation.frames {
-            // 每帧的长度必须与画布对得上 —— 对不上就说明解出来的东西不是"整张画布"，
-            // 而那种纹理上传上去是**错位的像素**（比失败更难查）。
-            if frame.rgba.len() != (stride * animation.height as usize) {
+        let frame_len = stride * animation.height as usize;
+
+        // 先把所有帧的长度校验完 —— 有一帧对不上就**一张纹理都不建**。
+        // 对不上说明解出来的不是"整张画布"，传上去是错位的像素（比失败更难查）。
+        for (index, frame) in animation.frames.iter().enumerate() {
+            if frame.rgba.len() != frame_len {
                 return Err(AnimError::BadData(format!(
                     "动图第 {} 帧的像素数与画布对不上：{} vs {}",
-                    textures.len() + 1,
+                    index + 1,
                     frame.rgba.len(),
-                    stride * animation.height as usize
+                    frame_len
                 )));
             }
-            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+        }
+
+        let layers = animation.frame_count() as u32;
+
+        // ⚠️ **层数上限**：WebGPU 的 `maxTextureArrayLayers` 默认下限是 **256**，
+        // 而帧数上限 `MAX_FRAMES` 是 4096 ⇒ 大动图会撞上，`create_texture` 直接报验证错。
+        // 撞了就**明确拒绝**（与预算闸同一种处置：宁可报"这张画不出来"，
+        // 也不要建出一张静默截断的纹理 —— 后者表现为"动图后半段不动了"）。
+        // 判据取自设备限制而不是写死 256：不同实现可以给得更高。
+        let max_layers = self.device.limits().max_texture_array_layers;
+        if layers > max_layers {
+            return Err(AnimError::BadData(format!(
+                "动图有 {layers} 帧，超过这个设备能用的纹理数组层数上限 {max_layers} \
+                 —— 请改用更少帧的素材"
+            )));
+        }
+
+        // **一次创建、一次写入**（见 `Entry` 上那段说明）：
+        // 所有帧拼进一张 `D2Array` 纹理，第 N 层就是第 N 帧。
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("dhampir animation frames"),
+            size: wgpu::Extent3d {
+                width: animation.width,
+                height: animation.height,
+                depth_or_array_layers: layers,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FRAME_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        // 帧数据拼成一段连续缓冲：**一次** `write_texture` 写完所有层。
+        //
+        // ⚠️ 这一步在 wasm 宿主上也是跨边界拷贝，但**只拷一趟**（原来是帧数趟）。
+        // 缓冲的层间排布就是 `D2Array` 要求的"每层按序紧挨着"。
+        let mut packed = Vec::with_capacity(frame_len * animation.frame_count());
+        for frame in &animation.frames {
+            // 每一层的行距已经是紧凑的（stride == width*4），所以直接首尾相接即可。
+            packed.extend_from_slice(&frame.rgba);
+        }
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &packed,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                // ⚠️ **必须是包含所有层的总排布**，不是单帧的：
+                // `bytes_per_row` 是一行跨多少字节，`rows_per_image` 是"每层多少行"，
+                // 两者合起来决定一层的步长；层与层由 extent 的 depth 推。
+                bytes_per_row: Some(stride as u32),
+                rows_per_image: Some(animation.height),
+            },
+            wgpu::Extent3d {
+                width: animation.width,
+                height: animation.height,
+                depth_or_array_layers: layers,
+            },
+        );
+
+        // 逐层建视图（**不新建纹理**）：层号 = 帧号，与 D2Array 的约定一致。
+        let mut views = Vec::with_capacity(animation.frame_count());
+        for layer in 0..layers {
+            views.push(texture.create_view(&wgpu::TextureViewDescriptor {
                 label: Some("dhampir animation frame"),
-                size: wgpu::Extent3d {
-                    width: animation.width,
-                    height: animation.height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: FRAME_FORMAT,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-            self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &frame.rgba,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(stride as u32),
-                    rows_per_image: Some(animation.height),
-                },
-                wgpu::Extent3d {
-                    width: animation.width,
-                    height: animation.height,
-                    depth_or_array_layers: 1,
-                },
-            );
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            textures.push((texture, view));
+                format: Some(FRAME_FORMAT),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: layer,
+                array_layer_count: Some(1),
+                ..Default::default()
+            }));
         }
 
         self.entries.insert(
             asset_id.to_string(),
             Entry {
-                textures,
+                texture,
+                views,
                 width: animation.width,
                 height: animation.height,
                 format: animation.format,
@@ -173,7 +231,7 @@ impl AnimationTextures {
     ) -> Option<(wgpu::TextureView, (u32, u32))> {
         let entry = self.entries.get(asset_id)?;
         let index = resolve_frame_index(entry.frame_count(), source_frame);
-        let (_, view) = entry.textures.get(index)?;
+        let view = entry.views.get(index)?;
         Some((view.clone(), (entry.width, entry.height)))
     }
 

@@ -154,3 +154,70 @@ fn 帧字节数与画布对不上时报错而不是传错位像素() {
     assert!(error.to_string().contains("对不上"), "理由不对：{error}");
     assert!(!cache.contains("broken"));
 }
+
+
+/// **真素材规模的形状判据**：所有帧进**一张** `D2Array` 纹理，而不是每帧一张。
+///
+/// # 为什么这条判据必须存在
+///
+/// 上传曾经是逐帧 `create_texture` + `write_texture`。两种宿主下**同一份 core 代码**：
+///
+/// | 500x500 x 77 帧 (73.4 MiB) | 耗时 |
+/// |---|---|
+/// | native（Vulkan 真机） | 6 ms |
+/// | **浏览器（wasm/WebGPU）** | **1699 ms** |
+///
+/// 差 283 倍 —— 因为 WebGPU 后端每次 `write_texture` 都要跨 wasm↔JS 边界拷一趟，
+/// 77 帧就是 77 趟。改成一张数组纹理后浏览器实测 **194 ms（8.8x）**，
+/// 五张真贴纸合计 **4994 ms -> 461 ms（10.8x）**。
+///
+/// ⚠️ 这条跑在 native 上，**抓不住浏览器那 283 倍**（native 两种写法都快）。
+/// 它抓的是**形状**：一旦有人把上传改回"每帧一张纹理"，帧号取值/预算/替换这几条
+/// 会跟着一起漂，而那是共享的契约。浏览器侧的耗时证据在
+/// `scripts/bench-animation-upload.mjs`（真素材，需 WebGPU）。
+///
+/// 尺寸取 500x500 x 77 = 真素材里最大的一张（V-Trim 的 `打招呼_1.gif`），
+/// 不是 `SIZE = 4` 那种玩具规模 —— 上面那个 218 ms 的旧数字就是被玩具规模掩盖的。
+#[test]
+#[ignore = "需要真 GPU；跑：cargo test -p dhampir-worker --test animation_gpu -- --ignored"]
+fn 真素材规模的上传走一张数组纹理() {
+    let (ctx, _init) = open_leg(NATIVE_BACKENDS).expect("拿不到 GPU 上下文");
+    let (side, fc) = (500u32, 77usize);
+    let mut frames = Vec::with_capacity(fc);
+    for index in 0..fc {
+        let shade = (index as u8).wrapping_mul(3).wrapping_add(20);
+        let mut rgba = Vec::with_capacity((side * side * 4) as usize);
+        for _ in 0..(side * side) {
+            rgba.extend_from_slice(&[shade, shade, shade, 255]);
+        }
+        frames.push(AnimFrame { delay_ms: 30, rgba });
+    }
+    let animation = Animation {
+        format: AnimFormat::Gif,
+        width: side,
+        height: side,
+        loop_count: 0,
+        total_ms: fc as u64 * 30,
+        frames,
+    };
+    let mut cache = AnimationTextures::new(ctx.device.clone(), ctx.queue.clone(), 0);
+    cache.upload("big", &animation).expect("上传失败");
+
+    // 账目按帧数×画布算（不是按纹理张数）
+    assert_eq!(cache.frame_count("big"), Some(fc));
+    assert_eq!(cache.memory_bytes(), u64::from(side * side * 4) * fc as u64);
+
+    // 帧号仍然各取各的：抽查首/中/尾三帧的颜色互不相同（证明层号真的接上了）
+    let mut seen = Vec::new();
+    for index in [0i64, (fc / 2) as i64, (fc - 1) as i64] {
+        let (view, size) = cache.texture_for("big", index).expect("取不到帧");
+        assert_eq!(size, (side, side));
+        seen.push(top_left(&ctx, &view));
+    }
+    assert_ne!(seen[0], seen[1], "第 0 帧与中间帧是同一个像素 —— 层号没接上");
+    assert_ne!(seen[1], seen[2], "中间帧与最后一帧是同一个像素 —— 层号没接上");
+
+    // 越界仍然停在最后一帧（不与上面那条重复：这里走的是钳制那条路）
+    let (last, _) = cache.texture_for("big", 9999).expect("越界应当钳到最后一帧");
+    assert_eq!(top_left(&ctx, &last), seen[2]);
+}
