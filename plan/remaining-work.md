@@ -344,7 +344,7 @@ M2 这次还没发起。产出 `records/m2/review-independent.md`，守卫对它
 ## 5. 怎么自己复核这份记录
 
 ```powershell
-cd F:/para/Code/Dhampir
+cd <本仓根>
 git rev-parse HEAD                      # 63782435ffa2e0c2bf923f503919b60da45a7f5a
 git status --porcelain                  # 28 项（含本文件；文档重整后）
 node scripts/check-m2-record.mjs        # 当前：零输出 EXIT=0  ← 这就是"还没有 main()"的证据

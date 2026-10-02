@@ -176,7 +176,7 @@ fn 帧字节数与画布对不上时报错而不是传错位像素() {
 /// 会跟着一起漂，而那是共享的契约。浏览器侧的耗时证据在
 /// `scripts/bench-animation-upload.mjs`（真素材，需 WebGPU）。
 ///
-/// 尺寸取 500x500 x 77 = 真素材里最大的一张（V-Trim 的 `打招呼_1.gif`），
+/// 尺寸取 500x500 x 77 = 真素材里最大的一张（一张 500x500、77 帧的 GIF），
 /// 不是 `SIZE = 4` 那种玩具规模 —— 上面那个 218 ms 的旧数字就是被玩具规模掩盖的。
 #[test]
 #[ignore = "需要真 GPU；跑：cargo test -p dhampir-worker --test animation_gpu -- --ignored"]

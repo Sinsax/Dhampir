@@ -6,8 +6,8 @@
 > **形状的真值**：CLI 看 `dhampir --help`；wasm 看 [host-api.md](host-api.md) 与
 > [api-surface.md](api-surface.md)（后者是**生成**的，由守卫钉着不许漂）。
 >
-> **下游宿主（V-Trim）接哪一块看**：[dhampir-animation-handoff.md](dhampir-animation-handoff.md) ——
-> 动图（GIF / 动画 WebP）原生解码的接入说明。
+> **下游宿主接哪一块看**：[host-animation-integration.md](host-animation-integration.md) ——
+> 动图（GIF / 动画 WebP）原生解码的宿主接入说明（V-Trim 是它现在的那个宿主）。
 
 ---
 

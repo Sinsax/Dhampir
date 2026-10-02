@@ -220,10 +220,15 @@ scripts/              守卫脚本、测量脚本、本地服务
 
 ## 许可证
 
-**Apache-2.0** —— 全文见 [`LICENSE-APACHE`](LICENSE-APACHE)。
+**Apache-2.0** —— 全文见 [`LICENSE`](LICENSE)（与 [`LICENSE-APACHE`](LICENSE-APACHE)
+**逐字节相同**的同一份：前者是 GitHub 许可证识别器认的标准名，后者是既有工具链与产物里
+引用的名字，两个都留着）。
 
 第三方依赖的许可清单是**生成的**（[`THIRD-PARTY-LICENSES.md`](THIRD-PARTY-LICENSES.md)，
 由 `node scripts/licenses.mjs --check` 钉住不许漂）；分发时产物里会带上这两份。
+
+**用它做什么都行**：Apache-2.0 允许商用、允许闭源集成，且自带专利授权（§3）——
+下游不必为"用了这个引擎"承担额外的许可证义务，只需保留许可与 NOTICE。
 
 > 2026-09-30 由 `MIT OR Apache-2.0` **收窄为 `Apache-2.0`**：此前没有发布过任何版本，
 > 所以不存在"已按 MIT 授权出去的副本"。收窄给下游的是更明确的专利授权（Apache-2.0 §3）。

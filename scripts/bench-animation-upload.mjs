@@ -17,10 +17,13 @@
 //
 // # 用法
 //
-//   node scripts/bench-animation-upload.mjs [port] [gif目录]
+//   node scripts/bench-animation-upload.mjs <gif目录> [port]
 //
-// 默认用 V-Trim 的贴纸库（`target/debug/stickers/ysyk`，最大的那张是 500x500x77）。
-// 素材是**只读引用**，不往本仓拷任何东西。没有那批素材时会给一条明确的说明。
+// `gif目录` **必填**：本仓不带这批素材（一张 500x500x77 的 GIF 体积不小，
+// 而且它是**别人产出的内容**，不该进本仓）。素材是**只读引用**，一个字节都不拷进来。
+//
+// 为什么非要真素材：上面那条 283 倍就是因为 fixture 规模不对才被藏了整整一轮。
+// 目录里应至少有**一张 500x500、几十帧**的 GIF，否则测的不是同一条路。
 //
 // 需要 WebGPU（Chrome 无头模式默认给 Dawn/WebGPU；拿不到时试 `--headed`）。
 import { spawn } from 'node:child_process';
@@ -34,13 +37,18 @@ const REPO = HERE + '..';
 const ARGV = process.argv.slice(2);
 const HEADLESS = !ARGV.includes('--headed');
 const positional = ARGV.filter((a) => !a.startsWith('--'));
-const PORT = Number(positional[0] || 8899);
-const GIF_DIR = positional[1] || 'F:/para/Code/V-Trim/target/debug/stickers/ysyk';
+const GIF_DIR = positional[0];
+const PORT = Number(positional[1] || 8899);
 
+if (!GIF_DIR) {
+  console.error('✗ 缺素材目录。');
+  console.error('  用法：node scripts/bench-animation-upload.mjs <gif目录> [port]');
+  console.error('  说明：这条基准刻意用真实 GIF（500x500、几十帧），本仓不带这批素材。');
+  process.exit(2);
+}
 if (!existsSync(GIF_DIR)) {
   console.error('✗ 找不到素材目录 ' + GIF_DIR);
-  console.error('  用法：node scripts/bench-animation-upload.mjs [port] [gif目录]');
-  console.error('  说明：这条基准刻意用真实 GIF（500x500、几十帧）。');
+  console.error('  用法：node scripts/bench-animation-upload.mjs <gif目录> [port]');
   process.exit(2);
 }
 
