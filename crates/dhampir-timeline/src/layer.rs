@@ -85,7 +85,10 @@ impl BlendMode {
     /// 渲染器**必须**先问这个，再决定要不要往下走 —— 让「做不到」在渲染前就显形，
     /// 而不是画出一张悄悄降级的图。
     pub const fn is_implemented(self) -> bool {
-        matches!(self, Self::Normal | Self::Add | Self::Multiply | Self::Screen)
+        matches!(
+            self,
+            Self::Normal | Self::Add | Self::Multiply | Self::Screen
+        )
     }
 }
 
@@ -106,7 +109,12 @@ pub struct TransformV2 {
 
 impl Default for TransformV2 {
     fn default() -> Self {
-        Self { x: 0.0, y: 0.0, scale: 1.0, rotation: 0.0 }
+        Self {
+            x: 0.0,
+            y: 0.0,
+            scale: 1.0,
+            rotation: 0.0,
+        }
     }
 }
 
@@ -128,9 +136,9 @@ pub struct Marker {
     pub id: String,
     /// **相对该元素 start 的偏移**。用绝对帧号的话，元素一挪标记就错位了。
     pub frame: Frame,
-#[serde(default)]
+    #[serde(default)]
     pub name: String,
-#[serde(default)]
+    #[serde(default)]
     pub color: Option<String>,
 }
 
@@ -139,11 +147,11 @@ pub struct Marker {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Recorded {
     /// 键值分类维度。用 BTreeMap 保证序列化逐字节稳定。
-#[serde(default)]
+    #[serde(default)]
     pub tags: BTreeMap<String, String>,
-#[serde(default)]
+    #[serde(default)]
     pub note: String,
-#[serde(default)]
+    #[serde(default)]
     pub markers: Vec<Marker>,
 }
 
@@ -162,13 +170,13 @@ pub struct Layer {
     /// 帧区间**左闭右开**：`[start, end)`。
     pub start: Frame,
     pub end: Frame,
-#[serde(default)]
+    #[serde(default)]
     pub transform: TransformV2,
-#[serde(default = "one")]
+    #[serde(default = "one")]
     pub opacity: f32,
-#[serde(default)]
+    #[serde(default)]
     pub blend: BlendMode,
-#[serde(default = "yes")]
+    #[serde(default = "yes")]
     pub enabled: bool,
     /// **音频增益**（线性倍数，1.0 = 原样）。
     ///
@@ -187,14 +195,14 @@ pub struct Layer {
     ///
     /// 只有音轨层用它；视频层上写它等于没写（渲染器不看），但也不报错 ——
     /// 与 `opacity` 刻意不同：它不是"画不出来"，是"与画无关"。
-#[serde(default = "one")]
+    #[serde(default = "one")]
     pub gain: f32,
-#[serde(default, flatten)]
+    #[serde(default, flatten)]
     pub recorded: Recorded,
 
     // ---- 拓展（按需挂）----
     /// 没有它就不是实拍片段 —— 这正是调整图层能存在的原因。
-#[serde(default)]
+    #[serde(default)]
     pub source: Option<SourceRef>,
     /// **素材放完了要不要从头再来。**
     ///
@@ -212,18 +220,22 @@ pub struct Layer {
     ///
     /// 循环在**素材帧**上取模，不是时间线帧 —— 素材 10fps、时间线 60fps 时
     /// 一个素材帧要停 6 个时间线帧，按时间线帧取模会把这 6 帧拆散。
-#[serde(default)]
+    #[serde(default)]
     pub loop_source: bool,
-#[serde(default)]
+    #[serde(default)]
     pub effects: Vec<Effect>,
-#[serde(default)]
+    #[serde(default)]
     pub transition_in: Option<TransitionSpec>,
-#[serde(default)]
+    #[serde(default)]
     pub keyframes: Vec<Keyframe>,
 }
 
-fn one() -> f32 { 1.0 }
-fn yes() -> bool { true }
+fn one() -> f32 {
+    1.0
+}
+fn yes() -> bool {
+    true
+}
 
 impl Layer {
     /// 时长。**派生值**，不是第二份真相。
@@ -448,20 +460,34 @@ fn is_zero_f32(value: &f32) -> bool {
     *value == 0.0
 }
 
-fn default_font_weight() -> u32 { 400 }
+fn default_font_weight() -> u32 {
+    400
+}
 
-fn subtitle_font_ratio() -> f32 { 0.055 }
-fn subtitle_bottom_margin() -> f32 { 0.06 }
-fn subtitle_max_lines() -> u32 { 2 }
-fn subtitle_color() -> [u8; 4] { [255, 255, 255, 255] }
+fn subtitle_font_ratio() -> f32 {
+    0.055
+}
+fn subtitle_bottom_margin() -> f32 {
+    0.06
+}
+fn subtitle_max_lines() -> u32 {
+    2
+}
+fn subtitle_color() -> [u8; 4] {
+    [255, 255, 255, 255]
+}
 /// **默认 0.0 = "宽度从字号推"**（升级前的老行为，`border_px(font_px)`）。
 ///
 /// 这里踩过一个坑：我第一版把默认值写成 `12/1080`（参照实现 的实际值），
 /// 于是**所有既有工程**的描边在 640×360 预览里从 `border_px(20)=1px`
 /// 变成 `12/1080*360=4px` —— 逐字节不变的判据当场就破了。
 /// 契约默认值不是"我觉得合理的值"，是"**让老工程一字不变**的值"。
-fn subtitle_stroke_ratio() -> f32 { 0.0 }
-fn subtitle_stroke_color() -> [u8; 4] { [0x40, 0x3c, 0x3b, 255] }
+fn subtitle_stroke_ratio() -> f32 {
+    0.0
+}
+fn subtitle_stroke_color() -> [u8; 4] {
+    [0x40, 0x3c, 0x3b, 255]
+}
 
 impl Default for SubtitleStyle {
     fn default() -> Self {
@@ -567,17 +593,31 @@ pub struct DanmakuSpec {
     pub line_height: f32,
 }
 
-fn danmaku_lanes() -> u32 { 8 }
-fn danmaku_duration() -> u64 { 8000 }
-fn danmaku_font_ratio() -> f32 { 0.04 }
-fn danmaku_color() -> [u8; 4] { [255, 255, 255, 255] }
+fn danmaku_lanes() -> u32 {
+    8
+}
+fn danmaku_duration() -> u64 {
+    8000
+}
+fn danmaku_font_ratio() -> f32 {
+    0.04
+}
+fn danmaku_color() -> [u8; 4] {
+    [255, 255, 255, 255]
+}
 /// 参照实现 的弹幕基础不透明度。**默认取 参照实现 的值而不是 1.0**：
 /// 这是弹幕该有的样子，而不是"某个工程的偏好"。
-fn danmaku_opacity() -> f32 { 0.9 }
+fn danmaku_opacity() -> f32 {
+    0.9
+}
 /// 默认 0.0 = "宽度从字号推"（与 `SubtitleStyle::stroke_ratio` 同一条理由：
 /// 契约默认值必须是"让老工程一字不变"的那个）。
-fn danmaku_stroke_ratio() -> f32 { 0.0 }
-fn danmaku_stroke_color() -> [u8; 4] { [0, 0, 0, 255] }
+fn danmaku_stroke_ratio() -> f32 {
+    0.0
+}
+fn danmaku_stroke_color() -> [u8; 4] {
+    [0, 0, 0, 255]
+}
 
 impl Default for DanmakuSpec {
     fn default() -> Self {
@@ -609,13 +649,13 @@ impl Default for DanmakuSpec {
 pub struct TrackV2 {
     pub id: String,
     pub kind: TrackKind,
-#[serde(default)]
+    #[serde(default)]
     pub layers: Vec<Layer>,
     /// 字幕轨的样式。非字幕轨忽略它。
-#[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtitle: Option<SubtitleStyle>,
     /// 弹幕轨的参数。非弹幕轨忽略它。
-#[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub danmaku: Option<DanmakuSpec>,
     /// **整条轨的音频增益**（线性倍数，1.0 = 原样）。
     ///
@@ -625,7 +665,7 @@ pub struct TrackV2 {
     /// 所以转译器把它填成图层的 `gain`；这个字段留给"整条轨一起调"的工程）。
     ///
     /// 非音轨忽略它（与 `subtitle`/`danmaku` 同款：挂错轨不报错，但也不生效）。
-#[serde(default = "one")]
+    #[serde(default = "one")]
     pub gain: f32,
 }
 
@@ -635,9 +675,9 @@ pub struct TrackV2 {
 pub struct TimelineV2 {
     pub schema: u32,
     pub timebase: TimebaseDto,
-#[serde(default)]
+    #[serde(default)]
     pub markers: Vec<Marker>,
-#[serde(default)]
+    #[serde(default)]
     pub tracks: Vec<TrackV2>,
 }
 
@@ -791,7 +831,10 @@ pub fn source_frame_at(
     asset: &TimebaseDto,
 ) -> Result<Frame, String> {
     if timeline.num == 0 || timeline.den == 0 {
-        return Err(format!("时间线的时间基不合法：{}/{}", timeline.num, timeline.den));
+        return Err(format!(
+            "时间线的时间基不合法：{}/{}",
+            timeline.num, timeline.den
+        ));
     }
     if asset.num == 0 || asset.den == 0 {
         return Err(format!("素材的时间基不合法：{}/{}", asset.num, asset.den));
@@ -836,7 +879,10 @@ pub fn source_frame_at_delays(
     loop_source: bool,
 ) -> Result<Frame, String> {
     if timeline.num == 0 || timeline.den == 0 {
-        return Err(format!("时间线的时间基不合法：{}/{}", timeline.num, timeline.den));
+        return Err(format!(
+            "时间线的时间基不合法：{}/{}",
+            timeline.num, timeline.den
+        ));
     }
     if delays_ms.is_empty() {
         return Err("延迟表是空的 —— 至少要有一帧".to_string());
@@ -989,9 +1035,13 @@ pub fn text_envelope(
 }
 
 /// `pow2_out`：`1 - (1-p)^2`。参照实现 的 `E.pow2_out`。
-fn pow2_out(p: f32) -> f32 { 1.0 - (1.0 - p) * (1.0 - p) }
+fn pow2_out(p: f32) -> f32 {
+    1.0 - (1.0 - p) * (1.0 - p)
+}
 /// `pow2_in`：`p^2`。参照实现 的 `E.pow2_in`。
-fn pow2_in(p: f32) -> f32 { p * p }
+fn pow2_in(p: f32) -> f32 {
+    p * p
+}
 
 /// 素材帧号 → 秒。**用素材自己的时间基**，不是时间线的。
 ///
@@ -1050,13 +1100,19 @@ pub struct AssetTiming {
 
 impl AssetTimebases {
     pub fn new() -> Self {
-        Self { entries: BTreeMap::new() }
+        Self {
+            entries: BTreeMap::new(),
+        }
     }
 
     pub fn insert(&mut self, asset_id: impl Into<String>, timebase: TimebaseDto) {
         self.entries.insert(
             asset_id.into(),
-            AssetTiming { timebase, frame_count: None, frame_delays_ms: None },
+            AssetTiming {
+                timebase,
+                frame_count: None,
+                frame_delays_ms: None,
+            },
         );
     }
 
@@ -1067,7 +1123,14 @@ impl AssetTimebases {
         timebase: TimebaseDto,
         frame_count: Option<Frame>,
     ) {
-        self.entries.insert(asset_id.into(), AssetTiming { timebase, frame_count, frame_delays_ms: None });
+        self.entries.insert(
+            asset_id.into(),
+            AssetTiming {
+                timebase,
+                frame_count,
+                frame_delays_ms: None,
+            },
+        );
     }
 
     pub fn get(&self, asset_id: &str) -> Option<&TimebaseDto> {
@@ -1086,7 +1149,11 @@ impl AssetTimebases {
         let frame_count = Some(delays_ms.len() as Frame);
         self.entries.insert(
             asset_id.into(),
-            AssetTiming { timebase, frame_count, frame_delays_ms: Some(delays_ms) },
+            AssetTiming {
+                timebase,
+                frame_count,
+                frame_delays_ms: Some(delays_ms),
+            },
         );
     }
 
@@ -1099,7 +1166,9 @@ impl AssetTimebases {
 
     /// 帧数。登记时没给就是 `None`（不能循环）。
     pub fn frame_count(&self, asset_id: &str) -> Option<Frame> {
-        self.entries.get(asset_id).and_then(|timing| timing.frame_count)
+        self.entries
+            .get(asset_id)
+            .and_then(|timing| timing.frame_count)
     }
 
     pub fn len(&self) -> usize {
@@ -1114,12 +1183,15 @@ impl AssetTimebases {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{transition_kind, Clip, Track, Transform};
+    use crate::schema::{Clip, Track, Transform, transition_kind};
 
     fn v1_project() -> Project {
         Project {
             schema: 1,
-            timebase: TimebaseDto { num: 30000, den: 1001 },
+            timebase: TimebaseDto {
+                num: 30000,
+                den: 1001,
+            },
             tracks: vec![Track {
                 id: "v1".to_string(),
                 kind: TrackKind::Video,
@@ -1129,7 +1201,12 @@ mod tests {
                     source_in: 10,
                     track_at: 30,
                     duration: 20,
-                    transform: Transform { x: 5.0, y: -2.0, scale: 1.5, rotation_deg: 90.0 },
+                    transform: Transform {
+                        x: 5.0,
+                        y: -2.0,
+                        scale: 1.5,
+                        rotation_deg: 90.0,
+                    },
                     opacity: 0.5,
                     effects: Vec::new(),
                     keyframes: Vec::new(),
@@ -1283,7 +1360,10 @@ mod tests {
         });
         let v4 = migrate_v3_to_v4(&timeline);
         assert_eq!(
-            v4.tracks[0].layers[0].transition_in.as_ref().map(|t| t.kind.as_str()),
+            v4.tracks[0].layers[0]
+                .transition_in
+                .as_ref()
+                .map(|t| t.kind.as_str()),
             Some("cross_dissolve"),
             "迁移不该改类型串"
         );
@@ -1316,7 +1396,10 @@ mod tests {
         // **这一条是兼容性的根据**：既有工程（素材帧率 == 时间线）行为逐字节不变。
         let timeline = tb(30000, 1001);
         for local in [0, 1, 17, 999, 100_000] {
-            assert_eq!(source_frame_at(7, local, &timeline, &timeline).expect("合法"), 7 + local);
+            assert_eq!(
+                source_frame_at(7, local, &timeline, &timeline).expect("合法"),
+                7 + local
+            );
         }
     }
 
@@ -1357,7 +1440,10 @@ mod tests {
     fn 序列帧号换算成秒要用序列自己的时间基() {
         // Warp 的位移场以秒为自变量，两个宿主各调这一条。
         let at30 = seconds_at_sequence_frame(30, &tb(30, 1)).expect("合法");
-        assert!((at30 - 1.0).abs() < 1e-12, "30fps 下第 30 帧应当是 1 秒，实得 {at30}");
+        assert!(
+            (at30 - 1.0).abs() < 1e-12,
+            "30fps 下第 30 帧应当是 1 秒，实得 {at30}"
+        );
         // **有理帧率**：30000/1001 下第 30000 帧是 1001 秒，不是一个近似值。
         let at_smpte = seconds_at_sequence_frame(30000, &tb(30000, 1001)).expect("合法");
         assert!((at_smpte - 1001.0).abs() < 1e-9, "实得 {at_smpte}");
@@ -1395,7 +1481,10 @@ mod tests {
     #[test]
     fn 迁移把裸字符串_source_变成资产引用() {
         let migrated = migrate_v1_to_v2(&v1_project()).unwrap();
-        let source = migrated.tracks[0].layers[0].source.clone().expect("应当有 source");
+        let source = migrated.tracks[0].layers[0]
+            .source
+            .clone()
+            .expect("应当有 source");
         assert_eq!(source.asset_id, "a.mp4");
         assert_eq!(source.source_in, 10);
     }
@@ -1435,7 +1524,10 @@ mod tests {
         assert!(!base.is_adjustment(), "都没有 → 占位，不是调整图层");
 
         let mut with_source = base.clone();
-        with_source.source = Some(SourceRef { asset_id: "a".to_string(), source_in: 0 });
+        with_source.source = Some(SourceRef {
+            asset_id: "a".to_string(),
+            source_in: 0,
+        });
         assert!(!with_source.is_adjustment(), "有素材 → 实拍片段");
 
         let mut adjustment = base.clone();
@@ -1453,7 +1545,12 @@ mod tests {
 
     #[test]
     fn 混合模式可实现性与枚举留全() {
-        for mode in [BlendMode::Normal, BlendMode::Add, BlendMode::Multiply, BlendMode::Screen] {
+        for mode in [
+            BlendMode::Normal,
+            BlendMode::Add,
+            BlendMode::Multiply,
+            BlendMode::Screen,
+        ] {
             assert!(mode.is_implemented(), "{mode:?} 应当可实现");
         }
         for mode in [
@@ -1463,7 +1560,10 @@ mod tests {
             BlendMode::SoftLight,
             BlendMode::Difference,
         ] {
-            assert!(!mode.is_implemented(), "{mode:?} 需要读目标像素，v2 不该说它可实现");
+            assert!(
+                !mode.is_implemented(),
+                "{mode:?} 需要读目标像素，v2 不该说它可实现"
+            );
         }
     }
 
@@ -1479,7 +1579,11 @@ mod tests {
         assert_eq!(layer.start + layer.recorded.markers[0].frame, 112);
         layer.start = 200;
         layer.end = 260;
-        assert_eq!(layer.start + layer.recorded.markers[0].frame, 212, "元素挪了，标记跟着挪");
+        assert_eq!(
+            layer.start + layer.recorded.markers[0].frame,
+            212,
+            "元素挪了，标记跟着挪"
+        );
     }
 }
 
@@ -1506,7 +1610,11 @@ pub fn validate_timeline_v2(timeline: &TimelineV2, effects: &[EffectSpec]) -> Ve
         return issues;
     }
     if let Err(message) = timeline.timebase.to_timebase() {
-        issues.push(Issue::new("invalid_timebase", "timeline.timebase", message.to_string()));
+        issues.push(Issue::new(
+            "invalid_timebase",
+            "timeline.timebase",
+            message.to_string(),
+        ));
     }
 
     // id 必须**全局**唯一（v1 只保证轨内唯一）。
@@ -1515,7 +1623,11 @@ pub fn validate_timeline_v2(timeline: &TimelineV2, effects: &[EffectSpec]) -> Ve
     for (track_index, track) in timeline.tracks.iter().enumerate() {
         let track_path = format!("tracks[{track_index}]");
         if track.id.is_empty() {
-            issues.push(Issue::new("empty_track_id", &track_path, "轨道的 id 不能为空".to_string()));
+            issues.push(Issue::new(
+                "empty_track_id",
+                &track_path,
+                "轨道的 id 不能为空".to_string(),
+            ));
         }
         // 同轨重叠。排序后只看相邻——不相邻的区间若重叠，一定存在相邻的一对也重叠。
         let mut spans: Vec<(Frame, Frame, usize)> = track
@@ -1540,7 +1652,11 @@ pub fn validate_timeline_v2(timeline: &TimelineV2, effects: &[EffectSpec]) -> Ve
         for (index, layer) in track.layers.iter().enumerate() {
             let path = format!("{track_path}.layers[{index}]");
             if layer.id.is_empty() {
-                issues.push(Issue::new("empty_layer_id", &path, "图层的 id 不能为空".to_string()));
+                issues.push(Issue::new(
+                    "empty_layer_id",
+                    &path,
+                    "图层的 id 不能为空".to_string(),
+                ));
             } else if let Some(first) = seen.insert(layer.id.as_str(), path.clone()) {
                 issues.push(Issue::new(
                     "duplicate_element_id",
@@ -1552,7 +1668,10 @@ pub fn validate_timeline_v2(timeline: &TimelineV2, effects: &[EffectSpec]) -> Ve
                 issues.push(Issue::new(
                     "end_not_after_start",
                     &format!("{path}.end"),
-                    format!("区间必须左闭右开且非空：start={} end={}", layer.start, layer.end),
+                    format!(
+                        "区间必须左闭右开且非空：start={} end={}",
+                        layer.start, layer.end
+                    ),
                 ));
             }
             if layer.start < 0 {
@@ -1596,7 +1715,11 @@ pub fn validate_timeline_v2(timeline: &TimelineV2, effects: &[EffectSpec]) -> Ve
                     issues.push(Issue::new(
                         "marker_out_of_layer",
                         &format!("{path}.markers[{marker_index}].frame"),
-                        format!("标记在第 {} 帧（相对元素起点），而元素只有 {} 帧", marker.frame, layer.duration()),
+                        format!(
+                            "标记在第 {} 帧（相对元素起点），而元素只有 {} 帧",
+                            marker.frame,
+                            layer.duration()
+                        ),
                     ));
                 }
             }
@@ -1611,12 +1734,16 @@ pub fn validate_timeline_v2(timeline: &TimelineV2, effects: &[EffectSpec]) -> Ve
                         )),
                         Some(spec) => {
                             for (name, value) in &effect.params {
-                                if let Some((_, min, max)) = spec.params.iter().find(|(param, _, _)| param == name) {
+                                if let Some((_, min, max)) =
+                                    spec.params.iter().find(|(param, _, _)| param == name)
+                                {
                                     if !value.is_finite() || value < min || value > max {
                                         issues.push(Issue::new(
                                             "effect_param_out_of_range",
                                             &format!("{effect_path}.params.{name}"),
-                                            format!("参数 {name} 必须在 {min}..={max}，得到 {value}"),
+                                            format!(
+                                                "参数 {name} 必须在 {min}..={max}，得到 {value}"
+                                            ),
                                         ));
                                     }
                                 }
@@ -1781,7 +1908,10 @@ mod v2_tests {
         );
         // 反过来说：如果两段都算，这里会得到 min(0.918, pow2_in(0.833)) = 0.694
         // —— 与上式差得远，所以这条用例能红。
-        assert!(opacity > 0.9, "取了两段的较小者就会掉到 0.69 附近，实得 {opacity}");
+        assert!(
+            opacity > 0.9,
+            "取了两段的较小者就会掉到 0.69 附近，实得 {opacity}"
+        );
     }
 
     /// **退场用的乘数是 `(1 - p)`，不是 `(1 - opacity)`。**
@@ -1793,7 +1923,10 @@ mod v2_tests {
     fn 文字包络的退场位移用原始比例() {
         // 6000ms 的 cue，走到剩余 90ms（fade_out 180 的中點，p = 0.5）。
         let (opacity, offset) = text_envelope(5910, 6000, 350, 180, 20.0, 8.0);
-        assert!((opacity - pow2_in(0.5)).abs() < 1e-6, "不透明度用 pow2_in：实得 {opacity}");
+        assert!(
+            (opacity - pow2_in(0.5)).abs() < 1e-6,
+            "不透明度用 pow2_in：实得 {opacity}"
+        );
         assert!(
             (offset - (-8.0 * (1.0 - 0.5))).abs() < 1e-6,
             "位移要用 (1 - p) = 0.5 -> -4.0；写成 (1 - opacity) 会得到 -6.0。实得 {offset}"
@@ -1813,12 +1946,19 @@ mod v2_tests {
             vec![with_effect(named_layer("a", 0, 100, Some("clip")), "shake")],
         )]);
         let issues = validate_timeline_v2(&bad, &specs);
-        assert_eq!(codes(&issues), vec!["effect_would_be_ignored"], "实得：{issues:?}");
+        assert_eq!(
+            codes(&issues),
+            vec!["effect_would_be_ignored"],
+            "实得：{issues:?}"
+        );
 
         // 2) 有素材 + SeparableBlur -> **不报**（它跑在源纹理上，是能执行的）
         let ok_blur = timeline(vec![track(
             "v",
-            vec![with_effect(named_layer("a", 0, 100, Some("clip")), "gaussian_blur")],
+            vec![with_effect(
+                named_layer("a", 0, 100, Some("clip")),
+                "gaussian_blur",
+            )],
         )]);
         assert!(
             validate_timeline_v2(&ok_blur, &specs).is_empty(),
@@ -1838,10 +1978,12 @@ mod v2_tests {
 
     #[test]
     fn 空区间与非负检查() {
-        let issues = validate_timeline_v2(&timeline(vec![track("v", vec![layer("a", 10, 10)])]), &[]);
+        let issues =
+            validate_timeline_v2(&timeline(vec![track("v", vec![layer("a", 10, 10)])]), &[]);
         assert_eq!(codes(&issues), vec!["end_not_after_start"]);
 
-        let issues = validate_timeline_v2(&timeline(vec![track("v", vec![layer("a", -5, 10)])]), &[]);
+        let issues =
+            validate_timeline_v2(&timeline(vec![track("v", vec![layer("a", -5, 10)])]), &[]);
         assert!(codes(&issues).contains(&"negative_frame"));
     }
 
@@ -1862,7 +2004,10 @@ mod v2_tests {
     #[test]
     fn 同轨重叠被抓而紧邻不抓() {
         let ok = validate_timeline_v2(
-            &timeline(vec![track("v", vec![layer("a", 0, 10), layer("b", 10, 20)])]),
+            &timeline(vec![track(
+                "v",
+                vec![layer("a", 0, 10), layer("b", 10, 20)],
+            )]),
             &[],
         );
         assert!(ok.is_empty(), "紧邻（左闭右开）不该算重叠：{ok:?}");
@@ -1880,12 +2025,19 @@ mod v2_tests {
         l.blend = BlendMode::Overlay;
         let timeline = timeline(vec![track("v", vec![l])]);
         // 契约层**不报错**：枚举留全就是为了将来支持时不必改版本号。
-        assert!(validate_timeline_v2(&timeline, &[]).is_empty(), "契约应当接受它");
+        assert!(
+            validate_timeline_v2(&timeline, &[]).is_empty(),
+            "契约应当接受它"
+        );
         // 但渲染前必须能知道「这个我做不了」——不许静默按 normal 画。
         let pending = unimplemented_blends(&timeline);
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].1, BlendMode::Overlay);
-        assert!(pending[0].0.contains("blend"), "path 要指到字段：{}", pending[0].0);
+        assert!(
+            pending[0].0.contains("blend"),
+            "path 要指到字段：{}",
+            pending[0].0
+        );
     }
 
     #[test]
@@ -1894,7 +2046,11 @@ mod v2_tests {
         tl.schema = 99;
         tl.tracks.push(track("v", vec![layer("a", 10, 10)]));
         let issues = validate_timeline_v2(&tl, &[]);
-        assert_eq!(codes(&issues), vec!["unsupported_schema"], "不该产生二次错误");
+        assert_eq!(
+            codes(&issues),
+            vec!["unsupported_schema"],
+            "不该产生二次错误"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1931,7 +2087,10 @@ mod v2_tests {
         assert_eq!(got[72], 0, "第 72 个时间线帧回到素材第 0 帧");
         assert_eq!(got[78], 1, "然后继续");
         // **这条是关键**：不循环的话 got[72] 会是 12（越界）。
-        assert!(got.iter().all(|f| *f < 12), "循环后绝不该出现超出 12 的素材帧：{got:?}");
+        assert!(
+            got.iter().all(|f| *f < 12),
+            "循环后绝不该出现超出 12 的素材帧：{got:?}"
+        );
     }
 
     #[test]
@@ -1964,7 +2123,10 @@ mod v2_tests {
             .collect();
         assert_eq!(got, vec![3, 4, 5, 0, 1, 2, 3, 4]);
         // 关键不变量：循环后**永远落回素材范围内**。
-        assert!(got.iter().all(|f| (0..6).contains(f)), "不许出现越界帧号：{got:?}");
+        assert!(
+            got.iter().all(|f| (0..6).contains(f)),
+            "不许出现越界帧号：{got:?}"
+        );
     }
 
     #[test]
@@ -2022,8 +2184,14 @@ mod v2_tests {
 
         let (o_mid, dy_mid) = text_envelope(175, 2000, 350, 0, 20.0, 0.0);
         // pow2_out(0.5) = 0.75
-        assert!((o_mid - 0.75).abs() < 1e-6, "半个窗口处应当是 pow2_out(0.5)=0.75，实得 {o_mid}");
-        assert!((dy_mid - 20.0 * 0.25).abs() < 1e-6, "位移应当与不透明度同步，实得 {dy_mid}");
+        assert!(
+            (o_mid - 0.75).abs() < 1e-6,
+            "半个窗口处应当是 pow2_out(0.5)=0.75，实得 {o_mid}"
+        );
+        assert!(
+            (dy_mid - 20.0 * 0.25).abs() < 1e-6,
+            "位移应当与不透明度同步，实得 {dy_mid}"
+        );
 
         let (o_end, dy_end) = text_envelope(350, 2000, 350, 0, 20.0, 0.0);
         assert_eq!(o_end, 1.0, "淡入结束是满不透明");
@@ -2061,7 +2229,8 @@ mod v2_tests {
         for span in [0_u64, 1, 7, 100, 1000, 6000] {
             for local in 0..=span.min(200) {
                 for (fade_in, fade_out) in [(0, 0), (350, 180), (80, 80), (1000, 3)] {
-                    let (opacity, offset) = text_envelope(local, span, fade_in, fade_out, 20.0, 8.0);
+                    let (opacity, offset) =
+                        text_envelope(local, span, fade_in, fade_out, 20.0, 8.0);
                     assert!(
                         (0.0..=1.0).contains(&opacity),
                         "span={span} local={local} fade=({fade_in},{fade_out}) 算出越界不透明度 {opacity}"
@@ -2107,7 +2276,11 @@ mod v2_tests {
         // 1. 读进来就是"不画阴影"。
         assert_eq!(style.shadow_color, None);
         assert_eq!(
-            (style.shadow_dx_px, style.shadow_dy_px, style.shadow_blur_ratio),
+            (
+                style.shadow_dx_px,
+                style.shadow_dy_px,
+                style.shadow_blur_ratio
+            ),
             (0.0, 0.0, 0.0)
         );
         // 2. 写回去的键集**冻结**在这里：多一个键（哪怕值等于默认值）就是老工程变样，
@@ -2156,7 +2329,12 @@ mod v2_tests {
         );
         // 4. 四个新键一个都不在里面 —— 前面那条键集断言已经覆盖，这里再点名一次：
         //    坏法最可能的样子就是"多出 shadow_color: null"。
-        for key in ["shadow_color", "shadow_dx_px", "shadow_dy_px", "shadow_blur_ratio"] {
+        for key in [
+            "shadow_color",
+            "shadow_dx_px",
+            "shadow_dy_px",
+            "shadow_blur_ratio",
+        ] {
             assert!(!again.contains(key), "老工程里不该出现 {key}：{again}");
         }
     }

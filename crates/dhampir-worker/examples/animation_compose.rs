@@ -63,7 +63,11 @@ fn main() {
     // ---- 逐帧合成：每一帧取不同的源内帧号，验证"帧号真的驱动画面" ----
     let target = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dhampir animation compose target"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -96,10 +100,15 @@ fn main() {
                 is_adjustment: false,
             }],
         };
-        let mut resolver = CacheResolver { cache: &cache, name: name.clone() };
-        let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("dhampir animation compose encoder"),
-        });
+        let mut resolver = CacheResolver {
+            cache: &cache,
+            name: name.clone(),
+        };
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("dhampir animation compose encoder"),
+            });
         renderer.render_frame(
             &ctx.device,
             &ctx.queue,
@@ -111,19 +120,19 @@ fn main() {
             wgpu::Color::TRANSPARENT,
         );
         ctx.queue.submit([encoder.finish()]);
-        let image = pollster::block_on(readback::read_texture_rgba8(&ctx.device, &ctx.queue, &target))
-            .expect("读回失败");
+        let image = pollster::block_on(readback::read_texture_rgba8(
+            &ctx.device,
+            &ctx.queue,
+            &target,
+        ))
+        .expect("读回失败");
         let mut hash = 1469598103934665603u64;
         for byte in &image.pixels {
             hash ^= u64::from(*byte);
             hash = hash.wrapping_mul(1099511628211);
         }
         // 非透明像素数：证明"画上去了"而不是一帧空的。
-        let opaque = image
-            .pixels
-            .chunks(4)
-            .filter(|pixel| pixel[3] > 0)
-            .count();
+        let opaque = image.pixels.chunks(4).filter(|pixel| pixel[3] > 0).count();
         println!(
             "  源内帧 {source_frame:>3}：摘要 {hash:016x}  非透明像素 {opaque}/{}",
             width as usize * height as usize

@@ -451,7 +451,8 @@ pub fn examine_alignment(image: &Rgba8Image, frame: u32) -> RowAlignment {
 
     for y in 0..size.1 {
         for x in 0..size.0 {
-            let expected = scene_model::bytes_of_linear_rgba(scene_model::checker_linear(frame, x, y));
+            let expected =
+                scene_model::bytes_of_linear_rgba(scene_model::checker_linear(frame, x, y));
             let Some(measured) = image.pixel(x, y) else {
                 result.detail = Some(format!("({x}, {y}) 取不到像素"));
                 return result;
@@ -783,10 +784,7 @@ mod tests {
     /// 那正是"记录里写了一个不存在的版本号"的近亲。这条测试让那种失效变红。
     #[test]
     fn versions_are_real_numbers() {
-        for (label, version) in [
-            ("wgpu", wgpu_version()),
-            ("naga", naga_version()),
-        ] {
+        for (label, version) in [("wgpu", wgpu_version()), ("naga", naga_version())] {
             assert_ne!(version, "unknown", "{label} 的版本没从 Cargo.lock 里取到");
             let mut parts = version.split('.');
             for part in [
@@ -843,8 +841,7 @@ mod tests {
         assert_ne!(both, backend_slug(wgpu::Backends::DX12));
         assert_ne!(both, backend_slug(wgpu::Backends::VULKAN));
         assert!(
-            both
-                .chars()
+            both.chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
             "{both}"
         );
@@ -905,7 +902,10 @@ mod tests {
         let result = examine_alignment(&image, ALIGN_PROBE_FRAME);
         assert!(result.exercises_padding, "{result:?}");
         assert!(result.ok, "{result:?}");
-        assert_eq!(result.pixels_compared, (PADDED_SIZE.0 * PADDED_SIZE.1) as usize);
+        assert_eq!(
+            result.pixels_compared,
+            (PADDED_SIZE.0 * PADDED_SIZE.1) as usize
+        );
         assert_eq!(result.pixels_ok, result.pixels_compared);
         assert_eq!(result.worst_distance, 0);
         assert!(result.detail.is_none());
@@ -956,7 +956,10 @@ mod tests {
     fn test_adapter() -> AdapterIdentity {
         AdapterIdentity {
             requested: wgpu::Backends::DX12,
-            fields: vec![("name", "测试 adapter".to_string()), ("backend", "Dx12".into())],
+            fields: vec![
+                ("name", "测试 adapter".to_string()),
+                ("backend", "Dx12".into()),
+            ],
         }
     }
 
@@ -1065,10 +1068,12 @@ mod tests {
                 .contains("高估"),
             "{json}"
         );
-        assert!(!json["timing"]["budget_metric_note"]
-            .as_str()
-            .unwrap()
-            .contains("worst_frame_cpu_ms 是判据"));
+        assert!(
+            !json["timing"]["budget_metric_note"]
+                .as_str()
+                .unwrap()
+                .contains("worst_frame_cpu_ms 是判据")
+        );
     }
 
     /// 两份记录回答**两个不同的问题**：`adapter.json` 里没有计时，`timing.json` 里

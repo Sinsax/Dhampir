@@ -48,10 +48,7 @@ impl ColorAdjustParams {
 
     /// 是否恒等。恒等时调用方可以整条跳过 —— 少一趟就少一次纹理往返。
     pub fn is_identity(&self) -> bool {
-        self.brightness == 0.0
-            && self.contrast == 1.0
-            && self.saturation == 1.0
-            && self.hue == 0.0
+        self.brightness == 0.0 && self.contrast == 1.0 && self.saturation == 1.0 && self.hue == 0.0
     }
 }
 
@@ -141,7 +138,11 @@ impl ColorAdjustRenderer {
             mapped_at_creation: false,
         });
 
-        Self { pipeline, bind_group_layout, uniform }
+        Self {
+            pipeline,
+            bind_group_layout,
+            uniform,
+        }
     }
 
     /// 跑一趟逐像素调整：`source` -> `target`。
@@ -210,12 +211,27 @@ mod tests {
         // 就会白跑一趟，或者更糟：把不该改的画面改掉。
         assert!(ColorAdjustParams::IDENTITY.is_identity());
         for mutate in [
-            ColorAdjustParams { brightness: 0.01, ..ColorAdjustParams::IDENTITY },
-            ColorAdjustParams { contrast: 0.99, ..ColorAdjustParams::IDENTITY },
-            ColorAdjustParams { saturation: 1.01, ..ColorAdjustParams::IDENTITY },
-            ColorAdjustParams { hue: 0.01, ..ColorAdjustParams::IDENTITY },
+            ColorAdjustParams {
+                brightness: 0.01,
+                ..ColorAdjustParams::IDENTITY
+            },
+            ColorAdjustParams {
+                contrast: 0.99,
+                ..ColorAdjustParams::IDENTITY
+            },
+            ColorAdjustParams {
+                saturation: 1.01,
+                ..ColorAdjustParams::IDENTITY
+            },
+            ColorAdjustParams {
+                hue: 0.01,
+                ..ColorAdjustParams::IDENTITY
+            },
         ] {
-            assert!(!mutate.is_identity(), "动了一个字段就不该再是恒等：{mutate:?}");
+            assert!(
+                !mutate.is_identity(),
+                "动了一个字段就不该再是恒等：{mutate:?}"
+            );
         }
     }
 
@@ -233,11 +249,17 @@ mod tests {
         // 《WGSL 可移植性子集》禁掉带副作用的分支与循环。
         // 这条在 wgsl_subset.rs 里也有通用版本，但那是扫**全部**着色器；
         // 这里钉这一份，让"加分支"在改这个文件时立刻红。
-        assert!(!COLOR_ADJUST_WGSL.contains("if ("), "色相/亮度用恒等值代替分支");
+        assert!(
+            !COLOR_ADJUST_WGSL.contains("if ("),
+            "色相/亮度用恒等值代替分支"
+        );
         assert!(!COLOR_ADJUST_WGSL.contains("for ("), "不要循环");
         assert!(!COLOR_ADJUST_WGSL.contains("while ("), "不要循环");
         // 采样器把滤波精度交给实现 —— 那是两端不一致的一个来源。
-        assert!(!COLOR_ADJUST_WGSL.contains("sampler"), "不要采样器，用 textureLoad");
+        assert!(
+            !COLOR_ADJUST_WGSL.contains("sampler"),
+            "不要采样器，用 textureLoad"
+        );
     }
 
     #[test]
@@ -247,9 +269,20 @@ mod tests {
         let kinds = ["brightness", "contrast", "saturation", "hue"];
         for kind in kinds {
             let spec = crate::effects::spec_of(kind).unwrap_or_else(|| panic!("{kind} 没登记"));
-            assert_eq!(spec.pipeline, EffectPipeline::ColorAdjust, "{kind} 该走 ColorAdjust");
-            assert_eq!(spec.space, EffectSpace::Source, "{kind} 是逐像素算子，不该声明 Document");
-            assert!(!spec.params.is_empty(), "{kind} 没有参数范围，UI 无从生成控件");
+            assert_eq!(
+                spec.pipeline,
+                EffectPipeline::ColorAdjust,
+                "{kind} 该走 ColorAdjust"
+            );
+            assert_eq!(
+                spec.space,
+                EffectSpace::Source,
+                "{kind} 是逐像素算子，不该声明 Document"
+            );
+            assert!(
+                !spec.params.is_empty(),
+                "{kind} 没有参数范围，UI 无从生成控件"
+            );
         }
     }
 

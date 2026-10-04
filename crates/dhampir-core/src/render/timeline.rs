@@ -23,8 +23,8 @@ use crate::compose::Composite;
 use crate::render::blur::BlurRenderer;
 use crate::render::color_adjust::ColorAdjustRenderer;
 use crate::render::color_mask::ColorMaskRenderer;
-use crate::render::warp::WarpRenderer;
 use crate::render::compose::{Compositor, LayerDraw};
+use crate::render::warp::WarpRenderer;
 use crate::wgpu;
 
 /// 源纹理的提供者。宿主实现它——浏览器那边是 video 元素，native 那边是解码器或文件。
@@ -137,9 +137,7 @@ pub fn radius_in_space(
         // （radius 填 999）会让着色器按 999 去索引一张只有 TAPS 个抽头的核。
         // 核是**定长展开**的，越界不会崩，只会读到垃圾或悄悄退化。
         // 结论：**"不换算"不等于"不设防"**，两件事要分开写。
-        dhampir_timeline::schema::EffectSpace::Source => {
-            radius.min(crate::render::BLUR_MAX_RADIUS)
-        }
+        dhampir_timeline::schema::EffectSpace::Source => radius.min(crate::render::BLUR_MAX_RADIUS),
         // 文档空间：按目标/文档比例换算（内部已含夹取）。
         dhampir_timeline::schema::EffectSpace::Document => {
             scale_document_radius(radius, render_space)
@@ -195,7 +193,10 @@ pub fn color_params(effects: &[Effect]) -> crate::render::ColorAdjustParams {
             // 走了 ColorAdjust 管线却不在这里 -> 登记表加了新特效但忘了接上。
             // **不静默忽略**：那正是最坏的情形（用户能选中它，画面却不变）。
             other => {
-                debug_assert!(false, "ColorAdjust 管线里的 {other} 没有在 color_params 里接上");
+                debug_assert!(
+                    false,
+                    "ColorAdjust 管线里的 {other} 没有在 color_params 里接上"
+                );
             }
         }
     }
@@ -385,7 +386,10 @@ pub fn color_mask_params(
             // 走了 ColorMask 管线却不在这里 -> 登记表加了新特效但忘了接上。
             // **不静默忽略**：那正是最坏的情形（用户能选中它，画面却不变）。
             other => {
-                debug_assert!(false, "ColorMask 管线里的 {other} 没有在 color_mask_params 里接上");
+                debug_assert!(
+                    false,
+                    "ColorMask 管线里的 {other} 没有在 color_mask_params 里接上"
+                );
             }
         }
     }
@@ -404,7 +408,11 @@ pub fn color_mask_params(
 /// `(像素坐标, 时间秒, seed)` 的纯函数，否则跳帧求值与顺序播放会不一致。
 ///
 /// 强度同样来自 `Effect.opacity`（时间窗已由求值层折进去，见 `color_mask_params`）。
-pub fn warp_params(effects: &[Effect], size: (u32, u32), seconds: f32) -> crate::render::WarpParams {
+pub fn warp_params(
+    effects: &[Effect],
+    size: (u32, u32),
+    seconds: f32,
+) -> crate::render::WarpParams {
     let mut out = crate::render::WarpParams::IDENTITY;
     out.width = size.0.max(1) as f32;
     out.height = size.1.max(1) as f32;
@@ -572,7 +580,12 @@ fn identity_layer() -> crate::compose::Layer {
         source: String::new(),
         source_frame: 0,
         opacity: 1.0,
-        transform: dhampir_timeline::schema::Transform { x: 0.0, y: 0.0, scale: 1.0, rotation_deg: 0.0 },
+        transform: dhampir_timeline::schema::Transform {
+            x: 0.0,
+            y: 0.0,
+            scale: 1.0,
+            rotation_deg: 0.0,
+        },
         effects: Vec::new(),
         frozen_for_transition: false,
         blend: dhampir_timeline::layer::BlendMode::Normal,
@@ -646,7 +659,9 @@ impl TimelineRenderer {
         clear: wgpu::Color,
     ) -> usize {
         let seconds = composite.frame as f32 / DEFAULT_FRAME_RATE;
-        self.render_frame_at(device, queue, encoder, target, space, composite, resolver, clear, seconds)
+        self.render_frame_at(
+            device, queue, encoder, target, space, composite, resolver, clear, seconds,
+        )
     }
 
     /// 与 [`Self::render_frame`] 相同，但**显式给出这一帧的时间（秒）**。
@@ -730,7 +745,7 @@ impl TimelineRenderer {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: format,
+                format,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING
                     | wgpu::TextureUsages::RENDER_ATTACHMENT,
                 view_formats: &[],
@@ -752,7 +767,14 @@ impl TimelineRenderer {
                         .collect();
                     let dest = match current {
                         Some(index) => index,
-                        None => allocate(device, self.format, extent, "dhampir segment first", &mut textures, &mut views),
+                        None => allocate(
+                            device,
+                            self.format,
+                            extent,
+                            "dhampir segment first",
+                            &mut textures,
+                            &mut views,
+                        ),
                     };
                     let base = views[dest].clone();
                     let fresh = current.is_none();
@@ -768,7 +790,9 @@ impl TimelineRenderer {
                     );
                     current = Some(dest);
                 }
-                Step::Adjust { effects, opacity, .. } => {
+                Step::Adjust {
+                    effects, opacity, ..
+                } => {
                     let Some(from) = current else { continue };
 
                     // **按管线分批跑，顺序由 `PassStage` 定**（见那里的注释）。
@@ -786,8 +810,18 @@ impl TimelineRenderer {
                             .filter_map(|index| effects.get(*index).cloned())
                             .collect();
                         let Some(next) = self.apply_stage(
-                            stage, &batch, cursor, extent, space, composite.frame, seconds,
-                            device, queue, encoder, &mut textures, &mut views,
+                            stage,
+                            &batch,
+                            cursor,
+                            extent,
+                            space,
+                            composite.frame,
+                            seconds,
+                            device,
+                            queue,
+                            encoder,
+                            &mut textures,
+                            &mut views,
                         ) else {
                             continue;
                         };
@@ -811,8 +845,12 @@ impl TimelineRenderer {
                             let a_view = views[from].clone();
                             let b_view = views[cursor].clone();
                             let dest = alloc_texture(
-                                device, self.format, extent,
-                                "dhampir adjust blend out", &mut textures, &mut views,
+                                device,
+                                self.format,
+                                extent,
+                                "dhampir adjust blend out",
+                                &mut textures,
+                                &mut views,
                             );
                             let dest_view = views[dest].clone();
                             let mut resolver = PairSource {
@@ -827,8 +865,13 @@ impl TimelineRenderer {
                             over.opacity = *opacity;
                             let blend_layers = [under, over];
                             self.compose_layers(
-                                device, queue, encoder, &dest_view, space,
-                                &blend_layers, &mut resolver,
+                                device,
+                                queue,
+                                encoder,
+                                &dest_view,
+                                space,
+                                &blend_layers,
+                                &mut resolver,
                                 Some(wgpu::Color::TRANSPARENT),
                             );
                             cursor = dest;
@@ -853,7 +896,14 @@ impl TimelineRenderer {
         };
         let blit = [identity_layer()];
         drawn += self.compose_layers(
-            device, queue, encoder, target, space, &blit, &mut fixed, Some(clear),
+            device,
+            queue,
+            encoder,
+            target,
+            space,
+            &blit,
+            &mut fixed,
+            Some(clear),
         );
         drop(textures);
         drawn
@@ -888,12 +938,17 @@ impl TimelineRenderer {
                 let params = color_params(batch);
                 if !params.is_identity() {
                     let out = alloc_texture(
-                        device, self.format, extent, "dhampir adjust color out",
-                        textures, views,
+                        device,
+                        self.format,
+                        extent,
+                        "dhampir adjust color out",
+                        textures,
+                        views,
                     );
                     let source = views[cursor].clone();
                     let to = views[out].clone();
-                    self.color_adjust.apply(device, queue, encoder, &source, &to, params);
+                    self.color_adjust
+                        .apply(device, queue, encoder, &source, &to, params);
                     cursor = out;
                 }
                 // ColorMask 与 ColorAdjust 都是逐像素，但**参数结构不同**，各走一趟。
@@ -902,12 +957,17 @@ impl TimelineRenderer {
                 let mask = color_mask_params(batch, space.target, frame);
                 if !mask.is_identity() {
                     let out = alloc_texture(
-                        device, self.format, extent, "dhampir adjust mask out",
-                        textures, views,
+                        device,
+                        self.format,
+                        extent,
+                        "dhampir adjust mask out",
+                        textures,
+                        views,
                     );
                     let source = views[cursor].clone();
                     let to = views[out].clone();
-                    self.color_mask.apply(device, queue, encoder, &source, &to, mask);
+                    self.color_mask
+                        .apply(device, queue, encoder, &source, &to, mask);
                     cursor = out;
                 }
                 if cursor != from { Some(cursor) } else { None }
@@ -918,11 +978,17 @@ impl TimelineRenderer {
                     return None;
                 }
                 let out = alloc_texture(
-                    device, self.format, extent, "dhampir adjust warp out", textures, views,
+                    device,
+                    self.format,
+                    extent,
+                    "dhampir adjust warp out",
+                    textures,
+                    views,
                 );
                 let source = views[from].clone();
                 let to = views[out].clone();
-                self.warp.apply(device, queue, encoder, &source, &to, params);
+                self.warp
+                    .apply(device, queue, encoder, &source, &to, params);
                 Some(out)
             }
             PassStage::Neighborhood => {
@@ -939,16 +1005,33 @@ impl TimelineRenderer {
                 }
                 // blur_separable 需要一张中间纹理与一张输出纹理（它自己是一横一纵两趟）。
                 let middle = alloc_texture(
-                    device, self.format, extent, "dhampir adjust middle", textures, views,
+                    device,
+                    self.format,
+                    extent,
+                    "dhampir adjust middle",
+                    textures,
+                    views,
                 );
                 let out = alloc_texture(
-                    device, self.format, extent, "dhampir adjust out", textures, views,
+                    device,
+                    self.format,
+                    extent,
+                    "dhampir adjust out",
+                    textures,
+                    views,
                 );
                 let source = views[from].clone();
                 let mid = views[middle].clone();
                 let to = views[out].clone();
                 self.blur.blur_separable(
-                    device, queue, encoder, &source, &mid, &to, space.target, radius,
+                    device,
+                    queue,
+                    encoder,
+                    &source,
+                    &mid,
+                    &to,
+                    space.target,
+                    radius,
                 );
                 Some(out)
             }
@@ -998,8 +1081,7 @@ impl TimelineRenderer {
         // 结果是 **B 层的纹理配上 A 层的变换**。画面会错，但不崩、也不报错。
         // 配成对之后，错位在类型上就不可能发生。
         #[allow(clippy::type_complexity)]
-        let mut prepared: Vec<(&crate::compose::Layer, wgpu::TextureView, (u32, u32))> =
-            Vec::new();
+        let mut prepared: Vec<(&crate::compose::Layer, wgpu::TextureView, (u32, u32))> = Vec::new();
 
         for layer in layers {
             let Some((view, size)) = resolver.texture_for(&layer.source, layer.source_frame) else {
@@ -1081,15 +1163,8 @@ impl TimelineRenderer {
             })
             .collect();
 
-        self.compositor.compose(
-            device,
-            queue,
-            encoder,
-            dest,
-            space,
-            &draws,
-            clear,
-        );
+        self.compositor
+            .compose(device, queue, encoder, dest, space, &draws, clear);
 
         // 让编译器和读者都看得见这些纹理活到了这里。
         drop(keep_alive);
@@ -1127,7 +1202,11 @@ pub fn synthetic_source_rgba8(width: u32, height: u32, seed: u32) -> Vec<u8> {
     let mut out = Vec::with_capacity((width * height * 4) as usize);
     for y in 0..height {
         for x in 0..width {
-            let checker = if ((x / 8) + (y / 8) + seed) % 2 == 0 { 220 } else { 40 };
+            let checker = if ((x / 8) + (y / 8) + seed).is_multiple_of(2) {
+                220
+            } else {
+                40
+            };
             let gradient = ((x * 255) / width.max(1)) as u8;
             let vertical = ((y * 255) / height.max(1)) as u8;
             let r = checker;
@@ -1147,7 +1226,10 @@ mod tests {
     fn effect(kind: &str, params: &[(&str, f32)]) -> Effect {
         Effect {
             kind: kind.to_string(),
-            params: params.iter().map(|(key, value)| (key.to_string(), *value)).collect(),
+            params: params
+                .iter()
+                .map(|(key, value)| (key.to_string(), *value))
+                .collect(),
             window: dhampir_timeline::schema::Window::Always,
             opacity: 1.0,
         }
@@ -1156,21 +1238,42 @@ mod tests {
     #[test]
     fn 没有特效就没有模糊() {
         assert_eq!(blur_radius(&[]), 0);
-        assert_eq!(blur_radius(&[effect("sharpen", &[("radius", 8.0)])]), 0, "不认识的特效不该触发模糊");
-        assert_eq!(blur_radius(&[effect("gaussian_blur", &[("sigma", 8.0)])]), 0, "没有 radius 参数就当 0");
+        assert_eq!(
+            blur_radius(&[effect("sharpen", &[("radius", 8.0)])]),
+            0,
+            "不认识的特效不该触发模糊"
+        );
+        assert_eq!(
+            blur_radius(&[effect("gaussian_blur", &[("sigma", 8.0)])]),
+            0,
+            "没有 radius 参数就当 0"
+        );
     }
 
     #[test]
     fn 半径被夹到上限且四舍五入() {
-        assert_eq!(blur_radius(&[effect("gaussian_blur", &[("radius", 3.0)])]), 3);
-        assert_eq!(blur_radius(&[effect("gaussian_blur", &[("radius", 2.6)])]), 3);
+        assert_eq!(
+            blur_radius(&[effect("gaussian_blur", &[("radius", 3.0)])]),
+            3
+        );
+        assert_eq!(
+            blur_radius(&[effect("gaussian_blur", &[("radius", 2.6)])]),
+            3
+        );
         assert_eq!(
             blur_radius(&[effect("gaussian_blur", &[("radius", 999.0)])]),
             crate::render::BLUR_MAX_RADIUS,
             "超过上限要夹住，不能把索引交给着色器"
         );
-        assert_eq!(blur_radius(&[effect("gaussian_blur", &[("radius", -5.0)])]), 0);
-        assert_eq!(blur_radius(&[effect("gaussian_blur", &[("radius", f32::NAN)])]), 0, "NaN 不能穿过去");
+        assert_eq!(
+            blur_radius(&[effect("gaussian_blur", &[("radius", -5.0)])]),
+            0
+        );
+        assert_eq!(
+            blur_radius(&[effect("gaussian_blur", &[("radius", f32::NAN)])]),
+            0,
+            "NaN 不能穿过去"
+        );
     }
 
     #[test]
@@ -1195,7 +1298,10 @@ mod tests {
             .filter(|spec| spec.pipeline == EffectPipeline::SeparableBlur)
             .map(|spec| spec.kind)
             .collect();
-        assert!(!blur_kinds.is_empty(), "至少该有一个走 SeparableBlur 的特效");
+        assert!(
+            !blur_kinds.is_empty(),
+            "至少该有一个走 SeparableBlur 的特效"
+        );
 
         for kind in &blur_kinds {
             assert_eq!(
@@ -1236,24 +1342,45 @@ mod tests {
     fn 同类色彩特效叠加是可交换的() {
         // 顺序无关很重要：两端各自的遍历顺序若不同，顺序相关就会变成两端不一致。
         // 亮度可加、其余可乘，所以两种顺序必须给出同一个结果。
-        let a = [effect("brightness", &[("amount", 0.1)]), effect("brightness", &[("amount", 0.2)])];
-        let b = [effect("brightness", &[("amount", 0.2)]), effect("brightness", &[("amount", 0.1)])];
+        let a = [
+            effect("brightness", &[("amount", 0.1)]),
+            effect("brightness", &[("amount", 0.2)]),
+        ];
+        let b = [
+            effect("brightness", &[("amount", 0.2)]),
+            effect("brightness", &[("amount", 0.1)]),
+        ];
         let pa = color_params(&a);
         let pb = color_params(&b);
-        assert!((pa.brightness - pb.brightness).abs() < 1e-6, "亮度叠加必须可交换");
+        assert!(
+            (pa.brightness - pb.brightness).abs() < 1e-6,
+            "亮度叠加必须可交换"
+        );
 
-        let c = [effect("saturation", &[("amount", 0.5)]), effect("saturation", &[("amount", 2.0)])];
-        let d = [effect("saturation", &[("amount", 2.0)]), effect("saturation", &[("amount", 0.5)])];
+        let c = [
+            effect("saturation", &[("amount", 0.5)]),
+            effect("saturation", &[("amount", 2.0)]),
+        ];
+        let d = [
+            effect("saturation", &[("amount", 2.0)]),
+            effect("saturation", &[("amount", 0.5)]),
+        ];
         let pc = color_params(&c);
         let pd = color_params(&d);
-        assert!((pc.saturation - pd.saturation).abs() < 1e-6, "饱和度叠加必须可交换");
+        assert!(
+            (pc.saturation - pd.saturation).abs() < 1e-6,
+            "饱和度叠加必须可交换"
+        );
     }
 
     #[test]
     fn 度转弧度在折叠时发生且只发生一次() {
         // 用户填度、着色器收弧度。转两次会让 90 度变成 90 弧度再转一次。
         let p = color_params(&[effect("hue", &[("degrees", 90.0)])]);
-        assert!((p.hue - std::f32::consts::FRAC_PI_2).abs() < 1e-6, "90 度应当是 pi/2 弧度");
+        assert!(
+            (p.hue - std::f32::consts::FRAC_PI_2).abs() < 1e-6,
+            "90 度应当是 pi/2 弧度"
+        );
     }
 
     #[test]
@@ -1275,7 +1402,10 @@ mod tests {
         use dhampir_timeline::schema::EffectSpace;
 
         // 文档 1920x1080 -> 目标 640x360，比例 1/3。
-        let space = RenderSpace { sequence: (1920, 1080), target: (640, 360) };
+        let space = RenderSpace {
+            sequence: (1920, 1080),
+            target: (640, 360),
+        };
 
         // 半径取 12（在上界 16 之内），这样比的是**换算**而不是夹取。
         // Source：原样。实拍片段那条路走这个。
@@ -1304,7 +1434,10 @@ mod tests {
         // 尺寸相同时两者相等 —— 换算恒等，且都夹到同一个上界。
         // 用**未超界**的半径（10），否则两边都被夹到同一上界，
         // 会掩盖"换算是否真的发生了"这件事。
-        let same = RenderSpace { sequence: (1920, 1080), target: (1920, 1080) };
+        let same = RenderSpace {
+            sequence: (1920, 1080),
+            target: (1920, 1080),
+        };
         assert_eq!(radius_in_space(10, EffectSpace::Source, same), 10);
         assert_eq!(radius_in_space(10, EffectSpace::Document, same), 10);
 
@@ -1330,7 +1463,8 @@ mod tests {
             .and_then(|spec| spec.param_max("radius"))
             .expect("登记表必须有 radius 上界");
         assert_eq!(
-            from_registry, crate::render::BLUR_MAX_RADIUS as f32,
+            from_registry,
+            crate::render::BLUR_MAX_RADIUS as f32,
             "登记表上界与着色器硬上界必须一致"
         );
         // 而且真的被用上了：超界值夹到登记表上界，不是别的数。
@@ -1344,14 +1478,23 @@ mod tests {
     fn 源图确定且不退化() {
         let a = synthetic_source_rgba8(64, 32, 1);
         let b = synthetic_source_rgba8(64, 32, 1);
-        assert_eq!(a, b, "同一个 seed 必须逐字节相同——否则双端比的就不是渲染差异");
+        assert_eq!(
+            a, b,
+            "同一个 seed 必须逐字节相同——否则双端比的就不是渲染差异"
+        );
         assert_eq!(a.len(), 64 * 32 * 4);
         assert_ne!(a, synthetic_source_rgba8(64, 32, 2), "换 seed 该变");
         let first = &a[..4];
-        assert!(a.chunks(4).any(|px| px != first), "源图不能是纯色，否则比不出采样错误");
+        assert!(
+            a.chunks(4).any(|px| px != first),
+            "源图不能是纯色，否则比不出采样错误"
+        );
         // 透明度也要有变化：不然"合成"这件事根本没被压到
         let first_alpha = a[3];
-        assert!(a.chunks(4).any(|px| px[3] != first_alpha), "源图的不透明度应当有变化");
+        assert!(
+            a.chunks(4).any(|px| px[3] != first_alpha),
+            "源图的不透明度应当有变化"
+        );
     }
 
     #[test]
@@ -1447,7 +1590,10 @@ mod plan_tests {
     fn effect(kind: &str, params: &[(&str, f32)]) -> Effect {
         Effect {
             kind: kind.to_string(),
-            params: params.iter().map(|(key, value)| (key.to_string(), *value)).collect(),
+            params: params
+                .iter()
+                .map(|(key, value)| (key.to_string(), *value))
+                .collect(),
             window: dhampir_timeline::schema::Window::Always,
             opacity: 1.0,
         }
@@ -1456,10 +1602,19 @@ mod plan_tests {
     fn layer(id: &str, adjustment: bool) -> crate::compose::Layer {
         crate::compose::Layer {
             clip_id: id.to_string(),
-            source: if adjustment { String::new() } else { format!("{id}.mp4") },
+            source: if adjustment {
+                String::new()
+            } else {
+                format!("{id}.mp4")
+            },
             source_frame: 0,
             opacity: 1.0,
-            transform: Transform { x: 0.0, y: 0.0, scale: 1.0, rotation_deg: 0.0 },
+            transform: Transform {
+                x: 0.0,
+                y: 0.0,
+                scale: 1.0,
+                rotation_deg: 0.0,
+            },
             effects: if adjustment {
                 vec![Effect {
                     kind: "gaussian_blur".to_string(),
@@ -1484,12 +1639,21 @@ mod plan_tests {
 
     #[test]
     fn 调整图层把清单切成三段() {
-        let layers = vec![layer("a", false), layer("b", false), layer("adj", true), layer("c", false)];
+        let layers = vec![
+            layer("a", false),
+            layer("b", false),
+            layer("adj", true),
+            layer("c", false),
+        ];
         let steps = plan_steps(&layers);
         assert_eq!(steps.len(), 3);
         assert_eq!(steps[0], Step::Draw(vec![0, 1]));
         match &steps[1] {
-            Step::Adjust { layer: index, effects, .. } => {
+            Step::Adjust {
+                layer: index,
+                effects,
+                ..
+            } => {
                 assert_eq!(*index, 2);
                 assert_eq!(effects.len(), 1, "调整图层的特效要跟着计划走");
             }
@@ -1548,7 +1712,10 @@ mod plan_tests {
         for step in plan_steps(&layers) {
             if let Step::Draw(indices) = step {
                 for index in indices {
-                    assert!(!layers[index].is_adjustment, "第 {index} 层是调整图层，不该进 Draw");
+                    assert!(
+                        !layers[index].is_adjustment,
+                        "第 {index} 层是调整图层，不该进 Draw"
+                    );
                 }
             }
         }
@@ -1637,19 +1804,31 @@ mod plan_tests {
         let params = color_mask_params(&effects, (1920, 1080), 0);
         assert!(!params.is_identity());
         assert_eq!(params.flash_amount, 1.0);
-        assert_eq!((params.flash_r, params.flash_g, params.flash_b), (1.0, 1.0, 1.0));
+        assert_eq!(
+            (params.flash_r, params.flash_g, params.flash_b),
+            (1.0, 1.0, 1.0)
+        );
     }
 
     #[test]
     fn 两条闪白取更强的那条的颜色() {
         // 更强的说了算，不做平均 —— 平均出来的颜色解释不清，且不是用户填的任何一个。
         let effects = vec![
-            effect("flash", &[("amount", 0.2), ("r", 1.0), ("g", 0.0), ("b", 0.0)]),
-            effect("flash", &[("amount", 0.9), ("r", 0.0), ("g", 0.0), ("b", 1.0)]),
+            effect(
+                "flash",
+                &[("amount", 0.2), ("r", 1.0), ("g", 0.0), ("b", 0.0)],
+            ),
+            effect(
+                "flash",
+                &[("amount", 0.9), ("r", 0.0), ("g", 0.0), ("b", 1.0)],
+            ),
         ];
         let params = color_mask_params(&effects, (1920, 1080), 0);
         assert_eq!(params.flash_amount, 0.9);
-        assert_eq!((params.flash_r, params.flash_g, params.flash_b), (0.0, 0.0, 1.0));
+        assert_eq!(
+            (params.flash_r, params.flash_g, params.flash_b),
+            (0.0, 0.0, 1.0)
+        );
     }
 
     #[test]
@@ -1658,13 +1837,19 @@ mod plan_tests {
         // 而硬阶跃在预览与成片之间更容易被看出差异。这里钉住它有下限。
         let effects = vec![effect("vignette", &[("amount", 0.5), ("softness", 0.0)])];
         let params = color_mask_params(&effects, (1920, 1080), 0);
-        assert!(params.vignette_softness > 0.0, "softness 不能是 0（它是除数）");
+        assert!(
+            params.vignette_softness > 0.0,
+            "softness 不能是 0（它是除数）"
+        );
     }
 
     #[test]
     fn 覆盖层的角度在这里就转成弧度() {
         // **度转弧度只在一处发生**：两边各转一遍会让 90 度变成 90 弧度。
-        let effects = vec![effect("overlay", &[("amount", 1.0), ("angle", 180.0), ("shape", 1.0)])];
+        let effects = vec![effect(
+            "overlay",
+            &[("amount", 1.0), ("angle", 180.0), ("shape", 1.0)],
+        )];
         let params = color_mask_params(&effects, (1920, 1080), 0);
         assert!(
             (params.overlay_angle - std::f32::consts::PI).abs() < 1e-5,
@@ -1720,7 +1905,11 @@ mod plan_tests {
         //
         // 这里扫一个周期：**至少有一帧的缩放必须明显偏离 1**。
         for (kind, params, freq) in [
-            ("zoom_bounce", vec![("amount", 0.12), ("frequency", 3.0)], 3.0f32),
+            (
+                "zoom_bounce",
+                vec![("amount", 0.12), ("frequency", 3.0)],
+                3.0f32,
+            ),
             ("pulse", vec![("amount", 0.08), ("frequency", 1.5)], 1.5),
         ] {
             let effects = vec![effect(kind, &params)];
@@ -1750,7 +1939,10 @@ mod plan_tests {
         // 这里只能验到"幅度被传下去了"（相位在着色器里算，
         // Rust 侧看不到两路 sin 的值）—— 所以这条断言的是**参数装配**，
         // 真正的观感由 `缩放类特效会在多数帧上真的改变采样` 那类实测兜。
-        let effects = vec![effect("shake", &[("amount", 0.02), ("frequency", 5.0), ("seed", 1.0)])];
+        let effects = vec![effect(
+            "shake",
+            &[("amount", 0.02), ("frequency", 5.0), ("seed", 1.0)],
+        )];
         let p = warp_params(&effects, (1920, 1080), 0.0);
         assert_eq!(p.shake_amount, 0.02);
         assert_eq!(p.shake_frequency, 5.0);

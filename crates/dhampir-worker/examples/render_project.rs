@@ -45,7 +45,11 @@ struct CachedSources<'a> {
 
 impl<'a> CachedSources<'a> {
     fn new(device: &'a wgpu::Device, queue: &'a wgpu::Queue) -> Self {
-        Self { device, queue, cache: HashMap::new() }
+        Self {
+            device,
+            queue,
+            cache: HashMap::new(),
+        }
     }
 }
 
@@ -91,7 +95,11 @@ impl SourceResolver for CachedSources<'_> {
                     bytes_per_row: Some(WIDTH * 4),
                     rows_per_image: Some(HEIGHT),
                 },
-                wgpu::Extent3d { width: WIDTH, height: HEIGHT, depth_or_array_layers: 1 },
+                wgpu::Extent3d {
+                    width: WIDTH,
+                    height: HEIGHT,
+                    depth_or_array_layers: 1,
+                },
             );
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
             self.cache.insert(key.clone(), (texture, view));
@@ -111,7 +119,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get(1)
         .ok_or("用法：render_project <project.json> <out-dir> [帧号...]")?;
     let frames: Vec<i64> = if args.len() > 2 {
-        args[2..].iter().filter_map(|text| text.parse().ok()).collect()
+        args[2..]
+            .iter()
+            .filter_map(|text| text.parse().ok())
+            .collect()
     } else {
         vec![0, 15, 30, 45, 75]
     };
@@ -136,7 +147,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let composite = compose::evaluate(&project, frame);
         let target = ctx.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("dhampir sample target"),
-            size: wgpu::Extent3d { width: WIDTH, height: HEIGHT, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: WIDTH,
+                height: HEIGHT,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,

@@ -43,7 +43,9 @@ use dhampir_worker::pipeline::{PoolCursor, demand_of, request_schedule};
 /// 扫一遍工程，把「这一段会怎么要帧」摊平。
 fn schedule_of(timeline: &TimelineV2, assets: &AssetTimebases) -> Vec<(Frame, String, Frame)> {
     let from = compose::first_frame_v2(timeline).unwrap_or(0);
-    let to = compose::end_frame_v2(timeline).unwrap_or(0).saturating_sub(1);
+    let to = compose::end_frame_v2(timeline)
+        .unwrap_or(0)
+        .saturating_sub(1);
     if to < from {
         return Vec::new();
     }
@@ -113,23 +115,25 @@ struct PoolCost {
 /// `slots_for` 按源给槽数，因为产品就是这么算的（[`pool_slots`] 吃的是**源自己的**
 /// 尺寸，不是输出尺寸）：扫描各档时给它一个常数，复现产品配置时给它
 /// `pool_slots(asset.width, asset.height)`。
-fn pool_cost(
-    rows: &[(Frame, String, Frame)],
-    slots_for: &dyn Fn(&str) -> usize,
-) -> PoolCost {
+fn pool_cost(rows: &[(Frame, String, Frame)], slots_for: &dyn Fn(&str) -> usize) -> PoolCost {
     let requests: Vec<_> = rows
         .iter()
-        .map(|(frame, source, source_frame)| dhampir_worker::pipeline::SourceRequest {
-            frame: *frame,
-            source: source.clone(),
-            source_frame: *source_frame,
-        })
+        .map(
+            |(frame, source, source_frame)| dhampir_worker::pipeline::SourceRequest {
+                frame: *frame,
+                source: source.clone(),
+                source_frame: *source_frame,
+            },
+        )
         .collect();
     let demand = demand_of(&requests);
     let mut pools: HashMap<String, PoolCursor> = HashMap::new();
     for row in rows {
         let cursor = pools.entry(row.1.clone()).or_insert_with(|| {
-            PoolCursor::new(slots_for(&row.1), demand.get(&row.1).cloned().unwrap_or_default())
+            PoolCursor::new(
+                slots_for(&row.1),
+                demand.get(&row.1).cloned().unwrap_or_default(),
+            )
         });
         let plan = cursor.plan(row.2);
         cursor.commit(&plan);
@@ -215,10 +219,7 @@ fn main() {
             .map(|asset| {
                 (
                     asset.id.clone(),
-                    (
-                        asset.width.unwrap_or(1920),
-                        asset.height.unwrap_or(1080),
-                    ),
+                    (asset.width.unwrap_or(1920), asset.height.unwrap_or(1080)),
                 )
             })
             .collect();

@@ -124,7 +124,10 @@ impl History {
     /// 所以 `redo` 拿回来的说明也是同一步，而不是「将要做什么」。
     pub fn undo(&mut self, current: ProjectDoc) -> Option<Snapshot> {
         let restored = self.past.pop()?;
-        self.future.push(Snapshot { label: restored.label.clone(), doc: current });
+        self.future.push(Snapshot {
+            label: restored.label.clone(),
+            doc: current,
+        });
         self.last_key = None;
         Some(restored)
     }
@@ -132,7 +135,10 @@ impl History {
     /// 进一步。语义与 [`History::undo`] 对称。
     pub fn redo(&mut self, current: ProjectDoc) -> Option<Snapshot> {
         let restored = self.future.pop()?;
-        self.past.push(Snapshot { label: restored.label.clone(), doc: current });
+        self.past.push(Snapshot {
+            label: restored.label.clone(),
+            doc: current,
+        });
         self.last_key = None;
         Some(restored)
     }
@@ -232,8 +238,14 @@ mod tests {
     fn 换了合并键就是新的一步() {
         let mut history = History::new(8);
         assert!(history.push_coalescing("拖 a", doc(1), "move:a"));
-        assert!(history.push_coalescing("拖 b", doc(2), "move:b"), "换了元素就是新的一步");
-        assert!(history.push_coalescing("拖 a", doc(3), "move:a"), "中间隔了别的键，必须重新压");
+        assert!(
+            history.push_coalescing("拖 b", doc(2), "move:b"),
+            "换了元素就是新的一步"
+        );
+        assert!(
+            history.push_coalescing("拖 a", doc(3), "move:a"),
+            "中间隔了别的键，必须重新压"
+        );
         assert_eq!(history.depth(), 3);
     }
 

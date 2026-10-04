@@ -28,7 +28,9 @@ use dhampir_core::timeline::project::ProjectDoc;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let path = args.first().ok_or("用法：eval_layers <project.json> <frame> [source-substring]")?;
+    let path = args
+        .first()
+        .ok_or("用法：eval_layers <project.json> <frame> [source-substring]")?;
     let frame: i64 = args
         .get(1)
         .and_then(|s| s.parse().ok())
@@ -39,10 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 转译器给的是**外层 doc**（assets / extensions / timeline / render_hints …），
     // 而 `Project` 要的是里面的 `timeline` 那一层。少取一层就是 "missing field `schema`"。
     let doc: serde_json::Value = serde_json::from_str(&text)?;
-    let timeline = doc
-        .get("timeline")
-        .cloned()
-        .unwrap_or_else(|| doc.clone());
+    let timeline = doc.get("timeline").cloned().unwrap_or_else(|| doc.clone());
     let project: TimelineV2 = serde_json::from_value(timeline)?;
 
     println!("== 工程里的轨 ==");
@@ -50,7 +49,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  轨数 {}", tracks.len());
     for track in tracks {
         // 字段名叫 `clips`（不是 JSON 里的 `layers`）—— 先把真实形状打出来再说。
-        println!("  {:<14} kind={:<10} layers={}", track.id, format!("{:?}", track.kind), track.layers.len());
+        println!(
+            "  {:<14} kind={:<10} layers={}",
+            track.id,
+            format!("{:?}", track.kind),
+            track.layers.len()
+        );
         // **只打 id/区间/源** —— 打印整个 Layer 的 Debug 会把几百个 keyframe 倒出来，
         // 把真正的答案淹掉（我这么干过一次，白跑一轮）。
         for layer in &track.layers {
@@ -103,13 +107,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             label,
             c.layers.len(),
             !hits.is_empty(),
-            hits.iter().map(|l| (l.source.clone(), l.source_frame)).collect::<Vec<_>>()
+            hits.iter()
+                .map(|l| (l.source.clone(), l.source_frame))
+                .collect::<Vec<_>>()
         );
     }
     println!();
 
     let composite = compose::evaluate_v2_with_assets(&project, frame, None);
-    println!("== 帧 {} 求值后的层（{} 层）==", frame, composite.layers.len());
+    println!(
+        "== 帧 {} 求值后的层（{} 层）==",
+        frame,
+        composite.layers.len()
+    );
     let mut hit = false;
     for l in &composite.layers {
         let tag = match &want {
@@ -132,7 +142,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("✓ 帧 {} 上有包含 {:?} 的层", frame, w);
                 Ok(())
             } else {
-                println!("✗ 帧 {} 上**没有**包含 {:?} 的层 —— 断点在求值（或它上游）", frame, w);
+                println!(
+                    "✗ 帧 {} 上**没有**包含 {:?} 的层 —— 断点在求值（或它上游）",
+                    frame, w
+                );
                 std::process::exit(1);
             }
         }

@@ -471,7 +471,10 @@ pub fn drawtext_args(key: &TextRasterKey, text_file: &Path) -> Vec<String> {
             // `stroke_ratio` 的默认值是 0，于是所有老工程都走这里，
             // 而它们升级前渲染出来的就是 `borderw=border_px(font_px):bordercolor=black`。
             // 让颜色也走 `stroke_color` 会在默认值上把黑描边变成别的颜色。
-            drawtext.push_str(&format!(":borderw={}:bordercolor=black", border_px(key.font_px)));
+            drawtext.push_str(&format!(
+                ":borderw={}:bordercolor=black",
+                border_px(key.font_px)
+            ));
         }
     }
 
@@ -592,7 +595,11 @@ fn run_ffmpeg(key: &TextRasterKey, text_file: &Path) -> Result<TextBitmap, Strin
             output.stdout.len()
         ));
     }
-    TextBitmap::new(key.width, key.height, tint(&output.stdout, key.tint_color()))
+    TextBitmap::new(
+        key.width,
+        key.height,
+        tint(&output.stdout, key.tint_color()),
+    )
 }
 
 /// 位图缓存：键 -> 位图，外加「最久未用」的淘汰。
@@ -729,7 +736,10 @@ mod tests {
             "-f".to_string(),
             "lavfi".to_string(),
             "-i".to_string(),
-            format!("color=c=black@0.0:s={}x{},format=rgba", key.width, key.height),
+            format!(
+                "color=c=black@0.0:s={}x{},format=rgba",
+                key.width, key.height
+            ),
             "-vf".to_string(),
             format!(
                 "drawtext=fontfile='C\\:/fake/font.ttf':textfile='C\\:/tmp/dhampir-text-1.txt':\
@@ -977,7 +987,10 @@ mod tests {
         styled.stroke_px = 12;
         styled.stroke_color = [0x40, 0x3c, 0x3b, 255];
         let joined = drawtext_args(&styled, Path::new("t.txt")).join(" ");
-        assert!(joined.contains("borderw=12"), "宽度要用契约给的 12，实得：{joined}");
+        assert!(
+            joined.contains("borderw=12"),
+            "宽度要用契约给的 12，实得：{joined}"
+        );
         assert!(
             joined.contains("bordercolor=0x403C3B"),
             "颜色要用契约给的 #403c3b，实得：{joined}"
@@ -989,7 +1002,10 @@ mod tests {
         legacy.outline = true;
         legacy.font_px = 48;
         let legacy_args = drawtext_args(&legacy, Path::new("t.txt")).join(" ");
-        assert!(legacy_args.contains("borderw=3"), "老行为：字号 48 -> 3 像素，实得：{legacy_args}");
+        assert!(
+            legacy_args.contains("borderw=3"),
+            "老行为：字号 48 -> 3 像素，实得：{legacy_args}"
+        );
         assert!(
             legacy_args.contains("bordercolor=black"),
             "老行为：默认颜色是 black（不是 0x000000），实得：{legacy_args}"
@@ -1008,14 +1024,24 @@ mod tests {
         // 无描边（老工程的默认：`stroke_ratio` 默认 0 且 `outline` 默认 true 时走另一支，
         // 所以这里两种都验）。
         let plain = key("字", 20);
-        assert_eq!(drawtext_args(&plain, Path::new("C:/tmp/dhampir-text-1.txt")), frozen_argv(&plain));
+        assert_eq!(
+            drawtext_args(&plain, Path::new("C:/tmp/dhampir-text-1.txt")),
+            frozen_argv(&plain)
+        );
 
         // 有描边：老路径（宽度从字号推、颜色写死 black）。
         let mut outlined = key("字", 20);
         outlined.outline = true;
         let mut expected = frozen_argv(&outlined);
-        let at = expected.iter().position(|arg| arg.starts_with("drawtext=")).expect("有 -vf");
-        expected[at] = format!("{}:borderw={}:bordercolor=black", expected[at], border_px(32));
+        let at = expected
+            .iter()
+            .position(|arg| arg.starts_with("drawtext="))
+            .expect("有 -vf");
+        expected[at] = format!(
+            "{}:borderw={}:bordercolor=black",
+            expected[at],
+            border_px(32)
+        );
         assert_eq!(
             drawtext_args(&outlined, Path::new("C:/tmp/dhampir-text-1.txt")),
             expected,
@@ -1038,7 +1064,10 @@ mod tests {
         let shadow = shadow_key(&text, [0, 0, 0, 102], 4, 3, 2);
         let args = drawtext_args(&shadow, Path::new("C:/tmp/dhampir-text-1.txt"));
         let joined = args.join(" ");
-        assert!(joined.contains("gblur=sigma=2"), "σ 应当是 blur/2 = 2：{joined}");
+        assert!(
+            joined.contains("gblur=sigma=2"),
+            "σ 应当是 blur/2 = 2：{joined}"
+        );
         assert!(!joined.contains("borderw"), "阴影不许带描边：{joined}");
         assert!(
             joined.contains("fontcolor=white"),
@@ -1114,7 +1143,10 @@ mod tests {
                 })
                 .unwrap();
         }
-        assert_eq!(calls, 3, "文本、阴影、另一档模糊各要一次；同键不许重复栅格化");
+        assert_eq!(
+            calls, 3,
+            "文本、阴影、另一档模糊各要一次；同键不许重复栅格化"
+        );
         assert_eq!(cache.hits, 2);
     }
 

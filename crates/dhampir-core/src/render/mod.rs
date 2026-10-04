@@ -18,12 +18,12 @@ mod blit;
 mod blur;
 mod color_adjust;
 mod color_mask;
-mod warp;
 mod compose;
 mod overlay;
 mod probe;
-mod timeline;
 mod scene;
+mod timeline;
+mod warp;
 
 /// corpus 的公共部分：一帧怎么渲染、怎么判、整表摘要怎么算、**记录长什么样**。
 ///
@@ -43,28 +43,26 @@ pub mod scene_model;
 #[cfg(test)]
 mod wgsl_subset;
 
-pub use corpus::{
-    CORPUS_RECORD_KIND, CORPUS_RECORD_SCHEMA, CORPUS_TARGET_FORMAT, CORPUS_TABLE_MILESTONE, Counts,
-    CorpusError, PointReading, RenderPair, SceneFrame, SceneRun, TableRow, epoch_seconds, frame_json,
-    frame_rel_path, frames_digest, judge_frame, leg_json, point_json, record_text, render_frame,
-    render_frame_pair, render_frame_record, render_run, report_text, scene_json, table_digest,
+pub use animation::{
+    AnimationTextures, FRAME_FORMAT as ANIMATION_FRAME_FORMAT, resolve_frame_index,
 };
-pub use animation::{AnimationTextures, FRAME_FORMAT as ANIMATION_FRAME_FORMAT, resolve_frame_index};
 pub use blit::{BLIT_WGSL, BlitRenderer};
-pub use blur::{BLUR_WGSL, BlurRenderer, MAX_RADIUS as BLUR_MAX_RADIUS, TAPS as BLUR_TAPS, gaussian_weights_1d};
-pub use color_adjust::{COLOR_ADJUST_WGSL, ColorAdjustParams, ColorAdjustRenderer};
-pub use color_mask::{
-    COLOR_MASK_WGSL, ColorMaskParams, ColorMaskRenderer, OverlayShape,
+pub use blur::{
+    BLUR_WGSL, BlurRenderer, MAX_RADIUS as BLUR_MAX_RADIUS, TAPS as BLUR_TAPS, gaussian_weights_1d,
 };
-pub use warp::{WARP_WGSL, WarpParams, WarpRenderer};
+pub use color_adjust::{COLOR_ADJUST_WGSL, ColorAdjustParams, ColorAdjustRenderer};
+pub use color_mask::{COLOR_MASK_WGSL, ColorMaskParams, ColorMaskRenderer, OverlayShape};
 pub use compose::{COMPOSE_WGSL, Compositor, LayerDraw, RenderSpace, inverse_affine};
+pub use corpus::{
+    CORPUS_RECORD_KIND, CORPUS_RECORD_SCHEMA, CORPUS_TABLE_MILESTONE, CORPUS_TARGET_FORMAT,
+    CorpusError, Counts, PointReading, RenderPair, SceneFrame, SceneRun, TableRow, epoch_seconds,
+    frame_json, frame_rel_path, frames_digest, judge_frame, leg_json, point_json, record_text,
+    render_frame, render_frame_pair, render_frame_record, render_run, report_text, scene_json,
+    table_digest,
+};
 pub use overlay::{
     InkBounds, InkReport, OverlayItem, OverlayReport, compose_overlay, ink_report,
     placement_transform,
-};
-pub use timeline::{
-    SourceResolver, TimelineRenderer, blur_radius, scale_document_radius, synthetic_seed_for_source,
-    synthetic_seed_for_source_frame, synthetic_source_rgba8,
 };
 pub use probe::{
     PROBE_CLEAR_COLOR, PROBE_TARGET_SIZE, PROBE_VERTICES, ProbeRenderer, ProbeSample, ProbeVertex,
@@ -76,3 +74,8 @@ pub use scene::{
     ScenePasses, SceneRenderer, SceneSpec, expected_bytes, judge_sample, scene_by_name,
     scene_names,
 };
+pub use timeline::{
+    SourceResolver, TimelineRenderer, blur_radius, scale_document_radius,
+    synthetic_seed_for_source, synthetic_seed_for_source_frame, synthetic_source_rgba8,
+};
+pub use warp::{WARP_WGSL, WarpParams, WarpRenderer};

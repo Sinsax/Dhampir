@@ -156,7 +156,15 @@ pub fn compose_overlay(
         return report;
     }
 
-    compositor.compose(device, queue, encoder, target, RenderSpace::square(target_size), &layers, None);
+    compositor.compose(
+        device,
+        queue,
+        encoder,
+        target,
+        RenderSpace::square(target_size),
+        &layers,
+        None,
+    );
     report
 }
 
@@ -215,7 +223,7 @@ pub fn ink_report(base: &Rgba8Image, overlaid: &Rgba8Image) -> Result<InkReport,
     let (mut min_x, mut min_y, mut max_x, mut max_y) = (u32::MAX, u32::MAX, 0u32, 0u32);
     for y in 0..base.height {
         for x in 0..base.width {
-            let at = ((y as usize * base.width as usize + x as usize) * 4) as usize;
+            let at = (y as usize * base.width as usize + x as usize) * 4;
             if base.pixels[at..at + 4] != overlaid.pixels[at..at + 4] {
                 pixels += 1;
                 min_x = min_x.min(x);
@@ -229,7 +237,12 @@ pub fn ink_report(base: &Rgba8Image, overlaid: &Rgba8Image) -> Result<InkReport,
     let bounds = if pixels == 0 {
         None
     } else {
-        Some(InkBounds { x: min_x, y: min_y, width: max_x - min_x + 1, height: max_y - min_y + 1 })
+        Some(InkBounds {
+            x: min_x,
+            y: min_y,
+            width: max_x - min_x + 1,
+            height: max_y - min_y + 1,
+        })
     };
     Ok(InkReport { pixels, bounds })
 }
@@ -241,7 +254,13 @@ mod tests {
     use dhampir_timeline::text_layout::{NormalizedRect, place_line};
 
     fn placement(x: i32, y: i32, bitmap_width: u32, bitmap_height: u32) -> LinePlacement {
-        LinePlacement { x, y, bitmap_width, bitmap_height, font_px: 16 }
+        LinePlacement {
+            x,
+            y,
+            bitmap_width,
+            bitmap_height,
+            font_px: 16,
+        }
     }
 
     /// 位图的四个角在**源像素**坐标里的对应点（用生产那份逆变换算）。
@@ -278,11 +297,17 @@ mod tests {
         ] {
             let target = (640, 360);
             let corner = source_at(case, target, (case.x as f32, case.y as f32));
-            assert!(close(corner.0, 0.0) && close(corner.1, 0.0), "{case:?} 左上角落在 {corner:?}");
+            assert!(
+                close(corner.0, 0.0) && close(corner.1, 0.0),
+                "{case:?} 左上角落在 {corner:?}"
+            );
             let far = source_at(
                 case,
                 target,
-                (case.x as f32 + case.bitmap_width as f32, case.y as f32 + case.bitmap_height as f32),
+                (
+                    case.x as f32 + case.bitmap_width as f32,
+                    case.y as f32 + case.bitmap_height as f32,
+                ),
             );
             assert!(
                 close(far.0, case.bitmap_width as f32) && close(far.1, case.bitmap_height as f32),
@@ -298,9 +323,19 @@ mod tests {
         let target = (640, 360);
         for rect in [
             // 常见的字幕位置：底部居中。
-            NormalizedRect { x: 0.25, y: 0.8, width: 0.5, height: 0.055 },
+            NormalizedRect {
+                x: 0.25,
+                y: 0.8,
+                width: 0.5,
+                height: 0.055,
+            },
             // 居中、更大的行盒（字号反推出来的字号应当是 30）。
-            NormalizedRect { x: 0.3, y: 0.45, width: 0.4, height: 0.1 },
+            NormalizedRect {
+                x: 0.3,
+                y: 0.45,
+                width: 0.4,
+                height: 0.1,
+            },
         ] {
             // 第 2 个行盒高 0.1、目标高 360 -> 行盒 36px；
             // font_ratio 是**布局给的事实**，这里按 0.083 给（= 36*1.2/360 的反推值同量级）。
@@ -312,7 +347,10 @@ mod tests {
                 (rect.y + rect.height / 2.0) * target.1 as f32,
             );
             let at = source_at(placed, target, line_box_center);
-            let expected = (placed.bitmap_width as f32 / 2.0, placed.bitmap_height as f32 / 2.0);
+            let expected = (
+                placed.bitmap_width as f32 / 2.0,
+                placed.bitmap_height as f32 / 2.0,
+            );
             assert!(
                 (at.0 - expected.0).abs() <= 0.5 && (at.1 - expected.1).abs() <= 0.5,
                 "行盒中心 {line_box_center:?} 该落在位图中心 {expected:?} 附近，得到 {at:?}",
@@ -346,7 +384,11 @@ mod tests {
 
     #[test]
     fn 墨迹包围盒只算变了的像素() {
-        let mut base = Rgba8Image { width: 4, height: 3, pixels: vec![0; 4 * 3 * 4] };
+        let mut base = Rgba8Image {
+            width: 4,
+            height: 3,
+            pixels: vec![0; 4 * 3 * 4],
+        };
         // 底图铺成不透明黑，便于「变了」＝「有墨」。
         for chunk in base.pixels.chunks_mut(4) {
             chunk[3] = 255;
@@ -364,19 +406,36 @@ mod tests {
         assert_eq!(report.pixels, 3);
         assert_eq!(
             report.bounds,
-            Some(InkBounds { x: 1, y: 1, width: 2, height: 2 }),
+            Some(InkBounds {
+                x: 1,
+                y: 1,
+                width: 2,
+                height: 2
+            }),
             "包围盒该是真正变了的范围，而不是整张图",
         );
     }
 
     #[test]
     fn 尺寸不一致时拒绝回答() {
-        let a = Rgba8Image { width: 4, height: 3, pixels: vec![0; 4 * 3 * 4] };
-        let b = Rgba8Image { width: 5, height: 3, pixels: vec![0; 5 * 3 * 4] };
+        let a = Rgba8Image {
+            width: 4,
+            height: 3,
+            pixels: vec![0; 4 * 3 * 4],
+        };
+        let b = Rgba8Image {
+            width: 5,
+            height: 3,
+            pixels: vec![0; 5 * 3 * 4],
+        };
         let error = ink_report(&a, &b).expect_err("尺寸不一致不该给结论");
         assert!(error.contains("尺寸不一致"), "报错要指出原因，得到 {error}");
         // 尺寸说是这么大、像素却不够长：这属于「图本身坏了」，同样不回答。
-        let broken = Rgba8Image { width: 4, height: 3, pixels: vec![0; 8] };
+        let broken = Rgba8Image {
+            width: 4,
+            height: 3,
+            pixels: vec![0; 8],
+        };
         assert!(ink_report(&a, &broken).is_err());
     }
 }

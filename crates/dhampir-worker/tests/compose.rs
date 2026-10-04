@@ -20,7 +20,13 @@ use dhampir_worker::baseline::open_leg;
 /// 这条要证的混合是纯算术，任何色彩转换都会把结论变成「转换的往返是否精确」。
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
-fn solid(device: &wgpu::Device, queue: &wgpu::Queue, size: u32, rgba: [u8; 4], label: &str) -> wgpu::Texture {
+fn solid(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    size: u32,
+    rgba: [u8; 4],
+    label: &str,
+) -> wgpu::Texture {
     solid_rect(device, queue, size, size, rgba, label)
 }
 
@@ -35,7 +41,11 @@ fn solid_rect(
 ) -> wgpu::Texture {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -60,7 +70,11 @@ fn solid_rect(
             bytes_per_row: Some(width * 4),
             rows_per_image: Some(height),
         },
-        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
     );
     texture
 }
@@ -72,7 +86,11 @@ fn target(device: &wgpu::Device, size: u32) -> wgpu::Texture {
 fn target_rect(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dhampir compose test target"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -84,7 +102,12 @@ fn target_rect(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture 
 
 fn pixel(image: &dhampir_core::readback::Rgba8Image, size: u32, x: u32, y: u32) -> [u8; 4] {
     let at = ((y * size + x) * 4) as usize;
-    [image.pixels[at], image.pixels[at + 1], image.pixels[at + 2], image.pixels[at + 3]]
+    [
+        image.pixels[at],
+        image.pixels[at + 1],
+        image.pixels[at + 2],
+        image.pixels[at + 3],
+    ]
 }
 
 fn near(got: [u8; 4], want: [u8; 4], tolerance: i32) -> bool {
@@ -99,14 +122,28 @@ fn 两层按不透明度叠加() {
     const SIZE: u32 = 8;
     let (ctx, _init) = open_leg(NATIVE_BACKENDS).expect("拿不到 GPU 上下文");
 
-    let red = solid(&ctx.device, &ctx.queue, SIZE, [255, 0, 0, 255], "dhampir compose red");
-    let blue = solid(&ctx.device, &ctx.queue, SIZE, [0, 0, 255, 255], "dhampir compose blue");
+    let red = solid(
+        &ctx.device,
+        &ctx.queue,
+        SIZE,
+        [255, 0, 0, 255],
+        "dhampir compose red",
+    );
+    let blue = solid(
+        &ctx.device,
+        &ctx.queue,
+        SIZE,
+        [0, 0, 255, 255],
+        "dhampir compose blue",
+    );
     let out = target(&ctx.device, SIZE);
 
     let renderer = Compositor::new(&ctx.device, FORMAT);
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("dhampir compose test encoder"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dhampir compose test encoder"),
+        });
     let red_view = red.create_view(&wgpu::TextureViewDescriptor::default());
     let blue_view = blue.create_view(&wgpu::TextureViewDescriptor::default());
     renderer.compose(
@@ -116,8 +153,20 @@ fn 两层按不透明度叠加() {
         &out.create_view(&wgpu::TextureViewDescriptor::default()),
         RenderSpace::square((SIZE, SIZE)),
         &[
-            LayerDraw { view: &red_view, source_size: (SIZE, SIZE), transform: Transform::default(), opacity: 1.0, blend: dhampir_core::timeline::layer::BlendMode::Normal },
-            LayerDraw { view: &blue_view, source_size: (SIZE, SIZE), transform: Transform::default(), opacity: 0.5, blend: dhampir_core::timeline::layer::BlendMode::Normal },
+            LayerDraw {
+                view: &red_view,
+                source_size: (SIZE, SIZE),
+                transform: Transform::default(),
+                opacity: 1.0,
+                blend: dhampir_core::timeline::layer::BlendMode::Normal,
+            },
+            LayerDraw {
+                view: &blue_view,
+                source_size: (SIZE, SIZE),
+                transform: Transform::default(),
+                opacity: 0.5,
+                blend: dhampir_core::timeline::layer::BlendMode::Normal,
+            },
         ],
         Some(wgpu::Color::TRANSPARENT),
     );
@@ -151,13 +200,21 @@ fn 缩放把层缩到中心而四周保持背景() {
     const SIZE: u32 = 8;
     let (ctx, _init) = open_leg(NATIVE_BACKENDS).expect("拿不到 GPU 上下文");
 
-    let red = solid(&ctx.device, &ctx.queue, SIZE, [255, 0, 0, 255], "dhampir compose red");
+    let red = solid(
+        &ctx.device,
+        &ctx.queue,
+        SIZE,
+        [255, 0, 0, 255],
+        "dhampir compose red",
+    );
     let out = target(&ctx.device, SIZE);
 
     let renderer = Compositor::new(&ctx.device, FORMAT);
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("dhampir compose scale encoder"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dhampir compose scale encoder"),
+        });
     let red_view = red.create_view(&wgpu::TextureViewDescriptor::default());
     renderer.compose(
         &ctx.device,
@@ -169,7 +226,12 @@ fn 缩放把层缩到中心而四周保持背景() {
             view: &red_view,
             source_size: (SIZE, SIZE),
             // 缩到一半：只盖住中心，四周应当留着背景（清屏色）
-            transform: Transform { x: 0.0, y: 0.0, scale: 0.5, rotation_deg: 0.0 },
+            transform: Transform {
+                x: 0.0,
+                y: 0.0,
+                scale: 0.5,
+                rotation_deg: 0.0,
+            },
             opacity: 1.0,
             blend: dhampir_core::timeline::layer::BlendMode::Normal,
         }],
@@ -181,7 +243,10 @@ fn 缩放把层缩到中心而四周保持背景() {
         .expect("读回失败");
 
     let center = pixel(&image, SIZE, 4, 4);
-    assert!(near(center, [255, 0, 0, 255], 2), "中心应当是实心红，得到 {center:?}");
+    assert!(
+        near(center, [255, 0, 0, 255], 2),
+        "中心应当是实心红，得到 {center:?}"
+    );
 
     // 四个角必须在层之外：源坐标越界 -> 全透明 -> 目标保持清屏色（全 0）。
     // 这条同时证明了「不用 discard」这条路是通的：透明片段确实没动目标。
@@ -266,7 +331,12 @@ fn 文字的落点与行盒逐个像素一致() {
     let placements: Vec<LinePlacement> = TEXT_RECTS
         .iter()
         .map(|(x, y, box_width, box_height)| {
-            let rect = NormalizedRect { x: *x, y: *y, width: *box_width, height: *box_height };
+            let rect = NormalizedRect {
+                x: *x,
+                y: *y,
+                width: *box_width,
+                height: *box_height,
+            };
             place_line(rect, TEXT_TARGET, TEXT_FONT_RATIO).expect("行盒有高度，应当给得出落点")
         })
         .collect();
@@ -300,9 +370,11 @@ fn 文字的落点与行盒逐个像素一致() {
         })
         .collect();
 
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("dhampir text overlay encoder"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dhampir text overlay encoder"),
+        });
     // 先按常规路径建立底（清屏），再叠文字 —— 这正是宿主那两行的顺序。
     compositor.compose(
         &ctx.device,
@@ -339,7 +411,10 @@ fn 文字的落点与行盒逐个像素一致() {
                 }
             }
             let got = pixel(&image, width, x, y);
-            assert!(near(got, expected, 2), "({x},{y}) 应当是 {expected:?}，得到 {got:?}");
+            assert!(
+                near(got, expected, 2),
+                "({x},{y}) 应当是 {expected:?}，得到 {got:?}"
+            );
         }
     }
 
@@ -350,7 +425,11 @@ fn 文字的落点与行盒逐个像素一致() {
         pixels: vec![0; (width * height * 4) as usize],
     };
     let ink = ink_report(&empty, &image).expect("两张同尺寸");
-    assert_eq!(ink.bounds, union_bounds(&placements, TEXT_TARGET), "墨迹包围盒与落点对不上");
+    assert_eq!(
+        ink.bounds,
+        union_bounds(&placements, TEXT_TARGET),
+        "墨迹包围盒与落点对不上"
+    );
 }
 
 #[test]
@@ -364,11 +443,20 @@ fn 没有可叠的行时目标一个字节都不改() {
     let compositor = Compositor::new(&ctx.device, FORMAT);
     let target_view = out.create_view(&wgpu::TextureViewDescriptor::default());
 
-    let base = solid_rect(&ctx.device, &ctx.queue, width, height, [40, 80, 120, 255], "dhampir text base");
+    let base = solid_rect(
+        &ctx.device,
+        &ctx.queue,
+        width,
+        height,
+        [40, 80, 120, 255],
+        "dhampir text base",
+    );
     let base_view = base.create_view(&wgpu::TextureViewDescriptor::default());
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("dhampir text base encoder"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dhampir text base encoder"),
+        });
     compositor.compose(
         &ctx.device,
         &ctx.queue,
@@ -388,9 +476,11 @@ fn 没有可叠的行时目标一个字节都不改() {
     let before = pollster::block_on(readback::read_texture_rgba8(&ctx.device, &ctx.queue, &out))
         .expect("读回失败");
 
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("dhampir text overlay empty encoder"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dhampir text overlay empty encoder"),
+        });
     let report = compose_overlay(
         &compositor,
         &ctx.device,
@@ -426,7 +516,12 @@ fn 位图尺寸与落点不符时一行都不画() {
     let target_view = out.create_view(&wgpu::TextureViewDescriptor::default());
 
     let placed = place_line(
-        NormalizedRect { x: 0.25, y: 0.6, width: 0.5, height: 0.15 },
+        NormalizedRect {
+            x: 0.25,
+            y: 0.6,
+            width: 0.5,
+            height: 0.15,
+        },
         TEXT_TARGET,
         TEXT_FONT_RATIO,
     )
@@ -444,11 +539,20 @@ fn 位图尺寸与落点不符时一行都不画() {
     let bitmap_view = bitmap.create_view(&wgpu::TextureViewDescriptor::default());
 
     // 底铺满整张（清屏色与文字色不同）：否则「没画」会被「底色一样」蒙过去。
-    let base = solid_rect(&ctx.device, &ctx.queue, width, height, [10, 20, 30, 255], "dhampir text base");
+    let base = solid_rect(
+        &ctx.device,
+        &ctx.queue,
+        width,
+        height,
+        [10, 20, 30, 255],
+        "dhampir text base",
+    );
     let base_view = base.create_view(&wgpu::TextureViewDescriptor::default());
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("dhampir text base encoder"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dhampir text base encoder"),
+        });
     compositor.compose(
         &ctx.device,
         &ctx.queue,
@@ -468,9 +572,11 @@ fn 位图尺寸与落点不符时一行都不画() {
     let before = pollster::block_on(readback::read_texture_rgba8(&ctx.device, &ctx.queue, &out))
         .expect("读回失败");
 
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("dhampir text overlay mismatch encoder"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dhampir text overlay mismatch encoder"),
+        });
     let report = compose_overlay(
         &compositor,
         &ctx.device,
@@ -478,7 +584,11 @@ fn 位图尺寸与落点不符时一行都不画() {
         &mut encoder,
         &target_view,
         TEXT_TARGET,
-        &[OverlayItem { view: &bitmap_view, bitmap_size: actual, placement: placed }],
+        &[OverlayItem {
+            view: &bitmap_view,
+            bitmap_size: actual,
+            placement: placed,
+        }],
     );
     assert_eq!(report.drawn, 0, "尺寸不符的位图不许画");
     assert_eq!(report.size_mismatch, 1, "尺寸不符必须数出来");

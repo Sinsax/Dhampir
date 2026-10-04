@@ -159,8 +159,9 @@ impl Args {
                     frames = Some(scenes::parse_frames(&value)?);
                 }
                 "--compare-run" => {
-                    compare_run =
-                        Some(PathBuf::from(argv.next().ok_or("--compare-run 后面要跟一个目录")?));
+                    compare_run = Some(PathBuf::from(
+                        argv.next().ok_or("--compare-run 后面要跟一个目录")?,
+                    ));
                 }
                 "--skip-timing" => skip_timing = true,
                 "--probe-only" => probe_only = true,
@@ -189,7 +190,7 @@ impl Args {
 
         let mode = match (scene, probe_only) {
             (Some(_), true) => {
-                return Err("--scene 与 --probe-only 是两条不同的路径，不能一起给".to_string())
+                return Err("--scene 与 --probe-only 是两条不同的路径，不能一起给".to_string());
             }
             (Some(selection), false) => RunMode::Scenes {
                 selection,
@@ -213,7 +214,11 @@ impl Args {
             );
         }
 
-        Ok(Self { out, backends, mode })
+        Ok(Self {
+            out,
+            backends,
+            mode,
+        })
     }
 }
 
@@ -240,7 +245,13 @@ fn run(args: &Args) -> Result<(), String> {
             frames,
             compare_run,
             skip_timing,
-        } => run_corpus(args, *selection, *frames, compare_run.as_deref(), *skip_timing),
+        } => run_corpus(
+            args,
+            *selection,
+            *frames,
+            compare_run.as_deref(),
+            *skip_timing,
+        ),
     }
 }
 
@@ -254,8 +265,7 @@ fn write_logic_probe_report(out: &Path) -> Result<(String, usize), String> {
     let lines = report.lines().count();
 
     let path = out.join("selfcheck-native.txt");
-    std::fs::write(&path, &report)
-        .map_err(|e| format!("写 {} 失败：{e}", path.display()))?;
+    std::fs::write(&path, &report).map_err(|e| format!("写 {} 失败：{e}", path.display()))?;
     println!("  报告 → {}", path.display());
     Ok((digest, lines))
 }
@@ -645,7 +655,11 @@ fn run_corpus(
             counts.frames, counts.points, counts.failed, counts.out_of_range, counts.unjudged
         );
         for spec in &specs {
-            let n = run.frames.iter().filter(|f| f.spec.name == spec.name).count();
+            let n = run
+                .frames
+                .iter()
+                .filter(|f| f.spec.name == spec.name)
+                .count();
             println!("            {:<12} {n} 帧", spec.name);
         }
         let mismatches = run.in_process_mismatches();
@@ -708,7 +722,11 @@ fn run_corpus(
                         baseline.alignment.padded_bytes_per_row,
                         baseline.alignment.pixels_compared,
                         baseline.alignment.worst_distance,
-                        if baseline.alignment.ok { "通过" } else { "**未通过**" }
+                        if baseline.alignment.ok {
+                            "通过"
+                        } else {
+                            "**未通过**"
+                        }
                     );
                     if !baseline.alignment.ok && outcome.problem.is_none() {
                         outcome.problem = Some(format!(
@@ -720,10 +738,9 @@ fn run_corpus(
                                 .unwrap_or_else(|| "（detail 没写原因）".to_string())
                         ));
                     }
-                    if let Err(e) = write_json(
-                        &dir.join("timing.json"),
-                        &baseline::timing_json(&baseline),
-                    ) {
+                    if let Err(e) =
+                        write_json(&dir.join("timing.json"), &baseline::timing_json(&baseline))
+                    {
                         outcome.problem.get_or_insert(e);
                     } else {
                         println!("  → {}/{slug}/timing.json", record_path(&args.out));
@@ -756,9 +773,7 @@ fn run_corpus(
             let identical = comparison["identical"].as_bool().unwrap_or(false);
             println!(
                 "  比对    ：比过 {} 个后端、没比 {} 个、identical={}",
-                comparison["backends_compared"],
-                comparison["backends_not_compared"],
-                identical
+                comparison["backends_compared"], comparison["backends_not_compared"], identical
             );
             for backend in comparison["backends"].as_array().into_iter().flatten() {
                 for (key, label) in [
@@ -769,7 +784,11 @@ fn run_corpus(
                 ] {
                     let list = backend[key].as_array().cloned().unwrap_or_default();
                     if !list.is_empty() {
-                        println!("            {}：{}（{key}）", label, serde_json::Value::Array(list));
+                        println!(
+                            "            {}：{}（{key}）",
+                            label,
+                            serde_json::Value::Array(list)
+                        );
                     }
                 }
             }
@@ -914,7 +933,10 @@ mod tests {
             (["--compare-run"], "--compare-run"),
         ] {
             let err = parse(&argv).expect_err(name);
-            assert!(err.contains(name) && err.contains("要跟"), "{argv:?} → {err}");
+            assert!(
+                err.contains(name) && err.contains("要跟"),
+                "{argv:?} → {err}"
+            );
         }
     }
 
@@ -961,7 +983,8 @@ mod tests {
 
     #[test]
     fn a_single_frame_is_a_one_frame_range() {
-        let args = parse(&["--scene", "checker", "--frames", "5", "--out", "target/x"]).expect("合法");
+        let args =
+            parse(&["--scene", "checker", "--frames", "5", "--out", "target/x"]).expect("合法");
         let RunMode::Scenes { frames, .. } = args.mode else {
             panic!("不在 corpus 路径上");
         };
@@ -1014,8 +1037,15 @@ mod tests {
             BackendSelection::All.expand(wgpu::Backends::VULKAN),
             vec![wgpu::Backends::VULKAN]
         );
-        assert!(BackendSelection::Dx12.expand(wgpu::Backends::VULKAN).is_empty());
-        assert!(BackendSelection::All.expand(wgpu::Backends::empty()).is_empty());
+        assert!(
+            BackendSelection::Dx12
+                .expand(wgpu::Backends::VULKAN)
+                .is_empty()
+        );
+        assert!(
+            BackendSelection::All
+                .expand(wgpu::Backends::empty())
+                .is_empty()
+        );
     }
 }
-

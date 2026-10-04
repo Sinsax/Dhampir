@@ -83,10 +83,14 @@ fn 真工程文件摊出来的音频计划与手算一致() {
         &repo_root().join("target/s3/proxy1080p.mp4"),
         &repo_root().join("target/s3/tone.m4a"),
     );
-    let plan =
-        plan_audio(&doc.timeline, &sources, &doc.asset_timebases(), FROM, TO).expect("计划要摊得出来");
+    let plan = plan_audio(&doc.timeline, &sources, &doc.asset_timebases(), FROM, TO)
+        .expect("计划要摊得出来");
 
-    assert!(plan.issues.is_empty(), "夹具本身不该有问题：{:?}", plan.issues);
+    assert!(
+        plan.issues.is_empty(),
+        "夹具本身不该有问题：{:?}",
+        plan.issues
+    );
     assert_eq!(plan.info.sample_rate, AUDIO_SAMPLE_RATE);
     assert_eq!(plan.info.channels, AUDIO_CHANNELS);
     // 总长由**帧区间**算出，与有没有音频段无关 —— 这就是"时长与视频一致"的来处。
@@ -133,14 +137,18 @@ fn 音轨与视频用的是同一条选片规则() {
     let frame = tag.output_start_sample / (AUDIO_SAMPLE_RATE as i64 / 30);
     assert_eq!(frame, 45);
     // 素材侧同理：source_in=30 帧 @30fps 就是第 1 秒，换算回素材帧号仍是 30。
-    assert_eq!(tag.source_start_sample / (AUDIO_SAMPLE_RATE as i64 / 30), 30);
+    assert_eq!(
+        tag.source_start_sample / (AUDIO_SAMPLE_RATE as i64 / 30),
+        30
+    );
 }
 
 // ---------------------------------------------------------------------------
 // 真机那一条
 // ---------------------------------------------------------------------------
 
-const RUNNER: &str = "需要 PATH 上的 ffmpeg；跑：cargo test -p dhampir-worker --test audio -- --ignored";
+const RUNNER: &str =
+    "需要 PATH 上的 ffmpeg；跑：cargo test -p dhampir-worker --test audio -- --ignored";
 
 /// 起一个**不给 stdin 开管道**的子进程。`Command::output()` 本来就把 stdin 置空，
 /// 这里显式写出来是为了让这条约束在代码里看得见（坑 19）。
@@ -432,10 +440,21 @@ fn 重叠的两段音频是相加而不是覆盖() {
     run(
         "ffmpeg",
         &[
-            "-v", "error", "-f", "lavfi", "-i",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
             "sine=frequency=440:sample_rate=48000:duration=2:beep_factor=1",
-            "-af", "volume=0.4",
-            "-ac", "2", "-c:a", "aac", "-b:a", "192k", "-y",
+            "-af",
+            "volume=0.4",
+            "-ac",
+            "2",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-y",
             &tone.display().to_string(),
         ],
     );
@@ -464,10 +483,7 @@ fn 重叠的两段音频是相加而不是覆盖() {
         stats.mixed_samples > 0,
         "没有任何采样点被相加 —— 说明重叠那段还是走顺序写（覆盖）"
     );
-    assert_eq!(
-        stats.clipped_samples, 0,
-        "两路各 0.4 倍，加起来不该削顶"
-    );
+    assert_eq!(stats.clipped_samples, 0, "两路各 0.4 倍，加起来不该削顶");
     // 叠加**看得见**：`overlaps` 里要写清是谁叠了谁、叠在哪、叠了多少。
     // 叠加本身不是错（所以不进问题清单），但它必须能被看见 ——
     // 只听见音效、背景被盖住，听起来也像"有个声音"，光靠听是发现不了的。
@@ -542,7 +558,10 @@ fn sfx_doc() -> ProjectDoc {
         enabled: true,
         recorded: Default::default(),
         gain: 1.0,
-        source: Some(SourceRef { asset_id: "tone.m4a".to_string(), source_in: 0 }),
+        source: Some(SourceRef {
+            asset_id: "tone.m4a".to_string(),
+            source_in: 0,
+        }),
         loop_source: false,
         effects: Vec::new(),
         transition_in: None,

@@ -62,7 +62,9 @@ fn main() {
                     &delays[..delays.len().min(12)]
                 );
                 let decoded = animation.memory_bytes();
-                let gpu = (animation.width as u64) * (animation.height as u64) * 4
+                let gpu = (animation.width as u64)
+                    * (animation.height as u64)
+                    * 4
                     * animation.frame_count() as u64;
                 println!(
                     "  内存：解出来 {:.1} MiB  传上显存 {:.1} MiB",
@@ -74,7 +76,11 @@ fn main() {
                 println!(
                     "  校验：延迟之和 {sum} ms vs total_ms {}  => {}",
                     animation.total_ms,
-                    if sum == animation.total_ms { "一致" } else { "不一致（要查）" }
+                    if sum == animation.total_ms {
+                        "一致"
+                    } else {
+                        "不一致（要查）"
+                    }
                 );
             }
             Err(error) => println!("  解码失败：{error}"),

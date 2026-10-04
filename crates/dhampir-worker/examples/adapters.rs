@@ -59,7 +59,6 @@
 //! 两者相差 **5.1 倍**，而 `resolve_workers` 并不知道当前选中的是哪个 adapter。
 //! （把"按 adapter 的 device_type 决定默认 worker 数"接上是个明确的小改进。）
 
-
 fn main() {
     // 本仓 native 侧实际请求的三个后端（`dhampir_core::gpu::NATIVE_BACKENDS`）。
     let backends = dhampir_core::gpu::NATIVE_BACKENDS;

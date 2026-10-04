@@ -207,7 +207,11 @@ impl ColorMaskRenderer {
             mapped_at_creation: false,
         });
 
-        Self { pipeline, bind_group_layout, uniform }
+        Self {
+            pipeline,
+            bind_group_layout,
+            uniform,
+        }
     }
 
     /// 跑一趟常量色叠加：`source` -> `target`。
@@ -302,7 +306,8 @@ mod tests {
     #[test]
     fn 着色器在可移植子集里() {
         // 与其它着色器同一道闸：禁词一个都不许出现。
-        let code = crate::render::wgsl_subset::check_portable_subset("color_mask.wgsl", COLOR_MASK_WGSL);
+        let code =
+            crate::render::wgsl_subset::check_portable_subset("color_mask.wgsl", COLOR_MASK_WGSL);
         assert!(code.contains("fs_color_mask"), "片元入口不见了");
         assert!(code.contains("vs_fullscreen"), "顶点入口不见了");
         // **不许有分支**：这条管线靠"强度 0 = 恒等"代替分支。

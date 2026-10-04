@@ -10,7 +10,10 @@ use std::path::Path;
 use dhampir_core::metric::compare_rgba8;
 use dhampir_core::readback::Rgba8Image;
 
-fn load(dir: &str, frame: i64) -> Result<dhampir_core::readback::Rgba8Image, Box<dyn std::error::Error>> {
+fn load(
+    dir: &str,
+    frame: i64,
+) -> Result<dhampir_core::readback::Rgba8Image, Box<dyn std::error::Error>> {
     let path = Path::new(dir).join(format!("frame-{frame:04}.png"));
     let bytes = std::fs::read(&path)?;
     Rgba8Image::decode_png(&bytes).map_err(|e| format!("{} 解码失败：{e}", path.display()).into())
@@ -18,10 +21,17 @@ fn load(dir: &str, frame: i64) -> Result<dhampir_core::readback::Rgba8Image, Box
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let left = args.first().ok_or("用法：compare_project <dir-a> <dir-b> [帧号...]")?;
-    let right = args.get(1).ok_or("用法：compare_project <dir-a> <dir-b> [帧号...]")?;
+    let left = args
+        .first()
+        .ok_or("用法：compare_project <dir-a> <dir-b> [帧号...]")?;
+    let right = args
+        .get(1)
+        .ok_or("用法：compare_project <dir-a> <dir-b> [帧号...]")?;
     let frames: Vec<i64> = if args.len() > 2 {
-        args[2..].iter().filter_map(|text| text.parse().ok()).collect()
+        args[2..]
+            .iter()
+            .filter_map(|text| text.parse().ok())
+            .collect()
     } else {
         vec![0, 15, 30, 45, 75]
     };

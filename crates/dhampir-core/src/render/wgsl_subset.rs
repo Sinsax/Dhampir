@@ -119,7 +119,8 @@ mod tests {
         // 悄悄失效（比如词表里写错了字），而"检查通过"照旧打印。
         for (token, _) in FORBIDDEN {
             let code = format!("fn f() {{ let x = {token} 0.0; }}\n");
-            let panicked = std::panic::catch_unwind(|| check_portable_subset("反例", &code)).is_err();
+            let panicked =
+                std::panic::catch_unwind(|| check_portable_subset("反例", &code)).is_err();
             assert!(panicked, "禁词 {token} 没有让检查变红");
         }
     }

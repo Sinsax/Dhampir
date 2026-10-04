@@ -45,7 +45,9 @@ use dhampir_core::timeline::layer::{AssetTimebases, TimelineV2};
 use dhampir_core::timeline::schema::{Frame, TimebaseDto};
 use dhampir_core::timeline::subtitle::parse_srt;
 use dhampir_worker::pipeline::{AudioMode, FramePng, RenderPlan, SourceTable, render_frames_png};
-use dhampir_worker::text_raster::{TextBitmap, TextRasterKey, bitmap_size, rasterize_line, shadow_key};
+use dhampir_worker::text_raster::{
+    TextBitmap, TextRasterKey, bitmap_size, rasterize_line, shadow_key,
+};
 
 /// 渲染目标与文档坐标系（工程的 render_hints）。两者一致是默认路径。
 const TARGET: (u32, u32) = (640, 360);
@@ -420,7 +422,8 @@ fn 阴影位图真的被模糊了() {
     let font = font_file();
     let key = text_key(&font, 40, SUBTITLE_TEXT);
     // 同一行字的两张影子：一张硬（blur = 0）、一张糊（blur = 12）。
-    let hard = rasterize_line(&shadow_key(&key, [0, 0, 0, 255], 0, 0, 8)).expect("硬阴影要画得出来");
+    let hard =
+        rasterize_line(&shadow_key(&key, [0, 0, 0, 255], 0, 0, 8)).expect("硬阴影要画得出来");
     let blurred =
         rasterize_line(&shadow_key(&key, [0, 0, 0, 255], 12, 0, 8)).expect("模糊阴影要画得出来");
 
@@ -523,12 +526,18 @@ fn 不画阴影时像素逐字节不变() {
 
     // 而且**不该多起一次栅格化**：阴影那张位图根本不存在。
     assert_eq!(
-        (legacy.png.overlay.cache_hits, legacy.png.overlay.cache_misses),
+        (
+            legacy.png.overlay.cache_hits,
+            legacy.png.overlay.cache_misses
+        ),
         (0, 1),
         "一行字只该有一次未命中 —— 多出来的那次就是为阴影起的 ffmpeg"
     );
     assert_eq!(
-        (zeroed.png.overlay.cache_hits, zeroed.png.overlay.cache_misses),
+        (
+            zeroed.png.overlay.cache_hits,
+            zeroed.png.overlay.cache_misses
+        ),
         (0, 1),
         "显式写零也走同一条老路"
     );

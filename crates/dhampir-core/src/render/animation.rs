@@ -30,7 +30,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::animation::{Animation, AnimError, AnimFormat};
+use crate::animation::{AnimError, AnimFormat, Animation};
 use crate::wgpu;
 
 /// 一张动图上传后的账目与句柄。
@@ -109,14 +109,16 @@ impl AnimationTextures {
     /// 替换而不是"忽略第二次"：宿主在编辑里换了素材文件时，重新 load 必须生效 ——
     /// 留着旧帧的表现是"换了贴纸但画面没变"。
     pub fn upload(&mut self, asset_id: &str, animation: &Animation) -> Result<(), AnimError> {
-        let frame_bytes =
-            (animation.width as u64) * (animation.height as u64) * 4;
+        let frame_bytes = (animation.width as u64) * (animation.height as u64) * 4;
         let incoming = frame_bytes * animation.frame_count() as u64;
         // 先在**不碰 GPU** 的前提下查账：超了就直接拒绝，一张纹理都不建。
         let replaced = self.entries.get(asset_id).map(Entry::bytes).unwrap_or(0);
         let after = self.memory_bytes() - replaced + incoming;
         if after > self.budget_bytes {
-            return Err(AnimError::OverBudget { bytes: after, limit: self.budget_bytes });
+            return Err(AnimError::OverBudget {
+                bytes: after,
+                limit: self.budget_bytes,
+            });
         }
         if animation.frames.is_empty() || animation.width == 0 || animation.height == 0 {
             return Err(AnimError::BadData("动图没有可上传的帧".to_string()));
@@ -250,7 +252,9 @@ impl AnimationTextures {
 
     /// 逐帧延迟表（契约里 `frame_delays_ms` 的真值）。宿主用它写回资产表。
     pub fn delays_ms(&self, asset_id: &str) -> Option<&[u32]> {
-        self.entries.get(asset_id).map(|entry| entry.delays_ms.as_slice())
+        self.entries
+            .get(asset_id)
+            .map(|entry| entry.delays_ms.as_slice())
     }
 
     pub fn frame_count(&self, asset_id: &str) -> Option<usize> {

@@ -39,7 +39,7 @@
 
 use serde_json::{Value, json};
 
-use crate::readback::{self, PngError, Rgba8Image, ReadbackError};
+use crate::readback::{self, PngError, ReadbackError, Rgba8Image};
 use crate::render::scene::{
     BYTE_TOLERANCE, SCENE_TARGET_FORMAT, SCENE_TARGET_SIZE, SamplePoint, SampleVerdict,
     SceneRenderer, SceneSpec, expected_bytes, judge_sample,
@@ -483,7 +483,10 @@ pub fn report_text(run: &SceneRun) -> String {
             if frame.repeat_identical() {
                 "逐字节一致".to_string()
             } else {
-                format!("不一致：{:016x} vs {:016x}", frame.digest, frame.repeat_digest)
+                format!(
+                    "不一致：{:016x} vs {:016x}",
+                    frame.digest, frame.repeat_digest
+                )
             }
         ));
         for reading in &frame.points {
@@ -685,8 +688,8 @@ pub fn leg_json(
 /// 别的地方、留下半份文件。native 侧把这句话变成 `Result<(), String>`，
 /// 浏览器侧变成抛给页面的异常。
 pub fn record_text(value: &Value) -> Result<String, String> {
-    let mut text = serde_json::to_string_pretty(value)
-        .map_err(|e| format!("记录序列化失败：{e}"))?;
+    let mut text =
+        serde_json::to_string_pretty(value).map_err(|e| format!("记录序列化失败：{e}"))?;
     text.push('\n');
     Ok(text)
 }
@@ -896,8 +899,14 @@ mod tests {
 
         for dirty in [
             Counts { failed: 1, ..clean },
-            Counts { out_of_range: 1, ..clean },
-            Counts { unjudged: 1, ..clean },
+            Counts {
+                out_of_range: 1,
+                ..clean
+            },
+            Counts {
+                unjudged: 1,
+                ..clean
+            },
         ] {
             assert!(!dirty.clean(), "{dirty:?} 不该算干净");
         }
@@ -1207,29 +1216,35 @@ mod tests {
                 "target_size",
             ]
         );
-        assert_eq!(keys(&frame_json(&run.frames[0])), [
-            "frame",
-            "pixel_digest",
-            "png",
-            "png_bytes",
-            "png_digest",
-            "points",
-            "repeat_identical",
-            "repeat_pixel_digest",
-            "scene",
-        ]);
-        assert_eq!(keys(&point_json(&run.frames[0].points[0])), [
-            "detail",
-            "distance",
-            "expected",
-            "label",
-            "measured",
-            "passed",
-            "purpose",
-            "tolerance",
-            "x",
-            "y",
-        ]);
+        assert_eq!(
+            keys(&frame_json(&run.frames[0])),
+            [
+                "frame",
+                "pixel_digest",
+                "png",
+                "png_bytes",
+                "png_digest",
+                "points",
+                "repeat_identical",
+                "repeat_pixel_digest",
+                "scene",
+            ]
+        );
+        assert_eq!(
+            keys(&point_json(&run.frames[0].points[0])),
+            [
+                "detail",
+                "distance",
+                "expected",
+                "label",
+                "measured",
+                "passed",
+                "purpose",
+                "tolerance",
+                "x",
+                "y",
+            ]
+        );
         assert_eq!(
             keys(&leg["backends"][0]),
             [
@@ -1245,22 +1260,22 @@ mod tests {
             keys(&leg["artifacts"]),
             ["adapter", "frame_count", "frames_dir", "readings"]
         );
-        assert_eq!(keys(&leg["scenes"][0]), [
-            "description",
-            "fragment_entries",
-            "name",
-            "passes",
-            "samples",
-            "size",
-            "uses_frame",
-        ]);
-        assert_eq!(keys(&leg["scenes"][0]["samples"][0]), [
-            "expected",
-            "label",
-            "purpose",
-            "x",
-            "y",
-        ]);
+        assert_eq!(
+            keys(&leg["scenes"][0]),
+            [
+                "description",
+                "fragment_entries",
+                "name",
+                "passes",
+                "samples",
+                "size",
+                "uses_frame",
+            ]
+        );
+        assert_eq!(
+            keys(&leg["scenes"][0]["samples"][0]),
+            ["expected", "label", "purpose", "x", "y",]
+        );
 
         // 契约版本写死在记录里：M2 的浏览器腿沿用同一个值（见 `CORPUS_TABLE_MILESTONE`）。
         assert_eq!(leg["schema"], CORPUS_RECORD_SCHEMA);
@@ -1276,7 +1291,10 @@ mod tests {
     #[test]
     fn record_text_bytes_are_pinned() {
         let text = record_text(&json!({"b": [1, 2], "a": {"n": null}})).unwrap();
-        assert_eq!(text, "{\n  \"a\": {\n    \"n\": null\n  },\n  \"b\": [\n    1,\n    2\n  ]\n}\n");
+        assert_eq!(
+            text,
+            "{\n  \"a\": {\n    \"n\": null\n  },\n  \"b\": [\n    1,\n    2\n  ]\n}\n"
+        );
         // 结尾**只有一个**换行：多一个，M1 归档的 diff 会多出一行空行。
         assert!(text.ends_with("}\n"));
         assert!(!text.ends_with("\n\n"));
@@ -1289,8 +1307,14 @@ mod tests {
     #[test]
     fn a_missing_clock_is_null_not_1970() {
         assert_eq!(epoch_seconds(0), Value::Null);
-        assert_eq!(epoch_seconds(1_790_000_000_123), Value::from(1_790_000_000_u64));
+        assert_eq!(
+            epoch_seconds(1_790_000_000_123),
+            Value::from(1_790_000_000_u64)
+        );
         // 毫秒被**截断**而不是四舍五入：秒那一栏说的是"这一秒"，不是"最接近的一秒"。
-        assert_eq!(epoch_seconds(1_790_000_000_999), Value::from(1_790_000_000_u64));
+        assert_eq!(
+            epoch_seconds(1_790_000_000_999),
+            Value::from(1_790_000_000_u64)
+        );
     }
 }

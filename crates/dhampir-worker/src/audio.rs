@@ -77,8 +77,7 @@ pub fn sample_at_frame(
             timebase.num, timebase.den
         ));
     }
-    let numerator =
-        i128::from(frame) * i128::from(timebase.den) * i128::from(sample_rate);
+    let numerator = i128::from(frame) * i128::from(timebase.den) * i128::from(sample_rate);
     let denominator = i128::from(timebase.num);
     let scaled = numerator.div_euclid(denominator);
     Ok(scaled.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64)
@@ -297,22 +296,17 @@ pub fn plan_audio(
             };
             // 素材自己的时间基（工程文件的 assets 表里那条）。
             // 缺了就退回时间线的时间基 —— 那是"素材帧率与时间线一致"的旧语义。
-            let asset_timebase = asset_timebases
-                .get(&source.asset_id)
-                .unwrap_or(timebase);
+            let asset_timebase = asset_timebases.get(&source.asset_id).unwrap_or(timebase);
 
             // 「同源求值」的落点：起点 = source_in 的**时间** + 片段内偏移的**时间**。
             // 视频那边取的是同一个时间点、再量化到素材的帧；音频不量化。
-            let source_start_sample = sample_at_frame(
-                source.source_in,
-                asset_timebase,
-                AUDIO_SAMPLE_RATE,
-            )?
-            .saturating_add(sample_at_frame(
-                low.saturating_sub(layer.start),
-                timebase,
-                AUDIO_SAMPLE_RATE,
-            )?);
+            let source_start_sample =
+                sample_at_frame(source.source_in, asset_timebase, AUDIO_SAMPLE_RATE)?
+                    .saturating_add(sample_at_frame(
+                        low.saturating_sub(layer.start),
+                        timebase,
+                        AUDIO_SAMPLE_RATE,
+                    )?);
             let output_samples = sample_at_frame(high, timebase, AUDIO_SAMPLE_RATE)?
                 .saturating_sub(sample_at_frame(low, timebase, AUDIO_SAMPLE_RATE)?);
             let output_start_sample = sample_at_frame(low, timebase, AUDIO_SAMPLE_RATE)?
@@ -337,8 +331,9 @@ pub fn plan_audio(
     }
 
     // 确定性：先按时间线位置，再按轨/图层名。同一份工程跑两次必须逐字节一样。
-    plan.segments
-        .sort_by(|a, b| (&a.timeline_start, &a.track, &a.layer).cmp(&(&b.timeline_start, &b.track, &b.layer)));
+    plan.segments.sort_by(|a, b| {
+        (&a.timeline_start, &a.track, &a.layer).cmp(&(&b.timeline_start, &b.track, &b.layer))
+    });
 
     // 同区段重叠 = 要混音。
     //
@@ -480,13 +475,15 @@ mod tests {
     fn 非整数帧率上也是精确的而不是浮点攒出来的() {
         // 30000/1001（29.97）：第 30000 帧应当是整整 1001 秒 * 48000。
         let exact = 1001i64 * 48_000;
-        assert_eq!(sample_at_frame(30_000, &tb(30_000, 1001), 48_000).unwrap(), exact);
+        assert_eq!(
+            sample_at_frame(30_000, &tb(30_000, 1001), 48_000).unwrap(),
+            exact
+        );
 
         // 现在把浮点抓出来。**比的是同一个取整方向**（都向下取整），
         // 否则量到的是"round 与 floor 的差"，那是另一件事（见 source_frame_at 的注释）。
-        let floor_via_float = |frame: i64| -> i64 {
-            (frame as f64 * 1001.0 / 30_000.0 * 48_000.0).floor() as i64
-        };
+        let floor_via_float =
+            |frame: i64| -> i64 { (frame as f64 * 1001.0 / 30_000.0 * 48_000.0).floor() as i64 };
         let precise = sample_at_frame(15, &tb(30_000, 1001), 48_000).unwrap();
         let noisy = floor_via_float(15);
         // 实测：29.97 下**第 15 帧（半秒）**浮点就已经少了一个采样点。
@@ -501,7 +498,10 @@ mod tests {
     #[test]
     fn 帧区间换算与逐帧累加一致() {
         // 30fps 下 [0, 89] 共 90 帧 = 3 秒 = 144000 个采样点。
-        assert_eq!(samples_in_range(0, 89, &tb(30, 1), 48_000).unwrap(), 144_000);
+        assert_eq!(
+            samples_in_range(0, 89, &tb(30, 1), 48_000).unwrap(),
+            144_000
+        );
         // 非整数帧率：区间换算与"每帧各自取整再相加"**不该**一致 ——
         // 后者是那个会攒出偏移的做法。
         let tb2997 = tb(30_000, 1001);
@@ -514,7 +514,10 @@ mod tests {
         }
         assert_eq!(range, per_frame, "区间换算必须与逐帧累加一致（都不丢余数）");
         let naive = 90 * (48_000 * 1001 / 30_000); // 每帧固定取整 = 1601
-        assert_ne!(range, naive, "每帧固定取整会丢余数 —— 90 帧就少了 54 个采样点");
+        assert_ne!(
+            range, naive,
+            "每帧固定取整会丢余数 —— 90 帧就少了 54 个采样点"
+        );
     }
 
     #[test]
@@ -629,7 +632,10 @@ mod tests {
             29,
         )
         .unwrap();
-        assert_eq!(plan.segments[0].output_samples, 48_000, "一秒就是 48000 个采样点");
+        assert_eq!(
+            plan.segments[0].output_samples, 48_000,
+            "一秒就是 48000 个采样点"
+        );
         // source_in = 60（素材的第 1 秒）-> 仍是 48000，因为素材自己的时间基是 60fps。
         let timeline = one_clip(0, 30, 60, "fast", tb(30, 1));
         let plan = plan_audio(
@@ -649,23 +655,15 @@ mod tests {
         // 与视频 source_frame_at 取到的那一帧的秒，差不超过**一个素材帧**。
         let timeline_tb = tb(30, 1);
         for asset in [tb(30, 1), tb(60, 1), tb(30_000, 1001)] {
-            let timeline = one_clip(0, 60, 12, "x", timeline_tb.clone());
+            let timeline = one_clip(0, 60, 12, "x", timeline_tb);
             let mut timebases = AssetTimebases::new();
-            timebases.insert("x", asset.clone());
-            let plan = plan_audio(
-                &timeline,
-                &sources(&[("x", "x.mp4")]),
-                &timebases,
-                0,
-                59,
-            )
-            .unwrap();
+            timebases.insert("x", asset);
+            let plan =
+                plan_audio(&timeline, &sources(&[("x", "x.mp4")]), &timebases, 0, 59).unwrap();
             let audio_start = plan.segments[0].source_start_sample;
             let layer = &timeline.tracks[0].layers[0];
-            let video_frame =
-                video_source_frame_at(layer, 0, &timeline_tb, &asset).unwrap();
-            let video_sample =
-                sample_at_frame(video_frame, &asset, AUDIO_SAMPLE_RATE).unwrap();
+            let video_frame = video_source_frame_at(layer, 0, &timeline_tb, &asset).unwrap();
+            let video_sample = sample_at_frame(video_frame, &asset, AUDIO_SAMPLE_RATE).unwrap();
             let one_asset_frame = sample_at_frame(1, &asset, AUDIO_SAMPLE_RATE).unwrap();
             assert!(
                 (audio_start - video_sample).abs() <= one_asset_frame,
@@ -705,14 +703,7 @@ mod tests {
     #[test]
     fn 音轨缺素材要报出来而不是静音() {
         let timeline = one_clip(0, 30, 0, "ghost", tb(30, 1));
-        let plan = plan_audio(
-            &timeline,
-            &sources(&[]),
-            &AssetTimebases::new(),
-            0,
-            29,
-        )
-        .unwrap();
+        let plan = plan_audio(&timeline, &sources(&[]), &AssetTimebases::new(), 0, 29).unwrap();
         assert!(plan.is_silent());
         assert_eq!(plan.issues.len(), 1);
         assert_eq!(plan.issues[0].code, "audio_source_missing");
@@ -764,7 +755,12 @@ mod tests {
             plan.issues.iter().map(|i| &i.code).collect::<Vec<_>>()
         );
         // 但**要记下来**：加法会削顶，削顶要看得见才知道该不该调增益。
-        assert_eq!(plan.overlaps.len(), 1, "重叠要记一笔，实得 {:?}", plan.overlaps);
+        assert_eq!(
+            plan.overlaps.len(),
+            1,
+            "重叠要记一笔，实得 {:?}",
+            plan.overlaps
+        );
         assert_eq!(plan.overlaps[0].at, 30);
         // 两段都还在计划里（不许静默丢掉任何一段）。
         assert_eq!(plan.segments.len(), 2);
@@ -790,7 +786,11 @@ mod tests {
             59,
         )
         .unwrap();
-        assert!(plan.overlaps.is_empty(), "首尾相接不是重叠：{:?}", plan.overlaps);
+        assert!(
+            plan.overlaps.is_empty(),
+            "首尾相接不是重叠：{:?}",
+            plan.overlaps
+        );
         assert_eq!(plan.segments.len(), 2);
     }
 

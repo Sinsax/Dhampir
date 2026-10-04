@@ -161,30 +161,43 @@ fn main() {
     }
 
     // --- B. 新建 + write_texture + 只 poll ---
-    bench("B 新建+write_texture+poll（冲不掉 staging）", frames, || {
-        let texture = device.create_texture(&tex_desc("b"));
-        queue.write_texture(dst(&texture), &bytes, layout, extent);
-        wait(&device);
-    });
+    bench(
+        "B 新建+write_texture+poll（冲不掉 staging）",
+        frames,
+        || {
+            let texture = device.create_texture(&tex_desc("b"));
+            queue.write_texture(dst(&texture), &bytes, layout, extent);
+            wait(&device);
+        },
+    );
 
     // --- C. 新建 + write_texture + submit + poll ---
-    bench("C 新建+write_texture+submit+poll（**冲得掉**）", frames, || {
-        let texture = device.create_texture(&tex_desc("c"));
-        queue.write_texture(dst(&texture), &bytes, layout, extent);
-        let encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        queue.submit([encoder.finish()]);
-        wait(&device);
-    });
-
-    // --- E. **复用**一张纹理 + write_texture + submit + poll ---
-    {
-        let texture = device.create_texture(&tex_desc("e"));
-        bench("E **复用**纹理+write_texture+submit+poll", frames, || {
+    bench(
+        "C 新建+write_texture+submit+poll（**冲得掉**）",
+        frames,
+        || {
+            let texture = device.create_texture(&tex_desc("c"));
             queue.write_texture(dst(&texture), &bytes, layout, extent);
             let encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
             queue.submit([encoder.finish()]);
             wait(&device);
-        });
+        },
+    );
+
+    // --- E. **复用**一张纹理 + write_texture + submit + poll ---
+    {
+        let texture = device.create_texture(&tex_desc("e"));
+        bench(
+            "E **复用**纹理+write_texture+submit+poll",
+            frames,
+            || {
+                queue.write_texture(dst(&texture), &bytes, layout, extent);
+                let encoder =
+                    device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+                queue.submit([encoder.finish()]);
+                wait(&device);
+            },
+        );
     }
 
     // --- D. 自己管 staging + copy_buffer_to_texture + submit + poll ---
@@ -257,16 +270,43 @@ fn main() {
     };
     // 每个变体带**每 texel 字节数** —— `Rgba16Float` 是 8，别的都是 4。
     // 第一版把它的 `bytes_per_row` 也写成 4 字节，于是校验不过直接崩了。
-    let textures_bits: Vec<(&str, wgpu::TextureFormat, wgpu::Extent3d, u32, wgpu::TextureUsages)> = vec![
-        ("J Bgra8Unorm（同尺寸同字节）", wgpu::TextureFormat::Bgra8Unorm, extent, 4,
-         wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST),
-        ("K 加 RENDER_ATTACHMENT", wgpu::TextureFormat::Rgba8Unorm, extent, 4,
-         wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST
-             | wgpu::TextureUsages::RENDER_ATTACHMENT),
-        ("L Rgba16Float（字节x2, texel 同）", wgpu::TextureFormat::Rgba16Float, extent, 8,
-         wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST),
-        ("M 半尺寸（texel 1/4, 字节 1/4）", wgpu::TextureFormat::Rgba8Unorm, half_extent, 4,
-         wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST),
+    let textures_bits: Vec<(
+        &str,
+        wgpu::TextureFormat,
+        wgpu::Extent3d,
+        u32,
+        wgpu::TextureUsages,
+    )> = vec![
+        (
+            "J Bgra8Unorm（同尺寸同字节）",
+            wgpu::TextureFormat::Bgra8Unorm,
+            extent,
+            4,
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        ),
+        (
+            "K 加 RENDER_ATTACHMENT",
+            wgpu::TextureFormat::Rgba8Unorm,
+            extent,
+            4,
+            wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+        ),
+        (
+            "L Rgba16Float（字节x2, texel 同）",
+            wgpu::TextureFormat::Rgba16Float,
+            extent,
+            8,
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        ),
+        (
+            "M 半尺寸（texel 1/4, 字节 1/4）",
+            wgpu::TextureFormat::Rgba8Unorm,
+            half_extent,
+            4,
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        ),
     ];
     for (label, format, ext, texel_bytes, usage) in textures_bits {
         let data: Vec<u8> = vec![0x80; (ext.width * ext.height * texel_bytes) as usize];

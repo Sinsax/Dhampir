@@ -78,10 +78,9 @@ fn active_clip(track: &dhampir_timeline::schema::Track, frame: Frame) -> Option<
 
 /// 紧挨在这个片段前面的那个片段（结束时正好接上）。
 fn previous_clip<'a>(track: &'a dhampir_timeline::schema::Track, clip: &Clip) -> Option<&'a Clip> {
-    track
-        .clips
-        .iter()
-        .find(|other| other.id != clip.id && other.track_at.saturating_add(other.duration) == clip.track_at)
+    track.clips.iter().find(|other| {
+        other.id != clip.id && other.track_at.saturating_add(other.duration) == clip.track_at
+    })
 }
 
 /// 关键帧求值。**逻辑只有一份，在 `dhampir_timeline::curve` 里** —— 这里只是转发。
@@ -105,10 +104,7 @@ pub fn opacity_at(clip: &Clip, local_frame: Frame) -> f32 {
 
 /// 转场权重（**与 v1 共用**）。后一个片段在它开头的 duration 帧里，从 0 涨到 1。
 /// 第 0 帧是完全的前一个片段（权重 0），第 duration 帧起就完全是自己了。
-pub fn transition_weight_from(
-    transition_in: Option<&TransitionSpec>,
-    local_frame: Frame,
-) -> f32 {
+pub fn transition_weight_from(transition_in: Option<&TransitionSpec>, local_frame: Frame) -> f32 {
     match transition_in {
         Some(spec) if spec.duration > 0 && local_frame < spec.duration => {
             local_frame as f32 / spec.duration as f32
@@ -223,7 +219,8 @@ impl EvalContext<'_> {
                     local_frame,
                     self.timeline,
                     asset,
-                    self.assets.and_then(|table| table.frame_count(&source.asset_id)),
+                    self.assets
+                        .and_then(|table| table.frame_count(&source.asset_id)),
                     element.loop_source,
                 )
                 .unwrap_or(identity),
@@ -250,7 +247,10 @@ pub fn evaluate_v2_with_assets(
     frame: Frame,
     assets: Option<&AssetTimebases>,
 ) -> Composite {
-    let ctx = EvalContext { timeline: &timeline.timebase, assets };
+    let ctx = EvalContext {
+        timeline: &timeline.timebase,
+        assets,
+    };
     let mut layers = Vec::new();
 
     for track in &timeline.tracks {
@@ -437,8 +437,8 @@ pub fn end_frame_v2(timeline: &TimelineV2) -> Option<Frame> {
 mod tests {
     use super::*;
     use dhampir_timeline::schema::{
-        transition_kind, Easing, Keyframe, Project, SCHEMA_VERSION, TimebaseDto, Track, TrackKind,
-        TransitionSpec,
+        Easing, Keyframe, Project, SCHEMA_VERSION, TimebaseDto, Track, TrackKind, TransitionSpec,
+        transition_kind,
     };
 
     /// 缺省 target 的简写：讲不透明度曲线的用例别让 target 喧宾夺主。
@@ -523,7 +523,12 @@ mod tests {
         layer.effects = vec![Effect {
             kind: "flash".to_string(),
             params: BTreeMap::new(),
-            window: Window::Transient { attack: 1, hold: 2, release: 3, fall_to_zero: true },
+            window: Window::Transient {
+                attack: 1,
+                hold: 2,
+                release: 3,
+                fall_to_zero: true,
+            },
             opacity: 1.0,
         }];
         let timeline = one_layer_v2(layer);
@@ -544,7 +549,11 @@ mod tests {
         assert_eq!(strength_at(0), 0.0, "第 0 帧还在上升段起点");
         assert_eq!(strength_at(1), 1.0, "hold 段满值");
         assert_eq!(strength_at(3), 1.0, "回落段的起点仍是满值");
-        assert!(strength_at(4) < 1.0, "回落段该降下来，实得 {}", strength_at(4));
+        assert!(
+            strength_at(4) < 1.0,
+            "回落段该降下来，实得 {}",
+            strength_at(4)
+        );
         assert_eq!(strength_at(6), 0.0, "窗口走完之后必须归零");
         assert_eq!(strength_at(30), 0.0, "之后一直归零 —— 而图层本身还有内容");
 
@@ -580,7 +589,10 @@ mod tests {
         layer.effects = vec![Effect {
             kind: "flash".to_string(),
             params: BTreeMap::new(),
-            window: Window::Fade { fade_in: 4, fade_out: 4 },
+            window: Window::Fade {
+                fade_in: 4,
+                fade_out: 4,
+            },
             opacity: 0.5,
         }];
         let timeline = one_layer_v2(layer);
@@ -594,9 +606,17 @@ mod tests {
                 .unwrap()
         };
         // 淡入一半（第 2 帧）：包络 0.5 × 自身 0.5 = 0.25。
-        assert!((strength_at(2) - 0.25).abs() < 1e-6, "实得 {}", strength_at(2));
+        assert!(
+            (strength_at(2) - 0.25).abs() < 1e-6,
+            "实得 {}",
+            strength_at(2)
+        );
         // 中段：包络 1 × 自身 0.5 = 0.5。
-        assert!((strength_at(30) - 0.5).abs() < 1e-6, "实得 {}", strength_at(30));
+        assert!(
+            (strength_at(30) - 0.5).abs() < 1e-6,
+            "实得 {}",
+            strength_at(30)
+        );
     }
 
     #[test]
@@ -613,7 +633,10 @@ mod tests {
             "sticker",
             0,
             30,
-            Some(SourceRef { asset_id: "anim.gif".to_string(), source_in: 0 }),
+            Some(SourceRef {
+                asset_id: "anim.gif".to_string(),
+                source_in: 0,
+            }),
         ));
 
         // 时间线 30fps，动图 12fps：走 1 秒（30 帧）应当走完 12 张。
@@ -655,7 +678,10 @@ mod tests {
             "sticker",
             0,
             30,
-            Some(SourceRef { asset_id: "anim.gif".to_string(), source_in: 5 }),
+            Some(SourceRef {
+                asset_id: "anim.gif".to_string(),
+                source_in: 5,
+            }),
         ));
 
         let composite = evaluate_v2_with_assets(&timeline, 10, None);
@@ -663,11 +689,19 @@ mod tests {
     }
 
     fn video(clips: Vec<Clip>) -> Track {
-        Track { id: "v".to_string(), kind: TrackKind::Video, clips }
+        Track {
+            id: "v".to_string(),
+            kind: TrackKind::Video,
+            clips,
+        }
     }
 
     fn project(tracks: Vec<Track>) -> Project {
-        Project { schema: SCHEMA_VERSION, timebase: TimebaseDto { num: 60, den: 1 }, tracks }
+        Project {
+            schema: SCHEMA_VERSION,
+            timebase: TimebaseDto { num: 60, den: 1 },
+            tracks,
+        }
     }
 
     #[test]
@@ -693,7 +727,11 @@ mod tests {
     fn 音频轨不参与合成() {
         let p = project(vec![
             video(vec![clip("a", 0, 10)]),
-            Track { id: "a1".to_string(), kind: TrackKind::Audio, clips: vec![clip("audio", 0, 10)] },
+            Track {
+                id: "a1".to_string(),
+                kind: TrackKind::Audio,
+                clips: vec![clip("audio", 0, 10)],
+            },
         ]);
         let composite = evaluate(&p, 3);
         assert_eq!(composite.layers.len(), 1, "v1 只合成视频轨");
@@ -703,7 +741,10 @@ mod tests {
 
     #[test]
     fn 多轨从下往上() {
-        let p = project(vec![video(vec![clip("bottom", 0, 10)]), video(vec![clip("top", 0, 10)])]);
+        let p = project(vec![
+            video(vec![clip("bottom", 0, 10)]),
+            video(vec![clip("top", 0, 10)]),
+        ]);
         let composite = evaluate(&p, 0);
         assert_eq!(composite.layers.len(), 2);
         assert_eq!(composite.layers[0].clip_id, "bottom", "tracks[0] 在最下面");
@@ -715,8 +756,18 @@ mod tests {
         let mut c = clip("a", 0, 11);
         c.opacity = 0.25;
         c.keyframes = vec![
-            Keyframe { frame: 0, target: kf_target(), value: 0.0, easing: Easing::Linear },
-            Keyframe { frame: 10, target: kf_target(), value: 1.0, easing: Easing::Linear },
+            Keyframe {
+                frame: 0,
+                target: kf_target(),
+                value: 0.0,
+                easing: Easing::Linear,
+            },
+            Keyframe {
+                frame: 10,
+                target: kf_target(),
+                value: 1.0,
+                easing: Easing::Linear,
+            },
         ];
         assert_eq!(opacity_at(&c, 0), 0.0);
         assert_eq!(opacity_at(&c, 10), 1.0);
@@ -729,8 +780,18 @@ mod tests {
     fn 关键帧不需要有序() {
         let mut c = clip("a", 0, 11);
         c.keyframes = vec![
-            Keyframe { frame: 10, target: kf_target(), value: 1.0, easing: Easing::Linear },
-            Keyframe { frame: 0, target: kf_target(), value: 0.0, easing: Easing::Linear },
+            Keyframe {
+                frame: 10,
+                target: kf_target(),
+                value: 1.0,
+                easing: Easing::Linear,
+            },
+            Keyframe {
+                frame: 0,
+                target: kf_target(),
+                value: 0.0,
+                easing: Easing::Linear,
+            },
         ];
         assert!((opacity_at(&c, 5) - 0.5).abs() < 1e-6);
     }
@@ -739,8 +800,18 @@ mod tests {
     fn 缓动在后一个关键帧上生效() {
         let mut c = clip("a", 0, 11);
         c.keyframes = vec![
-            Keyframe { frame: 0, target: kf_target(), value: 0.0, easing: Easing::Linear },
-            Keyframe { frame: 10, target: kf_target(), value: 1.0, easing: Easing::EaseIn },
+            Keyframe {
+                frame: 0,
+                target: kf_target(),
+                value: 0.0,
+                easing: Easing::Linear,
+            },
+            Keyframe {
+                frame: 10,
+                target: kf_target(),
+                value: 1.0,
+                easing: Easing::EaseIn,
+            },
         ];
         assert!((opacity_at(&c, 5) - 0.25).abs() < 1e-6, "ease_in 是 t*t");
     }
@@ -749,8 +820,18 @@ mod tests {
     fn 同一帧上的两个关键帧不除零() {
         let mut c = clip("a", 0, 11);
         c.keyframes = vec![
-            Keyframe { frame: 5, target: kf_target(), value: 0.0, easing: Easing::Linear },
-            Keyframe { frame: 5, target: kf_target(), value: 1.0, easing: Easing::Linear },
+            Keyframe {
+                frame: 5,
+                target: kf_target(),
+                value: 0.0,
+                easing: Easing::Linear,
+            },
+            Keyframe {
+                frame: 5,
+                target: kf_target(),
+                value: 1.0,
+                easing: Easing::Linear,
+            },
         ];
         let value = opacity_at(&c, 5);
         assert!(value.is_finite(), "不能是 NaN/Inf：{value}");
@@ -760,7 +841,10 @@ mod tests {
     fn 转场把前一片段冻在末帧并各占一半() {
         let a = clip("a", 0, 10);
         let mut b = clip("b", 10, 10);
-        b.transition_in = Some(TransitionSpec { kind: transition_kind::CROSS_DISSOLVE.to_string(), duration: 4 });
+        b.transition_in = Some(TransitionSpec {
+            kind: transition_kind::CROSS_DISSOLVE.to_string(),
+            duration: 4,
+        });
         let p = project(vec![video(vec![a, b])]);
 
         let composite = evaluate(&p, 10);
@@ -773,8 +857,14 @@ mod tests {
         assert!((composite.layers[1].opacity - 0.0).abs() < 1e-6);
 
         let composite = evaluate(&p, 12);
-        assert!((composite.layers[0].opacity - 0.5).abs() < 1e-6, "淡出那一半");
-        assert!((composite.layers[1].opacity - 0.5).abs() < 1e-6, "淡入那一半");
+        assert!(
+            (composite.layers[0].opacity - 0.5).abs() < 1e-6,
+            "淡出那一半"
+        );
+        assert!(
+            (composite.layers[1].opacity - 0.5).abs() < 1e-6,
+            "淡入那一半"
+        );
 
         let composite = evaluate(&p, 14);
         assert_eq!(composite.layers.len(), 1, "转场走完就不该再有冻帧层");
@@ -784,26 +874,49 @@ mod tests {
     #[test]
     fn 没有前驱时转场只把自己淡入() {
         let mut a = clip("a", 0, 10);
-        a.transition_in = Some(TransitionSpec { kind: transition_kind::CROSS_DISSOLVE.to_string(), duration: 4 });
+        a.transition_in = Some(TransitionSpec {
+            kind: transition_kind::CROSS_DISSOLVE.to_string(),
+            duration: 4,
+        });
         let p = project(vec![video(vec![a])]);
         let composite = evaluate(&p, 0);
         assert_eq!(composite.layers.len(), 1, "没有前驱就不该造层");
-        assert!((composite.layers[0].opacity - 0.0).abs() < 1e-6, "从黑里淡进来");
+        assert!(
+            (composite.layers[0].opacity - 0.0).abs() < 1e-6,
+            "从黑里淡进来"
+        );
     }
 
     #[test]
     fn 转场权重与关键帧相乘() {
         let mut b = clip("b", 10, 10);
         b.keyframes = vec![
-            Keyframe { frame: 0, target: kf_target(), value: 0.0, easing: Easing::Linear },
-            Keyframe { frame: 9, target: kf_target(), value: 1.0, easing: Easing::Linear },
+            Keyframe {
+                frame: 0,
+                target: kf_target(),
+                value: 0.0,
+                easing: Easing::Linear,
+            },
+            Keyframe {
+                frame: 9,
+                target: kf_target(),
+                value: 1.0,
+                easing: Easing::Linear,
+            },
         ];
-        b.transition_in = Some(TransitionSpec { kind: transition_kind::CROSS_DISSOLVE.to_string(), duration: 2 });
+        b.transition_in = Some(TransitionSpec {
+            kind: transition_kind::CROSS_DISSOLVE.to_string(),
+            duration: 2,
+        });
         let p = project(vec![video(vec![clip("a", 0, 10), b])]);
         let composite = evaluate(&p, 11);
         let top = composite.layers.iter().find(|l| l.clip_id == "b").unwrap();
         let expected = (1.0_f32 / 9.0) * 0.5;
-        assert!((top.opacity - expected).abs() < 1e-6, "得到 {}", top.opacity);
+        assert!(
+            (top.opacity - expected).abs() < 1e-6,
+            "得到 {}",
+            top.opacity
+        );
     }
 
     #[test]
@@ -827,7 +940,12 @@ mod tests {
                     source_in: 0,
                     track_at: 0,
                     duration: 10,
-                    transform: Transform { x: 0.0, y: 0.0, scale: 1.0, rotation_deg: 0.0 },
+                    transform: Transform {
+                        x: 0.0,
+                        y: 0.0,
+                        scale: 1.0,
+                        rotation_deg: 0.0,
+                    },
                     opacity: 1.0,
                     effects: Vec::new(),
                     keyframes: Vec::new(),
@@ -844,19 +962,28 @@ mod tests {
     }
 
     fn v1_fixture() -> Project {
-        use dhampir_timeline::schema::{transition_kind, Clip, Project, TimebaseDto, Track, TrackKind, Transform, TransitionSpec};
-        let clip = |id: &str, at: Frame, duration: Frame, transition: Option<TransitionSpec>| Clip {
-            id: id.to_string(),
-            source: format!("{id}.mp4"),
-            source_in: 0,
-            track_at: at,
-            duration,
-            transform: Transform { x: 0.0, y: 0.0, scale: 1.0, rotation_deg: 30.0 },
-            opacity: 0.5,
-            effects: Vec::new(),
-            keyframes: Vec::new(),
-            transition_in: transition,
+        use dhampir_timeline::schema::{
+            Clip, Project, TimebaseDto, Track, TrackKind, Transform, TransitionSpec,
+            transition_kind,
         };
+        let clip =
+            |id: &str, at: Frame, duration: Frame, transition: Option<TransitionSpec>| Clip {
+                id: id.to_string(),
+                source: format!("{id}.mp4"),
+                source_in: 0,
+                track_at: at,
+                duration,
+                transform: Transform {
+                    x: 0.0,
+                    y: 0.0,
+                    scale: 1.0,
+                    rotation_deg: 30.0,
+                },
+                opacity: 0.5,
+                effects: Vec::new(),
+                keyframes: Vec::new(),
+                transition_in: transition,
+            };
         Project {
             schema: 1,
             timebase: TimebaseDto { num: 30, den: 1 },
@@ -869,7 +996,10 @@ mod tests {
                         "b",
                         10,
                         10,
-                        Some(TransitionSpec { kind: transition_kind::CROSS_DISSOLVE.to_string(), duration: 4 }),
+                        Some(TransitionSpec {
+                            kind: transition_kind::CROSS_DISSOLVE.to_string(),
+                            duration: 4,
+                        }),
                     ),
                 ],
             }],
@@ -908,7 +1038,12 @@ mod tests {
             id: "cam".to_string(),
             start: 0,
             end: 100,
-            transform: TransformV2 { x: 0.0, y: 0.0, scale: 1.0, rotation: 0.0 },
+            transform: TransformV2 {
+                x: 0.0,
+                y: 0.0,
+                scale: 1.0,
+                rotation: 0.0,
+            },
             opacity: 1.0,
             blend: BlendMode::Normal,
             enabled: true,
@@ -919,18 +1054,44 @@ mod tests {
             effects: Vec::new(),
             transition_in: None::<TransitionSpec>,
             keyframes: vec![
-                Keyframe { frame: 0, target: "scale".to_string(), value: 1.0, easing: Easing::Linear },
-                Keyframe { frame: 50, target: "scale".to_string(), value: 2.0, easing: Easing::Linear },
-                Keyframe { frame: 0, target: "x".to_string(), value: 0.0, easing: Easing::Linear },
-                Keyframe { frame: 50, target: "x".to_string(), value: 100.0, easing: Easing::Linear },
+                Keyframe {
+                    frame: 0,
+                    target: "scale".to_string(),
+                    value: 1.0,
+                    easing: Easing::Linear,
+                },
+                Keyframe {
+                    frame: 50,
+                    target: "scale".to_string(),
+                    value: 2.0,
+                    easing: Easing::Linear,
+                },
+                Keyframe {
+                    frame: 0,
+                    target: "x".to_string(),
+                    value: 0.0,
+                    easing: Easing::Linear,
+                },
+                Keyframe {
+                    frame: 50,
+                    target: "x".to_string(),
+                    value: 100.0,
+                    easing: Easing::Linear,
+                },
             ],
         };
         let timeline = one_layer_v2(layer);
 
         // 中点是各自曲线的中点 —— **两条曲线互不干扰**。
         let mid = evaluate_v2(&timeline, 25);
-        assert!((mid.layers[0].transform.scale - 1.5).abs() < 1e-5, "scale 应当在推近");
-        assert!((mid.layers[0].transform.x - 50.0).abs() < 1e-5, "x 应当平移了一半");
+        assert!(
+            (mid.layers[0].transform.scale - 1.5).abs() < 1e-5,
+            "scale 应当在推近"
+        );
+        assert!(
+            (mid.layers[0].transform.x - 50.0).abs() < 1e-5,
+            "x 应当平移了一半"
+        );
 
         // 没被任何键驱动的量保持静态值。
         assert_eq!(mid.layers[0].transform.y, 0.0);
@@ -951,7 +1112,12 @@ mod tests {
             id: "old".to_string(),
             start: 0,
             end: 100,
-            transform: TransformV2 { x: 42.0, y: 7.0, scale: 0.5, rotation: 30.0 },
+            transform: TransformV2 {
+                x: 42.0,
+                y: 7.0,
+                scale: 0.5,
+                rotation: 30.0,
+            },
             opacity: 0.8,
             blend: BlendMode::Normal,
             enabled: true,
@@ -962,15 +1128,28 @@ mod tests {
             effects: Vec::new(),
             transition_in: None::<TransitionSpec>,
             keyframes: vec![
-                Keyframe { frame: 0, target: kf_target(), value: 0.0, easing: Easing::Linear },
-                Keyframe { frame: 50, target: kf_target(), value: 1.0, easing: Easing::Linear },
+                Keyframe {
+                    frame: 0,
+                    target: kf_target(),
+                    value: 0.0,
+                    easing: Easing::Linear,
+                },
+                Keyframe {
+                    frame: 50,
+                    target: kf_target(),
+                    value: 1.0,
+                    easing: Easing::Linear,
+                },
             ],
         };
         let mid = evaluate_v2(&one_layer_v2(layer), 25);
         assert_eq!(mid.layers[0].transform.x, 42.0, "x 不该被 opacity 的键动");
         assert_eq!(mid.layers[0].transform.scale, 0.5);
         assert_eq!(mid.layers[0].transform.rotation_deg, 30.0);
-        assert!((mid.layers[0].opacity - 0.5).abs() < 1e-5, "不透明度仍由那条曲线驱动");
+        assert!(
+            (mid.layers[0].opacity - 0.5).abs() < 1e-5,
+            "不透明度仍由那条曲线驱动"
+        );
     }
 
     #[test]
@@ -988,7 +1167,10 @@ mod tests {
             recorded: Recorded::default(),
             gain: 1.0,
             loop_source: false,
-            source: Some(SourceRef { asset_id: "a.mp4".to_string(), source_in: 0 }),
+            source: Some(SourceRef {
+                asset_id: "a.mp4".to_string(),
+                source_in: 0,
+            }),
             effects: vec![Effect {
                 kind: "gaussian_blur".to_string(),
                 params: [("radius".to_string(), 0.0)].into_iter().collect(),
@@ -997,13 +1179,26 @@ mod tests {
             }],
             transition_in: None::<TransitionSpec>,
             keyframes: vec![
-                Keyframe { frame: 0, target: "effect.0.radius".to_string(), value: 0.0, easing: Easing::Linear },
-                Keyframe { frame: 10, target: "effect.0.radius".to_string(), value: 8.0, easing: Easing::Linear },
+                Keyframe {
+                    frame: 0,
+                    target: "effect.0.radius".to_string(),
+                    value: 0.0,
+                    easing: Easing::Linear,
+                },
+                Keyframe {
+                    frame: 10,
+                    target: "effect.0.radius".to_string(),
+                    value: 8.0,
+                    easing: Easing::Linear,
+                },
             ],
         };
         let timeline = one_layer_v2(layer);
         let radius = evaluate_v2(&timeline, 5).layers[0].effects[0].params["radius"];
-        assert!((radius - 4.0).abs() < 1e-5, "半径应当在第 5 帧到中点，实得 {radius}");
+        assert!(
+            (radius - 4.0).abs() < 1e-5,
+            "半径应当在第 5 帧到中点，实得 {radius}"
+        );
         assert_eq!(
             evaluate_v2(&timeline, 99).layers[0].effects[0].params["radius"],
             8.0,
@@ -1013,7 +1208,9 @@ mod tests {
 
     #[test]
     fn v2_调整图层被标出来且没有素材() {
-        use dhampir_timeline::layer::{Layer as LayerV2, LAYER_SCHEMA_VERSION, Recorded, TrackV2, TransformV2};
+        use dhampir_timeline::layer::{
+            LAYER_SCHEMA_VERSION, Layer as LayerV2, Recorded, TrackV2, TransformV2,
+        };
         use dhampir_timeline::schema::{Effect, TimebaseDto, TransitionSpec};
         let mut adjustment = LayerV2 {
             id: "adj".to_string(),
@@ -1070,6 +1267,9 @@ mod tests {
                 gain: 1.0,
             }],
         };
-        assert!(evaluate_v2(&off, 0).layers.is_empty(), "关掉的层不该出现在清单里");
+        assert!(
+            evaluate_v2(&off, 0).layers.is_empty(),
+            "关掉的层不该出现在清单里"
+        );
     }
 }
