@@ -126,7 +126,7 @@ impl BlurRenderer {
                 entry_point: Some("fs_blur"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: format,
+                    format,
                     // 不混合：模糊是把它自己算完覆盖上去。混进一个混合方程就多一个差异来源。
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
@@ -198,7 +198,14 @@ impl BlurRenderer {
             size: [size.0 as f32, size.1 as f32],
         };
         queue.write_buffer(&self.uniform_horizontal, 0, bytemuck::bytes_of(&horizontal));
-        self.one_pass(device, encoder, source, intermediate, &self.uniform_horizontal, "dhampir blur pass (horizontal)");
+        self.one_pass(
+            device,
+            encoder,
+            source,
+            intermediate,
+            &self.uniform_horizontal,
+            "dhampir blur pass (horizontal)",
+        );
 
         let vertical = BlurUniform {
             weights: packed,
@@ -206,7 +213,14 @@ impl BlurRenderer {
             size: [size.0 as f32, size.1 as f32],
         };
         queue.write_buffer(&self.uniform_vertical, 0, bytemuck::bytes_of(&vertical));
-        self.one_pass(device, encoder, intermediate, target, &self.uniform_vertical, "dhampir blur pass (vertical)");
+        self.one_pass(
+            device,
+            encoder,
+            intermediate,
+            target,
+            &self.uniform_vertical,
+            "dhampir blur pass (vertical)",
+        );
     }
 
     fn one_pass(
@@ -266,7 +280,11 @@ mod tests {
     fn 权重归一() {
         for radius in [0, 1, 2, 5, 16] {
             let weights = gaussian_weights_1d(radius);
-            assert!((sum(&weights) - 1.0).abs() < 1e-5, "radius {radius} 的权重和是 {}", sum(&weights));
+            assert!(
+                (sum(&weights) - 1.0).abs() < 1e-5,
+                "radius {radius} 的权重和是 {}",
+                sum(&weights)
+            );
         }
     }
 
@@ -279,7 +297,10 @@ mod tests {
                 (weights[center + offset] - weights[center - offset]).abs() < 1e-6,
                 "偏移 {offset} 处不对称"
             );
-            assert!(weights[center - offset] < weights[center], "离中心越远应当越小");
+            assert!(
+                weights[center - offset] < weights[center],
+                "离中心越远应当越小"
+            );
         }
     }
 
@@ -296,7 +317,7 @@ mod tests {
         }
     }
 
-#[test]
+    #[test]
     fn 超出半径的抽头权重为零() {
         // 着色器是**定长展开**的：长度永远是 TAPS，靠 0 权重把多余抽头掩掉。
         // 这条测试钉住的就是那个约定——长度变了着色器就崩了。
@@ -307,7 +328,10 @@ mod tests {
             assert_eq!(weights[center + offset], 0.0, "偏移 {offset} 应当在半径外");
             assert_eq!(weights[center - offset], 0.0);
         }
-        assert!(weights[center + radius as usize] > 0.0, "半径上的抽头应当非零");
+        assert!(
+            weights[center + radius as usize] > 0.0,
+            "半径上的抽头应当非零"
+        );
     }
 
     #[test]
@@ -324,7 +348,8 @@ mod tests {
         // 着色器里写的是 array<vec4<f32>, WEIGHT_VECS>，多一个少一个都会编译失败。
         assert_eq!(TAPS, 2 * MAX_RADIUS as usize + 1);
         assert_eq!(WEIGHT_VECS, TAPS.div_ceil(4));
-        assert!(WEIGHT_VECS * 4 >= TAPS, "打包不能丢分量");
+        // 两边都是常量，所以写成 `const _:` 断言 —— 编译期就能断，而不是等到跑测试。
+        // （clippy::assertions_on_constants 要求的形状；语义与 assert! 完全一致。）
+        const _: () = assert!(WEIGHT_VECS * 4 >= TAPS, "打包不能丢分量");
     }
 }
-

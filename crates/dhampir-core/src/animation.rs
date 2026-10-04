@@ -187,7 +187,10 @@ pub fn decode_with_limits(
     frame_limit: usize,
 ) -> Result<Animation, AnimError> {
     if bytes.len() > file_limit {
-        return Err(AnimError::TooLarge { bytes: bytes.len(), limit: file_limit });
+        return Err(AnimError::TooLarge {
+            bytes: bytes.len(),
+            limit: file_limit,
+        });
     }
     match detect_format(bytes) {
         Some(AnimFormat::Gif) => decode_gif(bytes, byte_budget, frame_limit),
@@ -248,21 +251,21 @@ fn decode_gif(bytes: &[u8], byte_budget: u64, frame_limit: usize) -> Result<Anim
     // 不是随手写的默认值 —— 方案 §4.1 的对齐项之一。
 
     let mut pending_dispose = DisposalMethod::Any;
-    let mut pending_rect = Rect { left: 0, top: 0, width: 0, height: 0 };
+    let mut pending_rect = Rect {
+        left: 0,
+        top: 0,
+        width: 0,
+        height: 0,
+    };
     let mut saved_for_previous: Option<Vec<u8>> = None;
 
     let mut frames: Vec<AnimFrame> = Vec::new();
     let mut total_ms: u64 = 0;
     let mut decoded_bytes: u64 = 0;
 
-    loop {
-        let Some(frame) = decoder.read_next_frame().map_err(|error| {
-            AnimError::BadData(format!("GIF 第 {} 帧解不开：{error}", frames.len() + 1))
-        })?
-        else {
-            break;
-        };
-
+    while let Some(frame) = decoder.read_next_frame().map_err(|error| {
+        AnimError::BadData(format!("GIF 第 {} 帧解不开：{error}", frames.len() + 1))
+    })? {
         let delay_ms = u32::from(frame.delay) * 10;
         let dispose = frame.dispose;
         let rect = Rect {
@@ -298,12 +301,18 @@ fn decode_gif(bytes: &[u8], byte_budget: u64, frame_limit: usize) -> Result<Anim
         total_ms += u64::from(delay_ms);
         decoded_bytes += stride as u64;
         if decoded_bytes > byte_budget {
-            return Err(AnimError::OverBudget { bytes: decoded_bytes, limit: byte_budget });
+            return Err(AnimError::OverBudget {
+                bytes: decoded_bytes,
+                limit: byte_budget,
+            });
         }
         if frames.len() >= frame_limit {
             return Err(AnimError::TooManyFrames { limit: frame_limit });
         }
-        frames.push(AnimFrame { delay_ms, rgba: canvas.clone() });
+        frames.push(AnimFrame {
+            delay_ms,
+            rgba: canvas.clone(),
+        });
 
         pending_dispose = dispose;
         pending_rect = rect;
@@ -313,7 +322,14 @@ fn decode_gif(bytes: &[u8], byte_budget: u64, frame_limit: usize) -> Result<Anim
         return Err(AnimError::BadData("GIF 里一帧都没有".to_string()));
     }
 
-    Ok(Animation { format: AnimFormat::Gif, width, height, loop_count, total_ms, frames })
+    Ok(Animation {
+        format: AnimFormat::Gif,
+        width,
+        height,
+        loop_count,
+        total_ms,
+        frames,
+    })
 }
 
 /// 把一帧的 RGBA 贴到画布上。
@@ -423,15 +439,22 @@ fn decode_webp(bytes: &[u8], byte_budget: u64, frame_limit: usize) -> Result<Ani
 
     for index in 0..declared_frames {
         // 返回的是**这一帧的时长**（毫秒）—— 契约里的延迟表直接就是它。
-        let delay_ms = decoder
-            .read_frame(&mut buffer)
-            .map_err(|error| AnimError::BadData(format!("WebP 第 {} 帧解不开：{error}", index + 1)))?;
-        let rgba = if has_alpha { buffer.clone() } else { rgb_to_rgba(&buffer) };
+        let delay_ms = decoder.read_frame(&mut buffer).map_err(|error| {
+            AnimError::BadData(format!("WebP 第 {} 帧解不开：{error}", index + 1))
+        })?;
+        let rgba = if has_alpha {
+            buffer.clone()
+        } else {
+            rgb_to_rgba(&buffer)
+        };
 
         total_ms += u64::from(delay_ms);
         decoded_bytes += stride as u64;
         if decoded_bytes > byte_budget {
-            return Err(AnimError::OverBudget { bytes: decoded_bytes, limit: byte_budget });
+            return Err(AnimError::OverBudget {
+                bytes: decoded_bytes,
+                limit: byte_budget,
+            });
         }
         frames.push(AnimFrame { delay_ms, rgba });
     }
@@ -440,7 +463,14 @@ fn decode_webp(bytes: &[u8], byte_budget: u64, frame_limit: usize) -> Result<Ani
         return Err(AnimError::BadData("WebP 里一帧都没有".to_string()));
     }
 
-    Ok(Animation { format: AnimFormat::WebP, width, height, loop_count, total_ms, frames })
+    Ok(Animation {
+        format: AnimFormat::WebP,
+        width,
+        height,
+        loop_count,
+        total_ms,
+        frames,
+    })
 }
 
 /// RGB8 → RGBA8（alpha 恒 255）。没有 alpha 通道的动画 WebP 走这一支。
@@ -478,21 +508,27 @@ mod tests {
         dispose: DisposalMethod,
         transparent: Option<u8>,
     ) -> gif::Frame<'static> {
-        let mut frame = gif::Frame::default();
-        frame.width = rect.2;
-        frame.height = rect.3;
-        frame.left = rect.0;
-        frame.top = rect.1;
-        frame.buffer = Cow::Owned(indices.to_vec());
-        frame.delay = delay_cs;
-        frame.dispose = dispose;
-        frame.transparent = transparent;
+        let frame = gif::Frame {
+            width: rect.2,
+            height: rect.3,
+            left: rect.0,
+            top: rect.1,
+            buffer: Cow::Owned(indices.to_vec()),
+            delay: delay_cs,
+            dispose,
+            transparent,
+            ..gif::Frame::default()
+        };
         // «canvas» 只用来提醒这个函数知道逻辑屏幕尺寸；GIF 的帧不携带它。
         let _ = canvas;
         frame
     }
 
-    fn encode(canvas: (u16, u16), repeat: Option<Repeat>, frames: &[gif::Frame<'static>]) -> Vec<u8> {
+    fn encode(
+        canvas: (u16, u16),
+        repeat: Option<Repeat>,
+        frames: &[gif::Frame<'static>],
+    ) -> Vec<u8> {
         let mut out = Vec::new();
         {
             let mut encoder = gif::Encoder::new(&mut out, canvas.0, canvas.1, &palette())
@@ -511,7 +547,12 @@ mod tests {
         let stride = (animation.width as usize) * 4;
         let offset = y as usize * stride + x as usize * 4;
         let frame = &animation.frames[index].rgba;
-        [frame[offset], frame[offset + 1], frame[offset + 2], frame[offset + 3]]
+        [
+            frame[offset],
+            frame[offset + 1],
+            frame[offset + 2],
+            frame[offset + 3],
+        ]
     }
 
     #[test]
@@ -532,7 +573,10 @@ mod tests {
 
     #[test]
     fn 认不出的字节报_unknown_format() {
-        assert_eq!(decode(b"not an animation at all").unwrap_err(), AnimError::UnknownFormat);
+        assert_eq!(
+            decode(b"not an animation at all").unwrap_err(),
+            AnimError::UnknownFormat
+        );
     }
 
     #[test]
@@ -542,9 +586,30 @@ mod tests {
             (2, 2),
             None,
             &[
-                frame((2, 2), (0, 0, 2, 2), &[0, 1, 2, 3], 10, DisposalMethod::Keep, None),
-                frame((2, 2), (0, 0, 2, 2), &[1, 1, 1, 1], 20, DisposalMethod::Keep, None),
-                frame((2, 2), (0, 0, 2, 2), &[2, 2, 2, 2], 3, DisposalMethod::Keep, None),
+                frame(
+                    (2, 2),
+                    (0, 0, 2, 2),
+                    &[0, 1, 2, 3],
+                    10,
+                    DisposalMethod::Keep,
+                    None,
+                ),
+                frame(
+                    (2, 2),
+                    (0, 0, 2, 2),
+                    &[1, 1, 1, 1],
+                    20,
+                    DisposalMethod::Keep,
+                    None,
+                ),
+                frame(
+                    (2, 2),
+                    (0, 0, 2, 2),
+                    &[2, 2, 2, 2],
+                    3,
+                    DisposalMethod::Keep,
+                    None,
+                ),
             ],
         );
         let animation = decode(&bytes).expect("解得开");
@@ -565,7 +630,14 @@ mod tests {
         let bytes = encode(
             (2, 2),
             None,
-            &[frame((2, 2), (0, 0, 2, 2), &[0, 0, 0, 0], 0, DisposalMethod::Keep, None)],
+            &[frame(
+                (2, 2),
+                (0, 0, 2, 2),
+                &[0, 0, 0, 0],
+                0,
+                DisposalMethod::Keep,
+                None,
+            )],
         );
         let animation = decode(&bytes).expect("解得开");
         assert_eq!(animation.delays_ms(), vec![0]);
@@ -580,8 +652,22 @@ mod tests {
             (2, 2),
             None,
             &[
-                frame((2, 2), (0, 0, 2, 2), &[0, 1, 2, 3], 10, DisposalMethod::Keep, None),
-                frame((2, 2), (0, 0, 2, 2), &[0, 1, 0, 1], 10, DisposalMethod::Keep, Some(0)),
+                frame(
+                    (2, 2),
+                    (0, 0, 2, 2),
+                    &[0, 1, 2, 3],
+                    10,
+                    DisposalMethod::Keep,
+                    None,
+                ),
+                frame(
+                    (2, 2),
+                    (0, 0, 2, 2),
+                    &[0, 1, 0, 1],
+                    10,
+                    DisposalMethod::Keep,
+                    Some(0),
+                ),
             ],
         );
         let animation = decode(&bytes).expect("解得开");
@@ -604,13 +690,24 @@ mod tests {
             (2, 2),
             None,
             &[
-                frame((2, 2), (0, 0, 2, 2), &[0, 1, 2, 3], 10, DisposalMethod::Background, None),
+                frame(
+                    (2, 2),
+                    (0, 0, 2, 2),
+                    &[0, 1, 2, 3],
+                    10,
+                    DisposalMethod::Background,
+                    None,
+                ),
                 frame((2, 2), (1, 1, 1, 1), &[2], 10, DisposalMethod::Keep, None),
             ],
         );
         let animation = decode(&bytes).expect("解得开");
         assert_eq!(px(&animation, 1, 1, 1), GREEN);
-        assert_eq!(px(&animation, 1, 0, 0), CLEAR, "Background 处置没清掉上一帧");
+        assert_eq!(
+            px(&animation, 1, 0, 0),
+            CLEAR,
+            "Background 处置没清掉上一帧"
+        );
         assert_eq!(px(&animation, 1, 1, 0), CLEAR);
         assert_eq!(px(&animation, 1, 0, 1), CLEAR);
     }
@@ -624,14 +721,25 @@ mod tests {
             (2, 2),
             None,
             &[
-                frame((2, 2), (0, 0, 2, 2), &[0, 1, 2, 3], 10, DisposalMethod::Previous, None),
+                frame(
+                    (2, 2),
+                    (0, 0, 2, 2),
+                    &[0, 1, 2, 3],
+                    10,
+                    DisposalMethod::Previous,
+                    None,
+                ),
                 frame((2, 2), (0, 0, 1, 1), &[3], 10, DisposalMethod::Keep, None),
                 frame((2, 2), (1, 1, 1, 1), &[2], 10, DisposalMethod::Keep, None),
             ],
         );
         let animation = decode(&bytes).expect("解得开");
         assert_eq!(px(&animation, 1, 0, 0), WHITE);
-        assert_eq!(px(&animation, 1, 1, 0), CLEAR, "Previous 恢复错了：露出了上一帧的像素");
+        assert_eq!(
+            px(&animation, 1, 1, 0),
+            CLEAR,
+            "Previous 恢复错了：露出了上一帧的像素"
+        );
         assert_eq!(px(&animation, 1, 0, 1), CLEAR);
         assert_eq!(px(&animation, 1, 1, 1), CLEAR);
         // 第 3 帧：第 2 帧处置是 Keep，所以白的与绿的都在。
@@ -644,14 +752,28 @@ mod tests {
         let infinite = encode(
             (2, 2),
             Some(Repeat::Infinite),
-            &[frame((2, 2), (0, 0, 2, 2), &[0, 0, 0, 0], 10, DisposalMethod::Keep, None)],
+            &[frame(
+                (2, 2),
+                (0, 0, 2, 2),
+                &[0, 0, 0, 0],
+                10,
+                DisposalMethod::Keep,
+                None,
+            )],
         );
         assert_eq!(decode(&infinite).unwrap().loop_count, 0);
 
         let finite = encode(
             (2, 2),
             Some(Repeat::Finite(3)),
-            &[frame((2, 2), (0, 0, 2, 2), &[0, 0, 0, 0], 10, DisposalMethod::Keep, None)],
+            &[frame(
+                (2, 2),
+                (0, 0, 2, 2),
+                &[0, 0, 0, 0],
+                10,
+                DisposalMethod::Keep,
+                None,
+            )],
         );
         assert_eq!(decode(&finite).unwrap().loop_count, 3);
     }
@@ -662,14 +784,31 @@ mod tests {
             (2, 2),
             None,
             &[
-                frame((2, 2), (0, 0, 2, 2), &[0, 1, 2, 3], 10, DisposalMethod::Keep, None),
-                frame((2, 2), (0, 0, 2, 2), &[1, 1, 1, 1], 10, DisposalMethod::Keep, None),
+                frame(
+                    (2, 2),
+                    (0, 0, 2, 2),
+                    &[0, 1, 2, 3],
+                    10,
+                    DisposalMethod::Keep,
+                    None,
+                ),
+                frame(
+                    (2, 2),
+                    (0, 0, 2, 2),
+                    &[1, 1, 1, 1],
+                    10,
+                    DisposalMethod::Keep,
+                    None,
+                ),
             ],
         );
         // 原始字节上限
         assert_eq!(
             decode_with_limits(&bytes, bytes.len() - 1, MAX_DECODED_BYTES, MAX_FRAMES).unwrap_err(),
-            AnimError::TooLarge { bytes: bytes.len(), limit: bytes.len() - 1 }
+            AnimError::TooLarge {
+                bytes: bytes.len(),
+                limit: bytes.len() - 1
+            }
         );
         // 帧数上限
         assert_eq!(
@@ -691,7 +830,14 @@ mod tests {
         let bytes = encode(
             (2, 2),
             None,
-            &[frame((2, 2), (0, 0, 2, 2), &[0, 1, 2, 3], 10, DisposalMethod::Keep, None)],
+            &[frame(
+                (2, 2),
+                (0, 0, 2, 2),
+                &[0, 1, 2, 3],
+                10,
+                DisposalMethod::Keep,
+                None,
+            )],
         );
         // 掐掉尾巴：头还在（magic 认得出），后面解不动。
         let truncated = &bytes[..bytes.len().saturating_sub(12)];
@@ -723,8 +869,14 @@ mod tests {
         // 延迟之和等于总时长，且每一帧都有实际时长。
         let sum: u64 = animation.delays_ms().iter().map(|d| u64::from(*d)).sum();
         assert_eq!(sum, animation.total_ms);
-        assert!(animation.delays_ms().iter().all(|d| *d > 0), "WebP 的逐帧时长不该是 0");
-        assert_eq!(animation.memory_bytes(), stride as u64 * animation.frame_count() as u64);
+        assert!(
+            animation.delays_ms().iter().all(|d| *d > 0),
+            "WebP 的逐帧时长不该是 0"
+        );
+        assert_eq!(
+            animation.memory_bytes(),
+            stride as u64 * animation.frame_count() as u64
+        );
     }
 
     #[test]
@@ -738,4 +890,3 @@ mod tests {
         }
     }
 }
-

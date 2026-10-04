@@ -360,7 +360,12 @@ fn op_shape(op: &str) -> (&'static [&'static str], &'static [&'static str]) {
         "insert" => (
             &["--track", "--asset", "--at", "--source-in", "--length"],
             &[
-                "--track", "--asset", "--at", "--source-in", "--length", "--id",
+                "--track",
+                "--asset",
+                "--at",
+                "--source-in",
+                "--length",
+                "--id",
             ],
         ),
         "trim" => (
@@ -544,11 +549,11 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--id" => args.id = Some(value),
             "--op" => args.op = Some(value),
             "--history" => args.history = Some(value),
-            "--from" => args.from = Some(parse_int(&token, &value)?),
-            "--to" => args.to = Some(parse_int(&token, &value)?),
-            "--frame" => args.frame = Some(parse_int(&token, &value)?),
-            "--width" => args.width = Some(parse_uint(&token, &value)?),
-            "--height" => args.height = Some(parse_uint(&token, &value)?),
+            "--from" => args.from = Some(parse_int(token, &value)?),
+            "--to" => args.to = Some(parse_int(token, &value)?),
+            "--frame" => args.frame = Some(parse_int(token, &value)?),
+            "--width" => args.width = Some(parse_uint(token, &value)?),
+            "--height" => args.height = Some(parse_uint(token, &value)?),
             "--font-file" => args.font_file = Some(value),
             "--font-bold-file" => args.font_bold_file = Some(value),
             "--font-dir" => args.font_dir = Some(value),
@@ -562,16 +567,15 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             }
             "--subtitle-out" => args.subtitle_out = Some(value),
             "--format" => {
-                let parsed = SidecarFormat::from_flag(&value).ok_or_else(|| {
-                    format!("--format 只认 srt / ass，得到 {value}")
-                })?;
+                let parsed = SidecarFormat::from_flag(&value)
+                    .ok_or_else(|| format!("--format 只认 srt / ass，得到 {value}"))?;
                 args.format = Some(parsed);
             }
             "--track" => args.track = Some(value),
             "--layer" => args.layer = Some(value),
-            "--at" => args.at = Some(parse_int(&token, &value)?),
-            "--source-in" => args.source_in = Some(parse_int(&token, &value)?),
-            "--length" => args.length = Some(parse_int(&token, &value)?),
+            "--at" => args.at = Some(parse_int(token, &value)?),
+            "--source-in" => args.source_in = Some(parse_int(token, &value)?),
+            "--length" => args.length = Some(parse_int(token, &value)?),
             "--edge" => {
                 // 与 `--format` 同一条口径：**值只认两种，且在参数这一关判**。
                 // 等到动手时才发现边写错，是一条成功的编辑被报成用法错。
@@ -585,8 +589,9 @@ fn parse(argv: &[String]) -> Result<Args, String> {
                 args.edge = Some(parsed);
             }
             "--timebase" => {
-                let (num, den) = parse_rate(&value)
-                    .ok_or_else(|| format!("--timebase 要 num/den（如 30000/1001）或一个数，得到 {value}"))?;
+                let (num, den) = parse_rate(&value).ok_or_else(|| {
+                    format!("--timebase 要 num/den（如 30000/1001）或一个数，得到 {value}")
+                })?;
                 if num == 0 {
                     return Err(format!("--timebase 的分子不能是 0（得到 {value}）"));
                 }
@@ -926,7 +931,9 @@ fn asset_info(file: &Path) -> Result<AssetInfoView, String> {
     // GOP 长度**由切片实测**，不写死也不猜：只有至少两段时才谈得上"间隔"。
     // 0 表示未知 —— 契约里明说此时不能按 GOP 切。
     let gop_length = if slices.len() >= 2 {
-        u32::try_from(slices[0].sample_count).unwrap_or(0)
+        // `sample_count` 本身就是 u32（见 host_api.rs 的 GOP 切片类型），
+        // 原先套了一层 `u32::try_from` —— clippy 的 useless_conversion 是对的，去掉。
+        slices[0].sample_count
     } else {
         0
     };
@@ -1210,7 +1217,10 @@ enum FrameSpec {
     /// 出一帧，就是它。
     Single(Frame),
     /// 出一段；`None` = 那一头没给，由 [`resolve_frames`] 按工程补。
-    Span { from: Option<Frame>, to: Option<Frame> },
+    Span {
+        from: Option<Frame>,
+        to: Option<Frame>,
+    },
 }
 
 fn frame_spec(args: &Args) -> Result<FrameSpec, Usage> {
@@ -1229,7 +1239,10 @@ fn frame_spec(args: &Args) -> Result<FrameSpec, Usage> {
             "frame 要 --frame <N>，或者 --from <N> / --to <N> 出一段".to_string(),
         ));
     }
-    Ok(FrameSpec::Span { from: args.from, to: args.to })
+    Ok(FrameSpec::Span {
+        from: args.from,
+        to: args.to,
+    })
 }
 
 /// 把参数层的意图与工程的 `[first, end)` 合起来。**纯函数**（口径好单测）。
@@ -1248,7 +1261,9 @@ fn frame_spec(args: &Args) -> Result<FrameSpec, Usage> {
 fn resolve_frames(spec: FrameSpec, first: Frame, end: Frame) -> Result<Vec<Frame>, Usage> {
     let (from, to) = match spec {
         FrameSpec::Single(frame) => (frame, frame),
-        FrameSpec::Span { from, to } => (from.unwrap_or(first), to.unwrap_or(end.saturating_sub(1))),
+        FrameSpec::Span { from, to } => {
+            (from.unwrap_or(first), to.unwrap_or(end.saturating_sub(1)))
+        }
     };
     if to < from {
         return Err(usage_error(format!(
@@ -1308,8 +1323,7 @@ fn cmd_frame(args: &Args) -> Result<ExitCode, CommandError> {
     // **把资产时间基带上。** 少了它就会退回恒等换算（素材帧率按时间线算），
     // 而 60fps 素材放进 30fps 工程的表现是**半速播放**。
     // 动图那几条再按**解码器读出来的延迟**覆盖一次：出片与预览要用同一份时间真值。
-    let asset_timebases =
-        asset_timebases_with_animations(&doc.asset_timebases(), &sources);
+    let asset_timebases = asset_timebases_with_animations(&doc.asset_timebases(), &sources);
     let (first_frame, last_frame) = (
         frames.first().copied().expect("frame_range 一定给至少一帧"),
         frames.last().copied().expect("frame_range 一定给至少一帧"),
@@ -1362,21 +1376,23 @@ fn cmd_frame(args: &Args) -> Result<ExitCode, CommandError> {
         "width": width,
         "height": height,
         "project_frames": project_frames(&doc),
-        "overlay": written.first().map(|f| f.overlay.clone()),
+        "overlay": written.first().map(|f| f.overlay),
         "issues": written.first().map(|f| f.issues.clone()).unwrap_or_default(),
         "failed": failed,
     });
     if !single {
         // 摘要：一帧一条，**顺序与请求一致** —— 调用方要拿它去比对
         // "第 N 张是不是我要的那一帧"，乱序会让比对静默错位。
-        body["frames"] = serde_json::json!(written
-            .iter()
-            .map(|frame| serde_json::json!({
-                "frame": frame.frame,
-                "path": frame.path.display().to_string(),
-                "digest": frame.digest,
-            }))
-            .collect::<Vec<_>>());
+        body["frames"] = serde_json::json!(
+            written
+                .iter()
+                .map(|frame| serde_json::json!({
+                    "frame": frame.frame,
+                    "path": frame.path.display().to_string(),
+                    "digest": frame.digest,
+                }))
+                .collect::<Vec<_>>()
+        );
         body["count"] = serde_json::json!(written.len());
         body["failures"] = serde_json::json!(failures);
     }
@@ -1519,8 +1535,7 @@ fn cmd_render(args: &Args) -> Result<ExitCode, CommandError> {
     );
 
     // 同上：动图的时间真值走解码器那一份（出片与预览同一个口径）。
-    let asset_timebases =
-        asset_timebases_with_animations(&doc.asset_timebases(), &sources);
+    let asset_timebases = asset_timebases_with_animations(&doc.asset_timebases(), &sources);
     let plan = RenderPlan {
         timeline: &doc.timeline,
         sources: &sources,
@@ -1694,9 +1709,7 @@ fn cmd_import(args: &Args) -> Result<ExitCode, CommandError> {
         None => path
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
-            .ok_or_else(|| {
-                usage_error("这个路径没有文件名，请用 --id 指定".to_string())
-            })?,
+            .ok_or_else(|| usage_error("这个路径没有文件名，请用 --id 指定".to_string()))?,
     };
     let kind = infer_kind(path);
     let mut built = Asset {
@@ -1717,7 +1730,7 @@ fn cmd_import(args: &Args) -> Result<ExitCode, CommandError> {
     if kind == AssetKind::Video {
         let info = asset_info(path)?;
         built.frame_count = Some(info.frame_count);
-        built.timebase = Some(info.timebase.clone());
+        built.timebase = Some(info.timebase);
         built.width = Some(info.width);
         built.height = Some(info.height);
     }
@@ -1917,7 +1930,12 @@ fn sidecar_text(
     timebase: &TimebaseDto,
     format: SidecarFormat,
 ) -> Result<String, String> {
-    let broken = || format!("时间基坏掉（{}/{}），算不出侧挂字幕的时间", timebase.num, timebase.den);
+    let broken = || {
+        format!(
+            "时间基坏掉（{}/{}），算不出侧挂字幕的时间",
+            timebase.num, timebase.den
+        )
+    };
     let base_ms = ms_at_frame(base, timebase).ok_or_else(broken)?;
     let mut cues: Vec<Cue> = Vec::with_capacity(spans.len());
     for span in spans {
@@ -2002,24 +2020,29 @@ fn cmd_subtitle(args: &Args) -> Result<ExitCode, CommandError> {
 
     let sequence = doc.sequence_size();
     let overlay = evaluate_overlay(&doc.timeline, frame, sequence, Some(&table));
-    let (items, danmaku, subtitle_style, danmaku_style, dropped_lines, dropped_danmaku) = match overlay {
-        Some(overlay) => (
-            overlay.items.iter().map(text_item_json).collect::<Vec<_>>(),
-            overlay.danmaku.iter().map(danmaku_item_json).collect::<Vec<_>>(),
-            text_style_json(&overlay.subtitle_style),
-            text_style_json(&overlay.danmaku_style),
-            overlay.dropped_lines,
-            overlay.dropped_danmaku,
-        ),
-        None => (
-            Vec::new(),
-            Vec::new(),
-            serde_json::Value::Null,
-            serde_json::Value::Null,
-            0,
-            0,
-        ),
-    };
+    let (items, danmaku, subtitle_style, danmaku_style, dropped_lines, dropped_danmaku) =
+        match overlay {
+            Some(overlay) => (
+                overlay.items.iter().map(text_item_json).collect::<Vec<_>>(),
+                overlay
+                    .danmaku
+                    .iter()
+                    .map(danmaku_item_json)
+                    .collect::<Vec<_>>(),
+                text_style_json(&overlay.subtitle_style),
+                text_style_json(&overlay.danmaku_style),
+                overlay.dropped_lines,
+                overlay.dropped_danmaku,
+            ),
+            None => (
+                Vec::new(),
+                Vec::new(),
+                serde_json::Value::Null,
+                serde_json::Value::Null,
+                0,
+                0,
+            ),
+        };
 
     print_json(&serde_json::json!({
         "frame": frame,
@@ -2123,9 +2146,7 @@ fn load_history(path: &str) -> Result<History, String> {
     match std::fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text)
             .map_err(|error| format!("历史文件 {path} 不是合法的历史：{error}")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(History::new(HISTORY_CAP))
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(History::new(HISTORY_CAP)),
         Err(error) => Err(format!("读不了历史文件 {path}：{error}")),
     }
 }
@@ -2140,9 +2161,7 @@ fn cmd_edit(args: &Args) -> Result<ExitCode, CommandError> {
     let project = args
         .project
         .as_ref()
-        .ok_or_else(|| {
-            usage_error(format!("{} 要 --project <文件>", command_name(args)))
-        })?;
+        .ok_or_else(|| usage_error(format!("{} 要 --project <文件>", command_name(args))))?;
     let doc = match load_project_or_usage(project) {
         Ok(doc) => doc,
         Err(code) => return Ok(code),
@@ -2266,7 +2285,7 @@ fn build_named_op(args: &Args) -> EditOp {
             ripple: args.ripple,
         },
         "set" => EditOp::SetSequence {
-            timebase: args.timebase.clone().expect("--timebase 解析阶段就要求了"),
+            timebase: args.timebase.expect("--timebase 解析阶段就要求了"),
             width: args.width.unwrap_or(0),
             height: args.height.unwrap_or(0),
         },
@@ -2279,9 +2298,7 @@ fn cmd_named_op(args: &Args) -> Result<ExitCode, CommandError> {
     let project = args
         .project
         .as_ref()
-        .ok_or_else(|| {
-            usage_error(format!("{} 要 --project <文件>", command_name(args)))
-        })?;
+        .ok_or_else(|| usage_error(format!("{} 要 --project <文件>", command_name(args))))?;
     let doc = match load_project_or_usage(project) {
         Ok(doc) => doc,
         Err(code) => return Ok(code),
@@ -2420,7 +2437,8 @@ fn cmd_edit_history(args: &Args, project: &str, doc: ProjectDoc) -> Result<ExitC
     };
     if args.write {
         save_history(history_path, &history)?;
-        let text = serde_json::to_string_pretty(&snapshot.doc).map_err(|error| error.to_string())?;
+        let text =
+            serde_json::to_string_pretty(&snapshot.doc).map_err(|error| error.to_string())?;
         std::fs::write(project, format!("{text}\n"))
             .map_err(|error| format!("写不回工程 {project}：{error}"))?;
     }
@@ -2522,19 +2540,39 @@ mod tests {
         // 默认（不给标志）= Auto：**不能**默认成静音 ——
         // 默认静音会让"工程里有音轨"这件事静默地不起作用。
         let args = parse(&argv(&[
-            "render", "--project", "p.json", "--to", "9", "--out", "o.mp4",
+            "render",
+            "--project",
+            "p.json",
+            "--to",
+            "9",
+            "--out",
+            "o.mp4",
         ]))
         .expect("合法");
         assert!(!args.no_audio);
         // `--no-audio` 要认，而且要认成"不要声音"，不是"没给"。
         let muted = parse(&argv(&[
-            "render", "--project", "p.json", "--to", "9", "--out", "o.mp4", "--no-audio",
+            "render",
+            "--project",
+            "p.json",
+            "--to",
+            "9",
+            "--out",
+            "o.mp4",
+            "--no-audio",
         ]))
         .expect("合法");
         assert!(muted.no_audio);
         // 顺序无关。
         let front = parse(&argv(&[
-            "--no-audio", "render", "--project", "p.json", "--to", "9", "--out", "o.mp4",
+            "--no-audio",
+            "render",
+            "--project",
+            "p.json",
+            "--to",
+            "9",
+            "--out",
+            "o.mp4",
         ]))
         .expect("合法");
         assert!(front.no_audio);
@@ -2602,8 +2640,18 @@ mod tests {
             (
                 "--track",
                 &[
-                    "clip", "insert", "--track", "1", "--asset", "a", "--at", "1",
-                    "--source-in", "0", "--length", "1",
+                    "clip",
+                    "insert",
+                    "--track",
+                    "1",
+                    "--asset",
+                    "a",
+                    "--at",
+                    "1",
+                    "--source-in",
+                    "0",
+                    "--length",
+                    "1",
                 ],
             ),
             ("--layer", &["clip", "split", "--layer", "1", "--at", "1"]),
@@ -2611,18 +2659,41 @@ mod tests {
             (
                 "--source-in",
                 &[
-                    "clip", "insert", "--track", "1", "--asset", "a", "--at", "1",
-                    "--source-in", "0", "--length", "1",
+                    "clip",
+                    "insert",
+                    "--track",
+                    "1",
+                    "--asset",
+                    "a",
+                    "--at",
+                    "1",
+                    "--source-in",
+                    "0",
+                    "--length",
+                    "1",
                 ],
             ),
             (
                 "--length",
                 &[
-                    "clip", "insert", "--track", "1", "--asset", "a", "--at", "1",
-                    "--source-in", "0", "--length", "1",
+                    "clip",
+                    "insert",
+                    "--track",
+                    "1",
+                    "--asset",
+                    "a",
+                    "--at",
+                    "1",
+                    "--source-in",
+                    "0",
+                    "--length",
+                    "1",
                 ],
             ),
-            ("--edge", &["clip", "trim", "--layer", "1", "--edge", "in", "--to", "1"]),
+            (
+                "--edge",
+                &["clip", "trim", "--layer", "1", "--edge", "in", "--to", "1"],
+            ),
             ("--timebase", &["sequence", "set", "--timebase", "30"]),
             ("--script", &["batch", "--script", "1"]),
         ];
@@ -2665,18 +2736,19 @@ mod tests {
         let error = parse(&argv(&["edit", "--undo"])).expect_err("没给 --history 要给错");
         assert!(error.contains("--history"), "{error}");
 
-        let error = parse(&argv(&["edit", "--undo", "--history", "h.json", "--op", "{}"]))
-            .expect_err("--op 与 --undo 互斥");
-        assert!(error.contains("一次只做一件事"), "{error}");
-
         let error = parse(&argv(&[
             "edit",
             "--undo",
-            "--redo",
             "--history",
             "h.json",
+            "--op",
+            "{}",
         ]))
-        .expect_err("--undo 与 --redo 互斥");
+        .expect_err("--op 与 --undo 互斥");
+        assert!(error.contains("一次只做一件事"), "{error}");
+
+        let error = parse(&argv(&["edit", "--undo", "--redo", "--history", "h.json"]))
+            .expect_err("--undo 与 --redo 互斥");
         assert!(error.contains("只能给一个"), "{error}");
     }
 
@@ -2691,7 +2763,11 @@ mod tests {
         // 与上面那张表同一条规矩：表里列了却没写分支的选项会落到 other 报错。
         // 这一张的值受约束，所以占位值**各自给合法的**：`--format 1` 本来就该被拒。
         for flag in KNOWN_SIDECAR_FLAGS {
-            let value = if flag == "--format" { "ass" } else { "side.srt" };
+            let value = if flag == "--format" {
+                "ass"
+            } else {
+                "side.srt"
+            };
             let mut line = vec!["render", flag, value];
             if flag != "--subtitle-out" {
                 // `--format` 要跟着 `--subtitle-out`（单独出现是用法错，见下一条）。
@@ -2703,8 +2779,14 @@ mod tests {
             assert_eq!(parsed.subtitle_out.as_deref(), Some("side.srt"));
         }
         // 顺序反过来也要认：`--format` 先出现不该改变结论。
-        let swapped = parse(&argv(&["render", "--format", "ass", "--subtitle-out", "side.ass"]))
-            .expect("合法");
+        let swapped = parse(&argv(&[
+            "render",
+            "--format",
+            "ass",
+            "--subtitle-out",
+            "side.ass",
+        ]))
+        .expect("合法");
         assert_eq!(swapped.format, Some(SidecarFormat::Ass));
     }
 
@@ -2716,8 +2798,14 @@ mod tests {
         assert_eq!(SidecarFormat::from_flag("SRT"), None);
         assert_eq!(SidecarFormat::from_flag("ssa"), None);
         assert_eq!(SidecarFormat::from_flag("vtt"), None);
-        let error = parse(&argv(&["render", "--subtitle-out", "s.srt", "--format", "vtt"]))
-            .expect_err("应当报错");
+        let error = parse(&argv(&[
+            "render",
+            "--subtitle-out",
+            "s.srt",
+            "--format",
+            "vtt",
+        ]))
+        .expect_err("应当报错");
         assert!(error.contains("srt / ass"), "{error}");
     }
 
@@ -2769,8 +2857,8 @@ mod tests {
             sidecar_target(&sidecar_args("s.ass", Some(SidecarFormat::Ass))).expect("合法"),
             Some((PathBuf::from("s.ass"), SidecarFormat::Ass))
         );
-        let clash = sidecar_target(&sidecar_args("s.ass", Some(SidecarFormat::Srt)))
-            .expect_err("应当报错");
+        let clash =
+            sidecar_target(&sidecar_args("s.ass", Some(SidecarFormat::Srt))).expect_err("应当报错");
         assert!(clash.contains("--format"), "{clash}");
         // 扩展名认不出来：明说了就照明说的，没明说**不猜**。
         assert_eq!(
@@ -2781,8 +2869,11 @@ mod tests {
         assert!(guess.contains("--format"), "{guess}");
         // 没要侧挂文件时这一步什么都不做。
         assert_eq!(
-            sidecar_target(&Args { command: "render".to_string(), ..Args::default() })
-                .expect("合法"),
+            sidecar_target(&Args {
+                command: "render".to_string(),
+                ..Args::default()
+            })
+            .expect("合法"),
             None
         );
     }
@@ -2815,7 +2906,10 @@ mod tests {
         // ASS 是同一条内容的另一种装法：头部是 [Script Info]，条目在 Dialogue 行上。
         let ass = sidecar_text(&spans, 60, &timebase, SidecarFormat::Ass).expect("算得出");
         assert!(ass.starts_with("[Script Info]\n"), "{ass}");
-        assert!(ass.contains("Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,先说的\\N第二行"), "{ass}");
+        assert!(
+            ass.contains("Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,先说的\\N第二行"),
+            "{ass}"
+        );
     }
 
     #[test]
@@ -2832,8 +2926,13 @@ mod tests {
         let srt = sidecar_text(&spans, 8000, &timebase, SidecarFormat::Srt).expect("算得出");
         assert!(srt.contains("00:00:00,000 --> 00:00:00,001"), "{srt}");
         // 时间基坏掉时**不猜**：这是工程文件坏了，报出去让人查。
-        let broken = sidecar_text(&spans, 0, &TimebaseDto { num: 0, den: 1 }, SidecarFormat::Srt)
-            .expect_err("应当报错");
+        let broken = sidecar_text(
+            &spans,
+            0,
+            &TimebaseDto { num: 0, den: 1 },
+            SidecarFormat::Srt,
+        )
+        .expect_err("应当报错");
         assert!(broken.contains("时间基"), "{broken}");
     }
 
@@ -2863,31 +2962,78 @@ mod tests {
         let cases: [(&[&str], &str); 5] = [
             (
                 &[
-                    "clip", "insert", "--project", "p.json", "--track", "c", "--asset", "a.mp4",
-                    "--at", "10", "--source-in", "3", "--length", "20", "--id", "x",
+                    "clip",
+                    "insert",
+                    "--project",
+                    "p.json",
+                    "--track",
+                    "c",
+                    "--asset",
+                    "a.mp4",
+                    "--at",
+                    "10",
+                    "--source-in",
+                    "3",
+                    "--length",
+                    "20",
+                    "--id",
+                    "x",
                 ],
                 r#"{"op":"insert","track":"c","asset":"a.mp4","at":10,"source_in":3,"length":20,"id":"x"}"#,
             ),
             (
                 &[
-                    "clip", "trim", "--project", "p.json", "--layer", "c", "--edge", "out", "--to",
+                    "clip",
+                    "trim",
+                    "--project",
+                    "p.json",
+                    "--layer",
+                    "c",
+                    "--edge",
+                    "out",
+                    "--to",
                     "40",
                 ],
                 r#"{"op":"trim","layer":"c","edge":"out","to":40}"#,
             ),
             (
-                &["clip", "split", "--project", "p.json", "--layer", "c", "--at", "75"],
+                &[
+                    "clip",
+                    "split",
+                    "--project",
+                    "p.json",
+                    "--layer",
+                    "c",
+                    "--at",
+                    "75",
+                ],
                 r#"{"op":"split","layer":"c","at":75}"#,
             ),
             (
                 &[
-                    "clip", "move", "--project", "p.json", "--layer", "c", "--to", "30", "--track",
+                    "clip",
+                    "move",
+                    "--project",
+                    "p.json",
+                    "--layer",
+                    "c",
+                    "--to",
+                    "30",
+                    "--track",
                     "d",
                 ],
                 r#"{"op":"move","layer":"c","to":30,"track":"d"}"#,
             ),
             (
-                &["clip", "remove", "--project", "p.json", "--layer", "c", "--ripple"],
+                &[
+                    "clip",
+                    "remove",
+                    "--project",
+                    "p.json",
+                    "--layer",
+                    "c",
+                    "--ripple",
+                ],
                 r#"{"op":"remove","layer":"c","ripple":true}"#,
             ),
         ];
@@ -2906,8 +3052,16 @@ mod tests {
     #[test]
     fn sequence_set_也拼成同一份操作() {
         let args = parse(&argv(&[
-            "sequence", "set", "--project", "p.json", "--timebase", "30000/1001", "--width",
-            "1920", "--height", "1080",
+            "sequence",
+            "set",
+            "--project",
+            "p.json",
+            "--timebase",
+            "30000/1001",
+            "--width",
+            "1920",
+            "--height",
+            "1080",
         ]))
         .expect("合法");
         let manual: EditOp = serde_json::from_str(
@@ -2916,8 +3070,15 @@ mod tests {
         .expect("参照 JSON 合法");
         assert_eq!(build_named_op(&args), manual);
         // 不给 --width / --height 时折成 0，而 0 在 set_sequence 里的意思是「不动它」。
-        let bare = parse(&argv(&["sequence", "set", "--project", "p.json", "--timebase", "30"]))
-            .expect("合法");
+        let bare = parse(&argv(&[
+            "sequence",
+            "set",
+            "--project",
+            "p.json",
+            "--timebase",
+            "30",
+        ]))
+        .expect("合法");
         let manual: EditOp = serde_json::from_str(
             r#"{"op":"set_sequence","timebase":{"num":30,"den":1},"width":0,"height":0}"#,
         )
@@ -2928,11 +3089,23 @@ mod tests {
     #[test]
     fn undo_redo_折出来就是_edit_的那两个旗标() {
         // 这一条比"看起来一样"强：它比的是**解析结果逐字段相同**。
-        let named =
-            parse(&argv(&["undo", "--project", "p.json", "--history", "h.json", "--write"]))
-                .expect("合法");
+        let named = parse(&argv(&[
+            "undo",
+            "--project",
+            "p.json",
+            "--history",
+            "h.json",
+            "--write",
+        ]))
+        .expect("合法");
         let flag = parse(&argv(&[
-            "edit", "--project", "p.json", "--history", "h.json", "--undo", "--write",
+            "edit",
+            "--project",
+            "p.json",
+            "--history",
+            "h.json",
+            "--undo",
+            "--write",
         ]))
         .expect("合法");
         assert_eq!(
@@ -2941,10 +3114,21 @@ mod tests {
             "undo 与 edit --undo 必须折成同一件事"
         );
 
-        let named = parse(&argv(&["redo", "--project", "p.json", "--history", "h.json"]))
-            .expect("合法");
+        let named = parse(&argv(&[
+            "redo",
+            "--project",
+            "p.json",
+            "--history",
+            "h.json",
+        ]))
+        .expect("合法");
         let flag = parse(&argv(&[
-            "edit", "--project", "p.json", "--history", "h.json", "--redo",
+            "edit",
+            "--project",
+            "p.json",
+            "--history",
+            "h.json",
+            "--redo",
         ]))
         .expect("合法");
         assert_eq!(history_alias(&named), flag);
@@ -2955,8 +3139,18 @@ mod tests {
         // 少给一个开关**不能**拿默认值顶上：`--source-in` 默认 0 的意思是"从素材头开始"，
         // 而省掉它的那个人可能只是漏了。两种意图分不开，所以判错。
         let err = parse(&argv(&[
-            "clip", "insert", "--project", "p.json", "--track", "c", "--asset", "a.mp4", "--at",
-            "10", "--length", "20",
+            "clip",
+            "insert",
+            "--project",
+            "p.json",
+            "--track",
+            "c",
+            "--asset",
+            "a.mp4",
+            "--at",
+            "10",
+            "--length",
+            "20",
         ]))
         .expect_err("少 --source-in 应当报错");
         assert!(err.contains("--source-in"), "{err}");
@@ -2966,14 +3160,31 @@ mod tests {
     fn 具名动作多给开关也会报错() {
         // **多给**与少给一样坏：那个开关会被丢掉，而用户以为它生效了。
         let err = parse(&argv(&[
-            "clip", "split", "--project", "p.json", "--layer", "c", "--at", "75", "--length",
+            "clip",
+            "split",
+            "--project",
+            "p.json",
+            "--layer",
+            "c",
+            "--at",
+            "75",
+            "--length",
             "20",
         ]))
         .expect_err("split 不吃 --length");
         assert!(err.contains("--length"), "{err}");
         // 连"别的子命令本来就认的"也不许混进来：--width 是 render / frame 的。
         let err = parse(&argv(&[
-            "clip", "split", "--project", "p.json", "--layer", "c", "--at", "75", "--width", "640",
+            "clip",
+            "split",
+            "--project",
+            "p.json",
+            "--layer",
+            "c",
+            "--at",
+            "75",
+            "--width",
+            "640",
         ]))
         .expect_err("split 不吃 --width");
         assert!(err.contains("--width"), "{err}");
@@ -2995,8 +3206,16 @@ mod tests {
         let err = parse(&argv(&["probe", "--project", "p.json", "--layer", "c"]))
             .expect_err("probe 不认 --layer");
         assert!(err.contains("--layer"), "{err}");
-        let err = parse(&argv(&["edit", "--project", "p.json", "--op", "{}", "--at", "3"]))
-            .expect_err("edit 不认 --at（它走 --op）");
+        let err = parse(&argv(&[
+            "edit",
+            "--project",
+            "p.json",
+            "--op",
+            "{}",
+            "--at",
+            "3",
+        ]))
+        .expect_err("edit 不认 --at（它走 --op）");
         assert!(err.contains("--at"), "{err}");
     }
 
@@ -3004,7 +3223,16 @@ mod tests {
     fn 编辑那一组的选项不外流() {
         // --op 只归 edit：具名子命令存在的意义就是不必手写那段 JSON。
         let err = parse(&argv(&[
-            "clip", "split", "--project", "p.json", "--layer", "c", "--at", "1", "--op", "{}",
+            "clip",
+            "split",
+            "--project",
+            "p.json",
+            "--layer",
+            "c",
+            "--at",
+            "1",
+            "--op",
+            "{}",
         ]))
         .expect_err("--op 只归 edit");
         assert!(err.contains("--op"), "{err}");
@@ -3012,11 +3240,25 @@ mod tests {
         // 但它不认 --history。这两条一起测，是为了不让下一个人把它们合成一张表 ——
         // 合成之后「import 认不认 --history」会被顺手答成"认"，而那是错的。
         assert!(
-            parse(&argv(&["import", "--project", "p.json", "--file", "a.mp4", "--write"])).is_ok(),
+            parse(&argv(&[
+                "import",
+                "--project",
+                "p.json",
+                "--file",
+                "a.mp4",
+                "--write"
+            ]))
+            .is_ok(),
             "import 也要落盘，它必须认 --write"
         );
         let err = parse(&argv(&[
-            "import", "--project", "p.json", "--file", "a.mp4", "--history", "h.json",
+            "import",
+            "--project",
+            "p.json",
+            "--file",
+            "a.mp4",
+            "--history",
+            "h.json",
         ]))
         .expect_err("import 不认 --history");
         assert!(err.contains("--history"), "{err}");
@@ -3033,7 +3275,13 @@ mod tests {
         let err = parse(&argv(&["batch", "--project", "p.json"])).expect_err("batch 缺 --script");
         assert!(err.contains("--script"), "{err}");
         let err = parse(&argv(&[
-            "edit", "--project", "p.json", "--op", "{}", "--script", "s.ndjson",
+            "edit",
+            "--project",
+            "p.json",
+            "--op",
+            "{}",
+            "--script",
+            "s.ndjson",
         ]))
         .expect_err("--script 只归 batch");
         assert!(err.contains("--script"), "{err}");
@@ -3042,17 +3290,36 @@ mod tests {
     #[test]
     fn edge_与_timebase_在参数这一关就定死() {
         let err = parse(&argv(&[
-            "clip", "trim", "--project", "p.json", "--layer", "c", "--edge", "left", "--to", "1",
+            "clip",
+            "trim",
+            "--project",
+            "p.json",
+            "--layer",
+            "c",
+            "--edge",
+            "left",
+            "--to",
+            "1",
         ]))
         .expect_err("--edge 只认 in / out");
         assert!(err.contains("--edge"), "{err}");
         let err = parse(&argv(&[
-            "sequence", "set", "--project", "p.json", "--timebase", "0/1",
+            "sequence",
+            "set",
+            "--project",
+            "p.json",
+            "--timebase",
+            "0/1",
         ]))
         .expect_err("分子 0 不是帧率");
         assert!(err.contains("--timebase"), "{err}");
         let err = parse(&argv(&[
-            "sequence", "set", "--project", "p.json", "--timebase", "abc",
+            "sequence",
+            "set",
+            "--project",
+            "p.json",
+            "--timebase",
+            "abc",
         ]))
         .expect_err("认不出的帧率");
         assert!(err.contains("--timebase"), "{err}");
@@ -3070,25 +3337,40 @@ mod tests {
     fn frame_的两种写法互斥且各出各的() {
         // 「出一帧」与「出一段」是两件事，同时给必须报错 ——
         // 让其中一个悄悄赢，产出的就不是用户要的那一份。
-        let both = parse(&argv(&["frame", "--project", "p.json", "--frame", "1", "--from", "0"]))
-            .expect("解析这一关不该拦（--from 不是 clip 专用开关）");
-        assert!(matches!(frame_spec(&both), Err(_)), "同时给应当是用法的错");
+        let both = parse(&argv(&[
+            "frame",
+            "--project",
+            "p.json",
+            "--frame",
+            "1",
+            "--from",
+            "0",
+        ]))
+        .expect("解析这一关不该拦（--from 不是 clip 专用开关）");
+        assert!(frame_spec(&both).is_err(), "同时给应当是用法的错");
 
         // 工程的量纲：48 帧的片子（[0, 48)），最后一帧是 47。
         const FIRST: Frame = 0;
         const END: Frame = 48;
 
         // 单帧：就是那一个帧号，原样。
-        let one = parse(&argv(&["frame", "--project", "p.json", "--frame", "30"]))
-            .expect("合法");
+        let one = parse(&argv(&["frame", "--project", "p.json", "--frame", "30"])).expect("合法");
         assert_eq!(
             resolve_frames(frame_spec(&one).expect("合法"), FIRST, END).expect("合法"),
             vec![30]
         );
 
         // 区间：闭区间，两头都算上。
-        let span = parse(&argv(&["frame", "--project", "p.json", "--from", "0", "--to", "2"]))
-            .expect("合法");
+        let span = parse(&argv(&[
+            "frame",
+            "--project",
+            "p.json",
+            "--from",
+            "0",
+            "--to",
+            "2",
+        ]))
+        .expect("合法");
         assert_eq!(
             resolve_frames(frame_spec(&span).expect("合法"), FIRST, END).expect("合法"),
             vec![0, 1, 2]
@@ -3101,16 +3383,23 @@ mod tests {
         //
         // 写成 `to = args.to.unwrap_or(from)`（本仓 2026-10-01 之前就是）会让
         // `--from 3` 只出第 3 帧 —— 一个**看着成功、实际少了 44 帧**的结果（下游交接单 D2）。
-        let tail = parse(&argv(&["frame", "--project", "p.json", "--from", "3"]))
-            .expect("合法");
-        let tail_frames = resolve_frames(frame_spec(&tail).expect("合法"), FIRST, END).expect("合法");
-        assert_ne!(tail_frames.len(), 1, "只给 --from 不该只出一帧（那正是 D2）");
+        let tail = parse(&argv(&["frame", "--project", "p.json", "--from", "3"])).expect("合法");
+        let tail_frames =
+            resolve_frames(frame_spec(&tail).expect("合法"), FIRST, END).expect("合法");
+        assert_ne!(
+            tail_frames.len(),
+            1,
+            "只给 --from 不该只出一帧（那正是 D2）"
+        );
         assert_eq!(tail_frames.first(), Some(&3), "只给 --from 应当从它开始");
-        assert_eq!(tail_frames.last(), Some(&47), "只给 --from 应当到工程最后一帧");
+        assert_eq!(
+            tail_frames.last(),
+            Some(&47),
+            "只给 --from 应当到工程最后一帧"
+        );
         assert_eq!(tail_frames.len(), 45, "3..=47 一共 45 帧");
 
-        let head = parse(&argv(&["frame", "--project", "p.json", "--to", "2"]))
-            .expect("合法");
+        let head = parse(&argv(&["frame", "--project", "p.json", "--to", "2"])).expect("合法");
         assert_eq!(
             resolve_frames(frame_spec(&head).expect("合法"), FIRST, END).expect("合法"),
             vec![0, 1, 2]
@@ -3118,22 +3407,30 @@ mod tests {
 
         // 一头都不给：**不猜**要哪几帧，报用法错。
         let none = parse(&argv(&["frame", "--project", "p.json"])).expect("合法");
-        assert!(matches!(frame_spec(&none), Err(_)), "都没给应当是用法的错");
+        assert!(frame_spec(&none).is_err(), "都没给应当是用法的错");
 
         // 区间反了：在这里判掉，而不是等渲染时发现一帧都没出。
-        let reversed = parse(&argv(&["frame", "--project", "p.json", "--from", "9", "--to", "2"]))
-            .expect("合法");
+        let reversed = parse(&argv(&[
+            "frame",
+            "--project",
+            "p.json",
+            "--from",
+            "9",
+            "--to",
+            "2",
+        ]))
+        .expect("合法");
         assert!(
-            matches!(resolve_frames(frame_spec(&reversed).expect("合法"), FIRST, END), Err(_)),
+            resolve_frames(frame_spec(&reversed).expect("合法"), FIRST, END).is_err(),
             "反区间应当是用法的错"
         );
 
         // 只给 `--from` 而且起点在工程之外：补出来的 `to` 比它小 ⇒ 同样是用法错，
         // 而不是"一帧都不出但退 0"。
-        let beyond = parse(&argv(&["frame", "--project", "p.json", "--from", "500"]))
-            .expect("合法");
+        let beyond =
+            parse(&argv(&["frame", "--project", "p.json", "--from", "500"])).expect("合法");
         assert!(
-            matches!(resolve_frames(frame_spec(&beyond).expect("合法"), FIRST, END), Err(_)),
+            resolve_frames(frame_spec(&beyond).expect("合法"), FIRST, END).is_err(),
             "起点越过工程结尾应当是用法错"
         );
     }

@@ -273,12 +273,7 @@ struct Atom {
     highlight: bool,
 }
 
-fn flush_word(
-    atoms: &mut Vec<Atom>,
-    word: &mut String,
-    word_width: &mut f32,
-    highlight: bool,
-) {
+fn flush_word(atoms: &mut Vec<Atom>, word: &mut String, word_width: &mut f32, highlight: bool) {
     if word.is_empty() {
         return;
     }
@@ -436,7 +431,11 @@ pub fn layout(text: &str, style: &SubtitleStyle, sequence: (u32, u32)) -> TextLa
     let font_px = style.font_ratio.max(0.0) * sequence_height;
     // 轨道可以覆盖行高（参照实现 的字幕 CSS 是 line-height:1.5，本仓默认 1.2）。
     // 默认 0 = 老行为，既有工程一字不变。
-    let line_em = if style.line_height > 0.0 { style.line_height } else { LINE_HEIGHT_EM };
+    let line_em = if style.line_height > 0.0 {
+        style.line_height
+    } else {
+        LINE_HEIGHT_EM
+    };
     let line_px = font_px * line_em;
 
     // 安全边距：左右复用 bottom_margin。
@@ -448,6 +447,10 @@ pub fn layout(text: &str, style: &SubtitleStyle, sequence: (u32, u32)) -> TextLa
 
     // 字号或可用宽度为 0：没有可排的东西。**返回空，而不是一排零宽度的行** ——
     // 后者会让调用方以为「有字要画」。
+    //
+    // ⚠️ 与下面那处同理：`!(x > 0.0)` 与 `x <= 0.0` **在 NaN 上不等价**，
+    // 而这里要的正是把 NaN 一起挡掉。见 `place_line` 里那段说明。
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
     if !(font_px > 0.0) || !(max_width_px > 0.0) {
         return empty;
     }
@@ -471,10 +474,7 @@ pub fn layout(text: &str, style: &SubtitleStyle, sequence: (u32, u32)) -> TextLa
     //
     // 多段落时用**最长那一段**的总宽：每段各自折行，缩字要让最长的那段也装得下。
     // 单段落时它与参照的 `tw` 完全一致。
-    let total_em = text
-        .split('\n')
-        .map(measure_em)
-        .fold(0.0_f32, f32::max);
+    let total_em = text.split('\n').map(measure_em).fold(0.0_f32, f32::max);
     let mut scale = 1.0_f32;
     if style.shrink_min_scale > 0.0 && total_em > max_width_em + eps_em {
         scale = (max_width_em * SHRINK_MAX_LINES / total_em).clamp(style.shrink_min_scale, 1.0);
@@ -600,7 +600,11 @@ pub struct LinePlacement {
 ///
 /// 目标尺寸为 0、或行盒没有高度时给 `None`：**没有可画的东西**，
 /// 而不是「画失败」—— 两者在下游的处理不同（前者跳过，后者记问题）。
-pub fn place_line(rect: NormalizedRect, target: (u32, u32), font_ratio: f32) -> Option<LinePlacement> {
+pub fn place_line(
+    rect: NormalizedRect,
+    target: (u32, u32),
+    font_ratio: f32,
+) -> Option<LinePlacement> {
     if target.0 == 0 || target.1 == 0 {
         return None;
     }
@@ -608,6 +612,13 @@ pub fn place_line(rect: NormalizedRect, target: (u32, u32), font_ratio: f32) -> 
     let target_height = target.1 as f32;
     let line_box_px = rect.height * target_height;
     // 这一行同时挡掉 NaN（NaN 的比较恒为假）。
+    //
+    // ⚠️ `clippy::neg_cmp_op_on_partial_ord` 在这里**是误报，不许按它改**：
+    // 它建议的 `line_box_px.partial_cmp(&0.0)` 分支（或 `<= 0.0`）在 NaN 上会走进**另一边** ——
+    // `NaN <= 0.0` 是 false，于是 NaN 会被当成"合法行盒"放过去。
+    // 而 `!(NaN > 0.0)` 是 true，正是要挡的那个。这条有测试盯着（`NaN 也要挡住`）。
+    // 所以是 `#[allow]` + 理由，**不是**把判据改掉。
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
     if !(line_box_px > 0.0) {
         return None;
     }
@@ -947,7 +958,10 @@ mod tests {
     #[test]
     fn 高亮段按参照的正则语义切分() {
         // 普通文本
-        assert_eq!(parse_highlight("没有标记"), vec![("没有标记".to_string(), false)]);
+        assert_eq!(
+            parse_highlight("没有标记"),
+            vec![("没有标记".to_string(), false)]
+        );
         // 前后的普通文字 + 中间一段高亮
         assert_eq!(
             parse_highlight("前<span class=\"hl\">高亮</span>后"),
@@ -974,10 +988,10 @@ mod tests {
             vec![("高".to_string(), true), ("平".to_string(), false)]
         );
         // 没闭合：吃到结尾，**不假装它闭合了**
-        assert_eq!(parse_highlight("x<span class=\"hl\">y"), vec![
-            ("x".to_string(), false),
-            ("y".to_string(), true),
-        ]);
+        assert_eq!(
+            parse_highlight("x<span class=\"hl\">y"),
+            vec![("x".to_string(), false), ("y".to_string(), true),]
+        );
     }
 
     /// **同行里相邻的同属性段要合并** —— 参照也是这么做的
@@ -995,10 +1009,10 @@ mod tests {
         let out = layout("甲<span class=\"hl\">乙</span>丙丁", &style, seq);
         let parts = &out.lines[0].parts;
         assert_eq!(parts.len(), 3, "属性不同不该合并：{parts:?}");
-        assert_eq!(parts[0].highlight, false);
-        assert_eq!(parts[1].highlight, true);
+        assert!(!parts[0].highlight);
+        assert!(parts[1].highlight);
         assert_eq!(parts[1].text, "乙");
-        assert_eq!(parts[2].highlight, false);
+        assert!(!parts[2].highlight);
         assert_eq!(parts[2].text, "丙丁", "相邻的两个普通段应当并成一段");
         // `text` 是各段的拼接 —— 两者必须一致，否则量宽与画的字不是一个东西。
         assert_eq!(out.lines[0].text, "甲乙丙丁");
@@ -1016,9 +1030,16 @@ mod tests {
         // **长度要算过**：`max_width_em = 1920*0.875 / (0.04*1080) = 38.9 em`，
         // 所以 30 个全宽字（30 em）**一行就装得下**。我第一版写 3 遍，
         // 断言"必然跨行"直接打红。要 6 遍（60 em）才跨。
-        let marked = format!("<span class=\"hl\">{}</span>", "一二三四五六七八九十".repeat(6));
+        let marked = format!(
+            "<span class=\"hl\">{}</span>",
+            "一二三四五六七八九十".repeat(6)
+        );
         let out = layout(&marked, &style, seq);
-        assert!(out.lines.len() > 1, "这份文本应当折成多行，实得 {}", out.lines.len());
+        assert!(
+            out.lines.len() > 1,
+            "这份文本应当折成多行，实得 {}",
+            out.lines.len()
+        );
         for line in &out.lines {
             assert!(
                 line.parts.iter().all(|p| p.highlight),
@@ -1079,7 +1100,10 @@ mod tests {
         );
         style.keep_all_lines = true;
         let kept = layout(&long, &style, seq);
-        assert_eq!(kept.dropped_lines, 0, "缩字 + 不截断，才与参照一样一行都不丢");
+        assert_eq!(
+            kept.dropped_lines, 0,
+            "缩字 + 不截断，才与参照一样一行都不丢"
+        );
         assert!(
             kept.lines.len() <= SHRINK_MAX_LINES as usize + 1,
             "缩完应当是 3~4 行（贪心折行的浪费最多再要一行），实得 {}",
@@ -1130,14 +1154,23 @@ mod tests {
 
     #[test]
     fn 行盒变高不会把字号带大() {
-        let rect = NormalizedRect { x: 0.25, y: 0.5, width: 0.5, height: 0.1 };
+        let rect = NormalizedRect {
+            x: 0.25,
+            y: 0.5,
+            width: 0.5,
+            height: 0.1,
+        };
         // 同一份 `font_ratio`，行盒高矮不影响字号。
         let slim = place_line(rect, (1920, 1080), 72.0 / 1080.0).expect("能落点");
         let mut tall = rect;
         tall.height = 0.15;
         let fat = place_line(tall, (1920, 1080), 72.0 / 1080.0).expect("能落点");
         assert_eq!(slim.font_px, 72, "字号就是 font_ratio × 目标高");
-        assert_eq!(fat.font_px, 72, "行盒变高不该改变字号（实得 {}）", fat.font_px);
+        assert_eq!(
+            fat.font_px, 72,
+            "行盒变高不该改变字号（实得 {}）",
+            fat.font_px
+        );
     }
 
     /// 没有可画的东西与画失败是两回事：这里给 `None`，由宿主决定「跳过」。
@@ -1151,12 +1184,18 @@ mod tests {
         };
         assert!(place_line(ok, (640, 360), 0.04).is_some());
         let zero_height = NormalizedRect { height: 0.0, ..ok };
-        assert!(place_line(zero_height, (640, 360), 0.04).is_none(), "零高行盒");
+        assert!(
+            place_line(zero_height, (640, 360), 0.04).is_none(),
+            "零高行盒"
+        );
         let nan_height = NormalizedRect {
             height: f32::NAN,
             ..ok
         };
-        assert!(place_line(nan_height, (640, 360), 0.04).is_none(), "NaN 也要挡住");
+        assert!(
+            place_line(nan_height, (640, 360), 0.04).is_none(),
+            "NaN 也要挡住"
+        );
         assert!(place_line(ok, (0, 360), 0.04).is_none(), "目标宽为 0");
         assert!(place_line(ok, (640, 0), 0.04).is_none(), "目标高为 0");
     }

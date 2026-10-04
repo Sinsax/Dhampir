@@ -63,7 +63,10 @@ impl RenderSpace {
     /// **合成源、探针、语料这类「没有工程」的路径用它**：那种情况下没有文档坐标系可言，
     /// 目标尺寸就是它自己的坐标系，于是比例是 1.0，行为与引入本结构之前一致。
     pub fn square(size: (u32, u32)) -> Self {
-        Self { sequence: size, target: size }
+        Self {
+            sequence: size,
+            target: size,
+        }
     }
 
     /// 目标/文档 的比例。1.0 表示两者相同。
@@ -258,44 +261,47 @@ impl Compositor {
             .into_iter()
             .filter(|mode| mode.is_implemented())
         {
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("dhampir compose pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_fullscreen"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_layer"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    // 方程**只在 blend_state 里写一份**，这里不重复。
-                    // （用直通 alpha 而不是预乘：求值层给的不透明度是「这一层多透」，
-                    //   预乘会把它算两遍 —— 这条在选择 SrcAlpha/OneMinusSrcAlpha 时定下。）
-                    blend: blend_state(mode),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("dhampir compose pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_fullscreen"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_layer"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target_format,
+                        // 方程**只在 blend_state 里写一份**，这里不重复。
+                        // （用直通 alpha 而不是预乘：求值层给的不透明度是「这一层多透」，
+                        //   预乘会把它算两遍 —— 这条在选择 SrcAlpha/OneMinusSrcAlpha 时定下。）
+                        blend: blend_state(mode),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
 
-        // 这里刻意**不建共用 uniform**：见 compose() 里的说明。
-        pipelines.push((mode, pipeline));
+            // 这里刻意**不建共用 uniform**：见 compose() 里的说明。
+            pipelines.push((mode, pipeline));
         }
 
-        Self { pipelines, bind_group_layout }
+        Self {
+            pipelines,
+            bind_group_layout,
+        }
     }
 
     /// 把 layers **按给定顺序**（从下往上）叠进 target。
@@ -314,6 +320,14 @@ impl Compositor {
             .map(|(_, pipeline)| pipeline)
     }
 
+    // ⚠️ `too_many_arguments`：**这里选择 allow，不是拆结构体**。
+    //
+    // 这 8 个参数里每一个都是 wgpu 的必需输入（device / queue / encoder / target 四个
+    // 是 wgpu 的调用形状，不能合并），剩下 4 个（space / layers / clear + self）各自
+    // 语义独立。为了凑 clippy 的 7 而造一个 `ComposeArgs` 结构体，只会把
+    // "这次调用要清什么颜色" 变成一次多余的跳转，且要改掉全部调用点 ——
+    // **收益是把 lint 关掉，代价是让渲染入口更难读**。那不值。
+    #[allow(clippy::too_many_arguments)]
     pub fn compose(
         &self,
         device: &wgpu::Device,
@@ -443,7 +457,12 @@ mod tests {
 
     #[test]
     fn 中心平移把源中心映到目标中心() {
-        let t = Transform { x: 10.0, y: -4.0, scale: 1.0, rotation_deg: 0.0 };
+        let t = Transform {
+            x: 10.0,
+            y: -4.0,
+            scale: 1.0,
+            rotation_deg: 0.0,
+        };
         let (row0, row1) = inverse_affine(t, (100, 50), (100, 50));
         let cx = 50.0_f32;
         let cy = 25.0_f32;
@@ -456,7 +475,12 @@ mod tests {
 
     #[test]
     fn 放大两倍让源坐标落在中心四分之一() {
-        let t = Transform { x: 0.0, y: 0.0, scale: 2.0, rotation_deg: 0.0 };
+        let t = Transform {
+            x: 0.0,
+            y: 0.0,
+            scale: 2.0,
+            rotation_deg: 0.0,
+        };
         let (row0, row1) = inverse_affine(t, (100, 100), (100, 100));
         let src_x = row0[2];
         let src_y = row1[2];
@@ -467,7 +491,12 @@ mod tests {
 
     #[test]
     fn 旋转九十度把坐标换轴() {
-        let t = Transform { x: 0.0, y: 0.0, scale: 1.0, rotation_deg: 90.0 };
+        let t = Transform {
+            x: 0.0,
+            y: 0.0,
+            scale: 1.0,
+            rotation_deg: 90.0,
+        };
         let (row0, row1) = inverse_affine(t, (100, 100), (100, 100));
         assert!(row0[0].abs() < 1e-5, "得到 {}", row0[0]);
         assert!((row0[1] - 1.0).abs() < 1e-5, "得到 {}", row0[1]);
@@ -477,18 +506,34 @@ mod tests {
 
     #[test]
     fn 非法缩放退回一比一而不是除零() {
-        let t = Transform { x: 0.0, y: 0.0, scale: 0.0, rotation_deg: 0.0 };
+        let t = Transform {
+            x: 0.0,
+            y: 0.0,
+            scale: 0.0,
+            rotation_deg: 0.0,
+        };
         let (row0, _) = inverse_affine(t, (10, 10), (10, 10));
-        assert!(row0.iter().all(|v| v.is_finite()), "缩放为 0 不能让矩阵变成 Inf/NaN");
+        assert!(
+            row0.iter().all(|v| v.is_finite()),
+            "缩放为 0 不能让矩阵变成 Inf/NaN"
+        );
     }
 
     #[test]
     fn 平移到画面外时源坐标也落在外面() {
         // 这一条对应着色器里的越界分支：层被推出画面后不应还画出东西。
-        let t = Transform { x: 1000.0, y: 0.0, scale: 1.0, rotation_deg: 0.0 };
+        let t = Transform {
+            x: 1000.0,
+            y: 0.0,
+            scale: 1.0,
+            rotation_deg: 0.0,
+        };
         let (row0, _) = inverse_affine(t, (100, 100), (100, 100));
         let src_x = row0[0] * 0.0 + row0[1] * 0.0 + row0[2];
-        assert!(src_x < 0.0 || src_x >= 100.0, "目标左上角应当落在源纹理之外，得到 {src_x}");
+        assert!(
+            !(0.0..100.0).contains(&src_x),
+            "目标左上角应当落在源纹理之外，得到 {src_x}"
+        );
     }
 
     #[test]
@@ -539,7 +584,12 @@ mod tests {
         use dhampir_timeline::layer::BlendMode;
         // 这些模式说的是「颜色怎么合」，覆盖度不该跟着变 ——
         // 否则半透明层连不透明度都会变味。
-        for mode in [BlendMode::Normal, BlendMode::Add, BlendMode::Multiply, BlendMode::Screen] {
+        for mode in [
+            BlendMode::Normal,
+            BlendMode::Add,
+            BlendMode::Multiply,
+            BlendMode::Screen,
+        ] {
             let state = blend_state(mode).unwrap();
             assert_eq!(state.alpha.src_factor, wgpu::BlendFactor::One);
             assert_eq!(state.alpha.dst_factor, wgpu::BlendFactor::OneMinusSrcAlpha);
@@ -552,17 +602,25 @@ mod tests {
     fn 相同尺寸时比例是_1_且不改变任何像素量() {
         let space = RenderSpace::square((640, 360));
         assert_eq!(space.pixel_scale(), (1.0, 1.0));
-        let mut transform = Transform::default();
-        transform.x = 160.0;
-        transform.y = 90.0;
+        let transform = Transform {
+            x: 160.0,
+            y: 90.0,
+            ..Transform::default()
+        };
         assert_eq!(space.offset(transform), (160.0, 90.0));
-        let same = RenderSpace { sequence: (640, 360), target: (640, 360) };
+        let same = RenderSpace {
+            sequence: (640, 360),
+            target: (640, 360),
+        };
         assert_eq!(same.offset(transform), space.offset(transform));
     }
 
     #[test]
     fn 文档尺寸为零时兜到_1_而不是除零() {
-        let space = RenderSpace { sequence: (0, 0), target: (640, 360) };
+        let space = RenderSpace {
+            sequence: (0, 0),
+            target: (640, 360),
+        };
         assert_eq!(space.pixel_scale(), (1.0, 1.0));
         assert!(space.pixel_scale().0.is_finite());
     }
@@ -576,9 +634,11 @@ mod tests {
     fn 位移的归一化落点与目标尺寸无关() {
         let sequence = (640_u32, 360_u32);
         let source = (1920_u32, 1080_u32);
-        let mut transform = Transform::default();
-        transform.x = 160.0;
-        transform.y = 90.0;
+        let transform = Transform {
+            x: 160.0,
+            y: 90.0,
+            ..Transform::default()
+        };
 
         let expected = (
             0.5 + transform.x / sequence.0 as f32,
@@ -608,7 +668,8 @@ mod tests {
             let normalized = (out_x / target.0 as f32, out_y / target.1 as f32);
 
             assert!(
-                (normalized.0 - expected.0).abs() < 1e-5 && (normalized.1 - expected.1).abs() < 1e-5,
+                (normalized.0 - expected.0).abs() < 1e-5
+                    && (normalized.1 - expected.1).abs() < 1e-5,
                 "目标 {target:?} 的归一化落点是 {normalized:?}，期望 {expected:?}"
             );
             if let Some(previous) = first {
@@ -629,8 +690,10 @@ mod tests {
     fn 不换算文档像素时归一化落点会随目标尺寸变() {
         let sequence = (640_u32, 360_u32);
         let source = (1920_u32, 1080_u32);
-        let mut transform = Transform::default();
-        transform.x = 160.0;
+        let transform = Transform {
+            x: 160.0,
+            ..Transform::default()
+        };
 
         let mut normalized = Vec::new();
         for target in [(640_u32, 360_u32), (320, 180)] {
@@ -645,8 +708,9 @@ mod tests {
             "不换算时两种目标尺寸给出了相同的归一化落点（{normalized:?}）—— 那说明这条判据抓不到 bug"
         );
         // 而且错的正是「小的目标里位移占比更大」这个方向。
-        assert!(normalized[1] > normalized[0], "640 宽的位移在 320 宽里应该占更大比例");
+        assert!(
+            normalized[1] > normalized[0],
+            "640 宽的位移在 320 宽里应该占更大比例"
+        );
     }
 }
-
-

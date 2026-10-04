@@ -249,20 +249,26 @@ pub const HOST_API_VERSION: u32 = 6;
 pub struct OpenResult {
     pub parsed: bool,
     pub ok: bool,
-#[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issues: Option<Vec<Issue>>,
     /// **warnings**：不阻断载入（例如「登记了但没被引用」）。
     /// 与 errors 分开而不是给 Issue 加 severity —— Issue 是已冻结契约的一部分。
-#[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warnings: Option<Vec<Issue>>,
-#[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
 impl OpenResult {
     /// 解析成功。`ok` 表示**校验**是否通过（解析成功但校验不过也是正常的）。
     pub fn opened(issues: Vec<Issue>) -> Self {
-        Self { parsed: true, ok: issues.is_empty(), issues: Some(issues), warnings: None, error: None }
+        Self {
+            parsed: true,
+            ok: issues.is_empty(),
+            issues: Some(issues),
+            warnings: None,
+            error: None,
+        }
     }
 
     /// 从工程文件的校验结果来。**errors 决定 ok，warnings 单独给出** ——
@@ -279,7 +285,13 @@ impl OpenResult {
 
     /// 连 JSON 都没解析成功。
     pub fn unparsed(message: String) -> Self {
-        Self { parsed: false, ok: false, issues: None, warnings: None, error: Some(message) }
+        Self {
+            parsed: false,
+            ok: false,
+            issues: None,
+            warnings: None,
+            error: Some(message),
+        }
     }
 }
 
@@ -334,7 +346,12 @@ pub struct RectView {
 
 impl From<crate::text_layout::NormalizedRect> for RectView {
     fn from(rect: crate::text_layout::NormalizedRect) -> Self {
-        Self { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+        Self {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        }
     }
 }
 
@@ -520,7 +537,7 @@ pub struct SourceView {
 pub struct SourcesResult {
     pub frame: Frame,
     pub sources: Vec<SourceView>,
-#[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
@@ -659,10 +676,24 @@ mod tests {
         assert!(value.get("info").is_none(), "失败形态不该有 info 键");
 
         // 查得到 / 查不到两种形态。
-        let found = AnimQueryResult { loaded: true, info: Some(info), error: None };
-        assert_eq!(keys(&serde_json::to_value(&found).unwrap()), sorted(&["loaded", "info"]));
-        let missing = AnimQueryResult { loaded: false, info: None, error: None };
-        assert_eq!(keys(&serde_json::to_value(&missing).unwrap()), sorted(&["loaded"]));
+        let found = AnimQueryResult {
+            loaded: true,
+            info: Some(info),
+            error: None,
+        };
+        assert_eq!(
+            keys(&serde_json::to_value(&found).unwrap()),
+            sorted(&["loaded", "info"])
+        );
+        let missing = AnimQueryResult {
+            loaded: false,
+            info: None,
+            error: None,
+        };
+        assert_eq!(
+            keys(&serde_json::to_value(&missing).unwrap()),
+            sorted(&["loaded"])
+        );
     }
 
     /// 版本常量与 docs/host-api.md 那一行由 scripts/api-surface.mjs 比对；
@@ -696,12 +727,19 @@ mod tests {
         // 「有提示」不该看起来像「不能用」。
         let issues = crate::project::DocIssues {
             errors: Vec::new(),
-            warnings: vec![Issue::new("unused_asset", "assets[0]", "登记了但没被引用".to_string())],
+            warnings: vec![Issue::new(
+                "unused_asset",
+                "assets[0]",
+                "登记了但没被引用".to_string(),
+            )],
         };
         let result = OpenResult::from_doc_issues(&issues);
         assert!(result.parsed && result.ok);
         let value = serde_json::to_value(&result).unwrap();
-        assert_eq!(keys(&value), sorted(&["parsed", "ok", "issues", "warnings"]));
+        assert_eq!(
+            keys(&value),
+            sorted(&["parsed", "ok", "issues", "warnings"])
+        );
         assert_eq!(value["warnings"].as_array().map(Vec::len), Some(1));
     }
 
@@ -735,7 +773,12 @@ mod tests {
                 source_frame: 10,
                 opacity: 0.5,
                 frozen_for_transition: true,
-                transform: TransformView { x: 1.0, y: 2.0, scale: 1.5, rotation_deg: 90.0 },
+                transform: TransformView {
+                    x: 1.0,
+                    y: 2.0,
+                    scale: 1.5,
+                    rotation_deg: 90.0,
+                },
                 effects: vec![EffectView {
                     kind: "gaussian_blur".to_string(),
                     params: BTreeMap::from([("radius".to_string(), 4.0_f32)]),
@@ -759,7 +802,10 @@ mod tests {
                 "effects"
             ])
         );
-        assert_eq!(keys(&layer["transform"]), sorted(&["x", "y", "scale", "rotation_deg"]));
+        assert_eq!(
+            keys(&layer["transform"]),
+            sorted(&["x", "y", "scale", "rotation_deg"])
+        );
         assert_eq!(keys(&layer["effects"][0]), sorted(&["kind", "params"]));
     }
 
@@ -767,7 +813,12 @@ mod tests {
     fn 变换的键名仍是_rotation_deg() {
         // v2 的**契约**把它改名成了 rotation，但宿主 API 的形状改名是另一次破坏性改动。
         // 这条测试把这个「刻意不改」钉住 —— 否则将来有人会顺手改掉。
-        let transform = TransformView { x: 0.0, y: 0.0, scale: 1.0, rotation_deg: 0.0 };
+        let transform = TransformView {
+            x: 0.0,
+            y: 0.0,
+            scale: 1.0,
+            rotation_deg: 0.0,
+        };
         let value = serde_json::to_value(transform).unwrap();
         assert!(value.get("rotation_deg").is_some());
         assert!(value.get("rotation").is_none());
@@ -786,7 +837,10 @@ mod tests {
         };
         let value = serde_json::to_value(&result).unwrap();
         assert_eq!(keys(&value), sorted(&["frame", "sources"]));
-        assert_eq!(keys(&value["sources"][0]), sorted(&["source", "source_frame", "seconds"]));
+        assert_eq!(
+            keys(&value["sources"][0]),
+            sorted(&["source", "source_frame", "seconds"])
+        );
     }
 
     #[test]
@@ -810,14 +864,24 @@ mod tests {
             overlay: Some(OverlayView {
                 items: vec![TextItemView {
                     text: "第一行中文".to_string(),
-                    rect: RectView { x: 0.25, y: 0.8, width: 0.5, height: 0.066 },
+                    rect: RectView {
+                        x: 0.25,
+                        y: 0.8,
+                        width: 0.5,
+                        height: 0.066,
+                    },
                     opacity: 1.0,
                     dy_px: 0.0,
                     color: [255, 240, 200, 255],
                 }],
                 danmaku: vec![DanmakuItemView {
                     text: "飘过".to_string(),
-                    rect: RectView { x: 0.9, y: 0.0, width: 0.08, height: 0.048 },
+                    rect: RectView {
+                        x: 0.9,
+                        y: 0.0,
+                        width: 0.08,
+                        height: 0.048,
+                    },
                     lane: 0,
                     enter: 10,
                     exit: 250,
@@ -856,16 +920,34 @@ mod tests {
         let overlay = &value["overlay"];
         assert_eq!(
             keys(overlay),
-            sorted(&["items", "danmaku", "subtitle_style", "danmaku_style", "dropped_lines", "dropped_danmaku"])
+            sorted(&[
+                "items",
+                "danmaku",
+                "subtitle_style",
+                "danmaku_style",
+                "dropped_lines",
+                "dropped_danmaku"
+            ])
         );
-        assert_eq!(keys(&overlay["items"][0]), sorted(&["text", "rect", "opacity", "dy_px", "color"]));
-        assert_eq!(keys(&overlay["items"][0]["rect"]), sorted(&["x", "y", "width", "height"]));
+        assert_eq!(
+            keys(&overlay["items"][0]),
+            sorted(&["text", "rect", "opacity", "dy_px", "color"])
+        );
+        assert_eq!(
+            keys(&overlay["items"][0]["rect"]),
+            sorted(&["x", "y", "width", "height"])
+        );
         // 弹幕那一条：泳道与在屏区间必须在，否则「泳道分配错了」在单帧里查不出来。
         assert_eq!(
             keys(&overlay["danmaku"][0]),
-            sorted(&["text", "rect", "lane", "enter", "exit", "opacity", "dy_px", "color"])
+            sorted(&[
+                "text", "rect", "lane", "enter", "exit", "opacity", "dy_px", "color"
+            ])
         );
-        assert_eq!(keys(&overlay["danmaku"][0]["rect"]), sorted(&["x", "y", "width", "height"]));
+        assert_eq!(
+            keys(&overlay["danmaku"][0]["rect"]),
+            sorted(&["x", "y", "width", "height"])
+        );
         assert_eq!(overlay["danmaku"][0]["lane"], serde_json::json!(0));
         assert_eq!(overlay["danmaku"][0]["exit"], serde_json::json!(250));
     }
@@ -876,9 +958,17 @@ mod tests {
     /// 「这一帧什么都没有」与「这个宿主不懂文字」会长得一模一样。
     #[test]
     fn 没有文字时不许出现_overlay_键() {
-        let result = FrameResult { frame: 0, layers: Vec::new(), overlay: None, error: None };
+        let result = FrameResult {
+            frame: 0,
+            layers: Vec::new(),
+            overlay: None,
+            error: None,
+        };
         let value = serde_json::to_value(&result).unwrap();
-        assert!(value.get("overlay").is_none(), "没有文字时不该有 overlay 键");
+        assert!(
+            value.get("overlay").is_none(),
+            "没有文字时不该有 overlay 键"
+        );
         // 反过来说：有文字时**必须**有，否则这条反向用例本身是恒真的。
         let with_text = FrameResult {
             frame: 0,
@@ -886,7 +976,12 @@ mod tests {
             overlay: Some(OverlayView {
                 items: vec![TextItemView {
                     text: "x".to_string(),
-                    rect: RectView { x: 0.0, y: 0.0, width: 1.0, height: 0.1 },
+                    rect: RectView {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 1.0,
+                        height: 0.1,
+                    },
                     opacity: 1.0,
                     dy_px: 0.0,
                     color: [255, 255, 255, 255],
@@ -935,7 +1030,12 @@ mod tests {
                 items: Vec::new(),
                 danmaku: vec![DanmakuItemView {
                     text: "只此一条".to_string(),
-                    rect: RectView { x: 0.5, y: 0.048, width: 0.2, height: 0.048 },
+                    rect: RectView {
+                        x: 0.5,
+                        y: 0.048,
+                        width: 0.2,
+                        height: 0.048,
+                    },
                     lane: 1,
                     enter: 0,
                     exit: 30,
@@ -972,17 +1072,39 @@ mod tests {
         };
         let value = serde_json::to_value(&result).unwrap();
         assert_eq!(value["overlay"]["items"].as_array().map(Vec::len), Some(0));
-        assert_eq!(value["overlay"]["danmaku"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            value["overlay"]["danmaku"].as_array().map(Vec::len),
+            Some(1)
+        );
     }
 
     /// 矩形与文本行的字段是**逐字段对应**的：换名或漏字段都在这条上红。
     #[test]
     fn 矩形与文本行逐字段对应() {
         use crate::text_layout::{NormalizedRect, TextLine};
-        let rect = NormalizedRect { x: 0.125, y: 0.75, width: 0.5, height: 0.0625 };
+        let rect = NormalizedRect {
+            x: 0.125,
+            y: 0.75,
+            width: 0.5,
+            height: 0.0625,
+        };
         let view = RectView::from(rect);
-        assert_eq!(view, RectView { x: 0.125, y: 0.75, width: 0.5, height: 0.0625 });
-        let item = TextItemView::from(TextLine { text: "两行\n两行".to_string(), parts: vec![], rect, font_ratio: 0.04, scale: 1.0 });
+        assert_eq!(
+            view,
+            RectView {
+                x: 0.125,
+                y: 0.75,
+                width: 0.5,
+                height: 0.0625
+            }
+        );
+        let item = TextItemView::from(TextLine {
+            text: "两行\n两行".to_string(),
+            parts: vec![],
+            rect,
+            font_ratio: 0.04,
+            scale: 1.0,
+        });
         let value = serde_json::to_value(&item).unwrap();
         assert_eq!(value["text"], serde_json::json!("两行\n两行"));
         assert_eq!(value["rect"]["x"], serde_json::json!(0.125));
@@ -1043,7 +1165,13 @@ mod tests {
     fn 样本表的键仍是单字母() {
         // 改键名是破坏性改动，所以 o/s/d/u/k 原样保留；
         // 但字段名（offset/size/dts/duration/is_sync）让含义第一次有了出处。
-        let sample = SampleView { offset: 100, size: 4, dts: 0, duration: 1000, is_sync: true };
+        let sample = SampleView {
+            offset: 100,
+            size: 4,
+            dts: 0,
+            duration: 1000,
+            is_sync: true,
+        };
         let value = serde_json::to_value(sample).unwrap();
         assert_eq!(keys(&value), sorted(&["o", "s", "d", "u", "k"]));
     }
@@ -1051,12 +1179,24 @@ mod tests {
     #[test]
     fn 缓存账的键是钉死的() {
         let stats = CacheStatsView {
-            vram_bytes: 1, ram_bytes: 2, vram_len: 3, ram_len: 4, vram_over: false, ram_over: true,
+            vram_bytes: 1,
+            ram_bytes: 2,
+            vram_len: 3,
+            ram_len: 4,
+            vram_over: false,
+            ram_over: true,
         };
-        let value = serde_json::to_value(&stats).unwrap();
+        let value = serde_json::to_value(stats).unwrap();
         assert_eq!(
             keys(&value),
-            sorted(&["vram_bytes", "ram_bytes", "vram_len", "ram_len", "vram_over", "ram_over"])
+            sorted(&[
+                "vram_bytes",
+                "ram_bytes",
+                "vram_len",
+                "ram_len",
+                "vram_over",
+                "ram_over"
+            ])
         );
     }
 
@@ -1064,7 +1204,15 @@ mod tests {
     fn 能力声明里的混合模式是从谓词推出来的() {
         // **不是手写的清单** —— 手写一份一定会与渲染器漂开。
         let caps = Capabilities::new(Vec::new(), 16, false, false);
-        assert_eq!(caps.blend_modes, vec![BlendMode::Normal, BlendMode::Add, BlendMode::Multiply, BlendMode::Screen]);
+        assert_eq!(
+            caps.blend_modes,
+            vec![
+                BlendMode::Normal,
+                BlendMode::Add,
+                BlendMode::Multiply,
+                BlendMode::Screen
+            ]
+        );
         assert_eq!(caps.timeline_versions, vec![LAYER_SCHEMA_VERSION]);
     }
 
@@ -1140,7 +1288,11 @@ mod tests {
         codes.sort();
         assert_eq!(
             codes,
-            vec!["blend_unsupported_by_peer", "effect_exceeds_capability", "effect_unsupported_by_peer"]
+            vec![
+                "blend_unsupported_by_peer",
+                "effect_exceeds_capability",
+                "effect_unsupported_by_peer"
+            ]
         );
         // path 要指到具体字段，否则用户不知道该改哪一项。
         assert!(issues.iter().any(|i| i.path.ends_with(".blend")));
@@ -1273,7 +1425,10 @@ mod asset_tests {
         for frame in 0..300i64 {
             let index = gop_index_for_frame(frame, 60).unwrap();
             let (start, end) = gop_frame_range(index, 60, 480).unwrap();
-            assert!(frame >= start && frame < end, "第 {frame} 帧不在它自己的 GOP 区间里");
+            assert!(
+                frame >= start && frame < end,
+                "第 {frame} 帧不在它自己的 GOP 区间里"
+            );
         }
     }
 
@@ -1335,7 +1490,10 @@ pub fn gop_slices(samples: &[SampleView]) -> Vec<GopSliceView> {
 
     let mut slices = Vec::with_capacity(sync_indices.len());
     for (position, &first) in sync_indices.iter().enumerate() {
-        let end = sync_indices.get(position + 1).copied().unwrap_or(samples.len());
+        let end = sync_indices
+            .get(position + 1)
+            .copied()
+            .unwrap_or(samples.len());
         let head = &samples[first];
         // 字节范围取这一段所有样本的并集 —— 用 max 而不是只取最后一个，
         // 免得样本在文件里的顺序与表里的顺序不一致时算短了。
@@ -1416,7 +1574,10 @@ mod gop_slice_tests {
         let mut table = samples(10, 3);
         table[0].is_sync = false;
         let slices = gop_slices(&table);
-        assert_eq!(slices[0].first_sample, 3, "第 0 段应当从第一个**关键帧**开始");
+        assert_eq!(
+            slices[0].first_sample, 3,
+            "第 0 段应当从第一个**关键帧**开始"
+        );
     }
 
     #[test]
@@ -1489,7 +1650,10 @@ pub fn gop_length_mismatch(samples: &[SampleView], declared: u32) -> Option<Issu
     }
 
     let declared = declared as usize;
-    let spacings: Vec<usize> = sync_indices.windows(2).map(|pair| pair[1] - pair[0]).collect();
+    let spacings: Vec<usize> = sync_indices
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .collect();
     let first_bad = spacings.iter().position(|spacing| *spacing != declared)?;
 
     Some(Issue::new(
@@ -1533,7 +1697,11 @@ mod gop_length_tests {
         }
         let issue = gop_length_mismatch(&samples, 60).expect("应当报不一致");
         assert_eq!(issue.code, "gop_length_mismatch");
-        assert!(issue.path.starts_with("samples["), "path 要指到具体位置：{}", issue.path);
+        assert!(
+            issue.path.starts_with("samples["),
+            "path 要指到具体位置：{}",
+            issue.path
+        );
         // 提示要同时带上「声明的」与「实际的」，否则用户不知道该改哪一边。
         assert!(issue.message.contains("60"), "{}", issue.message);
         assert!(issue.message.contains("30"), "{}", issue.message);
@@ -1650,7 +1818,11 @@ mod export_tests {
 
     #[test]
     fn 终态不许再转() {
-        for state in [ExportState::Succeeded, ExportState::Failed, ExportState::Cancelled] {
+        for state in [
+            ExportState::Succeeded,
+            ExportState::Failed,
+            ExportState::Cancelled,
+        ] {
             assert!(state.is_terminal());
             for next in [
                 ExportState::Queued,
@@ -1670,7 +1842,10 @@ mod export_tests {
     #[test]
     fn 未终态只能沿着可行的边走() {
         assert!(ExportState::Queued.can_transition_to(ExportState::Running));
-        assert!(ExportState::Queued.can_transition_to(ExportState::Succeeded), "任务可能在第一次轮询前就跑完");
+        assert!(
+            ExportState::Queued.can_transition_to(ExportState::Succeeded),
+            "任务可能在第一次轮询前就跑完"
+        );
         assert!(ExportState::Queued.can_transition_to(ExportState::Cancelled));
         assert!(ExportState::Running.can_transition_to(ExportState::Succeeded));
         assert!(ExportState::Running.can_transition_to(ExportState::Failed));
@@ -1683,9 +1858,18 @@ mod export_tests {
     #[test]
     fn 状态序列化用蛇形且是稳定的字符串() {
         // 状态串是**跨进程**的：本机后端写、前端读。所以它不能随枚举改名字而变。
-        assert_eq!(serde_json::to_string(&ExportState::Running).unwrap(), "\"running\"");
-        assert_eq!(serde_json::to_string(&ExportState::Succeeded).unwrap(), "\"succeeded\"");
-        assert_eq!(serde_json::to_string(&ExportState::Cancelled).unwrap(), "\"cancelled\"");
+        assert_eq!(
+            serde_json::to_string(&ExportState::Running).unwrap(),
+            "\"running\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ExportState::Succeeded).unwrap(),
+            "\"succeeded\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ExportState::Cancelled).unwrap(),
+            "\"cancelled\""
+        );
     }
 
     #[test]
@@ -1698,7 +1882,12 @@ mod export_tests {
             error: None,
         };
         let value = serde_json::to_value(&status).unwrap();
-        let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
         keys.sort_unstable();
         assert_eq!(keys, vec!["job_id", "state"], "为空的可选项不该出现");
     }
@@ -1732,7 +1921,12 @@ mod export_tests {
         };
         let value = serde_json::to_value(&status).unwrap();
         let error = &value["error"];
-        let mut keys: Vec<&str> = error.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        let mut keys: Vec<&str> = error
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
         keys.sort_unstable();
         assert_eq!(keys, vec!["code", "message", "path"], "要复用 Issue 的形状");
     }

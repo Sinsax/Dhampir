@@ -37,7 +37,11 @@ impl SourceResolver for OneSource {
 fn blur_effect(radius: f32) -> Effect {
     let mut params = BTreeMap::new();
     params.insert("radius".to_string(), radius);
-    Effect { kind: "gaussian_blur".to_string(), params, ..Default::default() }
+    Effect {
+        kind: "gaussian_blur".to_string(),
+        params,
+        ..Default::default()
+    }
 }
 
 fn layer(clip_id: &str, opacity: f32, scale: f32, effects: Vec<Effect>) -> Layer {
@@ -46,7 +50,12 @@ fn layer(clip_id: &str, opacity: f32, scale: f32, effects: Vec<Effect>) -> Layer
         source: "synthetic".to_string(),
         source_frame: 0,
         opacity,
-        transform: Transform { x: 0.0, y: 0.0, scale, rotation_deg: 0.0 },
+        transform: Transform {
+            x: 0.0,
+            y: 0.0,
+            scale,
+            rotation_deg: 0.0,
+        },
         effects,
         frozen_for_transition: false,
         // 这个 fixture 测的是渲染，不是混合与调整图层 —— 用恒定默认值。
@@ -56,10 +65,18 @@ fn layer(clip_id: &str, opacity: f32, scale: f32, effects: Vec<Effect>) -> Layer
 }
 
 /// 渲染一份 composite 并读回。
-fn render(ctx: &dhampir_core::gpu::GpuContext, source: &wgpu::Texture, composite: &Composite) -> Vec<u8> {
+fn render(
+    ctx: &dhampir_core::gpu::GpuContext,
+    source: &wgpu::Texture,
+    composite: &Composite,
+) -> Vec<u8> {
     let target = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dhampir timeline test target"),
-        size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -73,9 +90,11 @@ fn render(ctx: &dhampir_core::gpu::GpuContext, source: &wgpu::Texture, composite
         size: (SIZE, SIZE),
     };
     let renderer = TimelineRenderer::new(&ctx.device, FORMAT);
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("dhampir timeline test encoder"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dhampir timeline test encoder"),
+        });
     renderer.render_frame(
         &ctx.device,
         &ctx.queue,
@@ -87,8 +106,12 @@ fn render(ctx: &dhampir_core::gpu::GpuContext, source: &wgpu::Texture, composite
         wgpu::Color::TRANSPARENT,
     );
     ctx.queue.submit([encoder.finish()]);
-    let image = pollster::block_on(readback::read_texture_rgba8(&ctx.device, &ctx.queue, &target))
-        .expect("读回失败");
+    let image = pollster::block_on(readback::read_texture_rgba8(
+        &ctx.device,
+        &ctx.queue,
+        &target,
+    ))
+    .expect("读回失败");
     image.pixels
 }
 
@@ -108,7 +131,11 @@ fn make_opaque_source(ctx: &dhampir_core::gpu::GpuContext) -> wgpu::Texture {
     }
     let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dhampir timeline test opaque source"),
-        size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -129,7 +156,11 @@ fn make_opaque_source(ctx: &dhampir_core::gpu::GpuContext) -> wgpu::Texture {
             bytes_per_row: Some(SIZE * 4),
             rows_per_image: Some(SIZE),
         },
-        wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
     );
     texture
 }
@@ -138,7 +169,11 @@ fn make_source(ctx: &dhampir_core::gpu::GpuContext) -> wgpu::Texture {
     let pixels = synthetic_source_rgba8(SIZE, SIZE, 7);
     let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dhampir timeline test source"),
-        size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -159,7 +194,11 @@ fn make_source(ctx: &dhampir_core::gpu::GpuContext) -> wgpu::Texture {
             bytes_per_row: Some(SIZE * 4),
             rows_per_image: Some(SIZE),
         },
-        wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
     );
     texture
 }
@@ -193,7 +232,10 @@ fn 多轨合成加模糊能被调度起来() {
 
     // 1. 确定性：同一份输入与 composite，两次必须逐字节相同。
     //    这是"两端一致"能成立的前提——本端都不自洽就没什么可比。
-    assert_eq!(blurred_pixels, again, "同一帧渲染两次结果不同，渲染不是确定性的");
+    assert_eq!(
+        blurred_pixels, again,
+        "同一帧渲染两次结果不同，渲染不是确定性的"
+    );
 
     // 2. 不退化：画面不能是一片纯色（纯色图什么结论都撑不起来）
     let first = &plain_pixels[..4];
@@ -226,7 +268,11 @@ fn 源解析不出来时跳过该层而不是整帧失败() {
     let (ctx, _init) = open_leg(NATIVE_BACKENDS).expect("拿不到 GPU 上下文");
     let target = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dhampir timeline test nothing"),
-        size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -234,19 +280,28 @@ fn 源解析不出来时跳过该层而不是整帧失败() {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
-    let composite = Composite { frame: 0, layers: vec![layer("a", 1.0, 1.0, Vec::new())] };
+    let composite = Composite {
+        frame: 0,
+        layers: vec![layer("a", 1.0, 1.0, Vec::new())],
+    };
     let renderer = TimelineRenderer::new(&ctx.device, FORMAT);
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
     let drawn = renderer.render_frame(
-        &ctx.device, &ctx.queue, &mut encoder,
+        &ctx.device,
+        &ctx.queue,
+        &mut encoder,
         &target.create_view(&wgpu::TextureViewDescriptor::default()),
-        RenderSpace::square((SIZE, SIZE)), &composite, &mut Nothing, wgpu::Color::TRANSPARENT,
+        RenderSpace::square((SIZE, SIZE)),
+        &composite,
+        &mut Nothing,
+        wgpu::Color::TRANSPARENT,
     );
     assert_eq!(drawn, 0, "解析不出源就不该画任何一层");
     ctx.queue.submit([encoder.finish()]);
     // 不 panic、能提交，就算过：这条钉的是"少一层素材不该让整帧失败"。
 }
-
 
 #[test]
 #[ignore = "需要真 GPU；跑：cargo test -p dhampir-worker --test timeline -- --ignored"]
@@ -275,7 +330,11 @@ fn 遇到调整图层时整帧不画而不是悄悄画错() {
     let (ctx, _init) = open_leg(NATIVE_BACKENDS).expect("拿不到 GPU 上下文");
     let target = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dhampir timeline test adjustment"),
-        size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -289,18 +348,30 @@ fn 遇到调整图层时整帧不画而不是悄悄画错() {
     adjustment.is_adjustment = true;
     adjustment.source = String::new();
 
-    let composite = Composite { frame: 0, layers: vec![adjustment] };
+    let composite = Composite {
+        frame: 0,
+        layers: vec![adjustment],
+    };
     let renderer = TimelineRenderer::new(&ctx.device, FORMAT);
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
     let drawn = renderer.render_frame(
-        &ctx.device, &ctx.queue, &mut encoder,
+        &ctx.device,
+        &ctx.queue,
+        &mut encoder,
         &target.create_view(&wgpu::TextureViewDescriptor::default()),
-        RenderSpace::square((SIZE, SIZE)), &composite, &mut Nothing, wgpu::Color::TRANSPARENT,
+        RenderSpace::square((SIZE, SIZE)),
+        &composite,
+        &mut Nothing,
+        wgpu::Color::TRANSPARENT,
     );
-    assert_eq!(drawn, 0, "分段合成还没实现，就该一帧都不画，而不是画出一张看不出错的图");
+    assert_eq!(
+        drawn, 0,
+        "分段合成还没实现，就该一帧都不画，而不是画出一张看不出错的图"
+    );
     ctx.queue.submit([encoder.finish()]);
 }
-
 
 #[test]
 #[ignore = "需要真 GPU；跑：cargo test -p dhampir-worker --test timeline -- --ignored"]
@@ -340,7 +411,10 @@ fn 调整图层模糊下方而不影响上方() {
             top.clone(),
         ],
     };
-    let only_top = Composite { frame: 0, layers: vec![top.clone()] };
+    let only_top = Composite {
+        frame: 0,
+        layers: vec![top.clone()],
+    };
 
     let plain = render(&ctx, &source, &bottom_only);
     let blurred = render(&ctx, &source, &adjusted);
@@ -348,10 +422,7 @@ fn 调整图层模糊下方而不影响上方() {
     let without_adjustment_above = render(&ctx, &source, &only_top);
 
     // 1. **下方真的被改了。**
-    assert_ne!(
-        plain, blurred,
-        "挂上调整图层后下方没变 —— 分段合成没生效"
-    );
+    assert_ne!(plain, blurred, "挂上调整图层后下方没变 —— 分段合成没生效");
 
     // **1.5 归因**：让「只有上层」也走**同一条分段路径**。
     //
@@ -404,7 +475,11 @@ fn color_mask_effect(kind: &str, params: &[(&str, f32)]) -> Effect {
     for (key, value) in params {
         map.insert((*key).to_string(), *value);
     }
-    Effect { kind: kind.to_string(), params: map, ..Default::default() }
+    Effect {
+        kind: kind.to_string(),
+        params: map,
+        ..Default::default()
+    }
 }
 
 /// 底图像素：与 `make_opaque_source` 用的是同一份序列（alpha 全 255，混合是全覆盖）。
@@ -428,6 +503,11 @@ fn pixel_at(pixels: &[u8], x: u32, y: u32) -> [f32; 3] {
 ///
 /// **分片着色器里 `position.xy` 是像素中心**（`(x+0.5, y+0.5)`），这里必须同口径 ——
 /// 差半个像素会让 45° 那条对角判据刚好落在边界上。
+///
+/// `too_many_arguments`：这是测试里的**参考实现**，8 个参数直接对应着色器 uniform 的
+/// 形态（base / 像素坐标 / shape / angle / amount / 两端颜色）。拆结构体只会让
+/// "照着着色器读一遍"变得更难，而这函数存在的全部意义就是能对着读。
+#[allow(clippy::too_many_arguments)]
 fn overlay_expected(
     base: [f32; 3],
     x: u32,
@@ -443,7 +523,11 @@ fn overlay_expected(
     let v = (y as f32 + 0.5) / size - 0.5;
     // `shape=0`（纯色）⇒ `grad_t = 0` ⇒ 取 `color_a`。**这一项 2026-10-01 修过**：
     // 以前写成 `is_solid + …`，纯色会落到 `color_b`（`r2/g2/b2`），与 `OVERLAY` 的文档矛盾。
-    let is_linear = if (0.5..1.5).contains(&shape) { 1.0 } else { 0.0 };
+    let is_linear = if (0.5..1.5).contains(&shape) {
+        1.0
+    } else {
+        0.0
+    };
     let is_radial = if shape >= 1.5 { 1.0 } else { 0.0 };
     let angle = angle_deg.to_radians();
     let (dx, dy) = (angle.cos(), angle.sin());
@@ -459,11 +543,20 @@ fn overlay_expected(
 }
 
 /// `color_mask.wgsl` 第 2 段（暗角）的数学。
-fn vignette_expected(base: [f32; 3], x: u32, y: u32, amount: f32, radius: f32, softness: f32) -> [f32; 3] {
+fn vignette_expected(
+    base: [f32; 3],
+    x: u32,
+    y: u32,
+    amount: f32,
+    radius: f32,
+    softness: f32,
+) -> [f32; 3] {
     let size = SIZE as f32;
     let u = (x as f32 + 0.5) / size - 0.5;
     let v = (y as f32 + 0.5) / size - 0.5;
-    let dist = (u * u + v * v).sqrt() * 1.414_213_6;
+    // 用真的 √2 常量，而不是手写的 `1.414_213_6`（那是它的近似值，
+    // clippy 的 approx_constant 指出的就是这里）。着色器那边算的是同一件事。
+    let dist = (u * u + v * v).sqrt() * std::f32::consts::SQRT_2;
     let edge = ((dist - radius) / softness.max(1e-4)).clamp(0.0, 1.0);
     let factor = 1.0 - edge * amount;
     [base[0] * factor, base[1] * factor, base[2] * factor]
@@ -474,7 +567,8 @@ fn assert_close(got: [f32; 3], want: [f32; 3], label: &str, tol: f32) {
         assert!(
             (got[c] - want[c]).abs() <= tol,
             "{label}：通道 {c} 实得 {}，期望 {}（容差 {tol}）",
-            got[c], want[c]
+            got[c],
+            want[c]
         );
     }
 }
@@ -492,30 +586,58 @@ fn 调整图层的_overlay_逐像素对上解析渐变() {
     let base = opaque_base_pixels();
 
     let bottom = layer("bottom", 1.0, 1.0, Vec::new());
-    let plain = Composite { frame: 0, layers: vec![bottom.clone()] };
+    let plain = Composite {
+        frame: 0,
+        layers: vec![bottom.clone()],
+    };
     let plain_pixels = render(&ctx, &source, &plain);
 
     for (label, angle) in [("angle=0", 0.0f32), ("angle=45", 45.0f32)] {
-        let mut adjustment = layer("adj", 1.0, 1.0, vec![color_mask_effect("overlay", &[
-            ("amount", AMOUNT),
-            ("r", A[0]), ("g", A[1]), ("b", A[2]),
-            ("r2", B[0]), ("g2", B[1]), ("b2", B[2]),
-            ("shape", 1.0), ("angle", angle),
-        ])]);
+        let mut adjustment = layer(
+            "adj",
+            1.0,
+            1.0,
+            vec![color_mask_effect(
+                "overlay",
+                &[
+                    ("amount", AMOUNT),
+                    ("r", A[0]),
+                    ("g", A[1]),
+                    ("b", A[2]),
+                    ("r2", B[0]),
+                    ("g2", B[1]),
+                    ("b2", B[2]),
+                    ("shape", 1.0),
+                    ("angle", angle),
+                ],
+            )],
+        );
         adjustment.is_adjustment = true;
         adjustment.source = String::new();
 
-        let with = render(&ctx, &source, &Composite {
-            frame: 0,
-            layers: vec![bottom.clone(), adjustment],
-        });
-        assert_ne!(plain_pixels, with, "{label}：挂上 overlay 后画面没变 —— Document space 那一趟没跑到");
+        let with = render(
+            &ctx,
+            &source,
+            &Composite {
+                frame: 0,
+                layers: vec![bottom.clone(), adjustment],
+            },
+        );
+        assert_ne!(
+            plain_pixels, with,
+            "{label}：挂上 overlay 后画面没变 —— Document space 那一趟没跑到"
+        );
 
         // 逐像素对解析值（每 3 个像素采一个，够密也够快）。
         for y in (0..SIZE).step_by(3) {
             for x in (0..SIZE).step_by(3) {
                 let want = overlay_expected(pixel_at(&base, x, y), x, y, 1.0, angle, AMOUNT, A, B);
-                assert_close(pixel_at(&with, x, y), want, &format!("{label} 像素({x},{y})"), 2.0);
+                assert_close(
+                    pixel_at(&with, x, y),
+                    want,
+                    &format!("{label} 像素({x},{y})"),
+                    2.0,
+                );
             }
         }
 
@@ -529,8 +651,14 @@ fn 调整图层的_overlay_逐像素对上解析渐变() {
             for c in 0..3 {
                 let want_l = base_left[c] + (A[c] * 255.0 - base_left[c]) * AMOUNT;
                 let want_r = base_right[c] + (B[c] * 255.0 - base_right[c]) * AMOUNT;
-                assert!((left[c] - want_l).abs() <= 2.0, "angle=0 左端通道 {c} 不是 color_a 那一端");
-                assert!((right[c] - want_r).abs() <= 2.0, "angle=0 右端通道 {c} 不是 color_b 那一端");
+                assert!(
+                    (left[c] - want_l).abs() <= 2.0,
+                    "angle=0 左端通道 {c} 不是 color_a 那一端"
+                );
+                assert!(
+                    (right[c] - want_r).abs() <= 2.0,
+                    "angle=0 右端通道 {c} 不是 color_b 那一端"
+                );
             }
         } else {
             // 45°：按下游 §5.2 的换算，应当是**从左上到右下**。
@@ -541,25 +669,48 @@ fn 调整图层的_overlay_逐像素对上解析渐变() {
             for c in 0..3 {
                 let want_tl = base_tl[c] + (A[c] * 255.0 - base_tl[c]) * AMOUNT;
                 let want_br = base_br[c] + (B[c] * 255.0 - base_br[c]) * AMOUNT;
-                assert!((tl[c] - want_tl).abs() <= 2.0, "angle=45 左上角通道 {c} 不是 color_a 那一端");
-                assert!((br[c] - want_br).abs() <= 2.0, "angle=45 右下角通道 {c} 不是 color_b 那一端");
+                assert!(
+                    (tl[c] - want_tl).abs() <= 2.0,
+                    "angle=45 左上角通道 {c} 不是 color_a 那一端"
+                );
+                assert!(
+                    (br[c] - want_br).abs() <= 2.0,
+                    "angle=45 右下角通道 {c} 不是 color_b 那一端"
+                );
             }
         }
     }
     // D4（2026-10-01 修）：`shape=0`（纯色）取的是 **`color_a`（`r/g/b`）**，不是 `color_b`。
     // 参数**故意让 r2≠r**：`r2` 缺省回落到 `r` 时，两种实现看不出区别 —— 那正是它活了这么久的原因。
-    let mut solid = layer("adj", 1.0, 1.0, vec![color_mask_effect("overlay", &[
-        ("amount", 1.0),
-        ("r", 0.8), ("g", 0.0), ("b", 0.0),
-        ("r2", 0.0), ("g2", 0.0), ("b2", 0.8),
-        ("shape", 0.0), ("angle", 0.0),
-    ])]);
+    let mut solid = layer(
+        "adj",
+        1.0,
+        1.0,
+        vec![color_mask_effect(
+            "overlay",
+            &[
+                ("amount", 1.0),
+                ("r", 0.8),
+                ("g", 0.0),
+                ("b", 0.0),
+                ("r2", 0.0),
+                ("g2", 0.0),
+                ("b2", 0.8),
+                ("shape", 0.0),
+                ("angle", 0.0),
+            ],
+        )],
+    );
     solid.is_adjustment = true;
     solid.source = String::new();
-    let solid_px = render(&ctx, &source, &Composite {
-        frame: 0,
-        layers: vec![bottom.clone(), solid],
-    });
+    let solid_px = render(
+        &ctx,
+        &source,
+        &Composite {
+            frame: 0,
+            layers: vec![bottom.clone(), solid],
+        },
+    );
     // amount = 1 ⇒ 整幅都该是 color_a = (0.8, 0, 0) × 255 = (204, 0, 0)
     let center = pixel_at(&solid_px, SIZE / 2, SIZE / 2);
     assert!(
@@ -583,23 +734,52 @@ fn 调整图层的_vignette_中心不动而角落压暗() {
     let base = opaque_base_pixels();
 
     let bottom = layer("bottom", 1.0, 1.0, Vec::new());
-    let mut adjustment = layer("adj", 1.0, 1.0, vec![color_mask_effect("vignette", &[
-        ("amount", AMOUNT), ("radius", RADIUS), ("softness", SOFTNESS),
-    ])]);
+    let mut adjustment = layer(
+        "adj",
+        1.0,
+        1.0,
+        vec![color_mask_effect(
+            "vignette",
+            &[
+                ("amount", AMOUNT),
+                ("radius", RADIUS),
+                ("softness", SOFTNESS),
+            ],
+        )],
+    );
     adjustment.is_adjustment = true;
     adjustment.source = String::new();
 
-    let plain = render(&ctx, &source, &Composite { frame: 0, layers: vec![bottom.clone()] });
-    let with = render(&ctx, &source, &Composite {
-        frame: 0,
-        layers: vec![bottom, adjustment],
-    });
-    assert_ne!(plain, with, "挂上 vignette 后画面没变 —— Document space 那一趟没跑到");
+    let plain = render(
+        &ctx,
+        &source,
+        &Composite {
+            frame: 0,
+            layers: vec![bottom.clone()],
+        },
+    );
+    let with = render(
+        &ctx,
+        &source,
+        &Composite {
+            frame: 0,
+            layers: vec![bottom, adjustment],
+        },
+    );
+    assert_ne!(
+        plain, with,
+        "挂上 vignette 后画面没变 —— Document space 那一趟没跑到"
+    );
 
     for y in (0..SIZE).step_by(3) {
         for x in (0..SIZE).step_by(3) {
             let want = vignette_expected(pixel_at(&base, x, y), x, y, AMOUNT, RADIUS, SOFTNESS);
-            assert_close(pixel_at(&with, x, y), want, &format!("vignette 像素({x},{y})"), 2.0);
+            assert_close(
+                pixel_at(&with, x, y),
+                want,
+                &format!("vignette 像素({x},{y})"),
+                2.0,
+            );
         }
     }
 

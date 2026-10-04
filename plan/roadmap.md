@@ -346,6 +346,69 @@ MP4 基本流不能从第二个进程接着写，所以"续渲"最多只能是�
 116 vs 134 的差更可能来自 wgpu 的后端 crate（dx12/metal + windows 系）。改数字不改结论：
 「交叉 check 只证类型正确」仍然成立。详见 [measurements.md](./measurements.md) §9.3 的更正。
 
+### Linux 产物补齐（D17 / D18，2026-10-04）
+
+上面那些证的是「Linux 上**能跑**」，但发布流程本身仍是 Windows-only 的：
+0.1.0 首发只出了 `dhampir-0.1.0-win32-x64.zip`。而 README 的命题是「同一个底座
+编译到两个宿主」、服务端出片的目标环境就是 Linux —— 只发一个平台的产物与那句话矛盾。
+补的过程挖出两个真断点，都已修并登记：
+
+* **D17** —— `scripts/package.mjs` 的压包只调 `powershell`，Linux 上没有（实测 ENOENT），
+  流程走到压包就断。现在按平台分叉，Linux/macOS 走纯 Node。
+* **D18** —— 打出的 zip **不写 Unix 权限位**，解开后 `bin/dhampir` 是 `-rw-r--r--`，
+  **跑不起来**。已写 `external_attr` 并把可执行位加进 `verifyZip` 判据（**反向验过**）。
+
+结果：`dhampir-0.1.0-linux-x64.zip`（3.68 MB）+ `.sha256.txt`，`bsdtar` 解开后
+`bin/dhampir --help` / `probe` / `frame` 全绿。
+
+**这一节的范围限制（别当成"Linux 全都完善了"）**：
+
+* 产物是**构建机上现产**，不是交叉编译；只证「Linux 上能构建、能打包、包解开能跑」，
+  不证别的发行版 / 别的 GPU 同样如此。
+
+### 发布前收口（2026-10-04 同日）
+
+上面「Linux 产物」写完之后，把**会拦 CI 的两条**一并收了 —— 它们与 Linux 无关，
+但正是 CI `check-native` 在 **ubuntu + windows** 上跑的判据，不收就发不出去：
+
+* **D19 `cargo fmt --all`** —— 848 处 / 65 文件，代码从没按 `rustfmt.toml` 排过
+  （系统 rustfmt 与 1.97.0 的都给出同一份 diff，所以不是版本问题）。现已绿。
+* **D20 `cargo clippy --workspace --all-targets -- -D warnings`** —— 原 23 条，逐条处理后归零。
+  其中**四处是 lint 误报，必须保留原判据**：`!(x > 0.0)` 与 `x <= 0.0` 在 **NaN 上不等价**，
+  而这正是本仓要挡掉 NaN 的写法（`text_layout.rs` 的 `place_line` / `layout`、
+  `pipeline.rs` 的 `encoder_fps`、`decode_sequence.rs`）——那里加了 `#[allow]` + 理由，
+  **不是**按 lint 改判据。`too_many_arguments` 三处（`compose` / `paint_one` /
+  `overlay_expected`）同理用 allow：参数是 wgpu 或着色器 uniform 的天然形状，
+  拆结构体只是把 lint 关掉而让热路径更难读。
+
+改完之后的复核（**逐条实跑，不是"应该没事"**）：
+
+| 判据 | 结果 |
+|---|---|
+| `cargo fmt --all --check` / `clippy` / `check` / `test` | ✅ 全 EXIT=0（705 passed / 0 failed） |
+| `-- --ignored`（装 `noto-fonts-cjk` 后） | ✅ **35 passed / 0 failed**（原 26/9） |
+| 双端一致性 | ✅ **SSIM 1.000000 / MAE 0** |
+| `check-m1-record --record records/m1` | ✅ 整表摘要 `71ecc80cade3d73d` 由重算复现 |
+| `docs/api-surface.md` / `host-api.md` | ✅ fmt 前后逐字节相同（md5 比对） |
+| 守卫全套 | ✅ 19/20（唯一红的是历史归档 `check-m2-record` 自检） |
+
+`cargo fmt` 与 clippy 的改动**只碰格式与上面那几处 allow**：生成物摘要、golden 摘要、
+双端 SSIM 三者都是改前改后一致的，所以可以断言行为未变。
+
+**一条仍然红、且这次不修的**：`check-m2-record.mjs` 自检红在 `diff-images` ——
+归档的 9 张差异图重编码后与盘上不是同一份字节（如 `gradient-f000.png` 2706 vs 2674）。
+守卫的规矩是「自检先过才谈结论」，所以它现在的结论不可信，**也不能当成绿的**。
+已确认与本次改动无关（`git stash` 撤下 `crates/` 全部改动后报错**逐字相同**，
+`records/` 自 2026-10-01 未动），登记为 **D21**（todo）。它不影响 0.1.0 产物，
+但属**发布说明里该提的一句**：20 条守卫里有一条自检是红的。
+
+另有一处**一度被当成 flake**，查明是**真阳性**：`check-web-invariants` 在套件里偶发红在
+「wasm pkg 比源码旧」。原因是套件里别的守卫会跑 `cargo` / `wasm-pack`，而源目录被 cargo
+写入 —— pkg 与源的 mtime 是亚秒级比较，谁新取决于最后写的是哪边。已确证：手工 `touch`
+一个源文件该守卫**稳定转红**并给出正确的重建命令，重建后稳定转绿。判据本身是对的，
+登记为 **D22**（wontfix）。要消掉套件内的偶发红，正确做法是**驱动在跑守卫前统一重建一次
+pkg**，而不是放宽判据 —— 这次没做（不在 0.1.0 产物范围内）。
+
 ---
 
 ## 明确不做（写进台账，不假装）

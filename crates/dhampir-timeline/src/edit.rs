@@ -88,10 +88,18 @@ fn commit(original: &ProjectDoc, candidate: ProjectDoc, effects: &[EffectSpec]) 
     let mut all = issues.errors.clone();
     all.extend(issues.warnings.clone());
     if issues.is_ok() {
-        EditOutcome { doc: candidate, issues: all, summary: String::new() }
+        EditOutcome {
+            doc: candidate,
+            issues: all,
+            summary: String::new(),
+        }
     } else {
         // **一个字段都不改**：让调用方看到的就是"什么都没发生 + 为什么"。
-        EditOutcome { doc: original.clone(), issues: all, summary: String::new() }
+        EditOutcome {
+            doc: original.clone(),
+            issues: all,
+            summary: String::new(),
+        }
     }
 }
 
@@ -133,8 +141,8 @@ fn asset_timebase(doc: &ProjectDoc, asset_id: &str) -> TimebaseDto {
     doc.assets
         .iter()
         .find(|asset| asset.id == asset_id)
-        .and_then(|asset| asset.timebase.clone())
-        .unwrap_or_else(|| doc.timeline.timebase.clone())
+        .and_then(|asset| asset.timebase)
+        .unwrap_or(doc.timeline.timebase)
 }
 
 fn no_such_layer(doc: &ProjectDoc, layer_id: &str) -> EditOutcome {
@@ -237,7 +245,7 @@ pub fn trim(
         return no_such_layer(doc, layer_id);
     };
     let mut candidate = doc.clone();
-    let timebase = candidate.timeline.timebase.clone();
+    let timebase = candidate.timeline.timebase;
     // **先把要用的东西读出来，再拿可变借用。** 借用与改动的边界摆整齐，
     // 混在一起写出来的就是"既要 &mut 又要 &"那种绕不过去的报错。
     let (start, source_in, asset_id) = {
@@ -250,7 +258,7 @@ pub fn trim(
     };
     let asset = match asset_id.as_deref() {
         Some(id) => asset_timebase(&candidate, id),
-        None => timebase.clone(),
+        None => timebase,
     };
     // 入点：**画面不动** —— 把 source_in 推进"被剪掉的那几帧"对应的素材帧数。
     let advanced = match (edge, source_in) {
@@ -328,12 +336,12 @@ pub fn split(
         };
     }
     let mut candidate = doc.clone();
-    let timebase = candidate.timeline.timebase.clone();
+    let timebase = candidate.timeline.timebase;
     let asset = original
         .source
         .as_ref()
         .map(|source| asset_timebase(&candidate, &source.asset_id))
-        .unwrap_or_else(|| timebase.clone());
+        .unwrap_or_else(|| timebase);
     let local = at_frame - original.start;
 
     let right_id = unique_id(doc, &format!("{layer_id}-b"));
@@ -421,7 +429,10 @@ pub fn split(
                     easing: seam_easing(keys, local),
                 });
             }
-            if !right_keys.iter().any(|key| key.frame == 0 && key.target == target) {
+            if !right_keys
+                .iter()
+                .any(|key| key.frame == 0 && key.target == target)
+            {
                 right_keys.push(Keyframe {
                     frame: 0,
                     target: target.to_string(),
@@ -462,7 +473,9 @@ pub fn move_layer(
         return no_such_layer(doc, layer_id);
     };
     let mut candidate = doc.clone();
-    let layer = candidate.timeline.tracks[track_index].layers.remove(layer_index);
+    let layer = candidate.timeline.tracks[track_index]
+        .layers
+        .remove(layer_index);
     let length = layer.end.saturating_sub(layer.start);
     let target_track = match to_track {
         Some(id) => match candidate
@@ -549,11 +562,15 @@ pub fn set_sequence(
     if timebase.num == 0 || timebase.den == 0 {
         return EditOutcome {
             doc: doc.clone(),
-            issues: vec![Issue::new("invalid_timebase", "timebase", "帧率不合法".to_string())],
+            issues: vec![Issue::new(
+                "invalid_timebase",
+                "timebase",
+                "帧率不合法".to_string(),
+            )],
             summary: String::new(),
         };
     }
-    let from = doc.timeline.timebase.clone();
+    let from = doc.timeline.timebase;
     let mut candidate = doc.clone();
     let scale = |frame: Frame| rescale_frame(frame, &from, &timebase);
 
@@ -576,7 +593,7 @@ pub fn set_sequence(
     for marker in candidate.timeline.markers.iter_mut() {
         marker.frame = scale(marker.frame);
     }
-    candidate.timeline.timebase = timebase.clone();
+    candidate.timeline.timebase = timebase;
     if width > 0 {
         candidate.render_hints.width = width;
     }
@@ -618,7 +635,11 @@ pub enum EditOp {
         id: Option<String>,
     },
     /// 修剪边缘。
-    Trim { layer: String, edge: TrimEdge, to: Frame },
+    Trim {
+        layer: String,
+        edge: TrimEdge,
+        to: Frame,
+    },
     /// 剃刀。
     Split { layer: String, at: Frame },
     /// 移动。
@@ -647,7 +668,14 @@ pub enum EditOp {
 /// 执行一次编辑操作。**唯一的入口** —— CLI 与 wasm 都走这里。
 pub fn apply(doc: &ProjectDoc, effects: &[EffectSpec], op: &EditOp) -> EditOutcome {
     match op {
-        EditOp::Insert { track, asset, at, source_in, length, id } => insert_reference(
+        EditOp::Insert {
+            track,
+            asset,
+            at,
+            source_in,
+            length,
+            id,
+        } => insert_reference(
             doc,
             effects,
             &InsertRequest {
@@ -663,9 +691,11 @@ pub fn apply(doc: &ProjectDoc, effects: &[EffectSpec], op: &EditOp) -> EditOutco
         EditOp::Split { layer, at } => split(doc, effects, layer, *at),
         EditOp::Move { layer, to, track } => move_layer(doc, effects, layer, *to, track.as_deref()),
         EditOp::Remove { layer, ripple } => remove(doc, effects, layer, *ripple),
-        EditOp::SetSequence { timebase, width, height } => {
-            set_sequence(doc, effects, timebase.clone(), *width, *height)
-        }
+        EditOp::SetSequence {
+            timebase,
+            width,
+            height,
+        } => set_sequence(doc, effects, *timebase, *width, *height),
     }
 }
 
@@ -794,7 +824,11 @@ mod tests {
         for at in [10, 20, 5, 30] {
             let outcome = split(&original, &[], "c", at);
             assert!(!outcome.is_ok(), "切点 {at} 不该被接受");
-            assert_eq!(ids(&outcome), vec!["c".to_string()], "不生效时元素一个都不该变");
+            assert_eq!(
+                ids(&outcome),
+                vec!["c".to_string()],
+                "不生效时元素一个都不该变"
+            );
         }
     }
 
@@ -805,8 +839,18 @@ mod tests {
         // == 原曲线在那几帧的值。半段内部的偏差是有界的，这里**不作断言**。
         let mut original = doc(tb(30, 1), vec![layer("c", 0, 101, Some(0))]);
         let keys = vec![
-            Keyframe { frame: 0, target: opacity_target(), value: 0.25, easing: Easing::EaseInOut },
-            Keyframe { frame: 100, target: opacity_target(), value: 1.0, easing: Easing::EaseInOut },
+            Keyframe {
+                frame: 0,
+                target: opacity_target(),
+                value: 0.25,
+                easing: Easing::EaseInOut,
+            },
+            Keyframe {
+                frame: 100,
+                target: opacity_target(),
+                value: 1.0,
+                easing: Easing::EaseInOut,
+            },
         ];
         original.timeline.tracks[0].layers[0].keyframes = keys.clone();
         let opacity = original.timeline.tracks[0].layers[0].opacity;
@@ -823,10 +867,9 @@ mod tests {
 
         // 比的是"每一半自己的曲线"与"原曲线在同一绝对帧上"。
         // 只钉切缝与端点：这几帧的相等是**逐位**的（两边走的是同一个 `opacity_from`）。
-        for (half, offset, local_frames) in [
-            (left, 0, vec![0, at - 1]),
-            (right, at, vec![0, 100 - at]),
-        ] {
+        for (half, offset, local_frames) in
+            [(left, 0, vec![0, at - 1]), (right, at, vec![0, 100 - at])]
+        {
             for local in local_frames {
                 let got = crate::curve::opacity_from(half.opacity, &half.keyframes, local);
                 let want = crate::curve::opacity_from(opacity, &keys, offset + local);
@@ -839,16 +882,34 @@ mod tests {
     fn 切点正好落在键上时右半段不再插一个重复的() {
         let mut original = doc(tb(30, 1), vec![layer("c", 0, 21, Some(0))]);
         original.timeline.tracks[0].layers[0].keyframes = vec![
-            Keyframe { frame: 0, target: opacity_target(), value: 0.0, easing: Easing::Linear },
-            Keyframe { frame: 10, target: opacity_target(), value: 1.0, easing: Easing::Linear },
-            Keyframe { frame: 20, target: opacity_target(), value: 0.5, easing: Easing::Linear },
+            Keyframe {
+                frame: 0,
+                target: opacity_target(),
+                value: 0.0,
+                easing: Easing::Linear,
+            },
+            Keyframe {
+                frame: 10,
+                target: opacity_target(),
+                value: 1.0,
+                easing: Easing::Linear,
+            },
+            Keyframe {
+                frame: 20,
+                target: opacity_target(),
+                value: 0.5,
+                easing: Easing::Linear,
+            },
         ];
         let outcome = split(&original, &[], "c", 10);
         assert!(outcome.is_ok(), "{:?}", outcome.issues);
         // 右半段：原来的 frame 10 左移成 frame 0 —— 它本身就是切缝上的键，别插重复的。
         let right = &outcome.doc.timeline.tracks[0].layers[1];
         assert_eq!(right.keyframes.len(), 2);
-        assert_eq!((right.keyframes[0].frame, right.keyframes[0].value), (0, 1.0));
+        assert_eq!(
+            (right.keyframes[0].frame, right.keyframes[0].value),
+            (0, 1.0)
+        );
         assert_eq!(right.keyframes[1].frame, 10);
         // 左半段：保留 frame 0，再补一个 frame 9（切缝）。
         let left = &outcome.doc.timeline.tracks[0].layers[0];
@@ -879,7 +940,11 @@ mod tests {
         let outcome = remove(&original, &[], "a", false);
         assert!(outcome.is_ok());
         let kept = &outcome.doc.timeline.tracks[0].layers[0];
-        assert_eq!((kept.start, kept.end), (10, 25), "不留空档的删除就不是普通删除了");
+        assert_eq!(
+            (kept.start, kept.end),
+            (10, 25),
+            "不留空档的删除就不是普通删除了"
+        );
     }
 
     #[test]
@@ -890,7 +955,12 @@ mod tests {
         );
         let outcome = move_layer(&original, &[], "b", 5, None);
         assert!(!outcome.is_ok(), "重叠必须被拦住");
-        assert!(outcome.issues.iter().any(|issue| issue.code == "layer_overlap"));
+        assert!(
+            outcome
+                .issues
+                .iter()
+                .any(|issue| issue.code == "layer_overlap")
+        );
         // **原样还回来**：不能留下"b 已经挪过去了"这种半改状态。
         assert_eq!(outcome.doc.timeline.tracks[0].layers[1].start, 100);
     }
@@ -934,8 +1004,15 @@ mod tests {
         let outcome = set_sequence(&original, &[], tb(60, 1), 1280, 720);
         assert!(outcome.is_ok(), "{:?}", outcome.issues);
         let layer = &outcome.doc.timeline.tracks[0].layers[0];
-        assert_eq!((layer.start, layer.end), (0, 60), "30 帧 @30fps = 1 秒 -> 60 帧 @60fps");
-        assert_eq!(layer.recorded.markers[0].frame, 20, "元素内标记也要按时间走");
+        assert_eq!(
+            (layer.start, layer.end),
+            (0, 60),
+            "30 帧 @30fps = 1 秒 -> 60 帧 @60fps"
+        );
+        assert_eq!(
+            layer.recorded.markers[0].frame, 20,
+            "元素内标记也要按时间走"
+        );
         assert_eq!(outcome.doc.timeline.markers[0].frame, 30);
         // **source_in 不动**：它是素材自己的帧号，与序列帧率无关。
         assert_eq!(layer.source.as_ref().unwrap().source_in, 7);
@@ -990,7 +1067,12 @@ mod tests {
             },
         );
         assert!(!outcome.is_ok());
-        assert!(outcome.issues.iter().any(|issue| issue.code == "no_such_track"));
+        assert!(
+            outcome
+                .issues
+                .iter()
+                .any(|issue| issue.code == "no_such_track")
+        );
     }
 
     #[test]
@@ -998,7 +1080,10 @@ mod tests {
         // is_ok() 靠白名单判断"不阻断的提示"。新加一种警告却忘了登记，
         // 会让一次成功的编辑被报成失败 —— 这条就是防它的。
         let mut original = doc(tb(30, 1), vec![layer("c", 0, 30, Some(0))]);
-        original.assets.push(Asset { id: "unused".to_string(), ..clip_asset() });
+        original.assets.push(Asset {
+            id: "unused".to_string(),
+            ..clip_asset()
+        });
         let issues = validate_project_doc(&original, &[]);
         assert!(issues.is_ok(), "只有警告时不该报错：{:?}", issues.errors);
         assert!(!issues.warnings.is_empty(), "这条测试要一个警告才有意义");
@@ -1020,17 +1105,23 @@ mod tests {
 
     #[test]
     fn 操作的_json_形状能往返() {
-        let op = EditOp::Split { layer: "c".to_string(), at: 75 };
+        let op = EditOp::Split {
+            layer: "c".to_string(),
+            at: 75,
+        };
         let text = serde_json::to_string(&op).expect("能序列化");
         assert_eq!(text, "{\"op\":\"split\",\"layer\":\"c\",\"at\":75}");
         let back: EditOp = serde_json::from_str(&text).expect("能反序列化");
         assert_eq!(back, op);
         // 修剪的 edge 用 in / out 两个小写词。
-        let trim_op = EditOp::Trim { layer: "c".to_string(), edge: TrimEdge::In, to: 3 };
+        let trim_op = EditOp::Trim {
+            layer: "c".to_string(),
+            edge: TrimEdge::In,
+            to: 3,
+        };
         assert_eq!(
             serde_json::to_string(&trim_op).expect("能序列化"),
             "{\"op\":\"trim\",\"layer\":\"c\",\"edge\":\"in\",\"to\":3}"
         );
     }
 }
-

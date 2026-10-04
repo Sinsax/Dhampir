@@ -64,7 +64,11 @@ impl VideoTrack {
 
     /// 第 frame 帧的样本下标（0 基）。超出范围返回 None。
     pub fn sample_index_of_frame(&self, frame: usize) -> Option<usize> {
-        if frame < self.samples.len() { Some(frame) } else { None }
+        if frame < self.samples.len() {
+            Some(frame)
+        } else {
+            None
+        }
     }
 
     /// 要解第 frame 帧，得从哪个同步样本开始（含）——WebCodecs 的硬约束。
@@ -133,8 +137,12 @@ fn boxes(data: &[u8], start: usize, end: usize) -> Vec<BoxRef> {
     let mut out = Vec::new();
     let mut at = start;
     while at + 8 <= end {
-        let Some(size32) = read_u32(data, at) else { break };
-        let Some(kind_slice) = data.get(at + 4..at + 8) else { break };
+        let Some(size32) = read_u32(data, at) else {
+            break;
+        };
+        let Some(kind_slice) = data.get(at + 4..at + 8) else {
+            break;
+        };
         let kind = [kind_slice[0], kind_slice[1], kind_slice[2], kind_slice[3]];
         let (header, size) = if size32 == 1 {
             match read_u64(data, at + 8) {
@@ -149,7 +157,11 @@ fn boxes(data: &[u8], start: usize, end: usize) -> Vec<BoxRef> {
         if size < header || at + size > end {
             break;
         }
-        out.push(BoxRef { kind, start: at + header, end: at + size });
+        out.push(BoxRef {
+            kind,
+            start: at + header,
+            end: at + size,
+        });
         at += size;
     }
     out
@@ -167,7 +179,10 @@ pub fn parse_video_track(bytes: &[u8]) -> Result<VideoTrack, DemuxError> {
     let top = boxes(bytes, 0, bytes.len());
     let moov = find_box(&top, b"moov").ok_or(DemuxError::NoMoov)?;
 
-    for trak in boxes(bytes, moov.start, moov.end).iter().filter(|b| &b.kind == b"trak") {
+    for trak in boxes(bytes, moov.start, moov.end)
+        .iter()
+        .filter(|b| &b.kind == b"trak")
+    {
         if let Some(track) = parse_trak(bytes, trak) {
             return Ok(track);
         }
@@ -204,7 +219,13 @@ fn parse_trak(bytes: &[u8], trak: &BoxRef) -> Option<VideoTrack> {
     let (width, height, description) = parse_stsd(bytes, &stbl_children)?;
     let samples = build_samples(bytes, &stbl_children)?;
 
-    Some(VideoTrack { timescale, width, height, description, samples })
+    Some(VideoTrack {
+        timescale,
+        width,
+        height,
+        description,
+        samples,
+    })
 }
 
 /// 从 stsd 里取编码尺寸与 avcC。
@@ -309,7 +330,9 @@ fn build_samples(bytes: &[u8], stbl_children: &[BoxRef]) -> Option<Vec<Sample>> 
     let mut samples = Vec::with_capacity(count);
     let mut index = 0usize;
     let chunk_count = chunk_offsets.len();
-    for chunk_index in 0..chunk_count {
+    // 用 `enumerate` 代替自己维护下标：`needless_range_loop` 要求的形状。
+    // 语义不变 —— 下面用的还是 chunk 的序号与它自己的偏移。
+    for (chunk_index, chunk_offset) in chunk_offsets.iter().enumerate().take(chunk_count) {
         let ordinal = (chunk_index + 1) as u32;
         // 该 chunk 每几个样本：取「first_chunk <= 本 chunk 序号」里最后一条
         let per_chunk = chunk_runs
@@ -317,7 +340,7 @@ fn build_samples(bytes: &[u8], stbl_children: &[BoxRef]) -> Option<Vec<Sample>> 
             .rev()
             .find(|(first, _)| *first <= ordinal)
             .map(|(_, per)| *per)?;
-        let mut offset = chunk_offsets[chunk_index];
+        let mut offset = *chunk_offset;
         for _ in 0..per_chunk {
             if index >= count {
                 break;
@@ -390,7 +413,11 @@ mod tests {
         entry.extend_from_slice(&[0u8; 32]); // compressorname
         entry.extend_from_slice(&[0x00, 0x18]); // depth
         entry.extend_from_slice(&[0xff, 0xff]); // pre_defined
-        assert_eq!(entry.len(), 78, "VisualSampleEntry 的固定部分必须是 78 字节");
+        assert_eq!(
+            entry.len(),
+            78,
+            "VisualSampleEntry 的固定部分必须是 78 字节"
+        );
         entry.extend_from_slice(&avcc);
 
         let stsd = boxed(
@@ -448,7 +475,10 @@ mod tests {
         hdlr_body.push(0);
 
         let minf = boxed(b"minf", &stbl);
-        let mdia = boxed(b"mdia", &concat(&[boxed(b"mdhd", &mdhd_body), boxed(b"hdlr", &hdlr_body), minf]));
+        let mdia = boxed(
+            b"mdia",
+            &concat(&[boxed(b"mdhd", &mdhd_body), boxed(b"hdlr", &hdlr_body), minf]),
+        );
         let trak = boxed(b"trak", &mdia);
         let moov = boxed(b"moov", &trak);
         let ftyp = boxed(b"ftyp", b"isom");
@@ -514,7 +544,6 @@ mod tests {
         assert!(track.is_constant_rate());
     }
 
-
     /// 拿真 proxy 验一遍：样本表必须与 ffprobe 独立量出来的事实逐项对上。
     ///
     /// 素材是 target/ 下的生成物（不入库），所以这条默认 #[ignore]：
@@ -542,8 +571,14 @@ mod tests {
         // 样本必须全部落在文件里，而且区间互不重叠、首尾相接
         let mut expected_offset = track.samples[0].offset;
         for (i, s) in track.samples.iter().enumerate() {
-            assert!(s.offset + s.size <= bytes.len(), "第 {i} 个样本越过文件末尾");
-            assert_eq!(s.offset, expected_offset, "第 {i} 个样本的偏移应当紧接前一个");
+            assert!(
+                s.offset + s.size <= bytes.len(),
+                "第 {i} 个样本越过文件末尾"
+            );
+            assert_eq!(
+                s.offset, expected_offset,
+                "第 {i} 个样本的偏移应当紧接前一个"
+            );
             expected_offset += s.size;
         }
 
@@ -560,7 +595,11 @@ mod tests {
 
         // 时间基与帧时长要和 60fps 自洽
         assert_eq!(track.timescale % 60, 0, "时间基应当能被 60 整除");
-        assert_eq!(track.samples[0].duration, track.timescale / 60, "每帧时长 = 时间基 / 60");
+        assert_eq!(
+            track.samples[0].duration,
+            track.timescale / 60,
+            "每帧时长 = 时间基 / 60"
+        );
         assert_eq!(track.samples[1].dts, u64::from(track.samples[0].duration));
     }
 
@@ -575,7 +614,10 @@ mod tests {
         let mut broken = tiny_mp4();
         let at = broken.windows(4).position(|w| w == b"moov").unwrap();
         broken[at..at + 4].copy_from_slice(b"xxxx");
-        assert!(matches!(parse_video_track(&broken), Err(DemuxError::NoMoov)));
+        assert!(matches!(
+            parse_video_track(&broken),
+            Err(DemuxError::NoMoov)
+        ));
     }
 
     #[test]
@@ -626,4 +668,3 @@ mod tests {
         assert_eq!(last.first_sample + last.sample_count, samples.len() as u32);
     }
 }
-

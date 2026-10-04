@@ -46,8 +46,14 @@
 node scripts/package.mjs
 # 3. 打 tag（tag 名与产品版本对齐）
 git tag -a v0.1.0 -m 'dhampir v0.1.0' && git push origin main --tags
-# 4. 挂 Release：dist/dhampir-0.1.0-win32-x64.zip + .sha256.txt
+# 4. 挂 Release：两个平台的稳定名各一份 + 各自的 .sha256.txt
+#    dist/dhampir-0.1.0-win32-x64.zip   ← 在 Windows 上打包得到
+#    dist/dhampir-0.1.0-linux-x64.zip   ← 在 Linux 上打包得到（2026-10-04 起）
 ```
+
+⚠️ **产物是各平台在各自机器上构建的，不是交叉编译**：`node scripts/package.mjs`
+按 `process.platform` 决定产物名，且它要真跑 `cargo build --release` 与 `wasm-pack`。
+所以**两个 zip 得在两台机器上各打一次** —— 别指望一条命令出两份。
 
 ---
 
