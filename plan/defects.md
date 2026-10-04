@@ -162,9 +162,11 @@
 - [D23] status=done phase=-
   症状: **Windows 上素材 uri 的「绝对」判定与「挂根」都是错的**，两处独立缺陷：(1) `is_absolute_uri` 的第 1 条用 `Path::is_absolute()` 实现，而 Windows 要求"盘符+根"，`Path::new("/abs/a.mp4").is_absolute()` 是 **false** → POSIX 绝对被误判成相对、挂到 `--asset-root` 下；(2) `build_sources` / `load_asset_map` 用 `asset_root.join(raw)` 挂根，而 Windows 的 `join` 规则是"若 path 有前缀但没有根则忽略 self"，`C:rel.mp4` 正是这种形状 → 得到 `C:rel.mp4` 而不是 `target/s3/C:rel.mp4`
   根因: crates/dhampir-worker/src/bin/dhampir.rs:993 scripts/dhampir-local.mjs:123
-  验收: 第 1 条改为**只看文本**（以 `/` 开头即绝对），不再调 `is_absolute()`；第 2 条新增 `join_under_root` 按文本拼（`asset_root` + 归一后的相对路径），两处调用点都改过去。JS 侧 `isAbsoluteUri` 同步改成 `startsWith('/')`（Node 的 `win32.join` 本身没有 Rust 那个丢 self 的问题，实测确认，故 JS 侧只需改判定）。新增反向可控的守卫：`挂根不用_path_join_以免在_windows_上丢掉_asset_root`（含 `./a.mp4` 前导点号用例，实测退回 `join` 后该测试在 **Linux 上也红**，证明它不是恒真）
+  验收: 第 1 条改为**只看文本**（以 `/` 开头即绝对），不再调 `is_absolute()`；第 2 条新增 `join_under_root`。**注意第 2 条踩了两次**：第一版写成"按文本拆成组件逐个 `PathBuf::push`"，看着比 `join` 安全，其实中同一条规则（`push` 与 `join` 语义一致，`join` 的文档明写 "See `PathBuf::push`"）—— `C:rel.mp4` 按 `/` 拆出来只有**一个**组件，整块 push 照样丢掉 `asset_root`，CI 第二次仍报 `left: "C:rel.mp4"`。最终改为**先把完整路径拼成一个字符串，再一次性 `PathBuf::from`**（`From` 不做前缀解析）。两处调用点（`build_sources` / `load_asset_map`）都改过去。JS 侧 `isAbsoluteUri` 同步改成 `startsWith('/')` 并去掉多余的 `isAbsolute` 导入（Node 的 `win32.join` 实测没有 Rust 那个丢 self 的问题，故那边只需改判定）。新增反向可控守卫 `挂根不用_path_join_也不用_push_以免在_windows_上丢掉_asset_root`（含 `./a.mp4` 前导点号用例，实测退回 `join` 后在 **Linux 上也红**，证明它不是恒真）
   证据: crates/dhampir-worker/src/bin/dhampir.rs:1024
-  备注: **这个缺陷在 Linux 上一条测试也测不出来**，两处都是 CI 的 `windows-latest` 腿抓到的（同一批测试在 ubuntu 上全绿）。这正是"两端矩阵"的价值：Linux 单腿会给出假绿。原先的 `绝对_uri_按书写形态判而不按平台判` 测试意图是对的，但它在 Linux 上恰好恒过 —— 是**测试在目标平台缺失**，不是判据写错
+  备注: **这个缺陷在 Linux 上一条测试也测不出来**，两处都是 CI 的 `windows-latest` 腿抓到的（同一批测试在 ubuntu 上全绿）。这正是"两端矩阵"的价值：Linux 单腿会给出假绿。原先的 `绝对_uri_按书写形态判而不按平台判` 测试意图是对的，但它在 Linux 上恰好恒过 —— 是**测试在目标平台缺失**，不是判据写错。
+  另记一条**方法教训**：中途我给守卫写过两条平台相关的反向对照 —— (a) 断言 `C:rel.mp4` 的 `components().count() == 1`，Windows 上其实是 **2**（Prefix + Normal），于是**在 Windows 上自己红了**（那是反向对照写错，不是被测代码错）；(b) 改成 `#[cfg(windows)]` 断言 ==2，但本机无 Windows target，那段代码**编译不到也跑不到**，等于往仓里塞未验证的代码。最终退回平台无关判据（结果必须以 asset_root 开头）。**别拿一个平台的形状去断言另一个平台**，也别引入自己验证不了的分支。
+  终局: CI 四个 job 全绿（`ubuntu-latest` 与 `windows-latest` 的 check-native、check-wasm、guard），`dhampir-0.1.0-linux-x64.zip` 基于该 commit（`git=4f8d06d`）重打并上传到 v0.1.0 Release
 
 ## 架构缺失（A）
 
