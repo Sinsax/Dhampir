@@ -19,9 +19,9 @@
 - 根因是一串**空格分隔的记号**，每个记号要么是仓库内真实存在的路径（可带 :行号 或 :起-止），
   要么是另一个条目 id。至少一个。
 - 证据是 - 或一串同样形式的真实路径；**status=done 时必须给出至少一个存在的文件**。
-- 计数声明行 <!-- ledger: D=22 A=10 --> 必须与实际条数一致。
+- 计数声明行 <!-- ledger: D=23 A=10 --> 必须与实际条数一致。
 
-<!-- ledger: D=22 A=10 -->
+<!-- ledger: D=23 A=10 -->
 
 ## 缺陷（D）
 
@@ -158,6 +158,13 @@
   验收: 记为**非缺陷**：那是**真阳性**。套件里别的守卫会跑 `cargo` / `wasm-pack`，而 `WASM_SOURCE_PATHS` 里的源目录会被 cargo 写入 —— pkg 与源的 mtime 是**亚秒级**比较，谁新谁旧取决于最后写的是哪边。已确证：手工 `touch` 一个源文件（`dhampir-core/src/lib.rs`）后该守卫**稳定转红**并打印正确的重建命令；`wasm-pack build --dev --target web --out-dir www/pkg` 重建后稳定转绿。即判据本身是对的，只是它把「pkg 与源同步」这件事**如实地**暴露在了套件中途
   证据: scripts/check-web-invariants.mjs:178
   备注: 若要消掉套件内的偶发红，正确做法是**让驱动在跑守卫前统一重建一次 pkg**，而不是放宽判据。这次没做（不在 0.1.0 产物范围内）；单独跑整套守卫时几乎不会遇到。**已实测该处置有效**：先跑一次 `wasm-pack build --dev --target web --out-dir www/pkg`，再跑整套守卫得到稳定 **19/20**（唯一红的仍是 D21）
+
+- [D23] status=done phase=-
+  症状: **Windows 上素材 uri 的「绝对」判定与「挂根」都是错的**，两处独立缺陷：(1) `is_absolute_uri` 的第 1 条用 `Path::is_absolute()` 实现，而 Windows 要求"盘符+根"，`Path::new("/abs/a.mp4").is_absolute()` 是 **false** → POSIX 绝对被误判成相对、挂到 `--asset-root` 下；(2) `build_sources` / `load_asset_map` 用 `asset_root.join(raw)` 挂根，而 Windows 的 `join` 规则是"若 path 有前缀但没有根则忽略 self"，`C:rel.mp4` 正是这种形状 → 得到 `C:rel.mp4` 而不是 `target/s3/C:rel.mp4`
+  根因: crates/dhampir-worker/src/bin/dhampir.rs:993 scripts/dhampir-local.mjs:123
+  验收: 第 1 条改为**只看文本**（以 `/` 开头即绝对），不再调 `is_absolute()`；第 2 条新增 `join_under_root` 按文本拼（`asset_root` + 归一后的相对路径），两处调用点都改过去。JS 侧 `isAbsoluteUri` 同步改成 `startsWith('/')`（Node 的 `win32.join` 本身没有 Rust 那个丢 self 的问题，实测确认，故 JS 侧只需改判定）。新增反向可控的守卫：`挂根不用_path_join_以免在_windows_上丢掉_asset_root`（含 `./a.mp4` 前导点号用例，实测退回 `join` 后该测试在 **Linux 上也红**，证明它不是恒真）
+  证据: crates/dhampir-worker/src/bin/dhampir.rs:1024
+  备注: **这个缺陷在 Linux 上一条测试也测不出来**，两处都是 CI 的 `windows-latest` 腿抓到的（同一批测试在 ubuntu 上全绿）。这正是"两端矩阵"的价值：Linux 单腿会给出假绿。原先的 `绝对_uri_按书写形态判而不按平台判` 测试意图是对的，但它在 Linux 上恰好恒过 —— 是**测试在目标平台缺失**，不是判据写错
 
 ## 架构缺失（A）
 

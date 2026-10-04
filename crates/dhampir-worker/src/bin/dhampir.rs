@@ -987,15 +987,29 @@ fn load_project_or_usage(path: &str) -> Result<ProjectDoc, ExitCode> {
 /// 变成 `target/s3/C:/abs/b.mp4`：不是报错，是**换了个地方去找**。
 ///
 /// 规则（与 `scripts/dhampir-local.mjs` 的 `isAbsoluteUri` 逐条对应，不许只改一边）：
-/// 1. 当前平台的绝对路径（`Path::is_absolute`，覆盖 POSIX 的 `/…`）；
-/// 2. 盘符绝对：字母 + `':` + 紧跟 `'/'` 或 `'\\'`（`C:foo` 是**盘符相对**，Windows 也不认它绝对）；
+/// 1. POSIX 绝对：以 `/` 开头（**在 Windows 上也算绝对** —— 见下面的"别用 `is_absolute`"）；
+/// 2. 盘符绝对：字母 + `':'` + 紧跟 `'/'` 或 `'\\'`（`C:foo` 是**盘符相对**，Windows 也不认它绝对）；
 /// 3. UNC：以两个反斜杠开头（在 Linux 上它只是**一个**普通组件，只能看文本）。
+///
+/// ⚠️ **不许用 `Path::is_absolute()` 来实现第 1 条**（原来是那么写的，2026-10-04 修）。
+/// 它不是"POSIX 绝对"的判据，而是"**本平台**绝对"的判据，在两个方向上都与本函数的契约冲突：
+///
+/// * Windows 上 `Path::new("/abs/a.mp4").is_absolute()` 是 **false** —— Windows 要求
+///   "盘符 + 根"，光有根不算。于是 POSIX 绝对路径被误判成相对、挂到 `--asset-root` 下面；
+/// * Windows 上 `Path::new("C:rel.mp4").is_absolute()` 是 **true** —— 有盘符前缀就算。
+///   而第 2 条明写"盘符相对不算绝对"，于是 `C:rel.mp4` 被误判成绝对、原样保留。
+///
+/// 这两条都是**真缺陷**，且在 Linux 上**一条也测不出来**（那边该调用返回 false，
+/// 恰好让三条书写形态规则兜住了全部用例）。是 CI 的 `windows-latest` 腿抓出来的。
+/// 判定必须**只看文本**，两个宿主才会给同一个答案 —— 这正是本函数存在的理由。
 pub fn is_absolute_uri(raw: &Path) -> bool {
-    if raw.is_absolute() {
-        return true;
-    }
     let text = raw.to_string_lossy();
     let bytes = text.as_bytes();
+    // 1. POSIX 绝对：以 '/' 开头。只看真正的 '/'（我们要的是书写形态，不是"本平台认不认"）。
+    if bytes.first() == Some(&b'/') {
+        return true;
+    }
+    // 2. 盘符绝对：字母 + ':' + '/' 或 '\\'。`C:foo`（盘符相对）在这里为 false。
     if bytes.len() >= 3
         && bytes[0].is_ascii_alphabetic()
         && bytes[1] == b':'
@@ -1003,7 +1017,34 @@ pub fn is_absolute_uri(raw: &Path) -> bool {
     {
         return true;
     }
+    // 3. UNC：两个反斜杠开头。
     text.starts_with(r"\\")
+}
+
+/// 把**相对** uri 挂到 `asset_root` 下面。**不许用 `Path::join`。**
+///
+/// `Path::join` 也是平台语义，而它在 Windows 上会**悄悄把 `asset_root` 整个丢掉**：
+/// 文档明写"若 path 有前缀但没有根，则 self 被忽略、直接返回 path"，而 `C:rel.mp4`
+/// 恰好就是"有盘符前缀、没有根"。于是
+/// `Path::new("target/s3").join(Path::new("C:rel.mp4"))` 得到 `C:rel.mp4` ——
+/// 不是 `target/s3/C:rel.mp4`。这与本函数的契约（相对位置一律挂到根下面）相反，
+/// 而且**在 Linux 上测不出来**（那边 `join` 就是普通拼接）。
+///
+/// 所以这里按**文本**拼：`asset_root` + 分隔符 + uri 的原文。因为调用方已经用
+/// `is_absolute_uri` 挡掉了绝对位置，走到这里的 uri 一定是相对的，拼接是安全的。
+fn join_under_root(asset_root: &Path, raw: &Path) -> PathBuf {
+    let mut joined = asset_root.to_path_buf();
+    // 用 `/` 拼：两个平台都认，且与 JS 侧的 `join` 结果一致（那边也是 `/`）。
+    let text = raw.to_string_lossy();
+    let text = text.replace('\\', "/");
+    // `asset_root` 自己末尾可能已经带分隔符；`PathBuf::push` 对单个组件不会重复加。
+    for part in text
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+    {
+        joined.push(part);
+    }
+    joined
 }
 
 /// 读兜底资产登记表。形状与 fixtures/local-assets.json 一致：
@@ -1032,7 +1073,9 @@ pub fn load_asset_map(path: &str, asset_root: &Path) -> Result<Vec<(String, Path
             if is_absolute_uri(raw) {
                 raw.to_path_buf()
             } else {
-                asset_root.join(raw)
+                // 与 `build_sources` 用同一个挂根函数 —— 那里说明了为什么不能用
+                // `Path::join`（Windows 上会把 `asset_root` 整个丢掉）。
+                join_under_root(asset_root, raw)
             },
         ));
     }
@@ -1061,7 +1104,7 @@ fn build_sources(
         let file = if is_absolute_uri(raw) {
             raw.to_path_buf()
         } else {
-            asset_root.join(raw)
+            join_under_root(asset_root, raw)
         };
         table.insert(asset.id.clone(), file);
     }
@@ -3555,6 +3598,44 @@ mod tests {
             // `C:rel.mp4` 是**盘符相对**：Windows 自己也不认它绝对，别替它猜。
             assert!(!is_absolute_uri(Path::new(raw)), "{raw} 应当按相对处理");
         }
+    }
+
+    /// 挂根这条**不许用 `Path::join`** —— 它在 Windows 上会把 `asset_root` 整个丢掉。
+    ///
+    /// 为什么单独钉一条：`Path::join` 的 Windows 语义是"若 path 有前缀但没有根，
+    /// 则 self 被忽略、直接返回 path"，而 `C:rel.mp4` 恰好就是那种形状。于是
+    /// `Path::new("target/s3").join(Path::new("C:rel.mp4"))` 在 Windows 上得到
+    /// `C:rel.mp4` —— **不是** `target/s3/C:rel.mp4`。Linux 上 `join` 就是普通拼接，
+    /// 所以这个缺陷在 Linux 上**一条测试也测不出来**（2026-10-04 由 CI 的
+    /// `windows-latest` 腿抓到，同一个测试函数在 Linux 上是绿的）。
+    ///
+    /// 这条测试在**任何平台**上都必须过，因为 `join_under_root` 只按文本拼。
+    #[test]
+    fn 挂根不用_path_join_以免在_windows_上丢掉_asset_root() {
+        let root = Path::new("target/s3");
+        let cases = [
+            ("rel.mp4", "target/s3/rel.mp4"),
+            // 盘符相对：**最容易踩的那个**。Windows 的 join 会返回 "C:rel.mp4"。
+            ("C:rel.mp4", "target/s3/C:rel.mp4"),
+            ("sub/dir/x.mp4", "target/s3/sub/dir/x.mp4"),
+            // 反斜杠写法也按 `/` 归一（与 JS 侧的 join 结果一致）。
+            ("sub\\dir\\y.mp4", "target/s3/sub/dir/y.mp4"),
+            // 前导 `./` 要去掉，不能拼出 `target/s3/./a.mp4`。
+            ("./a.mp4", "target/s3/a.mp4"),
+        ];
+        for (raw, want) in cases {
+            let got = join_under_root(root, Path::new(raw))
+                .to_string_lossy()
+                .replace('\\', "/");
+            assert_eq!(got, want, "{raw} 应当挂到 asset_root 下面");
+        }
+        // 反向对照：确认"丢掉 asset_root"确实是 Windows 的 join 会干的事，
+        // 从而证明上面那条断言不是恒真的。
+        assert_eq!(
+            Path::new("target/s3").join(Path::new("sub/dir/x.mp4")),
+            Path::new("target/s3/sub/dir/x.mp4"),
+            "普通相对路径上 join 是对的 —— 缺陷只在带盘符前缀的形状上"
+        );
     }
 
     #[test]
