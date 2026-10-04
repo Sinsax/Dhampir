@@ -3649,19 +3649,31 @@ mod tests {
             Path::new("target/s3/sub/dir/x.mp4"),
             "普通相对路径上 join 是对的 —— 缺陷只在带盘符前缀的形状上"
         );
-        // 反向对照 2：把"逐个 push"那种写法也钉住，让它在**任何平台**上都暴露。
-        // `C:rel.mp4` 不含 '/'，拆出来就是一个组件 —— push 会把它整块塞进去，
-        // 于是 `PathBuf` 里留下一个**独立于 root** 的盘符形状。这里断言
-        // "组件数不是 2"，即证明"拆组件再 push"并不能绕开那条平台规则。
-        let mut pushed = PathBuf::new();
-        for part in "C:rel.mp4".split('/') {
-            pushed.push(part);
+        // 反向对照 2：把"结果必须带根"这条钉在**能跨平台判**的形状上。
+        //
+        // 曾在这里写过两条平台相关的断言，都撤了：
+        //   (a) 断言 `Path::new("C:rel.mp4").components().count() == 1` —— Windows 上是 **2**
+        //       （Prefix("C:") + Normal），于是在 Windows 上自己红了。那是**反向对照写错**，
+        //       不是被测代码错。不能拿 Linux 的组件模型去断言 Windows。
+        //   (b) 后来改成 `#[cfg(windows)]` 断言 == 2 —— 但本机没有 Windows target，
+        //       那段代码我**编译不到也跑不到**，等于塞了一段没验证过的代码进仓。
+        //
+        // 所以这里退回只用**与平台无关**的判据：结果必须以 asset_root 开头。
+        // 这条在两个平台上都成立，而且一旦退回 join/push 就立刻红 ——
+        // 既不需要模拟平台，也不会引入测不到的分支。
+        for raw in [
+            "rel.mp4",
+            "C:rel.mp4",
+            "sub/dir/x.mp4",
+            "sub\\dir\\y.mp4",
+            "./a.mp4",
+        ] {
+            let got = join_under_root(root, Path::new(raw));
+            assert!(
+                got.starts_with(root),
+                "{raw} 挂根后必须以 {root:?} 开头，得到 {got:?} —— 退回 join/push 就会丢掉根"
+            );
         }
-        assert_eq!(
-            pushed.components().count(),
-            1,
-            "`C:rel.mp4` 拆不出多个组件 —— 这正是『拆组件再 push』绕不开 Windows 规则的原因"
-        );
     }
 
     #[test]
