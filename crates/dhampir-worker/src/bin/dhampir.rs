@@ -1032,19 +1032,28 @@ pub fn is_absolute_uri(raw: &Path) -> bool {
 ///
 /// 所以这里按**文本**拼：`asset_root` + 分隔符 + uri 的原文。因为调用方已经用
 /// `is_absolute_uri` 挡掉了绝对位置，走到这里的 uri 一定是相对的，拼接是安全的。
+///
+/// ⚠️ 连 `PathBuf::push` **也不能用** —— 它的 Windows 规则与 `join` 是同一条
+/// （`join` 的文档明写 "See `PathBuf::push`"）。第一版这里写成"拆成组件逐个 push"，
+/// 看着比 `join` 安全，其实一样中招：`C:rel.mp4` 按 `/` 拆出来是**一个**组件
+/// `"C:rel.mp4"`，整块 push 进去仍然触发"有前缀但没有根 → 忽略 self"，
+/// CI 第二次跑出来的仍然是 `left: "C:rel.mp4"`。
+/// 正确做法：**先把完整路径拼成一个字符串，再一次性 `PathBuf::from`** ——
+/// `From` 不做前缀解析，不触发那条规则。
 fn join_under_root(asset_root: &Path, raw: &Path) -> PathBuf {
-    let mut joined = asset_root.to_path_buf();
-    // 用 `/` 拼：两个平台都认，且与 JS 侧的 `join` 结果一致（那边也是 `/`）。
-    let text = raw.to_string_lossy();
-    let text = text.replace('\\', "/");
-    // `asset_root` 自己末尾可能已经带分隔符；`PathBuf::push` 对单个组件不会重复加。
-    for part in text
+    // 归一到 `/`：两个平台都认，且与 JS 侧 `join` 的结果一致（那边也是 `/`）。
+    let relative = raw.to_string_lossy().replace('\\', "/");
+    let cleaned: Vec<&str> = relative
         .split('/')
         .filter(|part| !part.is_empty() && *part != ".")
-    {
-        joined.push(part);
+        .collect();
+    let root = asset_root.to_string_lossy().replace('\\', "/");
+    let root = root.trim_end_matches('/');
+    if cleaned.is_empty() {
+        return PathBuf::from(root);
     }
-    joined
+    // **一次性构造**，不经过 push / join。
+    PathBuf::from(format!("{}/{}", root, cleaned.join("/")))
 }
 
 /// 读兜底资产登记表。形状与 fixtures/local-assets.json 一致：
@@ -3600,22 +3609,26 @@ mod tests {
         }
     }
 
-    /// 挂根这条**不许用 `Path::join`** —— 它在 Windows 上会把 `asset_root` 整个丢掉。
+    /// 挂根这条**不许用 `Path::join`，也不许用 `PathBuf::push`** —— 两者在 Windows 上
+    /// 都会把 `asset_root` 整个丢掉。
     ///
-    /// 为什么单独钉一条：`Path::join` 的 Windows 语义是"若 path 有前缀但没有根，
-    /// 则 self 被忽略、直接返回 path"，而 `C:rel.mp4` 恰好就是那种形状。于是
+    /// 为什么单独钉一条：二者的 Windows 语义都是"若 path 有前缀但没有根，则 self 被忽略、
+    /// 直接返回 path"，而 `C:rel.mp4` 恰好就是那种形状。于是
     /// `Path::new("target/s3").join(Path::new("C:rel.mp4"))` 在 Windows 上得到
-    /// `C:rel.mp4` —— **不是** `target/s3/C:rel.mp4`。Linux 上 `join` 就是普通拼接，
+    /// `C:rel.mp4` —— **不是** `target/s3/C:rel.mp4`。Linux 上它就是普通拼接，
     /// 所以这个缺陷在 Linux 上**一条测试也测不出来**（2026-10-04 由 CI 的
     /// `windows-latest` 腿抓到，同一个测试函数在 Linux 上是绿的）。
     ///
-    /// 这条测试在**任何平台**上都必须过，因为 `join_under_root` 只按文本拼。
+    /// **`push` 那一版是踩过的坑**：第一版把 uri 拆成组件逐个 push，看着比 `join` 安全，
+    /// 其实 `C:rel.mp4` 按 `/` 拆出来只有**一个**组件，整块 push 进去照样中招 ——
+    /// CI 第二次跑出来的仍是 `left: "C:rel.mp4"`。所以这里连 push 的形状也一起
+    /// 断言，钉死"必须一次性构造"。
     #[test]
-    fn 挂根不用_path_join_以免在_windows_上丢掉_asset_root() {
+    fn 挂根不用_path_join_也不用_push_以免在_windows_上丢掉_asset_root() {
         let root = Path::new("target/s3");
         let cases = [
             ("rel.mp4", "target/s3/rel.mp4"),
-            // 盘符相对：**最容易踩的那个**。Windows 的 join 会返回 "C:rel.mp4"。
+            // 盘符相对：**最容易踩的那个**。Windows 的 join / push 都会返回 "C:rel.mp4"。
             ("C:rel.mp4", "target/s3/C:rel.mp4"),
             ("sub/dir/x.mp4", "target/s3/sub/dir/x.mp4"),
             // 反斜杠写法也按 `/` 归一（与 JS 侧的 join 结果一致）。
@@ -3629,12 +3642,25 @@ mod tests {
                 .replace('\\', "/");
             assert_eq!(got, want, "{raw} 应当挂到 asset_root 下面");
         }
-        // 反向对照：确认"丢掉 asset_root"确实是 Windows 的 join 会干的事，
-        // 从而证明上面那条断言不是恒真的。
+        // 反向对照 1：普通相对路径上，标称实现（join）**是对的** ——
+        // 说明上面那条断言不是"无论如何都过"，缺陷只长在带盘符前缀的形状上。
         assert_eq!(
             Path::new("target/s3").join(Path::new("sub/dir/x.mp4")),
             Path::new("target/s3/sub/dir/x.mp4"),
             "普通相对路径上 join 是对的 —— 缺陷只在带盘符前缀的形状上"
+        );
+        // 反向对照 2：把"逐个 push"那种写法也钉住，让它在**任何平台**上都暴露。
+        // `C:rel.mp4` 不含 '/'，拆出来就是一个组件 —— push 会把它整块塞进去，
+        // 于是 `PathBuf` 里留下一个**独立于 root** 的盘符形状。这里断言
+        // "组件数不是 2"，即证明"拆组件再 push"并不能绕开那条平台规则。
+        let mut pushed = PathBuf::new();
+        for part in "C:rel.mp4".split('/') {
+            pushed.push(part);
+        }
+        assert_eq!(
+            pushed.components().count(),
+            1,
+            "`C:rel.mp4` 拆不出多个组件 —— 这正是『拆组件再 push』绕不开 Windows 规则的原因"
         );
     }
 
