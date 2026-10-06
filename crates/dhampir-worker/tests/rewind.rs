@@ -123,6 +123,7 @@ fn render_all(name: &str, out: &str) -> Rendered {
         width: doc.render_hints.width,
         height: doc.render_hints.height,
         sequence: doc.sequence_size(),
+        background: None,
         subtitles: &subtitles,
         // 这一条与字体无关：夹具里没有字幕轨，给了字体也不会画字。
         font_file: None,

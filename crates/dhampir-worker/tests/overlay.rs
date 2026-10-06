@@ -192,6 +192,7 @@ impl Fixture {
             width: TARGET.0,
             height: TARGET.1,
             sequence: TARGET,
+            background: None,
             subtitles,
             font_file: font,
             font_bold_file: None,
