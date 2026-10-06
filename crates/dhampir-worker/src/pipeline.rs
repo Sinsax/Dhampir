@@ -1179,6 +1179,11 @@ pub struct RenderPlan<'a> {
     /// 本仓有一批判据钉的是"同一份工程出同样的字节"，默认保持单趟；
     /// 要速度就显式开（`--chunk-workers 0`）。
     pub chunk_workers: usize,
+    /// **画布底色**（工程的 `render_hints.background`，已解析成 0..1 的 rgba）。
+    /// `None` = 透明（编码器那边就是黑），与改造前一致。
+    ///
+    /// 它替代了"纯色背景层"：清屏色不引入任何"有素材图层"，所以不碰分段路径那条逐帧泄漏。
+    pub background: Option<[f64; 4]>,
     /// 音轨怎么办。AudioPlan 由本函数从 `timeline`/`sources`/`asset_timebases` 摊出来 ——
     /// **同源求值**要的就是"同一份入参"，让调用方另传一份计划进来反而会分叉。
     pub audio: AudioMode,
@@ -1997,6 +2002,11 @@ fn render_range(
     video_target: &Path,
     on_progress: &mut dyn FnMut(usize, usize),
 ) -> Result<RangeReport, String> {
+    // **画布底色**：工程写了 `render_hints.background` 就用它，否则沿用改造前的透明（= 黑）。
+    let clear_color = plan
+        .background
+        .map(|[r, g, b, a]| wgpu::Color { r, g, b, a })
+        .unwrap_or(wgpu::Color::TRANSPARENT);
     let fps = encoder_fps(&plan.timeline.timebase)?;
     let (ctx, _init) =
         open_leg(NATIVE_BACKENDS).map_err(|error| format!("拿不到 GPU 上下文：{error}"))?;
@@ -2045,7 +2055,7 @@ fn render_range(
             },
             &composite,
             &mut sources,
-            wgpu::Color::TRANSPARENT,
+            clear_color,
             // **序列时间（秒）**：Warp 的位移场以它为自变量。
             // 与浏览器侧用**同一个换算**（都在 timeline 的 `seconds_at_sequence_frame`），
             // 否则同一个工程在两个宿主的抖动相位会不一致 —— 那正是"两端可比"要防的。
@@ -2225,6 +2235,12 @@ pub fn render_frames_png_run(
     if plan.width == 0 || plan.height == 0 {
         return Err(format!("输出尺寸不合法：{}x{}", plan.width, plan.height));
     }
+    // **画布底色**：与 `render_range` 同一条口径（PNG 出帧也要吃到它，否则
+    // "出片对了、单帧 PNG 不对"会变成新的分叉）。
+    let clear_color = plan
+        .background
+        .map(|[r, g, b, a]| wgpu::Color { r, g, b, a })
+        .unwrap_or(wgpu::Color::TRANSPARENT);
     let (ctx, _init) =
         open_leg(NATIVE_BACKENDS).map_err(|error| format!("拿不到 GPU 上下文：{error}"))?;
     let renderer = TimelineRenderer::new(&ctx.device, WORK_FORMAT);
@@ -2276,7 +2292,7 @@ pub fn render_frames_png_run(
             },
             &composite,
             &mut sources,
-            wgpu::Color::TRANSPARENT,
+            clear_color,
         );
         ctx.queue.submit([command.finish()]);
         let mut image = pollster::block_on(readback::read_texture_rgba8(

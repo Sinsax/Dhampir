@@ -163,6 +163,45 @@ pub struct RenderHints {
     pub height: u32,
 #[serde(default = "default_format")]
     pub format: String,
+    /// **画布底色**：`#rgb` / `#rrggbb` / `#rrggbbaa`。`None` = 透明（宿主/编码器那边就是黑）。
+    ///
+    /// # 为什么要有它（2026-10-06）
+    ///
+    /// YekiTrim 的「画面构成 → 背景 = 纯色/黑」在底座这条腿上**原先没有任何落地路径**：
+    /// 底座没有"纯色图层"原语，而加一层**有素材的图层**会触发分段路径的逐帧泄漏（长片 OOM，
+    /// 实测 2 层 1500 帧）。
+    ///
+    /// 清屏色是**零图层**的落地方式：留边处直接是这个颜色，既不碰那条泄漏，也不用编一张 1×1 的图。
+    /// 语义上它等于"主画面之外那块画布本来是什么颜色"，与 CSS 里 `background` 的直觉一致。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<String>,
+}
+
+impl RenderHints {
+    /// 画布底色的 rgba（0..1）。**没写 / 认不出 ⇒ `None`** —— 那就是改造前的行为（透明）。
+    ///
+    /// ⚠️ 不猜：认不出的字符串（`red`、`rgba(...)`、`#12`）一律 `None`，由调用方决定要不要报。
+    pub fn background_rgba(&self) -> Option<[f64; 4]> {
+        parse_hex_color(self.background.as_deref()?)
+    }
+}
+
+/// `#rgb` / `#rrggbb` / `#rrggbbaa`（大小写都收）⇒ 0..1 的 rgba。**认不出就是 `None`。**
+///
+/// 只认十六进制：契约里那一份颜色是 YekiTrim 自己写的（`#rrggbb`），
+/// 多认几种写法（`rgb()`/颜色名）只会让"两端对同一个字符串的解释"多出分叉的机会。
+pub fn parse_hex_color(s: &str) -> Option<[f64; 4]> {
+    let h = s.trim().trim_start_matches('#');
+    let byte = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).ok().map(|v| v as f64 / 255.0);
+    match h.len() {
+        3 => {
+            let one = |i: usize| u8::from_str_radix(&h[i..i + 1], 16).ok().map(|v| v as f64 / 15.0);
+            Some([one(0)?, one(1)?, one(2)?, 1.0])
+        }
+        6 => Some([byte(0)?, byte(2)?, byte(4)?, 1.0]),
+        8 => Some([byte(0)?, byte(2)?, byte(4)?, byte(6)?]),
+        _ => None,
+    }
 }
 
 fn default_width() -> u32 { 1920 }
@@ -171,7 +210,7 @@ fn default_format() -> String { "mp4".to_string() }
 
 impl Default for RenderHints {
     fn default() -> Self {
-        Self { width: 1920, height: 1080, format: "mp4".to_string() }
+        Self { width: 1920, height: 1080, format: "mp4".to_string(), background: None }
     }
 }
 
@@ -1078,5 +1117,38 @@ mod tests {
         let table = doc(vec![a], vec![layer_with("l", 0, 10, Some("gif"), 0)]).asset_timebases();
         assert_eq!(table.get("gif").is_some(), true, "有时间基就进表");
         assert_eq!(table.frame_count("gif"), None, "没登记长度就如实是 None");
+    }
+
+    /// **画布底色**：只认十六进制，认不出就是 `None`（不猜）。
+    ///
+    /// 它是 YekiTrim「画面构成 → 背景 = 纯色/黑」在底座这条腿上的唯一落地方式
+    /// （底座没有纯色图层原语，而有素材的图层会触发分段路径逐帧泄漏）。
+    #[test]
+    fn background_hex_is_parsed_strictly() {
+        let hints = |bg: Option<&str>| RenderHints {
+            width: 1920,
+            height: 1080,
+            format: "mp4".into(),
+            background: bg.map(|s| s.to_string()),
+        };
+        assert_eq!(hints(None).background_rgba(), None, "没写 = 透明（改造前行为）");
+        assert_eq!(hints(Some("#ffffff")).background_rgba(), Some([1.0, 1.0, 1.0, 1.0]));
+        assert_eq!(hints(Some("#000000")).background_rgba(), Some([0.0, 0.0, 0.0, 1.0]));
+        assert_eq!(hints(Some("#fff")).background_rgba(), Some([1.0, 1.0, 1.0, 1.0]));
+        assert_eq!(
+            hints(Some("#33669980")).background_rgba().map(|c| (c[0] > 0.19 && c[0] < 0.21, c[3] > 0.49 && c[3] < 0.51)),
+            Some((true, true)),
+            "8 位要认 alpha"
+        );
+        // **不猜**：颜色名 / rgb() / 位数不对 一律 None
+        for bad in ["red", "rgb(1,2,3)", "#12", "#12345", "", "  "] {
+            assert_eq!(hints(Some(bad)).background_rgba(), None, "{bad:?} 不该被认出来");
+        }
+        // 省略字段时必须能反序列化（老工程 / 老底座都靠它）
+        let doc: ProjectDoc = serde_json::from_str(
+            r#"{"project_schema":4,"timeline":{"schema":4,"timebase":{"num":30,"den":1},"markers":[],"tracks":[]}}"#,
+        )
+        .expect("缺 render_hints 也要能读");
+        assert_eq!(doc.render_hints.background_rgba(), None);
     }
 }

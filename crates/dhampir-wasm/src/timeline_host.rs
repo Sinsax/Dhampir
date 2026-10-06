@@ -1257,11 +1257,19 @@ impl ProjectHost {
                     .to_timebase()
                     .map(|tb| tb.num as f32 / tb.den.max(1) as f32)
                     .unwrap_or(0.0);
-                (composite, doc.sequence_size(), seconds, fps)
+                // **画布底色**：`render_hints.background`（没有就是透明 = 黑）。
+                // 它替代了"纯色背景层"—— 清屏色不引入任何"有素材图层"，所以不碰分段路径那条泄漏。
+                let background = doc.render_hints.background_rgba();
+                (composite, doc.sequence_size(), seconds, fps, background)
             })
         });
-        let Some((composite, sequence, seconds, fps)) = loaded else {
+        let Some((composite, sequence, seconds, fps, background)) = loaded else {
             return Err("还没有载入通过校验的工程".to_string());
+        };
+        // 清屏色：工程写了 `render_hints.background` 就用它，否则沿用改造前的透明（= 黑）。
+        let background_color = match background {
+            Some([r, g, b, a]) => wgpu::Color { r, g, b, a },
+            None => wgpu::Color::TRANSPARENT,
         };
 
         // 拆分借用：这些字段互不相干，解析器只需要其中几个的不可变借用。
@@ -1452,7 +1460,7 @@ impl ProjectHost {
             space,
             &composite,
             &mut resolver,
-            wgpu::Color::TRANSPARENT,
+            background_color,
             seconds,
         );
         // **文字叠在底上，不清屏** —— 清屏是上面那一句的事（compose_overlay 绝不清屏，
