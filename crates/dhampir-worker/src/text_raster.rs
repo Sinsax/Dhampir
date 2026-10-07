@@ -50,12 +50,34 @@
 //! **切没切字是查得出来的**：见 [`TextBitmap::ink_touches_edge`]。调用方必须把它
 //! 变成一条问题记录，而不是忽略 —— 静默切字属于最难查的那类（画面看着「就是这样」）。
 //!
+//! # 非 ASCII 字体文件名：ffmpeg 会**静默**画不出来
+//!
+//! `drawtext` 的 `fontfile=` 走的是 ffmpeg 内部的 fontconfig 查找路径，而那条路对
+//! 非 ASCII 文件名不可靠。本机实测（ffmpeg 9.0.1 gyan build，命令与数字见
+//! `plan/glyph-fallback-evidence.md`）：同一份字体，
+//!
+//! | 字体路径 | ffmpeg 退出码 | 产出字节 | stderr |
+//! |---|---|---|---|
+//! | `…/乐米波波体（免费商用）_爱给网_aigei_com.ttf` | 0 | **0** | `Fontconfig error: Cannot load default config file` |
+//! | 同一份复制成 `lemi_ascii.ttf` | 0 | 96000（3184 个非零 alpha） | 空 |
+//!
+//! 注意退出码是 **0**、画布尺寸也没错 —— 它只是**什么都不吐**。这正是最坏的一种失败：
+//! 调用方拿到的不是错误而是**一行看不见的字**，而「字没画出来」在看片时像「这一行没有字幕」。
+//! 现有的 `run_ffmpeg` 有一条「产出字节数对不上就报错」的检查，非零退出码那条挡不住这里，
+//! 挡住它的是**字节数**那条 —— 那是本模块敢在这条路上犯错的前提。
+//!
+//! 用户决策：**让它能画**，不是只报错。做法是把字体复制到一份 ASCII 名的临时路径再喂给
+//! ffmpeg（见 [`ascii_font_path`]），用完即删。
+//!
 //! # 有意不做的事
 //!
 //! * 不做字距 / 连字 / 禁则：那是共享布局的模型，宿主**不许**自己再算一遍，否则两端分叉。
 //! * 不解析字体文件、不量字形：度量取自 ffmpeg，结构取自共享布局。
 //! * 不缓存到磁盘：跨次运行的缓存键里还得塞字体文件的内容摘要，那是另一件事。
 //! * 不做彩色 emoji 字形：drawtext 画的是字体里那一层单色字形。
+//! * **不改字体集合、不猜系统字体**：产品路径上字体仍由 `--font-file` 给。
+//!   上面那个复制**只改路径的写法，不改用的是哪一份字体** —— 内容摘要进临时名，
+//!   所以「挪一份字体」与「换一份字体」在参数串上是可区分的。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -410,7 +432,12 @@ pub const SHADOW_MAX_BITMAP_BYTES: u64 = 64 * 1024 * 1024;
 ///
 /// 抽成纯函数是为了能单测它 —— 尤其是「文本**不进命令行**」这条：
 /// 用户内容一旦进了滤镜串，一个冒号或引号就能把整条命令改写。
-pub fn drawtext_args(key: &TextRasterKey, text_file: &Path) -> Vec<String> {
+///
+/// `font_file` 与 `key` **分开传**，而不是直接用 `key.font_file`：非 ASCII 那一条路上
+/// 喂给 ffmpeg 的是**搬过一份的临时路径**（见 [`ascii_font_path`]），而键上那份仍是
+/// 调用方给的。把它显式列出来，等于让"这一串里用的是哪份字体"在类型上就看得见 ——
+/// 顺手从 `key` 里取会是一条静默走回老路的岔路。
+pub fn drawtext_args(key: &TextRasterKey, font_file: &Path, text_file: &Path) -> Vec<String> {
     // 源：一张全透明的画布，尺寸就是要的位图尺寸。
     let source = format!(
         "color=c=black@0.0:s={}x{},format=rgba",
@@ -427,7 +454,7 @@ pub fn drawtext_args(key: &TextRasterKey, text_file: &Path) -> Vec<String> {
         // 所以"整行居中"这件事**由调用方算好偏移传进来**（`x_offset`）。
         // 0 时不写那一项 —— 既有工程的滤镜串逐字符不变。
         "drawtext=fontfile={}:textfile={}:fontsize={}:fontcolor=white:expansion=none:x=(w-text_w)/2{}:y=(h-text_h)/2",
-        filter_value(&key.font_file.to_string_lossy()),
+        filter_value(&font_file.to_string_lossy()),
         filter_value(&text_file.to_string_lossy()),
         key.font_px,
         if key.x_offset == 0 {
@@ -496,8 +523,112 @@ pub fn drawtext_args(key: &TextRasterKey, text_file: &Path) -> Vec<String> {
     ]
 }
 
-/// 把文本落成一个临时文件，给 `textfile=` 用。
+/// 把字体搬一份到**纯 ASCII 名的临时路径**，返回**接下来要喂给 ffmpeg 的那条路径**。
 ///
+/// # 返回值为什么是「一条路径」而不是「路径 + 清理标记」
+///
+/// 它返回的就是**接下来该用的那条**：ASCII 路径原样返回，非 ASCII 返回搬过去的那份。
+/// 调用方只有一条用法（`ascii_font_path(..)?.path()`），于是「搬了却没换上」
+/// 这件事**在类型上就写不出来** —— 没有第二条路径可选。
+///
+/// 早先的写法是返回 `Option<(路径, 清理路径)>` + 调用方 `match` 两条路各接一次。
+/// 那种写法有一个**静默**的错法：`match` 里把 `key.font_file` 接上去 ——
+/// 编译过、测试过、`Some` 也拿到了，只有真出片时字又是空的（本机的反向用例量过：
+/// 这个错法**不被任何一条断言接住**，所以改成本形态，让它不可写）。
+/// 搬出来的那份自己知道该删，见 [`StagedFont`]。
+///
+/// # 为什么要搬（这不是洁癖，是实测出来的）
+///
+/// `drawtext` 的 `fontfile=` 对非 ASCII 文件名会**静默失败**：退出码 0、不吐一个字节，
+/// stderr 只有一句 fontconfig 的抱怨（模块文档里那张表就是实测数字）。
+/// 同一份字体复制成 ASCII 名之后画得好好的 —— 所以问题在**路径的写法**，
+/// 不在字体内容，搬一份就能绕过去。
+///
+/// # 临时名：内容摘要进名字
+///
+/// 名字里塞**字体内容的 FNV-1a**（与文本临时文件同一个摘要函数），于是：
+/// * 同一次出片里几百行共用同一份字体 → 文件名稳定，重复调用撞上同一份；
+/// * 换一份字体 → 名字变了 → 不会被上一份的残留顶替；
+/// * 名字与内容对不上时能被发现（下面是**先读后算**，算的是读到的那些字节）。
+///
+/// 用 `copy` 而不是 `hard_link`：Windows 上跨卷硬链会失败，而临时目录与字体目录
+/// 常常不在一个卷上。一份中文字体约 2.5 MB，搬一次的代价远小于一次 ffmpeg 进程。
+pub fn ascii_font_path(font_file: &Path) -> Result<StagedFont, String> {
+    // 路径是字节，不是字符索引 —— Windows 上的非 UTF-8 路径也要能被判成"非 ASCII"，
+    // 所以这里看的是 `OsStr` 的编码字节，而不是 `to_string_lossy` 之后的 char。
+    if font_file.as_os_str().as_encoded_bytes().is_ascii() {
+        // **不用搬**：原样还回去，连 `to_string_lossy` 那一次往返都不做。
+        // 这一条是**默认路径字节冻结**的前提 —— 老工程的参数串一个字节都不许变。
+        return Ok(StagedFont {
+            path: font_file.to_path_buf(),
+            staged: None,
+        });
+    }
+    let staged = stage_font_file(font_file)?;
+    Ok(StagedFont {
+        path: staged.clone(),
+        staged: Some(staged),
+    })
+}
+
+/// 一次栅格化用的字体路径，**顺带管着**为它搬出来的那份临时文件。
+///
+/// 临时文件交给 [`Drop`] 删，而不是调用方在 `run_ffmpeg` 之后手写一次 `remove_file`：
+/// 手写那种要求**每一个出口**都想起来删（现在是成功/失败两条，将来多一条就漏一条），
+/// 而 `Drop` 连提前 return 与 panic 都覆盖得到。
+///
+/// 进程被 Ctrl-C 掉时残留一份几 MB 的副本是无解的（没有 atexit 钩子），
+/// 所以临时名带了 `dhampir-font-` 前缀与内容摘要，好让它**可识别、可认领**。
+#[derive(Debug)]
+pub struct StagedFont {
+    /// 喂给 ffmpeg 的那条路径（路径全是 ASCII 时 = 调用方原来那条）。
+    path: PathBuf,
+    /// 搬出来的那份；`None` = 没搬。
+    staged: Option<PathBuf>,
+}
+
+impl StagedFont {
+    /// 喂给 ffmpeg 用的路径。
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// 这一份是不是**搬出来的**（给测试与诊断用：老工程的路径必须给 `false`）。
+    pub fn is_staged(&self) -> bool {
+        self.staged.is_some()
+    }
+}
+
+impl Drop for StagedFont {
+    fn drop(&mut self) {
+        if let Some(staged) = &self.staged {
+            let _ = std::fs::remove_file(staged);
+        }
+    }
+}
+
+/// 真的把文件搬过去 —— 与 [`ascii_font_path`] 拆开只为让"要不要搬"这一个判断
+/// 能单独看（它是默认路径字节冻结那条判据的全部）。
+fn stage_font_file(font_file: &Path) -> Result<PathBuf, String> {
+    let bytes = std::fs::read(font_file)
+        .map_err(|error| format!("读不了字体文件 {}：{error}", font_file.display()))?;
+    let digest = dhampir_core::timeline::selfcheck::fnv1a64(&bytes);
+    let path = std::env::temp_dir().join(format!(
+        "dhampir-font-{}-{digest:016x}{}",
+        std::process::id(),
+        font_file
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.to_ascii_lowercase())
+            .map(|extension| format!(".{extension}"))
+            .unwrap_or_default()
+    ));
+    std::fs::write(&path, &bytes)
+        .map_err(|error| format!("写不了字体临时文件 {}：{error}", path.display()))?;
+    Ok(path)
+}
+
+/// 把文本落成一个临时文件，给 `textfile=` 用。///
 /// 名字要唯一：同一台机器上可能同时跑两个进程（两条腿并行），
 /// 用 pid + 计数器 + 内容摘要就撞不上。写的是 UTF-8 **无 BOM**、**不加结尾换行**
 /// —— 加一个换行，drawtext 会多排一行空行，垂直居中就偏了。
@@ -556,14 +687,23 @@ pub fn rasterize_line(key: &TextRasterKey) -> Result<TextBitmap, String> {
     }
 
     let text_file = write_text_file(text)?;
-    let result = run_ffmpeg(key, &text_file);
-    // 临时文件用完就删，成功失败都删：一次出片几百行，留一地文件是在给下次查问题挖坑。
+    // 字体路径含非 ASCII 时先搬一份到 ASCII 名的临时路径（实测：不搬的话 ffmpeg
+    // 退出码 0 但一个字节都不吐）。`StagedFont` 自己管清理，**也自己给出该用哪条路径**
+    // —— 调用方没有第二条路径可选，所以"搬了却没换上"这件事写不出来。
+    let font = ascii_font_path(&key.font_file)?;
+    let result = run_ffmpeg(key, font.path(), &text_file);
+    // 文本临时文件用完就删，成功失败都删：一次出片几百行，留一地文件是在给下次查问题挖坑。
+    // （字体那份由 `font` 的 Drop 删，连提前 return 都覆盖得到。）
     let _ = std::fs::remove_file(&text_file);
     result
 }
 
-fn run_ffmpeg(key: &TextRasterKey, text_file: &Path) -> Result<TextBitmap, String> {
-    let args = drawtext_args(key, text_file);
+fn run_ffmpeg(
+    key: &TextRasterKey,
+    font_file: &Path,
+    text_file: &Path,
+) -> Result<TextBitmap, String> {
+    let args = drawtext_args(key, font_file, text_file);
     let output = Command::new("ffmpeg")
         .args(&args)
         .stdout(Stdio::piped())
@@ -920,7 +1060,7 @@ mod tests {
         let dangerous = "危险:文本'带引号,逗号[方括号];分号 100% %{n}";
         let mut k = key("", 20);
         k.text = dangerous.to_string();
-        let args = drawtext_args(&k, Path::new("C:/tmp/dhampir-text-1.txt"));
+        let args = drawtext_args(&k, &k.font_file, Path::new("C:/tmp/dhampir-text-1.txt"));
         let joined = args.join(" ");
         assert!(!joined.contains("危险"), "文本进了命令行：{joined}");
         assert!(!joined.contains("带引号"), "文本进了命令行：{joined}");
@@ -951,13 +1091,14 @@ mod tests {
 
     #[test]
     fn 描边开关决定有没有_borderw() {
-        let plain = drawtext_args(&key("字", 20), Path::new("t.txt")).join(" ");
+        let plain_key = key("字", 20);
+        let plain = drawtext_args(&plain_key, &plain_key.font_file, Path::new("t.txt")).join(" ");
         assert!(!plain.contains("borderw"));
 
         let mut outlined = key("字", 20);
         outlined.outline = true;
         outlined.font_px = 48;
-        let joined = drawtext_args(&outlined, Path::new("t.txt")).join(" ");
+        let joined = drawtext_args(&outlined, &outlined.font_file, Path::new("t.txt")).join(" ");
         assert!(
             joined.contains("borderw=3"),
             "字号 48 的描边是 3 像素：{joined}"
@@ -976,7 +1117,7 @@ mod tests {
         styled.outline = true;
         styled.stroke_px = 12;
         styled.stroke_color = [0x40, 0x3c, 0x3b, 255];
-        let joined = drawtext_args(&styled, Path::new("t.txt")).join(" ");
+        let joined = drawtext_args(&styled, &styled.font_file, Path::new("t.txt")).join(" ");
         assert!(joined.contains("borderw=12"), "宽度要用契约给的 12，实得：{joined}");
         assert!(
             joined.contains("bordercolor=0x403C3B"),
@@ -988,7 +1129,7 @@ mod tests {
         let mut legacy = key("字", 48);
         legacy.outline = true;
         legacy.font_px = 48;
-        let legacy_args = drawtext_args(&legacy, Path::new("t.txt")).join(" ");
+        let legacy_args = drawtext_args(&legacy, &legacy.font_file, Path::new("t.txt")).join(" ");
         assert!(legacy_args.contains("borderw=3"), "老行为：字号 48 -> 3 像素，实得：{legacy_args}");
         assert!(
             legacy_args.contains("bordercolor=black"),
@@ -1008,7 +1149,7 @@ mod tests {
         // 无描边（老工程的默认：`stroke_ratio` 默认 0 且 `outline` 默认 true 时走另一支，
         // 所以这里两种都验）。
         let plain = key("字", 20);
-        assert_eq!(drawtext_args(&plain, Path::new("C:/tmp/dhampir-text-1.txt")), frozen_argv(&plain));
+        assert_eq!(drawtext_args(&plain, &plain.font_file, Path::new("C:/tmp/dhampir-text-1.txt")), frozen_argv(&plain));
 
         // 有描边：老路径（宽度从字号推、颜色写死 black）。
         let mut outlined = key("字", 20);
@@ -1017,7 +1158,7 @@ mod tests {
         let at = expected.iter().position(|arg| arg.starts_with("drawtext=")).expect("有 -vf");
         expected[at] = format!("{}:borderw={}:bordercolor=black", expected[at], border_px(32));
         assert_eq!(
-            drawtext_args(&outlined, Path::new("C:/tmp/dhampir-text-1.txt")),
+            drawtext_args(&outlined, &outlined.font_file, Path::new("C:/tmp/dhampir-text-1.txt")),
             expected,
             "有描边的老路径也一个字符都不能变"
         );
@@ -1036,7 +1177,7 @@ mod tests {
     fn 画阴影时用白字加模糊而不是描边() {
         let text = key("字", 20);
         let shadow = shadow_key(&text, [0, 0, 0, 102], 4, 3, 2);
-        let args = drawtext_args(&shadow, Path::new("C:/tmp/dhampir-text-1.txt"));
+        let args = drawtext_args(&shadow, &shadow.font_file, Path::new("C:/tmp/dhampir-text-1.txt"));
         let joined = args.join(" ");
         assert!(joined.contains("gblur=sigma=2"), "σ 应当是 blur/2 = 2：{joined}");
         assert!(!joined.contains("borderw"), "阴影不许带描边：{joined}");
@@ -1062,7 +1203,7 @@ mod tests {
     #[test]
     fn 硬阴影不带_gblur() {
         let shadow = shadow_key(&key("字", 20), [0, 0, 0, 255], 0, 0, 4);
-        let joined = drawtext_args(&shadow, Path::new("t.txt")).join(" ");
+        let joined = drawtext_args(&shadow, &shadow.font_file, Path::new("t.txt")).join(" ");
         assert!(!joined.contains("gblur"), "硬阴影不该有模糊：{joined}");
         assert!(!joined.contains("borderw"), "阴影不许带描边：{joined}");
         assert_eq!(shadow_pad_px(0, 0, 4), 4, "偏移仍要余量");
@@ -1141,6 +1282,315 @@ mod tests {
         assert_eq!(filter_value("带 空格 的.ttf"), "'带 空格 的.ttf'");
         assert_eq!(filter_value("it's"), "'it'\\''s'");
         assert_eq!(filter_value("a\\b"), "'a\\\\b'");
+    }
+
+    // ---- 非 ASCII 字体路径（T1）----
+
+    /// 一个**能写**的草稿目录，给"要造一份源文件/看临时目录"的用例用。
+    ///
+    /// 正常情况下就是 `std::env::temp_dir()` 底下的一层。但**沙箱化的开发环境**
+    /// （例如 DSH 的文件沙箱）会让某个路径下的可执行文件**写不了 `%TEMP%`**
+    /// —— 那种环境下 `temp_dir()` 建目录就会以 `拒绝访问 (os error 5)` 失败。
+    /// 那不是产品缺陷，所以这里**返回 `None` 让用例自己如实跳过**，
+    /// 而不是让一条环境差异伪装成"实现坏了"。
+    ///
+    /// 判据是**真去试着建一次**，不是去嗅探环境变量：能建就返回，建不了就 None。
+    fn writable_scratch_dir() -> Option<PathBuf> {
+        let dir = std::env::temp_dir().join(format!("dhampir-t1-{}", std::process::id()));
+        match std::fs::create_dir_all(&dir) {
+            Ok(()) => Some(dir),
+            Err(error) => {
+                eprintln!(
+                    "跳过：这个环境写不了临时目录 {}（{error}）—— \
+                     环境限制，不是实现坏了",
+                    dir.display()
+                );
+                None
+            }
+        }
+    }
+
+    /// **判据（正向）**：路径里有非 ASCII 字节 → 搬到 ASCII 的临时路径，且那一份**真的存在**。
+    ///
+    /// 只说"给了 is_staged() == true"是不够的：命令里写着一个不存在的路径同样是"搬过了"，
+    /// 而 ffmpeg 对不存在的字体报的错与这一条要修的那个缺陷**不是一回事**。
+    /// 所以这里必须真去 `is_file()` —— 那是"搬"这个动作唯一算数的证据。
+    #[test]
+    fn 非_ascii_字体路径会被搬到临时_ascii_路径() {
+        let Some(scratch) = writable_scratch_dir() else {
+            return;
+        };
+        // 造一份**真的存在**的源文件：这条要证的是"搬"，不是"报错"。
+        // 名字里带全角括号与中文 —— 正是本机那份字体文件名的形态。
+        let source = scratch.join("乐米波波体（免费商用）.ttf");
+        // 内容不必是真字体：这条只看"搬"这个动作（内容比对是逐字节的）。
+        let bytes: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
+        std::fs::write(&source, &bytes).expect("造一份源文件");
+
+        let staged_font = ascii_font_path(&source).expect("读不到源文件");
+        assert!(
+            staged_font.is_staged(),
+            "非 ASCII 路径**必须**搬 —— 不搬的话 ffmpeg 退出码 0 却一个字节都不吐"
+        );
+        let staged = staged_font.path().to_path_buf();
+
+        assert!(staged.is_file(), "搬完之后那一份必须真的在：{}", staged.display());
+        assert!(
+            staged
+                .to_string_lossy()
+                .bytes()
+                .all(|byte| byte.is_ascii()),
+            "临时路径自己必须全是 ASCII，否则搬了等于没搬：{}",
+            staged.display()
+        );
+        assert!(staged.starts_with(std::env::temp_dir()), "临时文件要落在临时目录里");
+        assert!(
+            staged
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("dhampir-font-"),
+            "临时名要可识别（进程被杀时靠它认领残留）：{}",
+            staged.display()
+        );
+        // 内容必须与源**逐字节相同**：搬的是路径不是字体。
+        assert_eq!(
+            std::fs::read(&staged).unwrap(),
+            bytes,
+            "搬过去的那一份内容必须与源逐字节相同"
+        );
+        // 搬出来的那份由 Drop 清理。
+        let staged_copy = staged.clone();
+        drop(staged_font);
+        assert!(
+            !staged_copy.exists(),
+            "StagedFont 掉了之后临时字体还在：{}",
+            staged_copy.display()
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// **反向用例（内容这一半）**：换一份字体（内容变了）→ 临时名必须跟着变。
+    ///
+    /// 摘要不进名字的话，同一次出片里换一份字体（或上一次进程留下的残留）
+    /// 会让 ffmpeg 拿到**上一份字体** —— 画出来的字形是错的，而没有任何报错。
+    #[test]
+    fn 换成另一份字体时临时名会变() {
+        let Some(dir) = writable_scratch_dir() else {
+            return;
+        };
+        let first = dir.join("字体甲.ttf");
+        let second = dir.join("字体乙.ttf");
+        std::fs::write(&first, b"AAAA").unwrap();
+        std::fs::write(&second, b"BBBB").unwrap();
+
+        let a = ascii_font_path(&first).unwrap();
+        let b = ascii_font_path(&second).unwrap();
+        assert_ne!(
+            a.path(),
+            b.path(),
+            "内容不同的两份字体不许共用同一个临时名"
+        );
+        // 内容相同（路径不同）时**应当**共用：同一次出片里同一份字体只搬一次。
+        let twin = dir.join("字体丙.ttf");
+        std::fs::write(&twin, b"AAAA").unwrap();
+        let c = ascii_font_path(&twin).unwrap();
+        assert_eq!(
+            a.path(),
+            c.path(),
+            "内容相同的字体应当落到同一个临时名（一次出片里几百行共用一份）"
+        );
+
+        drop((a, b, c));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **判据（反向）**：路径全是 ASCII 时**不许**搬 —— 这是"老工程逐字节不变"的前提。
+    ///
+    /// 返回 `None` 在这里的含义是"参数串里用的就是你给我的那条路径"。
+    /// 若这条红成 `Some`，那 `drawtext_args` 里就会换成一条临时路径，
+    /// 而那条串决定画出来的像素 —— **所有老工程**的每一帧字幕都会变。
+    #[test]
+    fn ascii_字体路径不搬_这一条是默认路径字节冻结() {
+        let plain = PathBuf::from("C:/Windows/Fonts/msyh.ttc");
+        let staged = ascii_font_path(&plain).expect("ASCII 路径不该读盘");
+        assert!(
+            !staged.is_staged(),
+            "全 ASCII 的路径不许触发复制 —— 老工程的参数串会因此改变"
+        );
+        assert_eq!(
+            staged.path(),
+            plain.as_path(),
+            "不搬时必须**原样**给回调用方那条路径"
+        );
+        // 连反斜杠这种"看着像转义"的 ASCII 字符也不许触发。
+        assert!(!ascii_font_path(Path::new("C:\\Windows\\Fonts\\simhei.ttf"))
+            .unwrap()
+            .is_staged());
+    }
+
+    /// **反向用例（会红的那一半）**：源文件不在时，搬这一步必须**响亮报错**，
+    /// 而不是返回一个指向不存在文件的路径让 ffmpeg 去撞。
+    ///
+    /// 这条挡的是"写错分支"：把 `stage_font_file` 的错误吞掉（`.ok()`、`unwrap_or_default()`
+    /// 那一类），这条立刻红 —— 因为那样会返回 `Some` 或 panic，而不是 Err。
+    #[test]
+    fn 搬字体失败要响亮报错而不是递一个空路径() {
+        let missing = PathBuf::from("C:/tmp/不存在的中文字体（T1）.ttf");
+        let err = ascii_font_path(&missing).unwrap_err();
+        assert!(
+            err.contains("读不了字体文件"),
+            "读不到源文件要给一条人话：{err}"
+        );
+        assert!(
+            err.contains("不存在的中文字体"),
+            "错误里要点出是哪份文件：{err}"
+        );
+    }
+
+    /// 搬到 ASCII 路径之后，**画出来的那一串里用的必须是临时路径**，而不是键上那条。
+    ///
+    /// 这条是"搬了却没换上"的守卫：`ascii_font_path` 算得很对、`drawtext_args` 里
+    /// 却仍旧读 `key.font_file` —— 那是最自然的一处写错，而它**静默**：
+    /// 编译过、测试过、`Some` 也拿到了，只有真出片时字又是空的。
+    #[test]
+    fn 参数串里用的是搬过去的路径而不是键上那条() {
+        let mut k = key("字", 20);
+        k.font_file = PathBuf::from("C:/tmp/乐米.ttf");
+        let staged = PathBuf::from("C:/tmp/dhampir-font-1-abc.ttf");
+        let joined = drawtext_args(&k, &staged, Path::new("t.txt")).join(" ");
+        assert!(
+            joined.contains("dhampir-font-1-abc.ttf"),
+            "参数串里没有搬过去的那条路径：{joined}"
+        );
+        assert!(
+            !joined.contains("乐米"),
+            "参数串里还留着非 ASCII 的那条路径 —— 搬了却没换上：{joined}"
+        );
+    }
+
+    /// **判据（反向用例的关键一半）**：路径是纯 ASCII 时，搬到不搬**参数串一模一样**。
+    ///
+    /// 这一条与上面那条合起来才是完整的：上面证明"搬了就换"，这条证明"不搬就不换"。
+    /// 两条都在，`ascii_font_path` 的返回分支才没有第三种走法。
+    ///
+    /// 用的字体是 [`test_font_ascii`]（**保证全 ASCII 路径**）而不是 [`test_font`]：
+    /// 这条要盯的正是"路径里有没有非 ASCII 字节"这一个判断，字体随机换会把这半条证稀释掉。
+    #[test]
+    #[ignore = "读一个真字体文件的字节：本机要有候选字体"]
+    fn 真起_ffmpeg_ascii_字体路径不搬_参数串逐字符不变() {
+        let font = test_font_ascii();
+        assert!(
+            font.to_string_lossy().bytes().all(|byte| byte.is_ascii()),
+            "这一条的前提是 ASCII 路径，拿到的是：{}",
+            font.display()
+        );
+        let mut k = key("字", 20);
+        k.font_file = font.clone();
+
+        // 搬这一步必须说"不用搬"，并且给回的就是原来那条路径。
+        let staged = ascii_font_path(&font).expect("ASCII 路径连读都不该读");
+        assert!(
+            !staged.is_staged(),
+            "全 ASCII 的路径不许触发复制 —— 老工程的参数串会因此改变"
+        );
+        assert_eq!(staged.path(), font.as_path(), "不搬时路径必须原样返回");
+        // 于是参数串里就是**键上那一条路径**，与不搬时逐字符相同。
+        let joined = drawtext_args(&k, &k.font_file, Path::new("t.txt")).join(" ");
+        assert!(
+            joined.contains(&font_file_value(&font)),
+            "参数串里该是键上那条路径：{joined}"
+        );
+        assert!(
+            !joined.contains("dhampir-font-"),
+            "ASCII 路径不许被换成临时路径：{joined}"
+        );
+    }
+
+    /// 参数串里那条 `fontfile='…'` 的**转义形态** —— 拿它去 `contains` 才算真比对过。
+    fn font_file_value(font: &Path) -> String {
+        filter_value(&font.to_string_lossy())
+    }
+
+    /// **反向用例（真起 ffmpeg）**：非 ASCII 字体路径现在能画出非空位图了。
+    ///
+    /// 修之前这条会**红得很难看**：`rasterize_line` 会以「ffmpeg 本该吐 N 字节，实际 0」
+    /// 失败 —— 也就是说"安静地画不出来"这件事被**字节数**那条检查抓住了。
+    /// 修之后必须绿，而且墨迹数是可复算的（见断言里的下限）。
+    #[test]
+    #[ignore = "真起 ffmpeg：需要一个非 ASCII 文件名的中文字体"]
+    fn 真起_ffmpeg_非_ascii_字体路径也画得出字() {
+        let font = test_font();
+        if font.to_string_lossy().bytes().all(|byte| byte.is_ascii()) {
+            // 本机没有非 ASCII 名的字体：这条**跳过**而不是假装通过 ——
+            // 拿一个 ASCII 路径跑出来的绿，证明不了这一条要证的事。
+            eprintln!("本机 test_font() 是 ASCII 路径（{}），这条测试跳过", font.display());
+            return;
+        }
+        let font_px = 40u32;
+        let (width, height) = bitmap_size(640, font_px as f32 * 1.2, font_px);
+        let mut k = key("笑靥如花", 20);
+        k.text = "笑靥如花".to_string();
+        k.font_px = font_px;
+        k.font_file = font.clone();
+        k.width = width;
+        k.height = height;
+
+        let bitmap = rasterize_line(&k).expect("非 ASCII 字体路径必须画得出来（T1）");
+        let inked = ink_count(&bitmap);
+        assert!(
+            inked > 0,
+            "非 ASCII 字体路径画出来是空的 —— 这正是 T1 要修的那个静默失败"
+        );
+        // 四个字、字号 40：墨迹至少上千像素。给一个宽松但能证伪的下限。
+        assert!(inked > 1000, "墨迹只有 {inked} 像素，像是没画全");
+        assert!(!bitmap.ink_touches_edge(), "字被切了");
+    }
+
+    /// 搬字体的临时文件用完必须删掉（成功那条路）。
+    ///
+    /// 清理写在 `rasterize_line` 里，所以这里只能真跑一次再看临时目录 ——
+    /// **不跑就都是在猜**：一次出片几百行，留一地几 MB 的字体副本是实打实的浪费。
+    #[test]
+    #[ignore = "真起 ffmpeg：需要一个非 ASCII 文件名的中文字体"]
+    fn 真起_ffmpeg_搬完的字体临时文件会被清掉() {
+        let font = test_font();
+        if font.to_string_lossy().bytes().all(|byte| byte.is_ascii()) {
+            eprintln!("本机 test_font() 是 ASCII 路径，这条测试跳过");
+            return;
+        }
+        let staged_name_after = || -> usize {
+            std::fs::read_dir(std::env::temp_dir())
+                .map(|entries| {
+                    entries
+                        .filter_map(|entry| entry.ok())
+                        .filter(|entry| {
+                            entry
+                                .file_name()
+                                .to_string_lossy()
+                                .starts_with("dhampir-font-")
+                        })
+                        .count()
+                })
+                .unwrap_or(0)
+        };
+        let before = staged_name_after();
+
+        let font_px = 40u32;
+        let (width, height) = bitmap_size(640, font_px as f32 * 1.2, font_px);
+        let mut k = key("清理", 20);
+        k.text = "清理".to_string();
+        k.font_px = font_px;
+        k.font_file = font;
+        k.width = width;
+        k.height = height;
+        rasterize_line(&k).expect("这一行应当画得出来");
+
+        assert_eq!(
+            staged_name_after(),
+            before,
+            "搬过去的字体副本没被删掉 —— 临时目录里每画一行就多留几 MB"
+        );
     }
 
     /// **反向用例**：尺寸不进缓存键的话，这条会拿到高度 20 的那张位图。
@@ -1415,7 +1865,36 @@ mod tests {
 
     /// 测试用的字体：挑本机常见的那些。**这不是产品默认值** ——
     /// 产品路径上字体由 `--font-file` 给，本仓不猜系统字体。
+    ///
+    /// **非 ASCII 名的那一份排在前面**：本机（Windows）用户字体目录里就有一份，
+    /// 而「非 ASCII 路径」正是 T1 要盯的那条路 —— 让既有的真机测试就踩到它，
+    /// 比专门写一条"只在有人记得时才跑"的路结实。找不到就退回下面那张常青候选表。
     fn test_font() -> PathBuf {
+        let user_fonts = PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default())
+            .join("Microsoft")
+            .join("Windows")
+            .join("Fonts");
+        if let Ok(entries) = std::fs::read_dir(&user_fonts) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                let lower = name.to_ascii_lowercase();
+                let is_font = [".ttf", ".ttc", ".otf"]
+                    .iter()
+                    .any(|extension| lower.ends_with(extension));
+                if is_font && !name.bytes().all(|byte| byte.is_ascii()) {
+                    return entry.path();
+                }
+            }
+        }
+        test_font_ascii()
+    }
+
+    /// 一份**保证全 ASCII 路径**的字体。
+    ///
+    /// T1 的反向用例（"ASCII 路径不许触发复制"）拿它当对照 —— 用 [`test_font`] 的话
+    /// 那一条会随机器变，反向那一半就证不实了。
+    fn test_font_ascii() -> PathBuf {
         const CANDIDATES: &[&str] = &[
             "C:/Windows/Fonts/msyh.ttc",
             "C:/Windows/Fonts/simhei.ttf",
