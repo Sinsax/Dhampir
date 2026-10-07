@@ -154,6 +154,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let single_layer = Composite {
         frame: 0,
         layers: vec![Layer {
+            backdrop_effects: Vec::new(),
             clip_id: "decoded".to_string(),
             source: "decoded".to_string(),
             source_frame: 0,
@@ -164,6 +165,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             effects: Vec::new(),
             frozen_for_transition: false,
             blend: dhampir_core::timeline::layer::BlendMode::Normal,
+            corner_radius: 0.0,
+            clip: None,
+            mask: None,
+            shadow: None,
             is_adjustment: false,
         }],
     };

@@ -425,12 +425,17 @@ mod tests {
     /// 与音频无关的字段 —— 一次，而不是每个用例各写一遍。
     fn clip_layer(id: &str, start: Frame, end: Frame, asset_id: &str, source_in: Frame) -> Layer {
         Layer {
+            backdrop_effects: Vec::new(),
             id: id.to_string(),
             start,
             end,
             transform: Default::default(),
             opacity: 1.0,
             blend: Default::default(),
+            corner_radius: 0.0,
+            clip: None,
+            mask: None,
+            shadow: None,
             enabled: true,
             recorded: Default::default(),
             gain: 1.0,

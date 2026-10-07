@@ -5,6 +5,8 @@
 
 export type BlendMode = "normal" | "add" | "multiply" | "screen" | "darken" | "lighten" | "overlay" | "soft_light" | "difference";
 
+export type ClipShape = Record<string, unknown>;
+
 export interface DanmakuSpec {
   /** 指向弹幕素材（AssetKind::Subtitle，内容是 ASS）。 */
   asset_id: string;
@@ -40,8 +42,6 @@ export interface DanmakuSpec {
   stroke_ratio?: number;
 }
 
-export type Easing = "linear" | "ease_in" | "ease_out" | "ease_in_out" | "back_out";
-
 export interface Effect {
   /** 类型串，对应 core 的特效注册表。 */
   kind: string;
@@ -53,15 +53,27 @@ export interface Effect {
   window?: Window;
 }
 
+export interface GradientStop {
+  at: number;
+  coverage: number;
+}
+
 export interface Keyframe {
-  easing?: Easing;
+  /** **CSS 缓动语法的字符串**（口径见 plan/web-animation-criteria.md 的 D2）。 */
+  easing?: "linear" | "ease_in" | "ease_out" | "ease_in_out" | "back_out" | (string & {});
   frame: number;
   target?: string;
   value: number;
 }
 
 export interface Layer {
+  /** **背景滤镜**（`backdrop-filter`）：对**这一层下面已经画好的内容**跑这些特效， */
+  backdrop_effects?: Effect[];
   blend?: BlendMode;
+  /** **裁剪形状**（`None` = 不裁 = 老行为，缺省不写进文件）。 */
+  clip?: ClipShape | null;
+  /** **圆角半径**（文档像素）。0 = 无圆角 = 老行为（缺省不写进文件）。 */
+  corner_radius?: number;
   effects?: Effect[];
   enabled?: boolean;
   end: number;
@@ -73,8 +85,12 @@ export interface Layer {
   /** **素材放完了要不要从头再来。** */
   loop_source?: boolean;
   markers?: Marker[];
+  /** **掩码**（`None` = 不掩 = 老行为，缺省不写进文件）。 */
+  mask?: MaskSpec | null;
   note?: string;
   opacity?: number;
+  /** **投影**（`None` = 不投 = 老行为，缺省不写进文件）。设计见 criteria 的 D13。 */
+  shadow?: ShadowSpec | null;
   /** 没有它就不是实拍片段 —— 这正是调整图层能存在的原因。 */
   source?: SourceRef | null;
   /** 帧区间**左闭右开**：`[start, end)`。 */
@@ -85,12 +101,39 @@ export interface Layer {
   transition_in?: TransitionSpec | null;
 }
 
+export interface LinearGradient {
+  angle_deg: number;
+  /** 断点，至少两个；位置非递减。 */
+  stops: GradientStop[];
+}
+
 export interface Marker {
   color?: string | null;
   /** **相对该元素 start 的偏移**。用绝对帧号的话，元素一挪标记就错位了。 */
   frame: number;
   id: string;
   name?: string;
+}
+
+export type MaskChannel = "alpha" | "luminance";
+
+export interface MaskSpec {
+  /** 指向 `assets` 里的一条。**与 `gradient` 二选一**（缺省空串）。 */
+  asset_id?: string;
+  /** 通道，缺省 `alpha`（缺省不写进文件）。 */
+  channel?: MaskChannel;
+  /** 程序化渐变（第 46 轮）：不挂素材，直接按角度与断点生成遮罩。 */
+  gradient?: LinearGradient | null;
+  /** 是否反相，缺省 false（缺省不写进文件）。 */
+  invert?: boolean;
+}
+
+export interface ShadowSpec {
+  /** CSS `drop-shadow()` 的模糊半径（σ，文档像素）。 */
+  blur_sigma?: number;
+  offset_x?: number;
+  offset_y?: number;
+  opacity?: number;
 }
 
 export interface SourceRef {

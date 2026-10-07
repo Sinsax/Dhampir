@@ -32,6 +32,10 @@ mod scene;
 /// 代码——以及"画完之后写成什么表"——在两端各写一遍，那个证明就退化成
 /// "两份驱动大致相当"。
 pub mod corpus;
+pub mod blend_fn;
+pub mod gradient;
+pub mod path;
+pub mod polygon;
 
 /// corpus 场景的**纯数值模型**：一堆 `f64` 算术，不碰 GPU、不碰 `wgpu`。
 ///
@@ -57,7 +61,11 @@ pub use color_mask::{
     COLOR_MASK_WGSL, ColorMaskParams, ColorMaskRenderer, OverlayShape,
 };
 pub use warp::{WARP_WGSL, WarpParams, WarpRenderer};
-pub use compose::{COMPOSE_WGSL, Compositor, LayerDraw, RenderSpace, inverse_affine};
+pub use compose::{COMPOSE_WGSL, Compositor, LayerDraw, MaskInput, RenderSpace, inverse_affine};
+pub use blend_fn::BlendFnRenderer;
+pub use gradient::rasterize_linear_gradient;
+pub use path::flatten_path;
+pub use polygon::{coverage_texture, rasterize_polygon_coverage};
 pub use overlay::{
     InkBounds, InkReport, OverlayItem, OverlayReport, compose_overlay, ink_report,
     placement_transform,

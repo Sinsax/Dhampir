@@ -30,6 +30,13 @@ const WEIGHT_VECS: usize = TAPS.div_ceil(4);
 ///
 /// **长度恒为 TAPS**：超出 radius 的位置是 0。着色器是定长展开的，不能有可变长度。
 /// sigma 取 radius / 2 —— 也就是核覆盖 ±2σ，是常见取法；radius 为 0 时退化成恒等核。
+///
+/// # 与 CSS 的 `blur()` 的关系（**换算按这条，写反了就是差一档糊**）
+///
+/// CSS 的 `blur(R)` 是 **σ = R** 的高斯（Filter Effects 规范：那个参数就是标准差）。
+/// 这里 σ = radius/2 ⇒ **本仓的 radius = 2 × CSS 的 R**。
+/// 有测试钉着这条（`css_的_blur_是本仓半径的两倍`）。
+/// 另注意上界：radius ≤ `MAX_RADIUS`(16) ⇒ CSS σ 上界 8（1:1 时；更大要加抽头）。
 pub fn gaussian_weights_1d(radius: u32) -> [f32; TAPS] {
     let mut out = [0.0_f32; TAPS];
     let center = MAX_RADIUS as usize;
@@ -267,6 +274,25 @@ mod tests {
         for radius in [0, 1, 2, 5, 16] {
             let weights = gaussian_weights_1d(radius);
             assert!((sum(&weights) - 1.0).abs() < 1e-5, "radius {radius} 的权重和是 {}", sum(&weights));
+        }
+    }
+
+    /// 权重之比把 σ 暴露出来：`w[1]/w[0] = exp(-1/(2σ²))`。
+    /// 所以这条测试**直接钉住 σ**，也就钉住了与 CSS 的换算关系。
+    #[test]
+    fn css_的_blur_是本仓半径的两倍() {
+        // CSS 的 blur(R) 是 σ = R 的高斯；本仓 σ = radius/2 ⇒ radius = 2R。
+        // 也就是：对每一个 CSS σ，取 radius = 2σ 时算出来的核，必须真的以 σ 为高斯。
+        for css_sigma in [1.0_f32, 2.0, 4.0, 8.0] {
+            let radius = (css_sigma * 2.0) as u32;
+            let weights = gaussian_weights_1d(radius);
+            let center = MAX_RADIUS as usize;
+            let ratio = weights[center + 1] / weights[center];
+            let expected = (-1.0 / (2.0 * css_sigma * css_sigma)).exp();
+            assert!(
+                (ratio - expected).abs() < 1e-5,
+                "CSS σ={css_sigma} 对应 radius={radius}，但权重之比 {ratio} 不等于 exp(-1/(2σ²))={expected}"
+            );
         }
     }
 

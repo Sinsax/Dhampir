@@ -319,6 +319,12 @@ pub fn asset_reference_counts(doc: &ProjectDoc) -> BTreeMap<String, usize> {
             if let Some(source) = &layer.source {
                 *counts.entry(source.asset_id.clone()).or_insert(0) += 1;
             }
+            // 掩码也是**一次使用**：不算进来，一张只被掩码引用的素材会被报成 unused_asset。
+            if let Some(mask) = &layer.mask {
+                if !mask.asset_id.is_empty() {
+                    *counts.entry(mask.asset_id.clone()).or_insert(0) += 1;
+                }
+            }
         }
         // 弹幕轨的素材是在**轨道级**引用的。不算进来，一份正在用的弹幕素材
         // 会被报成 unused_asset —— 而那种误报会让人去删掉它。
@@ -492,8 +498,120 @@ pub fn validate_project_doc(doc: &ProjectDoc, effects: &[EffectSpec]) -> DocIssu
     let counts = asset_reference_counts(doc);
     for (track_index, track) in doc.timeline.tracks.iter().enumerate() {
         for (layer_index, layer) in track.layers.iter().enumerate() {
-            let Some(source) = &layer.source else { continue };
             let base = format!("timeline.tracks[{track_index}].layers[{layer_index}]");
+            // 掩码引用素材：同样要查"登记表里有没有"。
+            // **先于 source 那条**：没有 source 的层（占位层）也可以有掩码。
+            if let Some(mask) = &layer.mask {
+                // **二选一**：素材 或 程序化渐变。两个都给 / 都不给，都是错的。
+                // （合同上写清楚，比让渲染端"猜哪个优先"好 —— 猜错了画面不对还不报错。）
+                let has_asset = !mask.asset_id.is_empty();
+                let has_gradient = mask.gradient.is_some();
+                match (has_asset, has_gradient) {
+                    (true, true) => errors.push(Issue::new(
+                        "mask_source_ambiguous",
+                        &format!("{base}.mask"),
+                        "掩码只能二选一：要么给 `asset_id`、要么给 `gradient`，不能两个都给".to_string(),
+                    )),
+                    (false, false) => errors.push(Issue::new(
+                        "mask_source_missing",
+                        &format!("{base}.mask"),
+                        "掩码既没有 `asset_id` 也没有 `gradient` —— 那样它什么也遮不住".to_string(),
+                    )),
+                    _ => {}
+                }
+                if let Some(gradient) = &mask.gradient {
+                    if gradient.stops.len() < 2 {
+                        errors.push(Issue::new(
+                            "gradient_stops_too_few",
+                            &format!("{base}.mask.gradient.stops"),
+                            format!("渐变至少要有两个断点，得到 {}", gradient.stops.len()),
+                        ));
+                    }
+                    if !gradient.angle_deg.is_finite() {
+                        errors.push(Issue::new(
+                            "gradient_angle_not_finite",
+                            &format!("{base}.mask.gradient.angle_deg"),
+                            "渐变角度必须是有限数".to_string(),
+                        ));
+                    }
+                    let mut previous = f32::NEG_INFINITY;
+                    for (stop_index, stop) in gradient.stops.iter().enumerate() {
+                        let at = format!("{base}.mask.gradient.stops[{stop_index}]");
+                        for (name, value) in [("at", stop.at), ("coverage", stop.coverage)] {
+                            if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                                errors.push(Issue::new(
+                                    "gradient_stop_out_of_range",
+                                    &format!("{at}.{name}"),
+                                    format!("渐变的 {name} 必须在 0..=1，得到 {value}"),
+                                ));
+                            }
+                        }
+                        if stop.at < previous {
+                            errors.push(Issue::new(
+                                "gradient_stops_not_sorted",
+                                &at,
+                                format!("渐变断点的位置必须非递减，得到 {} 在 {} 之后", stop.at, previous),
+                            ));
+                        }
+                        previous = stop.at;
+                    }
+                }
+                if has_asset && index_of.get(mask.asset_id.as_str()).is_none() {
+                    errors.push(Issue::new(
+                        "unknown_asset",
+                        &format!("{base}.mask.asset_id"),
+                        format!("掩码引用了登记表里没有的资产：{}", mask.asset_id),
+                    ));
+                }
+            }
+            // 「靠遮罩通路画的形状」：多边形与路径。两条口径对它们都成立。
+            let masked_shape = match &layer.clip {
+                Some(crate::layer::ClipShape::Polygon { points }) => {
+                    if points.len() < 3 {
+                        errors.push(Issue::new(
+                            "clip_polygon_too_few_points",
+                            &format!("{base}.clip.points"),
+                            format!(
+                                "多边形至少要 3 个顶点，得到 {} 个 —— 少了它这一层会被**整个裁掉**，那不像是作者想要的",
+                                points.len()
+                            ),
+                        ));
+                    }
+                    true
+                }
+                Some(crate::layer::ClipShape::Path { data }) => {
+                    match crate::path::flatten_path(data) {
+                        Err(reason) => errors.push(Issue::new(
+                            "clip_path_unparsable",
+                            &format!("{base}.clip.data"),
+                            format!("路径读不出来：{reason}"),
+                        )),
+                        Ok(flat) => {
+                            if flat.len() < 3 {
+                                errors.push(Issue::new(
+                                    "clip_path_too_few_points",
+                                    &format!("{base}.clip.data"),
+                                    format!(
+                                        "路径细分之后只有 {} 个顶点 —— 少了它这一层会被**整个裁掉**",
+                                        flat.len()
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                    true
+                }
+                _ => false,
+            };
+            if masked_shape && layer.mask.is_some() {
+                errors.push(Issue::new(
+                    "clip_shape_with_mask",
+                    &format!("{base}.clip"),
+                    "同一层既有靠遮罩通路画的形状（多边形 / 路径）又有掩码：两者都要占那条通路 —— **明说不支持**，不替作者挑一个用"
+                        .to_string(),
+                ));
+            }
+            let Some(source) = &layer.source else { continue };
             match index_of.get(source.asset_id.as_str()) {
                 None => errors.push(Issue::new(
                     "unknown_asset",
@@ -537,6 +655,37 @@ pub fn validate_project_doc(doc: &ProjectDoc, effects: &[EffectSpec]) -> DocIssu
                             ));
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // ---- 投影：契约接受，但**本实现还画不出来** —— 警告，不阻断 ----
+    //
+    // 为什么不报错：字段先立是刻意的（作者要能表达意图）。但也不能沉默：
+    // 渲染路径遇到它会**拒绝整帧**。设计见 criteria 的 D13。
+    for (track_index, track) in doc.timeline.tracks.iter().enumerate() {
+        for (layer_index, layer) in track.layers.iter().enumerate() {
+            if let Some(shadow) = &layer.shadow {
+                let base = format!("timeline.tracks[{track_index}].layers[{layer_index}].shadow");
+                // 模糊上界按 D5 的口径：CSS 的 σ ≤ 8（本仓核半径 ≤ 16）。
+                // 不报的话，作者设 20 会得到一个"比想要的糊得少"的投影 —— 静默偏差。
+                if !(0.0..=8.0).contains(&shadow.blur_sigma) {
+                    errors.push(Issue::new(
+                        "shadow_blur_out_of_range",
+                        &format!("{base}.blur_sigma"),
+                        format!(
+                            "投影的模糊半径（σ）要在 0..=8 之间，得到 {}（上界来自 D5：本仓核半径 ≤ 16）",
+                            shadow.blur_sigma
+                        ),
+                    ));
+                }
+                if !(0.0..=1.0).contains(&shadow.opacity) {
+                    errors.push(Issue::new(
+                        "shadow_opacity_out_of_range",
+                        &format!("{base}.opacity"),
+                        format!("投影的浓淡要在 0..=1 之间，得到 {}", shadow.opacity),
+                    ));
                 }
             }
         }
@@ -676,6 +825,14 @@ pub fn validate_project_doc(doc: &ProjectDoc, effects: &[EffectSpec]) -> DocIssu
             let base = format!("timeline.tracks[{track_index}].layers[{layer_index}]");
             for (key_index, keyframe) in layer.keyframes.iter().enumerate() {
                 let at = format!("{base}.keyframes[{key_index}].target");
+                // 缓动：真值是**字符串**（D2），所以认不认识必须在这里判。
+                if let Err(bad) = keyframe.easing.form() {
+                    errors.push(Issue::new(
+                        bad.code(),
+                        &format!("{base}.keyframes[{key_index}].easing"),
+                        bad.message(),
+                    ));
+                }
                 let target = keyframe.target.as_str();
                 if TRANSFORM_TARGETS.contains(&target) {
                     continue;
@@ -738,12 +895,17 @@ mod tests {
 
     fn layer_with(id: &str, start: Frame, end: Frame, asset: Option<&str>, source_in: Frame) -> Layer {
         Layer {
+            backdrop_effects: Vec::new(),
             id: id.to_string(),
             start,
             end,
             transform: TransformV2::default(),
             opacity: 1.0,
             blend: BlendMode::Normal,
+            corner_radius: 0.0,
+            clip: None,
+            mask: None,
+            shadow: None,
             enabled: true,
             gain: 1.0,
             recorded: Recorded::default(),

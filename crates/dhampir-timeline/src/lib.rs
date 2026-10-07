@@ -27,6 +27,11 @@
 //! 时间码（只影响显示与解析，M4）、帧号解析（`FromStr`）。
 
 pub mod golden;
+// CSS 缓动（关键字 / `cubic-bezier()` / `steps()`）的**唯一解析与求值实现**。
+// 不依赖 serde：它是纯数学，两端（native / wasm）调同一份 —— 各写一遍迟早在某个
+// 控制点上差一个像素，而那种差异最难归因。口径见 plan/web-animation-criteria.md 的 D2。
+pub mod easing;
+pub mod path;
 // 元素模型 v2。与 v1（schema 模块）**并存**：v1 保持可用，切换是下一步。
 // 这样每个提交都是绿的，而不是把仓库停在「改了一半」的状态。
 // 同样建立在 serde 上，所以跟 schema 一起按 feature 门控。

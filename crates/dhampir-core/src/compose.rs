@@ -47,6 +47,20 @@ pub struct Layer {
     pub frozen_for_transition: bool,
     /// 混合模式。v1 只有 normal；v2 的元素自带它。
     pub blend: BlendMode,
+    /// 裁剪形状（`None` = 不裁）。与圆角**同时生效**：两个覆盖度相乘。
+    pub clip: Option<dhampir_timeline::layer::ClipShape>,
+    /// 掩码（`None` = 不掩）。**本实现还没画它** —— 渲染路径遇到它会拒绝整帧
+    /// （见 `render::timeline` 的整帧检查），而契约层已经接受它（设计见 D12）。
+    pub mask: Option<dhampir_timeline::layer::MaskSpec>,
+    /// 投影（`None` = 不投）。**本实现还没画它** —— 渲染前会拒绝整帧（设计见 D13）。
+    pub shadow: Option<dhampir_timeline::layer::ShadowSpec>,
+    /// 背景滤镜（空 = 不做）。`plan_steps` 靠它决定要不要插 `Step::Backdrop`。
+    pub backdrop_effects: Vec<dhampir_timeline::schema::Effect>,
+    /// 圆角半径（文档像素）。0 = 无圆角。
+    ///
+    /// **本实现还没画它**：渲染路径遇到 > 0 会拒绝整帧（见 render::compose 的整帧检查），
+    /// 而契约层已经接受它（作者要能表达意图，HTML 宿主也要能先看见）。口径见 D10。
+    pub corner_radius: f32,
     /// **这一层是不是调整图层**：没有素材、只有特效，要影响「已经画上去的全部内容」。
     ///
     /// 求值层**不做切段**（那是渲染器的事），但必须把位置信息给出去 ——
@@ -142,6 +156,7 @@ pub fn evaluate(project: &Project, frame: Frame) -> Composite {
             if let Some(previous) = previous_clip(track, clip) {
                 let last_local = previous.duration - 1;
                 layers.push(Layer {
+                    backdrop_effects: Vec::new(),
                     clip_id: previous.id.clone(),
                     source: previous.source.clone(),
                     source_frame: previous.source_in + last_local.max(0),
@@ -151,12 +166,17 @@ pub fn evaluate(project: &Project, frame: Frame) -> Composite {
                     frozen_for_transition: true,
                     // v1 的契约里没有这两个概念，所以是恒定的默认值。
                     blend: BlendMode::Normal,
+                    corner_radius: 0.0,
+                    clip: None,
+                    mask: None,
+                    shadow: None,
                     is_adjustment: false,
                 });
             }
         }
 
         layers.push(Layer {
+            backdrop_effects: Vec::new(),
             clip_id: clip.id.clone(),
             source: clip.source.clone(),
             source_frame: clip.source_in + local,
@@ -166,6 +186,10 @@ pub fn evaluate(project: &Project, frame: Frame) -> Composite {
             frozen_for_transition: false,
             // v1 的契约里没有这两个概念，所以是恒定的默认值。
             blend: BlendMode::Normal,
+            corner_radius: 0.0,
+            clip: None,
+            mask: None,
+            shadow: None,
             is_adjustment: false,
         });
     }
@@ -324,6 +348,11 @@ fn element_to_draw(
             rotation_deg: animated(element.transform.rotation, "rotation"),
         },
         effects: resolve_effects(element, local_frame, element.duration()),
+        corner_radius: element.corner_radius,
+        clip: element.clip.clone(),
+        mask: element.mask.clone(),
+        shadow: element.shadow.clone(),
+        backdrop_effects: element.backdrop_effects.clone(),
         frozen_for_transition: frozen,
         blend: element.blend,
         is_adjustment: element.is_adjustment(),
@@ -476,12 +505,17 @@ mod tests {
         source: Option<dhampir_timeline::layer::SourceRef>,
     ) -> dhampir_timeline::layer::Layer {
         dhampir_timeline::layer::Layer {
+            backdrop_effects: Vec::new(),
             id: id.to_string(),
             start,
             end,
             transform: Default::default(),
             opacity: 1.0,
             blend: BlendMode::Normal,
+            corner_radius: 0.0,
+            clip: None,
+            mask: None,
+            shadow: None,
             enabled: true,
             recorded: Default::default(),
             gain: 1.0,
@@ -905,12 +939,17 @@ mod tests {
     fn v2_关键帧能驱动_transform_的每个量() {
         use dhampir_timeline::layer::{Layer as LayerV2, Recorded, TransformV2};
         let layer = LayerV2 {
+            backdrop_effects: Vec::new(),
             id: "cam".to_string(),
             start: 0,
             end: 100,
             transform: TransformV2 { x: 0.0, y: 0.0, scale: 1.0, rotation: 0.0 },
             opacity: 1.0,
             blend: BlendMode::Normal,
+            corner_radius: 0.0,
+            clip: None,
+            mask: None,
+            shadow: None,
             enabled: true,
             recorded: Recorded::default(),
             gain: 1.0,
@@ -948,12 +987,17 @@ mod tests {
         // 这是"老工程"的形态：只有一个缺省 target 的键。
         // 它**不许**把 x/scale/rotation 拉走 —— 那是泛化最容易踩的错。
         let layer = LayerV2 {
+            backdrop_effects: Vec::new(),
             id: "old".to_string(),
             start: 0,
             end: 100,
             transform: TransformV2 { x: 42.0, y: 7.0, scale: 0.5, rotation: 30.0 },
             opacity: 0.8,
             blend: BlendMode::Normal,
+            corner_radius: 0.0,
+            clip: None,
+            mask: None,
+            shadow: None,
             enabled: true,
             recorded: Recorded::default(),
             gain: 1.0,
@@ -978,12 +1022,17 @@ mod tests {
         use dhampir_timeline::layer::{Layer as LayerV2, Recorded, SourceRef, TransformV2};
         // 「模糊从小涨到大」——**不需要**新的特效类型，只是参数被驱动。
         let layer = LayerV2 {
+            backdrop_effects: Vec::new(),
             id: "blur".to_string(),
             start: 0,
             end: 100,
             transform: TransformV2::default(),
             opacity: 1.0,
             blend: BlendMode::Normal,
+            corner_radius: 0.0,
+            clip: None,
+            mask: None,
+            shadow: None,
             enabled: true,
             recorded: Recorded::default(),
             gain: 1.0,
@@ -1016,12 +1065,17 @@ mod tests {
         use dhampir_timeline::layer::{Layer as LayerV2, LAYER_SCHEMA_VERSION, Recorded, TrackV2, TransformV2};
         use dhampir_timeline::schema::{Effect, TimebaseDto, TransitionSpec};
         let mut adjustment = LayerV2 {
+            backdrop_effects: Vec::new(),
             id: "adj".to_string(),
             start: 0,
             end: 5,
             transform: TransformV2::default(),
             opacity: 1.0,
             blend: BlendMode::Screen,
+            corner_radius: 0.0,
+            clip: None,
+            mask: None,
+            shadow: None,
             enabled: true,
             recorded: Recorded::default(),
             gain: 1.0,

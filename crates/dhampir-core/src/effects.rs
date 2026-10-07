@@ -8,6 +8,14 @@ use dhampir_timeline::schema::{EffectPipeline, EffectSpace, EffectSpec, WindowDe
 
 /// 高斯模糊。radius 是像素半径。
 ///
+/// # 与 CSS 的 `blur()` 的换算（**转译器按这条，写反了就是差一档糊**）
+///
+/// CSS 的 `blur(R)` 的参数**就是标准差 σ**（Filter Effects 规范）；
+/// 本仓的 `radius` 是**核半径**，且 σ = radius/2（见 `render::blur`）。
+/// 所以 **radius = 2 × CSS 的 R**（同一像素空间）。
+/// 这条由 `render::blur` 的测试 `css_的_blur_是本仓半径的两倍` 钉着 —— 改 σ 它就红。
+/// 上界也换算得出来：radius ≤ 16 ⇒ **CSS σ ≤ 8**（1:1 时；更大的模糊要加抽头）。
+///
 /// 上界**必须**等于着色器能展开的最大抽头数的一半（`render::BLUR_MAX_RADIUS`）。
 /// 写死一个更大的数会让「用户能拖到 64」而着色器只按 16 算——
 /// 那种不一致不报错，只是模糊得不够，正是这份登记表要防的事。
@@ -51,6 +59,20 @@ pub const BRIGHTNESS: EffectSpec = EffectSpec {
     pipeline: EffectPipeline::ColorAdjust,
     window_default: None,
 };
+/// 亮度（**乘性**）：CSS 的 `brightness()` 就是这一条。
+///
+/// 为什么不能改上面那条加性的：加性与乘性**不是同一函数**（`c+k` vs `c·k`）：
+/// 加法会把黑抬亮、亮部截断，乘法保黑。要一致就得新增一条 ——
+/// 改现有那条会**动老工程的出片**（本仓铁律：不改既有的画法）。
+pub const BRIGHTNESS_MULTIPLY: EffectSpec = EffectSpec {
+    kind: "brightness_multiply",
+    // CSS `brightness(k)` 的 k ≥ 0；上限取 8 是"足够大"的工程口径。
+    params: &[("factor", 0.0, 8.0)],
+    space: EffectSpace::Source,
+    pipeline: EffectPipeline::ColorAdjust,
+    window_default: None,
+};
+
 /// 对比度：绕 0.5 中灰缩放。1.0 = 不变。
 pub const CONTRAST: EffectSpec = EffectSpec {
     kind: "contrast",
@@ -79,6 +101,42 @@ pub const HUE: EffectSpec = EffectSpec {
     pipeline: EffectPipeline::ColorAdjust,
     window_default: None,
 };
+/// 色相旋转（**CSS / SVG 规范矩阵**）：CSS 的 `hue-rotate(θ)` 就是这一条。
+///
+/// 系数取自**规范自己的 MathML**（`fxtf-drafts/filter-effects/mathml/feColorMatrix03.mml`，
+/// 第 44 轮抓到的权威源）—— 不是凭记忆写的：矩阵 =
+/// ```text
+/// [0.213 0.715 0.072]        [0.787 -0.715 -0.072]        [-0.213 -0.715 0.928]
+/// [0.213 0.715 0.072] + cos·[-0.213 0.285 -0.072] + sin·[0.143 0.140 -0.283]
+/// [0.213 0.715 0.072]        [-0.213 -0.715 0.928]        [-0.787 0.715 0.072]
+/// ```
+///
+/// 与既有那条 YIQ / Rec.601（0.299/0.587/0.114）**不是同一套**：纯红转 90°，
+/// 这条给约 `(0, 91, 0)`，YIQ 那条给约 `(119, 234, 0)`。要一致就得新增一条；
+/// 改现有那条会**动老工程的出片**。
+pub const HUE_ROTATE_CSS: EffectSpec = EffectSpec {
+    kind: "hue_rotate_css",
+    params: &[("degrees", -360.0, 360.0)],
+    space: EffectSpace::Source,
+    pipeline: EffectPipeline::ColorAdjust,
+    window_default: None,
+};
+
+/// 饱和度（**CSS / SVG 规范权重**）：CSS 的 `saturate(k)` 就是这一条。
+///
+/// 与既有那条的差别只有一处：灰度权重用规范那组**取整值** 0.213/0.715/0.072，
+/// 既有那条用 Rec.709 的 0.2126/0.7152/0.0722。
+/// 这组差在 4e-4 量级 —— 换算到 8 位不到 0.1 档，肉眼与逐像素都分不出来，
+/// 但"分不出来"不等于"是同一个函数"：要跟浏览器**精确**一致，就得有它。
+/// 新增而不是改：改既有那条会**动老工程的出片**。
+pub const SATURATION_CSS: EffectSpec = EffectSpec {
+    kind: "saturation_css",
+    params: &[("amount", 0.0, 4.0)],
+    space: EffectSpace::Source,
+    pipeline: EffectPipeline::ColorAdjust,
+    window_default: None,
+};
+
 /// 全部已登记的特效。
 ///
 /// **顺序不重要**（查找是线性的），但分组成段便于读。
@@ -86,9 +144,12 @@ pub const REGISTRY: &[EffectSpec] = &[
     // ---- 已有 ----
     GAUSSIAN_BLUR,
     BRIGHTNESS,
+    BRIGHTNESS_MULTIPLY,
     CONTRAST,
     SATURATION,
     HUE,
+    HUE_ROTATE_CSS,
+    SATURATION_CSS,
     // ---- ColorMask（T10）----
     FLASH,
     VIGNETTE,
@@ -251,14 +312,17 @@ mod tests {
             kinds(),
             vec![
                 "brightness",
+                "brightness_multiply",
                 "contrast",
                 "flash",
                 "gaussian_blur",
                 "hue",
+                "hue_rotate_css",
                 "noise",
                 "overlay",
                 "pulse",
                 "saturation",
+                "saturation_css",
                 "shake",
                 "split",
                 "vignette",
@@ -328,13 +392,21 @@ mod tests {
                     );
                 }
                 EffectPipeline::ColorAdjust => {
-                    // 逐像素调整**必须**有 amount 类参数，否则这一趟什么都不改。
+                    // 逐像素调整**必须**有一个"强度类"参数，否则这一趟什么都不改。
                     // 有参数但不给范围也不行 —— 那样 UI 无从生成控件。
+                    //
+                    // 名字**不**限定成 `amount`：本条的意图是"有强度可调"，不是"必须叫 amount"。
+                    // 第 42 轮加了 `brightness_multiply{factor}`（乘性亮度）—— 它叫 `factor`
+                    // 是因为在语义上就是乘数；把它改名叫 `amount` 会让 `amount` 同时意味着加与乘。
                     let has_param = spec.params.iter().any(|(name, _, _)| {
-                        *name == "amount" || *name == "degrees"
+                        *name == "amount" || *name == "degrees" || *name == "factor"
                     });
                     assert!(!spec.params.is_empty(), "{} 走 ColorAdjust 却没有参数", spec.kind);
-                    assert!(has_param, "{} 的参数名既不是 amount 也不是 degrees", spec.kind);
+                    assert!(
+                        has_param,
+                        "{} 的参数名既不是 amount / degrees 也不是 factor",
+                        spec.kind
+                    );
                     // 逐像素算子与坐标系无关，声明 Document 会造成"多做一次换算"的误读。
                     assert!(
                         matches!(spec.space, EffectSpace::Source),

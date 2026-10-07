@@ -80,6 +80,7 @@ fn main() {
         let composite = Composite {
             frame: *source_frame,
             layers: vec![Layer {
+                backdrop_effects: Vec::new(),
                 clip_id: "sticker".to_string(),
                 source: name.clone(),
                 source_frame: *source_frame,
@@ -93,6 +94,10 @@ fn main() {
                 effects: Vec::new(),
                 frozen_for_transition: false,
                 blend: BlendMode::Normal,
+                corner_radius: 0.0,
+                clip: None,
+                mask: None,
+                shadow: None,
                 is_adjustment: false,
             }],
         };

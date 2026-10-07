@@ -142,6 +142,16 @@ thread_local! {
     /// 工程预览宿主。与 PROJECT 分开：工程可以在没有 canvas 时先载入并校验。
     static PROJECT_HOST: RefCell<Option<ProjectHost>> = const { RefCell::new(None) };
 }
+
+thread_local! {
+    /// 已注册的掩码 id 的**影子清单**。
+    ///
+    /// 为什么要影子：`draw_impl` 是在 `PROJECT_HOST` **已经被可变借用**的情况下跑的，
+    /// 里面再 `PROJECT_HOST.with(|h| h.borrow())` 就是**重入** ⇒ `RefCell already mutably
+    /// borrowed` ⇒ wasm 里变成 `unreachable`，页面上一帧都画不出来（第 80 轮实测）。
+    /// 所以这份清单在**设置掩码时**同步更新，绘制时只读它。
+    static MASK_IDS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
 thread_local! {
     /// **解码器读出来的动图延迟真值**：asset_id -> 逐帧延迟表。
     ///
@@ -628,6 +638,12 @@ pub struct ProjectHost {
     /// 页面上只剩「启动失败：unreachable executed」，看不出跟素材有关。
     /// ImageBitmap 在**每一个**实现的联合类型里都有，所以它是最稳的源。
     bitmaps: HashMap<String, web_sys::ImageBitmap>,
+    /// **掩码图**（asset id → 纹理）。浏览器那条腿的掩码通路：
+    ///
+    /// 预览宿主没有素材表，取不到掩码图。所以由 JS 侧 fetch + 解码后，
+    /// 通过 `dhampir_project_set_mask_image` 把像素交进来，这里存纹理。
+    /// 没注册的那些会让 `draw` **响亮报错**（而不是静默画一张没有掩码的图 ✗）。
+    masks: HashMap<String, (wgpu::Texture, wgpu::TextureView, (u32, u32))>,
     /// 强制走位图。JS 探测过之后告诉宿主；此时**不许退回 video**（退回去就是 trap）。
     require_bitmap: bool,
     /// 预览尺寸。**由 canvas 决定**，不由工程决定。
@@ -708,6 +724,8 @@ struct BoundVideos<'a> {
     queue: &'a wgpu::Queue,
     videos: &'a HashMap<String, HtmlVideoElement>,
     bitmaps: &'a HashMap<String, web_sys::ImageBitmap>,
+    /// 掩码图（宿主注册的）。没有这一项，掩码层的 `mask_texture_for` 只能返回 None。
+    masks: &'a HashMap<String, (wgpu::Texture, wgpu::TextureView, (u32, u32))>,
     require_bitmap: bool,
     format: wgpu::TextureFormat,
     /// 一份源纹理的缓存。缓存的是**纹理**不是像素：每次渲染仍重新拷一次。
@@ -766,6 +784,12 @@ impl BoundVideos<'_> {
 }
 
 impl SourceResolver for BoundVideos<'_> {
+    /// 掩码图：**注册过就给，没注册就 None**（调用方会转成"整帧拒绝"并报出来）。
+    /// 这一条是浏览器腿掩码通路的最后一环：JS 侧解码完调 set_mask_image，渲染这一趟就能取到。
+    fn mask_texture_for(&mut self, source: &str) -> Option<(wgpu::TextureView, (u32, u32))> {
+        self.masks.get(source).map(|(_, view, size)| (view.clone(), *size))
+    }
+
     fn texture_for(
         &mut self,
         source: &str,
@@ -1230,6 +1254,24 @@ impl ProjectHost {
     }
 
     fn draw_impl(&mut self, frame: i64, present: bool) -> Result<(), String> {
+        // **预览宿主没有素材表**：工程里用到掩码素材、而 JS 还没把图交进来时，渲染器解析不出来。
+        // 以前那是"只 debug_assert ⇒ 静默画一张**没有掩码**的图" ✗ —— 那种错没人看得出来。
+        // 所以这里**响亮地拒绝**（渐变遮罩不算：它是程序化生成的，不需要素材）。
+        // **不许在这里碰 `PROJECT_HOST`**：它此刻已被可变借用（重入 ⇒ RefCell panic）。
+        // 读影子清单即可 —— 它在 `set_mask_image` 里同步。
+        let registered_mask_ids: Vec<String> = MASK_IDS.with(|cell| cell.borrow().clone());
+        let needed = PROJECT.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .map(|doc| dhampir_core::timeline::layer::missing_mask_assets(&doc.timeline, &registered_mask_ids))
+                .unwrap_or_default()
+        });
+        if !needed.is_empty() {
+            return Err(format!(
+                "这份工程用了掩码素材（{}），而**预览宿主还没接到那张图** —— 预览这里刻意报错，而不是画一张没有掩码的图（出片端照常画）。在 JS 侧 await engine.uploadMasks() 把图交进来即可",
+                needed.join("、")
+            ));
+        }
         // **顺带把文档坐标系取出来。** 预览的渲染目标是画布，而契约里的像素量
         // （transform.x/y、调整图层的模糊半径）以 render_hints 度量 —— 两者不等时
         // 由 RenderSpace 按比例换算。少了这一步，同一个工程在不同画布尺寸下
@@ -1279,6 +1321,7 @@ impl ProjectHost {
             renderer,
             videos,
             bitmaps,
+            masks,
             require_bitmap,
             size,
             text_lines,
@@ -1439,6 +1482,7 @@ impl ProjectHost {
             queue: &ctx.queue,
             videos,
             bitmaps,
+            masks,
             require_bitmap: *require_bitmap,
             format: sink_format,
             textures: HashMap::new(),
@@ -2330,6 +2374,7 @@ pub async fn dhampir_project_attach(canvas_id: String) -> Result<String, JsValue
             renderer,
             videos: HashMap::new(),
             bitmaps: HashMap::new(),
+            masks: HashMap::new(),
             require_bitmap: false,
             size,
             text_lines: Vec::new(),
@@ -2704,6 +2749,79 @@ pub fn dhampir_project_set_bitmap(source: String, bitmap: web_sys::ImageBitmap) 
             host.bitmap_ids.remove(&source);
         }
     });
+}
+
+/// **把一张掩码图交给预览宿主**（asset id + 尺寸 + RGBA 像素）。
+///
+/// **把一张掩码图交给预览宿主**（浏览器那条腿）。
+///
+/// 预览宿主没有素材表、取不到掩码图，所以由 JS 侧负责"取 + 解码"
+/// （`fetch` → `createImageBitmap`），再把位图对象交进来 ——
+/// **与源位图那条路同一个形状**（`dhampir_project_set_bitmap`）。
+///
+/// 用 `copy_external_image_to_texture` 而不是自建 GPU 缓冲：那是这个仓库里
+/// 位图进纹理的**唯一**一条路（见 `BoundVideos` 的上传），掩码没有理由另走一条。
+///
+/// **没交进来的掩码会让 `draw` 报错**（不是静默画一张没有掩码的图）。
+#[wasm_bindgen]
+pub fn dhampir_project_set_mask_image(
+    asset_id: String,
+    bitmap: web_sys::ImageBitmap,
+) -> Result<(), JsValue> {
+    let width = bitmap.width();
+    let height = bitmap.height();
+    if width == 0 || height == 0 {
+        return Err(js_err("掩码位图的尺寸是 0 —— 多半是解码失败"));
+    }
+    PROJECT_HOST.with(|h| {
+        let mut borrowed = h.borrow_mut();
+        let host = borrowed
+            .as_mut()
+            .ok_or_else(|| js_err("工程预览宿主尚未初始化，先调 dhampir_project_attach"))?;
+        let texture = host.ctx.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("dhampir preview mask"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: PREVIEW_FORMAT,
+            // RENDER_ATTACHMENT 不是可选的：Dawn 要求 copy_external_image_to_texture 的目标带它。
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        host.ctx.queue.copy_external_image_to_texture(
+            &wgpu::wgt::CopyExternalImageSourceInfo {
+                source: wgpu::wgt::ExternalImageSource::ImageBitmap(bitmap.clone()),
+                origin: wgpu::wgt::Origin2d::ZERO,
+                flip_y: false,
+            },
+            wgpu::wgt::CopyExternalImageDestInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+                color_space: wgpu::wgt::PredefinedColorSpace::Srgb,
+                premultiplied_alpha: false,
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        host.masks.insert(asset_id, (texture, view, (width, height)));
+        // 影子清单跟着宿主那份走（重建成一份，避免两份漂开）。
+        let ids: Vec<String> = host.masks.keys().cloned().collect();
+        MASK_IDS.with(|cell| *cell.borrow_mut() = ids);
+        Ok(())
+    })
 }
 
 /// 这一帧需要哪些源、各自停在**第几秒**。
@@ -3355,6 +3473,7 @@ pub async fn dhampir_project_text_probe(frame: i32) -> Result<String, JsValue> {
             queue: &host.ctx.queue,
             videos: &host.videos,
             bitmaps: &host.bitmaps,
+            masks: &host.masks,
             require_bitmap: host.require_bitmap,
             format,
             textures: HashMap::new(),

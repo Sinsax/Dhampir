@@ -533,12 +533,17 @@ fn sfx_doc() -> ProjectDoc {
     use dhampir_core::timeline::schema::{TimebaseDto, TrackKind};
 
     let audio_layer = |id: &str, start, end| Layer {
+        backdrop_effects: Vec::new(),
         id: id.to_string(),
         start,
         end,
         transform: Default::default(),
         opacity: 1.0,
         blend: Default::default(),
+        corner_radius: 0.0,
+        clip: None,
+        mask: None,
+        shadow: None,
         enabled: true,
         recorded: Default::default(),
         gain: 1.0,

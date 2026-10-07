@@ -224,6 +224,8 @@ Version: 6
 - `dhampir_project_render_probe`
 - `dhampir_project_resize`
 - `dhampir_project_set_bitmap`
+- `dhampir_project_set_mask_image`
+
 - `dhampir_project_set_bitmap_mode`
 - `dhampir_project_set_danmaku_bitmap`
 - `dhampir_project_set_subtitles`
@@ -233,3 +235,14 @@ Version: 6
 - `dhampir_project_text_probe`
 - `dhampir_project_undo`
 - `dhampir_sample_project_render_png`
+
+
+### `dhampir_project_set_mask_image(asset_id, bitmap)`
+
+**把一张掩码图交给预览宿主**（浏览器那条腿）。预览宿主没有素材表、取不到掩码图，
+所以由 JS 侧负责"取 + 解码"（`fetch` → `createImageBitmap`），再把**位图对象**交进来 ——
+**与源位图那条路同一个形状**（`dhampir_project_set_bitmap`），一个 `copy_external_image_to_texture` 就上了 GPU。
+
+尺寸为 0（多半是解码失败）直接报错。**没有交进来的掩码会让 `draw` 报错** ——
+而不是静默画一张没有掩码的图（这正是这条通路存在的理由）。
+`web/engine.js` 的 `async uploadMasks()` 就是调用方：在 `open()` 之后 await 一次。

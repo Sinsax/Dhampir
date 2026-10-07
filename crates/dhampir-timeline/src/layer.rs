@@ -72,7 +72,7 @@ impl BlendMode {
         BlendMode::Add,
         BlendMode::Multiply,
         BlendMode::Screen,
-        // 以下需要读取目标像素，v2 不实现（枚举先占位，与上面同因）。
+        // 以下要读目标像素：走**读回型回路**（D13），不再"做不到"而是"另一条路"。
         BlendMode::Darken,
         BlendMode::Lighten,
         BlendMode::Overlay,
@@ -80,12 +80,35 @@ impl BlendMode {
         BlendMode::Difference,
     ];
 
-    /// 能不能用固定混合方程表达。
+    /// 能不能用**固定混合方程**表达（也就是合成器那条一趟直写的路）。
     ///
-    /// 渲染器**必须**先问这个，再决定要不要往下走 —— 让「做不到」在渲染前就显形，
-    /// 而不是画出一张悄悄降级的图。
-    pub const fn is_implemented(self) -> bool {
+    /// 渲染器**必须**先问这个：不能的（`darken` / `lighten` / `overlay` / `soft_light` /
+    /// `difference`）要走**读回型**回路 —— 先把已经画好的底读成一张纹理，
+    /// 再按 `f(src, dst)` 逐像素算（设计见 plan/web-animation-criteria.md 的 D13）。
+    pub const fn uses_fixed_equation(self) -> bool {
         matches!(self, Self::Normal | Self::Add | Self::Multiply | Self::Screen)
+    }
+
+    /// 这一版**能不能画**。
+    ///
+    /// 与 [`Self::uses_fixed_equation`] 分开是刻意的：**"要读目标"与"做不到"是两件事** ——
+    /// 读回型回路（D13）落地之后，后 5 条会在这里变成 `true`，而
+    /// `uses_fixed_equation` **永远是那 4 条**（它描述的是"走哪条路"，不是"能不能"）。
+    ///
+    /// 第 31 轮起**全部 9 条都是 `true`**：前 4 条走固定方程、后 5 条走读回型回路（D13）。
+    pub const fn is_implemented(self) -> bool {
+        matches!(
+            self,
+            Self::Normal
+                | Self::Add
+                | Self::Multiply
+                | Self::Screen
+                | Self::Darken
+                | Self::Lighten
+                | Self::Overlay
+                | Self::SoftLight
+                | Self::Difference
+        )
     }
 }
 
@@ -147,6 +170,156 @@ pub struct Recorded {
     pub markers: Vec<Marker>,
 }
 
+/// 掩码通道：拿素材的哪一路当遮罩（设计见 plan/web-animation-criteria.md 的 D12）。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MaskChannel {
+    /// 用 alpha（缺省）。
+    #[default]
+    Alpha,
+    /// 用亮度。系数与 core 的 luma 同一组（Rec.709）—— 与 D6 的老规矩一致：
+    /// **口径要写进文档**，不许两边各猜一组。
+    Luminance,
+}
+
+/// 层的**投影**（`filter: drop-shadow()` 那件事）。
+///
+/// # 为什么它不是一条 effect pipeline
+///
+/// 逐像素管线（色彩 / 遮罩 / 重映射 / 模糊）都是"**把这一层的像素改一下**"；
+/// 投影不是改像素，而是**同一层多画一张**（模糊 + 染色 + 偏移，画在本层**下面**）。
+/// 把它塞进 pipeline 会让"一趟逐像素"的模型出现一个例外，而例外正是最难查的那种。
+///
+/// # 口径
+///
+/// - 长度都是**文档像素**；
+/// - `blur_sigma` 是 **CSS `drop-shadow()` 的那个模糊半径（σ）** —— 引擎按下界口径
+///   换算成本仓的核半径（`radius = 2σ`，见 D5）；
+/// - 颜色 v1 **固定黑**（要彩色再加字段，不在这里偷偷支持）；
+/// - `opacity` 是整张阴影的浓淡（0..1），与图层自己的 opacity 相乘。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ShadowSpec {
+    #[serde(default)]
+    pub offset_x: f32,
+    #[serde(default)]
+    pub offset_y: f32,
+    /// CSS `drop-shadow()` 的模糊半径（σ，文档像素）。
+    #[serde(default)]
+    pub blur_sigma: f32,
+    #[serde(default = "one")]
+    pub opacity: f32,
+}
+
+/// 一层怎么被掩码。
+///
+/// # 素材层（D12 的第一条决定）
+///
+/// 掩码是一张**登记过的素材**，所以契约是「层引用素材 id」而不是「层内嵌一张图」——
+/// 素材的注册、时间基、URI 解析、"引用不存在的素材要报错"这套校验**都已经有了**。
+///
+/// 坐标口径（D12 的第三条决定，也是本设计里唯一一处新坐标）：掩码图的**整张**映射到
+/// **图层自己的矩形**上（拉伸填满），即**图层局部坐标** —— 与合成源的源像素坐标不是同一套。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MaskSpec {
+    /// 指向 `assets` 里的一条。**与 `gradient` 二选一**（缺省空串）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub asset_id: String,
+    /// 程序化渐变（第 46 轮）：不挂素材，直接按角度与断点生成遮罩。
+    /// **与 `asset_id` 二选一**；缺省不写进文件。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gradient: Option<LinearGradient>,
+    /// 通道，缺省 `alpha`（缺省不写进文件）。
+    #[serde(default, skip_serializing_if = "is_default_mask_channel")]
+    pub channel: MaskChannel,
+    /// 是否反相，缺省 false（缺省不写进文件）。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub invert: bool,
+}
+
+/// 线性渐变的遮罩（程序化，不挂素材）。
+///
+/// 几何口径照 CSS：`angle_deg` 里 **0° 朝上、90° 朝右**（屏幕 y 向下），
+/// 渐变轴过图层矩形中心，轴长 = `|w·sinθ| + |h·cosθ|`（CSS 对盒子的那条规矩）。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LinearGradient {
+    pub angle_deg: f32,
+    /// 断点，至少两个；位置非递减。
+    pub stops: Vec<GradientStop>,
+}
+
+/// 渐变的一个断点：位置与**覆盖度**（遮罩用的就是它）。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct GradientStop {
+    pub at: f32,
+    pub coverage: f32,
+}
+
+/// 裁剪形状。长度一律是**文档像素**。
+///
+/// # 为什么只有这三种
+///
+/// 引擎用的是**每像素覆盖度**（着色器里一个无分支 SDF），能用同一套式子表达的只有
+/// 圆 / 椭圆 / 圆角矩形 —— 正好是 CSS `clip-path` 里的 `circle()` / `ellipse()` / `inset()`。
+/// `polygon()` 与 `path()` 需要一般多边形求交或掩码纹理，**明确不做**（登记表里记着这个缺口，
+/// 不在这里假装支持）。
+///
+/// `center` 是**图层框内的归一化比例**（`[0.5, 0.5]` 就是正中间），`None` 等价于居中 ——
+/// 与 CSS `at 50% 50%` 同一个口径。
+///
+/// # 为什么是比例而不是像素
+///
+/// CSS 的 `at X Y` 是相对**元素左上角**，而 `X%` 是相对元素尺寸的百分比。用比例表达，
+/// 作者侧（`at 25% 75%`）与 DOM 侧（CSS 原文）**都不需要知道图层的像素尺寸** ——
+/// 而尺寸是素材的属性，转译器根本不知道。像素值仍然拒绝：那需要尺寸才能换算。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ClipShape {
+    /// `circle(R at X Y)`。
+    Circle {
+        radius: f32,
+        /// 归一化中心（`[0.5, 0.5]` = 正中），`None` 等价于居中。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        center: Option<[f32; 2]>,
+    },
+    /// `ellipse(RX RY at X Y)`。
+    Ellipse {
+        radius_x: f32,
+        radius_y: f32,
+        /// 归一化中心（`[0.5, 0.5]` = 正中），`None` 等价于居中。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        center: Option<[f32; 2]>,
+    },
+    /// `polygon(x y, x y, …)`：顶点是**图层框内的归一化坐标**（0..1，与 `center` 同一套口径）。
+    ///
+    /// 引擎把它**栅格化成一张掩码纹理**再走已经验过的掩码通路 —— 所以这一版
+    /// 着色器一行都不用改，而且**两个宿主共用同一份栅格化代码**（core 里纯 Rust）。
+    ///
+    /// 口径（v1）：非零环绕规则；边缘用 2×2 超采样近似抗锯齿；顶点允许在框外
+    /// （框外部分自然被裁掉，不报错）。
+    Polygon { points: Vec<[f32; 2]> },
+    /// `path("…")`：SVG 路径数据，坐标是**文档像素**、原点是图层框的**左上角**
+    /// （与 CSS `clip-path: path()` 同一套，所以 DOM 侧原样透传）。
+    ///
+    /// 支持 `M L H V C Q Z`（含相对形式）；**弧 `A` 与光滑续接 `S`/`T` 明说不支持**
+    /// （遇到就报错，不猜一个近似）。曲线按固定段数细分 —— 确定性优先。
+    Path { data: String },
+    /// `inset(上 右 下 左 round R)`：四条边各缩进多少。
+    Inset {
+        top: f32,
+        right: f32,
+        bottom: f32,
+        left: f32,
+        #[serde(default, skip_serializing_if = "is_zero_f32")]
+        radius: f32,
+    },
+}
+
 /// 基础元素 + 拓展。
 ///
 /// 判定规则（三行，不需要额外字段）：
@@ -168,6 +341,38 @@ pub struct Layer {
     pub opacity: f32,
 #[serde(default)]
     pub blend: BlendMode,
+    /// **圆角半径**（文档像素）。0 = 无圆角 = 老行为（缺省不写进文件）。
+    ///
+    /// 引擎在合成着色器里用一个**无分支**的圆角矩形 SDF 画它（见
+    /// `plan/web-animation-criteria.md` 的 D10）：半径 0 时那条路径的输出**逐字节不变**，
+    /// 半径 > 0 时只切四个角（有 GPU 用例逐点钉着）。
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub corner_radius: f32,
+    /// **裁剪形状**（`None` = 不裁 = 老行为，缺省不写进文件）。
+    ///
+    /// 与 `corner_radius` 的关系：圆角裁的是**图层自己的矩形**，`clip` 裁的是形状 ——
+    /// 两者**同时生效**（各自算一个覆盖度再相乘），与 CSS 里 `border-radius` 与
+    /// `clip-path` 同时写的行为一致。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip: Option<ClipShape>,
+    /// **掩码**（`None` = 不掩 = 老行为，缺省不写进文件）。
+    ///
+    /// 契约先立、引擎还没画（设计见 D12）：渲染前由 [`unimplemented_masks`] 与
+    /// 文档校验的警告如实报出来 —— 与圆角 / 未实现的混合模式同一套形态。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<MaskSpec>,
+    /// **投影**（`None` = 不投 = 老行为，缺省不写进文件）。设计见 criteria 的 D13。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow: Option<ShadowSpec>,
+    /// **背景滤镜**（`backdrop-filter`）：对**这一层下面已经画好的内容**跑这些特效，
+    /// 且**只在这一层的矩形里**生效（CSS 的规矩就是"元素范围内"）。
+    ///
+    /// 与 `effects` 的区别是本条最要紧的一处：`effects` 改的是**这一层自己**的像素；
+    /// 背景滤镜读的是**它身后的东西**。空 = 不做 = 老行为（缺省不写进文件）。
+    ///
+    /// 设计见 criteria 的 D13（读回型那一批的第二个用户）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backdrop_effects: Vec<Effect>,
 #[serde(default = "yes")]
     pub enabled: bool,
     /// **音频增益**（线性倍数，1.0 = 原样）。
@@ -444,6 +649,14 @@ pub struct SubtitleStyle {
 /// 与 `schema.rs` 的 `is_one` 同款（那边是"等于默认值就不写"的另一个实例）。
 /// 比法用 `== 0.0`：`-0.0 == 0.0` 为真，于是负零也走"不写"那一支 —— 而它在
 /// JSON 里是 `-0.0`，写出来就是个没意义的新键。
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn is_default_mask_channel(value: &MaskChannel) -> bool {
+    *value == MaskChannel::Alpha
+}
+
 fn is_zero_f32(value: &f32) -> bool {
     *value == 0.0
 }
@@ -681,6 +894,7 @@ pub fn migrate_v1_to_v2(project: &Project) -> Result<TimelineV2, MigrateError> {
                 return Err(MigrateError::DuplicateId(clip.id.clone()));
             }
             layers.push(Layer {
+                backdrop_effects: Vec::new(),
                 id: clip.id.clone(),
                 start: clip.track_at,
                 // v1 是 [track_at, track_at + duration)，v2 直接存右端点。
@@ -693,6 +907,10 @@ pub fn migrate_v1_to_v2(project: &Project) -> Result<TimelineV2, MigrateError> {
                 },
                 opacity: clip.opacity,
                 blend: BlendMode::Normal,
+                corner_radius: 0.0,
+                clip: None,
+                mask: None,
+                shadow: None,
                 enabled: true,
                 gain: 1.0,
                 recorded: Recorded::default(),
@@ -1141,12 +1359,17 @@ mod tests {
 
     fn base_layer(id: &str, start: Frame, end: Frame) -> Layer {
         Layer {
+            backdrop_effects: Vec::new(),
             id: id.to_string(),
             start,
             end,
             transform: TransformV2::default(),
             opacity: 1.0,
             blend: BlendMode::Normal,
+            corner_radius: 0.0,
+            clip: None,
+            mask: None,
+            shadow: None,
             enabled: true,
             gain: 1.0,
             recorded: Recorded::default(),
@@ -1453,7 +1676,9 @@ mod tests {
 
     #[test]
     fn 混合模式可实现性与枚举留全() {
+        // 「走哪条路」与「能不能画」是两件事 —— 两个谓词都要钉住。
         for mode in [BlendMode::Normal, BlendMode::Add, BlendMode::Multiply, BlendMode::Screen] {
+            assert!(mode.uses_fixed_equation(), "{mode:?} 走固定方程");
             assert!(mode.is_implemented(), "{mode:?} 应当可实现");
         }
         for mode in [
@@ -1463,7 +1688,8 @@ mod tests {
             BlendMode::SoftLight,
             BlendMode::Difference,
         ] {
-            assert!(!mode.is_implemented(), "{mode:?} 需要读目标像素，v2 不该说它可实现");
+            assert!(!mode.uses_fixed_equation(), "{mode:?} 要读目标像素 ⇒ 走读回型回路");
+            assert!(mode.is_implemented(), "{mode:?} 的读回回路第 31 轮起已落地（D13）");
         }
     }
 
@@ -1600,9 +1826,17 @@ pub fn validate_timeline_v2(timeline: &TimelineV2, effects: &[EffectSpec]) -> Ve
                     ));
                 }
             }
-            if !effects.is_empty() {
-                for (effect_index, effect) in layer.effects.iter().enumerate() {
-                    let effect_path = format!("{path}.effects[{effect_index}]");
+            // **两张表走同一套校验**：`effects` 改这一层自己的像素，`backdrop_effects` 读它身后的东西 ——
+            // 但它们的取值口径来自**同一个注册表**，所以任何一张表都不许绕过校验。
+            for (list_name, list) in [
+                ("effects", &layer.effects),
+                ("backdrop_effects", &layer.backdrop_effects),
+            ] {
+                if list.is_empty() {
+                    continue;
+                }
+                for (effect_index, effect) in list.iter().enumerate() {
+                    let effect_path = format!("{path}.{list_name}[{effect_index}]");
                     match effects.iter().find(|spec| spec.kind == effect.kind) {
                         None => issues.push(Issue::new(
                             "unknown_effect",
@@ -1678,6 +1912,63 @@ pub fn unimplemented_blends(timeline: &TimelineV2) -> Vec<(String, BlendMode)> {
     out
 }
 
+/// 工程里用到的**掩码素材** id（去重、按出现顺序）。
+///
+/// 为什么要有它：预览宿主（浏览器那条腿）**没有素材表**，取不到掩码图。
+/// 那种情形以前是"渲染时解析不出来 ⇒ 只 debug_assert ⇒ 静默画一张没有掩码的图" ✗。
+/// 有了这份清单，宿主可以在画之前**响亮地报出来**："这份工程用了掩码，预览还没接上"。
+///
+/// 渐变遮罩不算在内 —— 它是程序化生成的，不需要素材。
+pub fn mask_asset_ids(timeline: &TimelineV2) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for track in &timeline.tracks {
+        for layer in &track.layers {
+            let Some(mask) = &layer.mask else { continue };
+            if mask.asset_id.is_empty() {
+                continue;
+            }
+            if !out.contains(&mask.asset_id) {
+                out.push(mask.asset_id.clone());
+            }
+        }
+    }
+    out
+}
+
+/// 工程用到、但**宿主还没注册**的掩码素材 id（按出现顺序、去重）。
+///
+/// 这是给**宿主**用的一问一答：宿主先把它手上有的掩码图注册进来，
+/// 再问这句话 —— 非空就说明"预览会画错"（少了掩码），必须报出来而不是照画。
+///
+/// 为什么要分成"清单"与"缺哪些"两个函数：
+/// 注册是**宿主的事**（浏览器那条腿要 fetch + 解码 + 上传），而"哪几张缺"是**纯计算** ——
+/// 纯的那部分放这里，就能在没有浏览器的地方被钉住。
+///
+/// 渐变遮罩永远不会出现在返回值里：它是程序化生成的，不需要任何素材。
+pub fn missing_mask_assets(timeline: &TimelineV2, registered: &[String]) -> Vec<String> {
+    mask_asset_ids(timeline)
+        .into_iter()
+        .filter(|id| !registered.contains(id))
+        .collect()
+}
+
+/// 层的**背景滤镜**本实现还画不出来的清单。与 [`unimplemented_blends`] 同一套形态。
+///
+/// 设计见 plan/web-animation-criteria.md 的 D13：契约先把"作者要什么"立起来，
+/// 引擎那条"读身后内容再跑特效"的回路是下一步 —— 在那之前，渲染前必须能知道
+/// "这个我画不了"，而不是悄悄画成没有背景滤镜的样子。
+pub fn unimplemented_backdrops(timeline: &TimelineV2) -> Vec<String> {
+    let mut out = Vec::new();
+    for (track_index, track) in timeline.tracks.iter().enumerate() {
+        for (layer_index, layer) in track.layers.iter().enumerate() {
+            if !layer.backdrop_effects.is_empty() {
+                out.push(format!("tracks[{track_index}].layers[{layer_index}].backdrop_effects"));
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod v2_tests {
     use super::*;
@@ -1685,12 +1976,17 @@ mod v2_tests {
 
     fn layer(id: &str, start: Frame, end: Frame) -> Layer {
         Layer {
+            backdrop_effects: Vec::new(),
             id: id.to_string(),
             start,
             end,
             transform: TransformV2::default(),
             opacity: 1.0,
             blend: BlendMode::Normal,
+            corner_radius: 0.0,
+            clip: None,
+            mask: None,
+            shadow: None,
             enabled: true,
             gain: 1.0,
             recorded: Recorded::default(),
@@ -1875,17 +2171,216 @@ mod v2_tests {
     }
 
     #[test]
-    fn 未实现的混合模式_契约接受但渲染前必须被发现() {
+    fn 九条混合模式都能画_但只有四条走固定方程() {
+        // 第 31 轮起 `unimplemented_blends` 永远是空的：读回型回路（D13）把后 5 条也接上了。
+        // 这条判据改成钉**两条路的区分** —— 那才是渲染器真正要问的问题。
+        for mode in BlendMode::ALL {
+            let mut l = layer("a", 0, 10);
+            l.blend = mode;
+            let timeline = timeline(vec![track("v", vec![l])]);
+            assert!(validate_timeline_v2(&timeline, &[]).is_empty(), "{mode:?} 契约应当接受");
+            assert!(unimplemented_blends(&timeline).is_empty(), "{mode:?} 不该再说「做不了」");
+        }
+        let fixed = BlendMode::ALL.iter().filter(|m| m.uses_fixed_equation()).count();
+        assert_eq!(fixed, 4, "只有 4 条能一趟直写");
+        assert_eq!(BlendMode::ALL.len() - fixed, 5, "另外 5 条走读回型回路");
+    }
+
+    #[test]
+    fn 掩码素材清单_去重且不含渐变() {
+        let plain = timeline(vec![track("v", vec![layer("a", 0, 10)])]);
+        assert!(mask_asset_ids(&plain).is_empty(), "没有掩码时应当是空的");
+        // 素材掩码：出现两次也只算一个 id。
+        let mut first = layer("a", 0, 10);
+        first.mask = Some(MaskSpec { asset_id: "m.png".to_string(), gradient: None, channel: MaskChannel::Alpha, invert: false });
+        let mut second = layer("b", 0, 10);
+        second.mask = Some(MaskSpec { asset_id: "m.png".to_string(), gradient: None, channel: MaskChannel::Alpha, invert: false });
+        // 渐变掩码：不需要素材，**不该**出现在清单里。
+        let mut gradient = layer("c", 0, 10);
+        gradient.mask = Some(MaskSpec {
+            asset_id: String::new(),
+            gradient: Some(LinearGradient { angle_deg: 90.0, stops: vec![GradientStop { at: 0.0, coverage: 0.0 }, GradientStop { at: 1.0, coverage: 1.0 }] }),
+            channel: MaskChannel::Alpha,
+            invert: false,
+        });
+        let doc = timeline(vec![track("v", vec![first, second, gradient])]);
+        assert_eq!(mask_asset_ids(&doc), vec!["m.png".to_string()]);
+    }
+
+    #[test]
+    fn 缺哪些掩码素材_注册过的就不缺了() {
+        let mut masked = layer("a", 0, 10);
+        masked.mask = Some(MaskSpec {
+            asset_id: "m.png".to_string(),
+            gradient: None,
+            channel: MaskChannel::Alpha,
+            invert: false,
+        });
+        let mut gradient_layer = layer("b", 0, 10);
+        gradient_layer.mask = Some(MaskSpec {
+            asset_id: String::new(),
+            gradient: Some(LinearGradient {
+                angle_deg: 0.0,
+                stops: vec![
+                    GradientStop { at: 0.0, coverage: 0.0 },
+                    GradientStop { at: 1.0, coverage: 1.0 },
+                ],
+            }),
+            channel: MaskChannel::Alpha,
+            invert: false,
+        });
+        let doc = timeline(vec![track("v", vec![masked, gradient_layer])]);
+        // 一张都没注册：缺的正是素材那张（**渐变不算**）。
+        assert_eq!(missing_mask_assets(&doc, &[]), vec!["m.png".to_string()]);
+        // 注册过就不缺了 —— 这是宿主（浏览器那条腿）要回答的问题。
+        assert!(missing_mask_assets(&doc, &["m.png".to_string()]).is_empty());
+        // 注册了别的、没注册这张，照样缺。
+        assert_eq!(
+            missing_mask_assets(&doc, &["other.png".to_string()]),
+            vec!["m.png".to_string()]
+        );
+        // 没有掩码的工程永远是空的。
+        let plain = timeline(vec![track("v", vec![layer("c", 0, 10)])]);
+        assert!(missing_mask_assets(&plain, &[]).is_empty());
+    }
+
+    #[test]
+    fn 背景滤镜缺省不写进文件_写了就能被认出来() {
+        let flat = timeline(vec![track("v", vec![layer("a", 0, 10)])]);
+        let text = serde_json::to_string(&flat).expect("能写出");
+        assert!(!text.contains("backdrop_effects"), "缺省不该写进文件：{text}");
         let mut l = layer("a", 0, 10);
-        l.blend = BlendMode::Overlay;
-        let timeline = timeline(vec![track("v", vec![l])]);
-        // 契约层**不报错**：枚举留全就是为了将来支持时不必改版本号。
-        assert!(validate_timeline_v2(&timeline, &[]).is_empty(), "契约应当接受它");
-        // 但渲染前必须能知道「这个我做不了」——不许静默按 normal 画。
-        let pending = unimplemented_blends(&timeline);
+        l.backdrop_effects = vec![Effect {
+            kind: "gaussian_blur".to_string(),
+            params: std::collections::BTreeMap::from([("radius".to_string(), 4.0_f32)]),
+            ..Default::default()
+        }];
+        let backdrop = timeline(vec![track("v", vec![l])]);
+        // 契约层**接受**它（枚举/字段留全是为了将来支持时不必改版本号）。
+        // 校验器按**参数**收登记表（它不自己去 core 取）—— 这里给一张最小的。
+        let specs = [crate::schema::EffectSpec {
+            kind: "gaussian_blur",
+            params: &[("radius", 0.0, 16.0)],
+            space: crate::schema::EffectSpace::Source,
+            pipeline: crate::schema::EffectPipeline::SeparableBlur,
+            window_default: None,
+        }];
+        let issues = validate_timeline_v2(&backdrop, &specs);
+        assert!(issues.is_empty(), "契约应当接受它，得到 {issues:?}");
+        let written = serde_json::to_string(&backdrop).expect("能写出");
+        assert!(written.contains("backdrop_effects"), "写了就该写出来：{written}");
+        // 但渲染前必须能知道"这个我画不了"——不许静默画成没有背景滤镜的样子。
+        let pending = unimplemented_backdrops(&backdrop);
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].1, BlendMode::Overlay);
-        assert!(pending[0].0.contains("blend"), "path 要指到字段：{}", pending[0].0);
+        assert!(pending[0].contains("backdrop_effects"), "path 要指到字段：{}", pending[0]);
+        // 参数越界同样要被拦（两张表走同一套注册表）。
+        let mut bad = layer("a", 0, 10);
+        bad.backdrop_effects = vec![Effect {
+            kind: "gaussian_blur".to_string(),
+            params: std::collections::BTreeMap::from([("radius".to_string(), 9999.0_f32)]),
+            ..Default::default()
+        }];
+        let issues = validate_timeline_v2(&timeline(vec![track("v", vec![bad])]), &specs);
+        assert!(
+            issues.iter().any(|issue| issue.code == "effect_param_out_of_range"
+                && issue.path.contains("backdrop_effects")),
+            "背景滤镜的参数越界必须被拦：{issues:?}"
+        );
+    }
+
+    #[test]
+    fn 投影缺省不写进文件_写了就原样往返() {
+        let flat = timeline(vec![track("v", vec![layer("a", 0, 10)])]);
+        let text = serde_json::to_string(&flat).expect("能写出");
+        assert!(!text.contains("shadow"), "缺省不该写进文件：{text}");
+        let mut l = layer("a", 0, 10);
+        l.shadow = Some(ShadowSpec {
+            offset_x: 4.0,
+            offset_y: 6.0,
+            blur_sigma: 3.0,
+            opacity: 0.5,
+        });
+        let dropped = timeline(vec![track("v", vec![l])]);
+        assert!(validate_timeline_v2(&dropped, &[]).is_empty(), "契约应当接受它");
+        let written = serde_json::to_string(&dropped).expect("能写出");
+        assert!(written.contains("\"offset_x\":4.0"), "{written}");
+        assert!(written.contains("\"blur_sigma\":3.0"), "{written}");
+        // 第 28 轮起引擎真的会画它了（"同一层多画一张"）—— 所以这里不再有"还没实现"那条查询。
+        assert!(!written.contains("unimplemented"), "契约里不该出现实现状态的痕迹");
+    }
+
+    #[test]
+    fn 掩码缺省不写进文件_写了就原样往返() {
+        let flat = timeline(vec![track("v", vec![layer("a", 0, 10)])]);
+        let text = serde_json::to_string(&flat).expect("能写出");
+        assert!(!text.contains("mask"), "缺省不该写进文件：{text}");
+        let mut l = layer("a", 0, 10);
+        l.mask = Some(MaskSpec {
+            gradient: None,
+            asset_id: "m.png".to_string(),
+            channel: MaskChannel::Luminance,
+            invert: true,
+        });
+        let masked = timeline(vec![track("v", vec![l])]);
+        assert!(validate_timeline_v2(&masked, &[]).is_empty(), "契约应当接受它");
+        let written = serde_json::to_string(&masked).expect("能写出");
+        assert!(written.contains("\"asset_id\":\"m.png\""), "{written}");
+        assert!(written.contains("\"channel\":\"luminance\""), "{written}");
+        assert!(written.contains("\"invert\":true"), "{written}");
+        // 缺省值不写：通道 alpha、invert false。
+        let mut l2 = layer("a", 0, 10);
+        l2.mask = Some(MaskSpec {
+            gradient: None,
+            asset_id: "m.png".to_string(),
+            channel: MaskChannel::Alpha,
+            invert: false,
+        });
+        let text2 = serde_json::to_string(&timeline(vec![track("v", vec![l2])])).expect("能写出");
+        assert!(!text2.contains("channel"), "缺省通道不该写：{text2}");
+        assert!(!text2.contains("invert"), "false 不该写：{text2}");
+    }
+
+    #[test]
+    fn 裁剪形状缺省不写进文件_写了就原样往返() {
+        let flat = timeline(vec![track("v", vec![layer("a", 0, 10)])]);
+        let text = serde_json::to_string(&flat).expect("能写出");
+        assert!(!text.contains("clip"), "缺省不该写进文件：{text}");
+        let mut l = layer("a", 0, 10);
+        l.clip = Some(ClipShape::Circle {
+            radius: 30.0,
+            center: Some([10.0, -5.0]),
+        });
+        let shaped = timeline(vec![track("v", vec![l])]);
+        assert!(validate_timeline_v2(&shaped, &[]).is_empty(), "契约应当接受它");
+        let written = serde_json::to_string(&shaped).expect("能写出");
+        assert!(written.contains("\"kind\":\"circle\""), "形状要按 kind 标签写出来：{written}");
+        // 内缩的圆角为 0 时不写（缺省就是 0）；居中时 center 也不写。
+        let mut l2 = layer("a", 0, 10);
+        l2.clip = Some(ClipShape::Inset {
+            top: 4.0,
+            right: 4.0,
+            bottom: 4.0,
+            left: 4.0,
+            radius: 0.0,
+        });
+        let text2 = serde_json::to_string(&timeline(vec![track("v", vec![l2])])).expect("能写出");
+        assert!(text2.contains("\"kind\":\"inset\""), "{text2}");
+        assert!(!text2.contains("center"), "没有显式中心时不该写 center：{text2}");
+    }
+
+    #[test]
+    fn 圆角为_0_时不写进文件_而大于_0_时契约接受() {
+        // 0 = 老行为：**序列化时一个字节都不多**（这是"老工程逐字节不变"在文件层的判据）。
+        let flat = timeline(vec![track("v", vec![layer("a", 0, 10)])]);
+        let text = serde_json::to_string(&flat).expect("能写出");
+        assert!(!text.contains("corner_radius"), "0 不该写进文件：{text}");
+        // 大于 0：契约接受（引擎从第 13 轮起真的画了 —— 见 D10 的落地进度与那条 GPU 用例）。
+        let mut l = layer("a", 0, 10);
+        l.corner_radius = 24.0;
+        let rounded = timeline(vec![track("v", vec![l])]);
+        assert!(validate_timeline_v2(&rounded, &[]).is_empty(), "契约应当接受它");
+        let written = serde_json::to_string(&rounded).expect("能写出");
+        assert!(written.contains("\"corner_radius\":24.0"), "大于 0 时必须写出来：{written}");
     }
 
     #[test]

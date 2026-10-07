@@ -1112,6 +1112,17 @@ impl SourceResolver for DecodingSources<'_> {
             }
         }
     }
+
+    /// 掩码：**复用同一条解码通路**（掩码就是一张静态图，取第 0 帧）。
+    ///
+    /// 另写一条"掩码专用"的解码路会把"素材怎么变成纹理"写两遍 ——
+    /// 那种两份实现迟早分叉（`AssetTimebases` 的注释里记过一次同类教训）。
+    ///
+    /// 解析不出来时 `texture_for` 会自己记 `unknown_asset` / `source_decode_failed`，
+    /// 然后返回 `None` —— 调用方据此**拒绝整帧**，不静默。
+    fn mask_texture_for(&mut self, source: &str) -> Option<(wgpu::TextureView, (u32, u32))> {
+        self.texture_for(source, 0)
+    }
 }
 
 // ---------------------------------------------------------------------------

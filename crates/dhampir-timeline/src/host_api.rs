@@ -1063,8 +1063,10 @@ mod tests {
     #[test]
     fn 能力声明里的混合模式是从谓词推出来的() {
         // **不是手写的清单** —— 手写一份一定会与渲染器漂开。
+        // 第 31 轮起是全部 9 条（后 5 条走读回型回路，见 D13）—— 但"走哪条路"是另一回事：
+        // 那条区分由 `uses_fixed_equation` 表达，能力清单只回答"能不能画"。
         let caps = Capabilities::new(Vec::new(), 16, false, false);
-        assert_eq!(caps.blend_modes, vec![BlendMode::Normal, BlendMode::Add, BlendMode::Multiply, BlendMode::Screen]);
+        assert_eq!(caps.blend_modes, BlendMode::ALL.to_vec());
         assert_eq!(caps.timeline_versions, vec![LAYER_SCHEMA_VERSION]);
     }
 
@@ -1093,12 +1095,17 @@ mod tests {
     #[test]
     fn 预检能指出是对端的哪一项不支持() {
         let mut layer = crate::layer::Layer {
+            backdrop_effects: Vec::new(),
             id: "l1".to_string(),
             start: 0,
             end: 10,
             transform: crate::layer::TransformV2::default(),
             opacity: 1.0,
             blend: BlendMode::Overlay, // 对端不支持
+            corner_radius: 0.0,
+            clip: None,
+            mask: None,
+            shadow: None,
             enabled: true,
             gain: 1.0,
             recorded: crate::layer::Recorded::default(),
@@ -1134,7 +1141,10 @@ mod tests {
             }],
         };
         // 对端：支持模糊但半径上限只有 16；没有 vignette。
-        let caps = Capabilities::new(vec!["gaussian_blur".to_string()], 16, true, true);
+        let mut caps = Capabilities::new(vec!["gaussian_blur".to_string()], 16, true, true);
+        // **模拟一个旧对端**：第 31 轮起本仓 9 条混合模式都能画，所以"对端不支持某条"
+        // 只能由"它声明得少"来表达（真实世界里就是对方版本旧）。
+        caps.blend_modes.truncate(4);
         let issues = precheck(&timeline, &caps);
         let mut codes: Vec<&str> = issues.iter().map(|i| i.code.as_str()).collect();
         codes.sort();

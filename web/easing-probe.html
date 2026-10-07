@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>缓动逐值参考（浏览器原生）</title>
+<style>
+  body { font: 13px/1.6 Consolas, "Cascadia Mono", monospace; margin: 16px; }
+  h1 { font-size: 16px; margin: 0 0 8px; }
+  h2 { font-size: 14px; margin: 20px 0 6px; }
+  .hint { color: #444; max-width: 70em; }
+  #status { font-weight: bold; }
+  .bad { color: #b00; }
+  pre { background: #f5f5f5; border: 1px solid #ccc; padding: 8px; max-height: 50vh; overflow: auto; }
+</style>
+</head>
+<body>
+<h1>缓动逐值参考（浏览器原生）</h1>
+<p class="hint">
+  取值方法：WAAPI + <code>getComputedStyle</code>（为什么这样取，见下面脚本里的注释）。
+</p>
+<p class="hint">
+  <b>下面第一段就是 <code>target/easing-reference.json</code> 的全部内容</b>（顶层只有缓动串，
+  别往顶层加键 —— 消费者是按顶层键遍历的）。正常由
+  <code>scripts/easing-reference.mjs</code> 自动抓取；本页被手工打开时，把它存成那个文件，
+  再用 <code>node scripts/easing-reference.mjs --check</code> 校验。
+  第二段是说明（浏览器是谁、读数精度），另存成 <code>target/easing-reference.meta.json</code> 即可，不影响判据。
+</p>
+<p id="status">取样中…</p>
+<p><button id="download" type="button">下载 easing-reference.json</button> <span id="note" class="hint"></span></p>
+<pre id="out">（还没算完）</pre>
+<h2>说明（不进 easing-reference.json）</h2>
+<pre id="metaout">（还没算完）</pre>
+
+<script>
+/* 缓动逐值参考页：**只做一件事** —— 让浏览器自己把每条缓动在 21 个点上的值算出来。
+ *
+ * # 为什么不自己写公式
+ * 本页存在的全部意义，是给阶段 1 的 Rust 实现一份**外部**参考（口径见
+ * plan/web-animation-criteria.md 的 D2）。自己再写一份 cubic-bezier 求解器，
+ * 就变成"我们跟自己比"——两边一起错的时候它是绿的，而那正是这条参考要防的事。
+ *
+ * # 取值方法（题目给定，不改）
+ *   const el = document.createElement("div"); document.body.appendChild(el);
+ *   const anim = el.animate([{opacity:0},{opacity:1}], {duration:1000, easing:EASING, fill:"both"});
+ *   anim.pause(); anim.currentTime = t * 1000;
+ *   const v = parseFloat(getComputedStyle(el).opacity);
+ * 三处细节都不是装饰：
+ *   · fill:"both" 让两端（t=0 / t=1）也有值，否则读回来的是元素的底层值；
+ *   · pause() 之后动画不自己往前走，同一个 t 读几次都是同一个值；
+ *   · currentTime 的赋值是同步的，紧跟其后的 getComputedStyle 会强制一次样式重算，
+ *     所以读到的是那一刻的动画值 —— 不需要等一帧，也不需要 rAF。
+ *
+ * # 两列值（下游别比错）
+ *   · values    —— opacity 的 computed 值。**按 CSS 规定夹到 [0,1]**，对应 apply(t).clamp(0,1)；
+ *   · unclamped —— 同一条缓动挂在 transform: translateX(0 -> 1e6 px) 上读回来再除以位移量。
+ *                  transform 不夹，所以它对应 apply(t) 本身；过冲只能在这一列看出来。
+ * 两列都是**浏览器给的**：第二列也只是换了一条不夹的属性，没有一处是本页算的。
+ */
+(function () {
+  'use strict';
+
+  /* 候选缓动串：**精确名单**（D2 的值域表 + 本次任务名单）。一个字都不许改 ——
+   * 它们同时是这份参考的"键"，下游按原串取值，改一个字符就等于换了一条缓动。 */
+  var CANDIDATES = [
+    'linear',
+    'ease',
+    'ease-in',
+    'ease-out',
+    'ease-in-out',
+    'step-start',
+    'step-end',
+    'cubic-bezier(0.25,0.1,0.25,1)',
+    'cubic-bezier(0.42,0,0.58,1)',
+    'cubic-bezier(0.68,-0.55,0.265,1.55)',
+    'steps(1)',
+    'steps(4)',
+    'steps(4,start)',
+    'steps(4,end)',
+    'steps(4,jump-none)',
+    'steps(4,jump-both)'
+  ];
+  var POINTS = 21;          // t = 0.00, 0.05, … 1.00
+  var DURATION_MS = 1000;   // 1 秒：t 就是"动画进度的百分比"，读起来不用换算
+  /* unclamped 那条路的位移量。**宁大勿小**：computed 的矩阵是十进制字符串，
+   * 打印几位由浏览器决定（这一条在本页里是**实测**的，见 transform_read_back），
+   * 而位移越大，同样的打印位数换算回缓动值时分辨率就越高。 */
+  var RANGE_PX = 1000000;
+
+  function readOpacity(computed) {
+    return parseFloat(computed.opacity);
+  }
+
+  /* 从 computed 的矩阵里取出 translateX。**两种序列化都要认**：
+   * 2D 是 matrix(a,b,c,d,tx,ty)（tx 在 4 号位），
+   * 3D 是 matrix3d(...)（**列主序**，平移在 12/13/14）。
+   * 只认前者的话，浏览器换一种序列化就会得到一整列 NaN ——
+   * 而 JSON.stringify 会把 NaN 变成 null，看着像"这一列没取到"，其实是被读法卡住了。 */
+  function readTranslateX(computed) {
+    var text = computed.transform;
+    if (text === '' || text === 'none') return 0;
+    var flat = /^matrix\(([^)]+)\)$/.exec(text);
+    if (flat !== null) return Number(flat[1].split(',')[4]);
+    var deep = /^matrix3d\(([^)]+)\)$/.exec(text);
+    if (deep !== null) return Number(deep[1].split(',')[12]);
+    return NaN;
+  }
+
+  /* transform 的 computed 值是**十进制字符串**，能保留几位由浏览器决定。
+   * 与其猜，不如量：写几个已知位移进去、读回来，差多少就是这条路的分辨率。
+   * 这个数直接决定"unclamped 那一列能用来判到几位" —— 属于必须一起交出去的信息。 */
+  function measureTransformResolution() {
+    var probes = [123.4567, 0.0001234, 802403.456789, 0.1];
+    var rows = [];
+    for (var i = 0; i < probes.length; i += 1) {
+      var el = document.createElement('div');
+      el.style.cssText = 'position:absolute;left:0;top:0;width:1px;height:1px;';
+      el.style.transform = 'translateX(' + probes[i] + 'px)';
+      document.body.appendChild(el);
+      var readBack = readTranslateX(getComputedStyle(el));
+      el.remove();
+      rows.push({ wrote_px: probes[i], read_back_px: readBack, delta_px: readBack - probes[i] });
+    }
+    return rows;
+  }
+
+  /* 在一条缓动、一条属性上取 POINTS 个点。同步取完就销毁元素 —— 16 条缓动各建两个，
+   * 留在文档里只会让后面的 getComputedStyle 多做无用功。 */
+  function sample(easing, keyframes, read) {
+    var el = document.createElement('div');
+    // 1x1 绝对定位：不进文档树的话 getComputedStyle 拿不到有效值。
+    el.style.cssText = 'position:absolute;left:0;top:0;width:1px;height:1px;';
+    document.body.appendChild(el);
+    var anim = el.animate(keyframes, { duration: DURATION_MS, easing: easing, fill: 'both' });
+    anim.pause();
+    var values = [];
+    for (var i = 0; i < POINTS; i += 1) {
+      anim.currentTime = (i / (POINTS - 1)) * DURATION_MS;
+      values.push(read(getComputedStyle(el)));
+    }
+    // 浏览器回报的缓动串：能走到这里说明它认了这个串。记下来是**证据**，不是判据。
+    var reported = anim.effect.getTiming().easing;
+    anim.cancel();
+    el.remove();
+    return { values: values, reported: reported };
+  }
+
+  /* 返回 { table, meta }：**分开是有原因的**。
+   * table 会被原样存成 target/easing-reference.json，而消费者是**按它的顶层键遍历**的 ——
+   * 顶层多一个"自己用的"键（ok / ua / t 之类），下游就会把它当成一条
+   * "浏览器认了、本仓不认"的缓动串，直接炸。所以说明一律进 meta。 */
+  function collect() {
+    var table = {};
+    for (var k = 0; k < CANDIDATES.length; k += 1) {
+      var easing = CANDIDATES[k];
+      try {
+        var opacity = sample(easing, [{ opacity: 0 }, { opacity: 1 }], readOpacity);
+        var moved = sample(
+          easing,
+          [{ transform: 'translateX(0px)' }, { transform: 'translateX(' + RANGE_PX + 'px)' }],
+          readTranslateX
+        );
+        table[easing] = {
+          values: opacity.values,
+          unclamped: moved.values.map(function (px) { return px / RANGE_PX; }),
+          reported_easing: opacity.reported
+        };
+      } catch (error) {
+        /* 浏览器不认这个串（Element.animate 抛 TypeError）。
+         * **如实记错，绝不补一个自己算的数** —— 伪造出来的"参考值"会一路污染下游的比对，
+         * 而它看起来与真值没有任何区别。 */
+        table[easing] = { error: String(error && error.message ? error.message : error) };
+      }
+    }
+
+    var t = [];
+    for (var i = 0; i < POINTS; i += 1) t.push(i / (POINTS - 1));
+
+    return {
+      table: table,
+      meta: {
+        what: '浏览器原生缓动的逐值参考（WAAPI + getComputedStyle）',
+        method: 'el.animate([{opacity:0},{opacity:1}], {duration:1000, easing:EASING, fill:"both"})；' +
+          'anim.pause()；anim.currentTime = t*1000；parseFloat(getComputedStyle(el).opacity)',
+        values_are: 'opacity 的 computed 值（按 CSS 规定夹到 [0,1]）—— 对应 apply(t).clamp(0,1)',
+        unclamped_how: '同一条缓动挂在 transform: translateX(0 -> ' + RANGE_PX + 'px) 上（transform 不夹），' +
+          '读回矩阵的平移分量再除以 ' + RANGE_PX + ' —— 对应 apply(t) 本身',
+        duration_ms: DURATION_MS,
+        // t 不进参考数据：消费者本来就是按 index/(n-1) 算的，存一份就是第二个说法。
+        t: t,
+        // 谁给的这份参考要记下来：同一个串在不同浏览器上可能不一样，
+        // 而"值对不上"的第一件事就是问"这是哪个浏览器量的"。
+        ua: navigator.userAgent,
+        /* 上面 unclamped 那条路的分辨率**是量出来的，不是假定的**。
+         * 换算：delta_px 除以 RANGE_PX 就是缓动值上的误差量级。 */
+        transform_read_back: {
+          note: 'computed 的 transform 是十进制字符串。wrote_px 写进去、read_back_px 读回来，' +
+            'delta_px 就是这条路能分辨到的最小量级（换算成缓动值再除以 ' + RANGE_PX + '）',
+          probes: measureTransformResolution()
+        }
+      }
+    };
+  }
+
+  var statusEl = document.getElementById('status');
+  var noteEl = document.getElementById('note');
+  var outEl = document.getElementById('out');
+  var metaEl = document.getElementById('metaout');
+
+  function showFailure(message) {
+    statusEl.textContent = '✗ 取样失败：' + message;
+    statusEl.className = 'bad';
+    outEl.textContent = '（没有结果可复制）';
+    metaEl.textContent = '（没有结果可复制）';
+    // 由驱动脚本跑时把失败也回传：否则那边只会静静地等到超时，
+    // 而"超时"与"页面报错"在终端上长得一模一样。
+    if (location.protocol !== 'file:') {
+      try {
+        fetch('easing-reference', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ ok: false, error: message })
+        }).catch(function () { /* 回传不了不影响页面自己把话说清楚 */ });
+      } catch (error) { /* 同上 */ }
+    }
+  }
+
+  var collected;
+  try {
+    collected = collect();
+  } catch (error) {
+    showFailure(String(error && error.message ? error.message : error));
+    return;
+  }
+
+  var tableText = JSON.stringify(collected.table, null, 2);
+  var metaText = JSON.stringify(collected.meta, null, 2);
+  window.__easingReference = collected.table;   // 就是 easing-reference.json 的内容
+  window.__easingMeta = collected.meta;         // 说明；不进参考数据
+  outEl.textContent = tableText;
+  metaEl.textContent = metaText;
+
+  var rejected = CANDIDATES.filter(function (easing) {
+    return collected.table[easing].error !== undefined;
+  });
+  if (rejected.length === 0) {
+    statusEl.textContent = '✓ ' + CANDIDATES.length + ' 条缓动全部取样完成（浏览器没有拒绝任何串）';
+  } else {
+    statusEl.textContent = '⚠ ' + CANDIDATES.length + ' 条里有 ' + rejected.length +
+      ' 条被浏览器拒绝（参考数据里如实记为 error）：' + rejected.join('、');
+    statusEl.className = 'bad';
+  }
+
+  document.getElementById('download').addEventListener('click', function () {
+    try {
+      var url = URL.createObjectURL(new Blob([tableText], { type: 'application/json' }));
+      var link = document.createElement('a');
+      link.href = url;
+      link.download = 'easing-reference.json';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      noteEl.textContent = '已触发下载；若被浏览器拦下，直接全选第一段文本复制也一样。';
+    } catch (error) {
+      noteEl.textContent = '下载不可用（' + error + '）—— 直接全选第一段文本复制。';
+    }
+  });
+
+  if (location.protocol === 'file:') {
+    // 手工打开时没有服务端可回传。这条路是**一等公民**：本脚本起不了浏览器时就靠它。
+    noteEl.textContent = '（file:// 打开：把第一段存成 target/easing-reference.json 即可）';
+  } else {
+    fetch('easing-reference', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ok: true, table: collected.table, meta: collected.meta })
+    }).then(function (response) {
+      noteEl.textContent = response.ok
+        ? '已回传给驱动脚本（scripts/easing-reference.mjs）'
+        : '回传失败：HTTP ' + response.status + '（那就手工复制第一段）';
+    }).catch(function (error) {
+      noteEl.textContent = '回传失败：' + error + '（那就手工复制第一段）';
+    });
+  }
+})();
+</script>
+</body>
+</html>

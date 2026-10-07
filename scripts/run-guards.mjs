@@ -109,6 +109,19 @@ export const GUARDS = [
   { script: 'check-linux-portability.mjs', args: [] },
   { script: 'check-sequential-decode.mjs', args: [] },
   { script: 'check-web-invariants.mjs', args: [] },
+  // 网页动画 → 工程文件的转译器（阶段 2）：只吃 fixtures 里的样本快照 + 纯数据判据，
+  // 不碰 GPU / ffmpeg / 浏览器，所以放前面。
+  { script: 'check-waapi2doc.mjs', args: [] },
+  // 网页那份求值（第二实现）与 core 的逐帧数值对照：它漂了必须红。
+  { script: 'check-anim-eval.mjs', args: [] },
+  // 两个宿主的形状对表（DOM 接口 ↔ 承诺过的 wasm 导出名）：只读两个文件，最轻。
+  { script: 'check-host-parity.mjs', args: [] },
+  // 能力登记表（web/capabilities.json）：supported 必须有原语与判据，DOM 用了的必须登记。
+  { script: 'check-capabilities.mjs', args: [] },
+  // DOM 侧的特效 → CSS 映射（口径 D5/D6），以及宿主有没有真的用上它。
+  { script: 'check-dom-css.mjs', args: [] },
+  // 「允许的差异」台账：未实测的不许写成数，每条都要被引用。
+  { script: 'check-dom-differences.mjs', args: [] },
   { script: 'check-backend-seam.mjs', args: [] },
   { script: 'check-defects.mjs', args: [] },
   { script: 'check-preview-parity.mjs', args: [] },

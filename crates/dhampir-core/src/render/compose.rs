@@ -30,6 +30,77 @@ struct LayerUniform {
     source_size: [f32; 2],
     opacity: f32,
     _padding: f32,
+    /// 圆角：[半径（源像素）, 抗锯齿斜坡宽度（源像素）, 备用, 备用]。
+    ///
+    /// **换算在这一处发生**：契约里的半径是**文档像素**，而着色器在源像素参照系里算。
+    /// 文档像素 → 目标像素（`pixel_scale`）与目标像素 → 源像素（`1/scale`）两步里
+    /// `pixel_scale` 正好约掉：输出尺寸变了，半径与 quad 一起按比例变，形状不变 ——
+    /// 这正是「同一个圆角在不同导出尺寸下长得一样」要的。
+    corner: [f32; 4],
+    /// 裁剪形状：(形状码, 中心 x, 中心 y, 圆的半径)，源像素。
+    clip_a: [f32; 4],
+    /// 裁剪形状：(半宽 或 rx, 半高 或 ry, 内缩矩形的圆角, 备用)，源像素。
+    clip_b: [f32; 4],
+    /// 掩码开关：(有没有掩码, 是否反相, 用亮度, 备用)。
+    mask_a: [f32; 4],
+    /// 染色：(r, g, b, 要不要染)。不染时走 `select` 的另一边，输出逐字节同旧。
+    tint: [f32; 4],
+}
+
+/// 一层要用的**掩码输入**：纹理视图 + 通道 + 是否反相。
+///
+/// "有没有掩码"由 `Option` 表达 —— 没有时调用方绑的是兜底白图，且 `mask_a.x = 0` 把它整个旁路掉。
+pub struct MaskInput<'a> {
+    pub view: &'a wgpu::TextureView,
+    pub channel: dhampir_timeline::layer::MaskChannel,
+    pub invert: bool,
+}
+
+/// 把裁剪形状换算成着色器要的两组参数（**源像素**）。
+///
+/// 换算与圆角同一条口径：长度都是**文档像素**，文档像素 → 源像素只差一个 `1/scale`
+/// （`pixel_scale` 正好约掉）。`center` 是**归一化比例**，`None` 取正中间 —— 尺寸是素材的
+/// 属性，所以比例到像素这一步只能在渲染器这一层做（也正因为如此，作者侧不必知道尺寸）。
+///
+/// 没有裁剪时给的是**安全占位值**（半径 1、半宽 1）而不是 0：着色器的 `select`
+/// **两支都会求值**，0 会让未选中的那一支算出 0/0。
+fn clip_params(
+    clip: Option<&dhampir_timeline::layer::ClipShape>,
+    source_size: (u32, u32),
+    scale: f32,
+) -> ([f32; 4], [f32; 4]) {
+    use dhampir_timeline::layer::ClipShape;
+    let half = (source_size.0 as f32 * 0.5, source_size.1 as f32 * 0.5);
+    let s = if scale.abs() > f32::EPSILON { scale } else { 1.0 };
+    // 归一化比例 → 源像素。`None` 与 `[0.5, 0.5]` 是同一条路。
+    let center_of = |center: &Option<[f32; 2]>| match center {
+        None => half,
+        Some([fx, fy]) => (half.0 * fx * 2.0, half.1 * fy * 2.0),
+    };
+    match clip {
+        None => ([0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 0.0]),
+        Some(ClipShape::Circle { radius, center }) => {
+            let (cx, cy) = center_of(center);
+            ([1.0, cx, cy, radius / s], [1.0, 1.0, 1.0, 0.0])
+        }
+        Some(ClipShape::Ellipse { radius_x, radius_y, center }) => {
+            let (cx, cy) = center_of(center);
+            ([2.0, cx, cy, 0.0], [radius_x / s, radius_y / s, 1.0, 0.0])
+        }
+        // 多边形**不走这里**：它先被栅格化成一张掩码纹理，由掩码那条通路参与运算
+        // （见 `render/polygon.rs` 与调用点的注释）。这里给"不裁"的占位值。
+        Some(ClipShape::Polygon { .. }) | Some(ClipShape::Path { .. }) => {
+            ([0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 0.0])
+        }
+        Some(ClipShape::Inset { top, right, bottom, left, radius }) => {
+            let (t, r, b, l) = (top / s, right / s, bottom / s, left / s);
+            let (cx, cy) = (half.0 + (l - r) * 0.5, half.1 + (t - b) * 0.5);
+            // 缩到没边时兜一个正下界：负半宽会让 SDF 整个翻过来，那不是"裁到空"。
+            let (hx, hy) = ((half.0 - (l + r) * 0.5).max(1e-3), (half.1 - (t + b) * 0.5).max(1e-3));
+            let inset_radius = radius / s;
+            ([3.0, cx, cy, 0.0], [hx, hy, inset_radius, 0.0])
+        }
+    }
 }
 
 /// 渲染空间：**文档坐标系**与**实际目标尺寸**是两件事。
@@ -101,6 +172,17 @@ pub struct LayerDraw<'a> {
     pub opacity: f32,
     /// 这一层怎么与下面合。**必须是已实现的模式** —— 调用方负责预筛，见 `compose`。
     pub blend: dhampir_timeline::layer::BlendMode,
+    /// 圆角半径（文档像素）。
+    pub corner_radius: f32,
+    /// 裁剪形状（`None` = 不裁）。**在着色器里与圆角同时生效**（两个覆盖度相乘）。
+    pub clip: Option<dhampir_timeline::layer::ClipShape>,
+    /// 掩码输入（`None` = 不掩）。**已解析成纹理的那一份** —— 工程里的素材 id → 纹理
+    /// 是调用方的事（worker 的素材解析）。
+    pub mask: Option<MaskInput<'a>>,
+    /// 染色：`Some((r, g, b))` 时把这一张的 rgb 换成它（形状不动）。投影那张用它。
+    pub tint: Option<[f32; 3]>,
+    /// **额外的文档像素偏移**（加在 transform 之上）。投影那张用它把自己挪开。
+    pub extra_offset: (f32, f32),
 }
 
 /// 把混合模式映射成**固定的混合方程**。
@@ -210,6 +292,14 @@ pub struct Compositor {
     /// 所以没法在 draw 之间改，只能按模式各建一条、画的时候切。
     pipelines: Vec<(dhampir_timeline::layer::BlendMode, wgpu::RenderPipeline)>,
     bind_group_layout: wgpu::BindGroupLayout,
+    /// 没有掩码的层绑的**兜底掩码图**（1×1）。
+    ///
+    /// 为什么要兜底而不是"不绑"：bind group 布局是固定的三项，画的时候不必为
+    /// "有没有掩码"分叉 —— 而 `mask_a.x = 0` 会把掩码整个旁路掉，所以那张图
+    /// 一个像素都不会参与运算（乘的是精确的 1.0），内容是什么也无所谓。
+    mask_fallback: wgpu::TextureView,
+    /// 兜底白图的**本体**：视图不能比纹理活得久，所以两个都要留着。
+    _mask_fallback_texture: wgpu::Texture,
 }
 
 impl Compositor {
@@ -242,6 +332,17 @@ impl Compositor {
                     },
                     count: None,
                 },
+                // 掩码纹理（没有掩码时绑兜底白图 —— 布局总是三项，管线不必分叉）。
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -256,7 +357,10 @@ impl Compositor {
         let mut pipelines = Vec::new();
         for mode in dhampir_timeline::layer::BlendMode::ALL
             .into_iter()
-            .filter(|mode| mode.is_implemented())
+            // **只对固定方程的模式建管线**：`blend_state` 对另外 5 条返回 `None`，
+            // 而 `None` 在 wgpu 里是"不混合"（= 直接覆盖目标）—— 那不是"做不到"，
+            // 而是**画错**。所以这里的谓词必须是 `uses_fixed_equation`，不是 `is_implemented`。
+            .filter(|mode| mode.uses_fixed_equation())
         {
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("dhampir compose pipeline"),
@@ -295,7 +399,29 @@ impl Compositor {
         pipelines.push((mode, pipeline));
         }
 
-        Self { pipelines, bind_group_layout }
+        // 兜底掩码图：1×1。**内容无所谓** —— `mask_a.x = 0` 会把掩码整个旁路掉，
+        // 它存在的意义只是让 bind group 布局始终合法（画的时候不分叉）。
+        let mask_fallback_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("dhampir compose mask fallback"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let mask_fallback = mask_fallback_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Self {
+            pipelines,
+            bind_group_layout,
+            mask_fallback,
+            _mask_fallback_texture: mask_fallback_texture,
+        }
     }
 
     /// 把 layers **按给定顺序**（从下往上）叠进 target。
@@ -303,7 +429,8 @@ impl Compositor {
     /// 整个列表只用一次 render pass：清屏一次、之后每层叠加。
     /// 每层一个 pass 会让 load 语义有机会出错，也慢。
     #[allow(clippy::too_many_arguments)]
-    /// 这个模式的 pipeline。`None` = 未实现 —— 不该走到渲染。
+    /// 这个模式的 pipeline。`None` = **不能一趟直写**（要读回型回路，或还没实现）——
+    /// 不该走到这个合成器。调用方（`compose`）会据此**拒绝整帧**，而不是画错。
     fn pipeline_for(
         &self,
         mode: dhampir_timeline::layer::BlendMode,
@@ -343,6 +470,7 @@ impl Compositor {
             return;
         }
 
+
         // **每层一块 uniform**，而不是共用一块、边画边写。
         //
         // 共用一块是错的，而且错得很安静：queue.write_buffer 写的是「提交时那一块内存」，
@@ -357,16 +485,51 @@ impl Compositor {
             // **像素量按文档坐标系度量，这里换算成目标像素。**
             // 相同尺寸时 offset 与 transform.x/y 逐位相等，所以那条路逐字节不变。
             let mut documented = layer.transform;
+            // 额外偏移也是**文档像素**，所以与 transform 走同一次换算。
+            let (pixel_x, pixel_y) = space.pixel_scale();
             let (offset_x, offset_y) = space.offset(layer.transform);
-            documented.x = offset_x;
-            documented.y = offset_y;
+            documented.x = offset_x + layer.extra_offset.0 * pixel_x;
+            documented.y = offset_y + layer.extra_offset.1 * pixel_y;
             let (row0, row1) = inverse_affine(documented, layer.source_size, space.target);
+            let clip = clip_params(layer.clip.as_ref(), layer.source_size, layer.transform.scale);
             let uniform = LayerUniform {
                 inv_row0: row0,
                 inv_row1: row1,
                 source_size: [layer.source_size.0 as f32, layer.source_size.1 as f32],
                 opacity: layer.opacity,
                 _padding: 0.0,
+                corner: {
+                    // 半径与斜坡都在源像素参照系里算（见 LayerUniform::corner 的注释）。
+                    let scale = layer.transform.scale.abs();
+                    let (pixel_x, _) = space.pixel_scale();
+                    if layer.corner_radius > 0.0 && scale > f32::EPSILON {
+                        // 斜坡取「目标像素里约 1 像素」换算回源像素；**兜一个正下界**，
+                        // 否则着色器里的除法会得到 NaN —— 而 NaN 乘 0 仍是 NaN，
+                        // 「半径 0 时逐字节不变」就会被它毁掉。
+                        [layer.corner_radius / scale, (1.0 / (scale * pixel_x)).max(1e-3), 0.0, 0.0]
+                    } else {
+                        [0.0, 1.0, 0.0, 0.0]
+                    }
+                },
+                clip_a: clip.0,
+                clip_b: clip.1,
+                tint: match layer.tint {
+                    None => [0.0, 0.0, 0.0, 0.0],
+                    Some([r, g, b]) => [r, g, b, 1.0],
+                },
+                mask_a: match &layer.mask {
+                    None => [0.0, 0.0, 0.0, 0.0],
+                    Some(mask) => [
+                        1.0,
+                        if mask.invert { 1.0 } else { 0.0 },
+                        if mask.channel == dhampir_timeline::layer::MaskChannel::Luminance {
+                            1.0
+                        } else {
+                            0.0
+                        },
+                        0.0,
+                    ],
+                },
             };
             let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("dhampir compose layer uniform"),
@@ -386,6 +549,15 @@ impl Compositor {
                     wgpu::BindGroupEntry {
                         binding: 1,
                         resource: buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(
+                            match &layer.mask {
+                                Some(mask) => mask.view,
+                                None => &self.mask_fallback,
+                            },
+                        ),
                     },
                 ],
             }));
@@ -520,7 +692,7 @@ mod tests {
     }
 
     #[test]
-    fn 方程的有无必须与_is_implemented_完全一致() {
+    fn 方程的有无必须与_uses_fixed_equation_完全一致() {
         use dhampir_timeline::layer::BlendMode;
         // 这条是本步最重要的一致性约束：「能做」有两个出处
         // （契约层的谓词、渲染器的方程表），它们一旦对不上，
@@ -528,8 +700,8 @@ mod tests {
         for mode in BlendMode::ALL {
             assert_eq!(
                 blend_state(mode).is_some(),
-                mode.is_implemented(),
-                "方程有无与 is_implemented() 不一致"
+                mode.uses_fixed_equation(),
+                "方程有无与 uses_fixed_equation() 不一致"
             );
         }
     }

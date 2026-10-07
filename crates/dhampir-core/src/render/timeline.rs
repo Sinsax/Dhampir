@@ -24,7 +24,7 @@ use crate::render::blur::BlurRenderer;
 use crate::render::color_adjust::ColorAdjustRenderer;
 use crate::render::color_mask::ColorMaskRenderer;
 use crate::render::warp::WarpRenderer;
-use crate::render::compose::{Compositor, LayerDraw};
+use crate::render::compose::{Compositor, LayerDraw, MaskInput};
 use crate::wgpu;
 
 /// 源纹理的提供者。宿主实现它——浏览器那边是 video 元素，native 那边是解码器或文件。
@@ -40,6 +40,204 @@ pub trait SourceResolver {
         source: &str,
         source_frame: i64,
     ) -> Option<(wgpu::TextureView, (u32, u32))>;
+
+    /// 掩码素材 → **一张静态图**的纹理与尺寸。给不出来返回 `None`。
+    ///
+    /// # 为什么是带默认实现的方法
+    ///
+    /// 掩码是**后加**的通路：宿主可以一条条接（native 先接文件，浏览器接 `<img>` / `ImageBitmap`），
+    /// 没接的宿主走默认实现返回 `None` —— 而**调用方据此拒绝整帧**，
+    /// 不是悄悄画成"没有掩码"的样子。默认返回 `None` 让"还没接"这件事有一个
+    /// **明确**的落点，而不是一条静默的岔路（D12 的第 3.5 步）。
+    ///
+    /// 为什么复用 `texture_for` 而不另开一条解码路：掩码就是一张静态图，取第 0 帧即可。
+    /// 另写一份"素材怎么变成纹理"迟早会与源那条分叉 ——
+    /// `AssetTimebases` 的注释里已经记过一次同类教训（两个入口登记的东西不一致）。
+    fn mask_texture_for(&mut self, _source: &str) -> Option<(wgpu::TextureView, (u32, u32))> {
+        None
+    }
+}
+
+/// 把这一层的**投影**推到 `prepared` 里（在它自己**之前** —— 阴影要画在下面）。
+///
+/// # 口径
+///
+/// - 模糊半径按 D5 换算：`radius = 2σ`，并夹到 [`crate::render::BLUR_MAX_RADIUS`]；
+/// - **模糊的是源纹理**（与这一层自己的 `gaussian_blur` 同一条路）。这意味着
+///   "先染色后模糊"这类顺序差异在这一版里不区分 —— 逐像素特效在合成器那一趟才跑，
+///   而阴影在这一趟就要成形。这条限制写在 criteria 的 D13 里；
+/// - 形状（掩码 / 裁剪）跟着本层走：阴影是"这一层的样子"的影子，不该比它多一块。
+/// - 颜色 v1 固定黑（契约里没有颜色字段，这里也就没有别的可能）。
+#[allow(clippy::too_many_arguments)]
+fn push_shadow_before<'a>(
+    prepared: &mut Vec<PreparedDraw<'a>>,
+    keep_alive: &mut Vec<wgpu::Texture>,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    renderer: &TimelineRenderer,
+    layer: &'a crate::compose::Layer,
+    view: &wgpu::TextureView,
+    size: (u32, u32),
+    mask: &Option<PreparedMask>,
+) {
+    let Some(shadow) = &layer.shadow else {
+        return;
+    };
+    // σ → 核半径（D5：半径 = 2σ），再夹到着色器展开得了的上界。
+    let radius = ((shadow.blur_sigma * 2.0).round() as i64)
+        .clamp(0, crate::render::BLUR_MAX_RADIUS as i64) as u32;
+    // **留白宽度 = 模糊半径**：模糊把轮廓摊开多少，就需要多少留白。
+    let pad = radius;
+    let padded = (size.0.max(1) + pad * 2, size.1.max(1) + pad * 2);
+    let shadow_view = if radius == 0 {
+        view.clone()
+    } else {
+        // ---- 第 1 步：把**轮廓**（含形状）画进一张带留白的纹理 ----
+        //
+        // 为什么必须这样：直接模糊源纹理只会「向内」软化 —— 源纹理到边界都是不透明的，
+        // 而**模糊一个常量还是那个常量**。留白之后轮廓外才有衰减的空间，阴影才向外扩散。
+        let silhouette = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("dhampir shadow silhouette"),
+            size: wgpu::Extent3d {
+                width: padded.0,
+                height: padded.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: renderer.format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let silhouette_view = silhouette.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dhampir shadow silhouette encoder"),
+        });
+        // 目标尺寸 = 留白后的尺寸，而图层自己**不带变换**（恒等）——
+        // 于是源纹理正好落在中间那一块，四周留透明的 pad。
+        // 形状（圆角 / 裁剪 / 掩码）**烘进轮廓**里：阴影的形状就是这一层的样子。
+        let mask_input = mask.as_ref().map(|prepared_mask| MaskInput {
+            view: &prepared_mask.view,
+            channel: prepared_mask.channel,
+            invert: prepared_mask.invert,
+        });
+        renderer.compositor.compose(
+            device,
+            queue,
+            &mut encoder,
+            &silhouette_view,
+            crate::render::RenderSpace::square(padded),
+            &[LayerDraw {
+                view,
+                source_size: size,
+                transform: dhampir_timeline::schema::Transform {
+                    x: 0.0,
+                    y: 0.0,
+                    scale: 1.0,
+                    rotation_deg: 0.0,
+                },
+                opacity: 1.0,
+                blend: dhampir_timeline::layer::BlendMode::Normal,
+                corner_radius: layer.corner_radius,
+                clip: layer.clip.clone(),
+                mask: mask_input,
+                tint: None,
+                extra_offset: (0.0, 0.0),
+            }],
+            Some(wgpu::Color::TRANSPARENT),
+        );
+        queue.submit([encoder.finish()]);
+        keep_alive.push(silhouette);
+
+        // ---- 第 2 步：模糊这张带留白的轮廓 ----
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("dhampir shadow blur target"),
+            size: wgpu::Extent3d {
+                width: padded.0,
+                height: padded.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: renderer.format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let intermediate = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("dhampir shadow blur intermediate"),
+            size: wgpu::Extent3d {
+                width: padded.0,
+                height: padded.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: renderer.format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let intermediate_view =
+            intermediate.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dhampir shadow blur encoder"),
+        });
+        renderer.blur.blur_separable(
+            device,
+            queue,
+            &mut encoder,
+            &silhouette_view,
+            &intermediate_view,
+            &target_view,
+            padded,
+            radius,
+        );
+        queue.submit([encoder.finish()]);
+        // 三张纹理都要活到最后一次绘制之后 —— 挂进调用方的 keep_alive。
+        keep_alive.push(target);
+        keep_alive.push(intermediate);
+        target_view
+    };
+    prepared.push(PreparedDraw {
+        layer,
+        view: shadow_view,
+        // 留白尺寸：这样目标上的阴影比本层大一圈，扩散才有地方落。
+        size: padded,
+        // 形状**已经烘进轮廓**了，这里不再重复应用（否则扩散出去那一圈会被再裁一次）。
+        mask: None,
+        tint: Some([0.0, 0.0, 0.0]),
+        extra_offset: (shadow.offset_x, shadow.offset_y),
+        opacity_scale: shadow.opacity,
+    });
+}
+
+/// 已经准备好的掩码：**视图的拥有权在调用方**（`prepared` 里活着，视图不悬空）。
+#[derive(Clone)]
+struct PreparedMask {
+    view: wgpu::TextureView,
+    channel: dhampir_timeline::layer::MaskChannel,
+    invert: bool,
+}
+
+/// 已经准备好的一次绘制。**投影会让同一层产生两次**（先投影、再本层），所以
+/// "一层一张"这个假设在这里必须打破 —— 用结构体而不是元组，多出来的那两张才有名字。
+struct PreparedDraw<'a> {
+    layer: &'a crate::compose::Layer,
+    view: wgpu::TextureView,
+    size: (u32, u32),
+    mask: Option<PreparedMask>,
+    /// 染色（投影那张用它把 rgb 换成阴影色）。
+    tint: Option<[f32; 3]>,
+    /// 额外的**文档像素**偏移（投影那张用它把自己挪开）。
+    extra_offset: (f32, f32),
+    /// 这一张的额外不透明度倍数（投影那张乘阴影自己的 `opacity`；本层是 1.0）。
+    opacity_scale: f32,
 }
 
 /// 图层要用的模糊半径。0 表示这层不需要模糊。
@@ -175,6 +373,12 @@ pub fn color_params(effects: &[Effect]) -> crate::render::ColorAdjustParams {
                     out.brightness += v;
                 }
             }
+            // 乘性亮度（CSS `brightness()`）：乘法**可交换**，与加性那条一样。
+            "brightness_multiply" => {
+                if let Some(v) = param("factor") {
+                    out.scale *= v;
+                }
+            }
             "contrast" => {
                 if let Some(v) = param("amount") {
                     out.contrast *= v;
@@ -190,6 +394,18 @@ pub fn color_params(effects: &[Effect]) -> crate::render::ColorAdjustParams {
                     // **度转弧度只在这一处发生。**
                     // 着色器收的是弧度；两边各转一遍会让 90 度变成 90 弧度再转一次。
                     out.hue += v.to_radians();
+                }
+            }
+            // CSS/SVG 规范矩阵那条：度转弧度同样只在**这一处**发生。
+            "hue_rotate_css" => {
+                if let Some(v) = param("degrees") {
+                    out.hue_css += v.to_radians();
+                }
+            }
+            // CSS/SVG 规范权重那条饱和度（乘法，可交换）。
+            "saturation_css" => {
+                if let Some(v) = param("amount") {
+                    out.saturation_css *= v;
                 }
             }
             // 走了 ColorAdjust 管线却不在这里 -> 登记表加了新特效但忘了接上。
@@ -521,6 +737,8 @@ pub struct TimelineRenderer {
     color_adjust: ColorAdjustRenderer,
     color_mask: ColorMaskRenderer,
     warp: WarpRenderer,
+    /// 读回型混合（`f(src, dst)`，D13）。
+    blend_fn: crate::render::BlendFnRenderer,
     format: wgpu::TextureFormat,
 }
 
@@ -568,6 +786,7 @@ impl SourceResolver for PairSource<'_> {
 /// 一次「原样搬运」用的图层：没有变换、完全不透明。
 fn identity_layer() -> crate::compose::Layer {
     crate::compose::Layer {
+        backdrop_effects: Vec::new(),
         clip_id: String::new(),
         source: String::new(),
         source_frame: 0,
@@ -576,6 +795,10 @@ fn identity_layer() -> crate::compose::Layer {
         effects: Vec::new(),
         frozen_for_transition: false,
         blend: dhampir_timeline::layer::BlendMode::Normal,
+        corner_radius: 0.0,
+        clip: None,
+        mask: None,
+        shadow: None,
         is_adjustment: false,
     }
 }
@@ -588,6 +811,7 @@ impl TimelineRenderer {
             color_adjust: ColorAdjustRenderer::new(device, format),
             color_mask: ColorMaskRenderer::new(device, format),
             warp: WarpRenderer::new(device, format),
+            blend_fn: crate::render::BlendFnRenderer::new(device, format),
             format,
         }
     }
@@ -669,7 +893,9 @@ impl TimelineRenderer {
         // **先看分段计划。** 没有调整图层就走原来那条单 pass 路（行为逐字节不变）；
         // 有的话要「先合成一段 -> 对结果跑特效 -> 再继续」，那需要中间纹理。
         let plan = plan_steps(&composite.layers);
-        if !plan.iter().any(|step| matches!(step, Step::Adjust { .. })) {
+        // **有任何非 `Draw` 步就走分段**：调整图层要"对已经画好的结果"跑特效，
+        // 读回型混合要"读已经画好的底" —— 两者都需要中间纹理，走同一条路。
+        if !plan.iter().any(|step| !matches!(step, Step::Draw(_))) {
             return self.compose_layers(
                 device,
                 queue,
@@ -767,6 +993,163 @@ impl TimelineRenderer {
                         if fresh { Some(clear) } else { None },
                     );
                     current = Some(dest);
+                }
+
+                Step::Backdrop { layer, effects } => {
+                    let Some(base) = current else {
+                        continue;
+                    };
+                    let target = space.target;
+                    let layer_ref = &composite.layers[*layer];
+                    // ① 对**累积结果**跑背景特效（与调整图层同一套分级管线）。
+                    let mut cursor = base;
+                    for (stage, indices) in effect_passes(effects) {
+                        let batch: Vec<Effect> = indices
+                            .iter()
+                            .filter_map(|index| effects.get(*index).cloned())
+                            .collect();
+                        let Some(next) = self.apply_stage(
+                            stage, &batch, cursor, extent, space, composite.frame, seconds,
+                            device, queue, encoder, &mut textures, &mut views,
+                        ) else {
+                            continue;
+                        };
+                        cursor = next;
+                    }
+                    if cursor == base {
+                        continue;
+                    }
+                    // ② 这一层在**目标空间**里的矩形 → 覆盖度掩码。
+                    //
+                    // 半宽要用**源尺寸 × scale**：只拿 transform 是拼不出四角的。
+                    // 解析一次源尺寸（宿主那边是缓存命中，因为它马上就要被画一次）。
+                    let Some((_probe, source_size)) =
+                        resolver.texture_for(&layer_ref.source, layer_ref.source_frame)
+                    else {
+                        continue;
+                    };
+                    let (offset_x, offset_y) = space.offset(layer_ref.transform);
+                    let center = (
+                        target.0 as f32 / 2.0 + offset_x,
+                        target.1 as f32 / 2.0 + offset_y,
+                    );
+                    let scale = layer_ref.transform.scale.abs();
+                    let half = (
+                        source_size.0 as f32 * scale / 2.0,
+                        source_size.1 as f32 * scale / 2.0,
+                    );
+                    let angle = layer_ref.transform.rotation_deg.to_radians();
+                    let (sin, cos) = (angle.sin(), angle.cos());
+                    let corner = |dx: f32, dy: f32| {
+                        [
+                            (center.0 + (dx * cos - dy * sin)) / target.0 as f32,
+                            (center.1 + (dx * sin + dy * cos)) / target.1 as f32,
+                        ]
+                    };
+                    let corners = vec![
+                        corner(-half.0, -half.1),
+                        corner(half.0, -half.1),
+                        corner(half.0, half.1),
+                        corner(-half.0, half.1),
+                    ];
+                    let coverage = crate::render::rasterize_polygon_coverage(
+                        &corners, target.0.max(1), target.1.max(1),
+                    );
+                    let (mask_texture, mask_view) =
+                        crate::render::coverage_texture(device, queue, target, &coverage, self.format);
+                    textures.push(mask_texture);
+                    // ③ 先搬一份底，再把滤波结果**1:1**乘上掩码叠上去。
+                    let filtered_view = views[cursor].clone();
+                    let out = alloc_texture(
+                        device, self.format, extent, "dhampir backdrop out", &mut textures, &mut views,
+                    );
+                    let out_view = views[out].clone();
+                    let base_view = views[base].clone();
+                    let mut fixed_base = FixedSource { view: &base_view, size: target };
+                    self.compose_layers(
+                        device, queue, encoder, &out_view, space, &[identity_layer()], &mut fixed_base,
+                        Some(wgpu::Color::TRANSPARENT),
+                    );
+                    // 这一趟的解析器：源 → 滤波结果；掩码 → 刚栅格化出来的覆盖度。
+                    struct BackdropSources<'a> {
+                        filtered: &'a wgpu::TextureView,
+                        mask: &'a wgpu::TextureView,
+                        size: (u32, u32),
+                    }
+                    impl SourceResolver for BackdropSources<'_> {
+                        fn texture_for(
+                            &mut self,
+                            _source: &str,
+                            _frame: i64,
+                        ) -> Option<(wgpu::TextureView, (u32, u32))> {
+                            Some((self.filtered.clone(), self.size))
+                        }
+                        fn mask_texture_for(
+                            &mut self,
+                            _source: &str,
+                        ) -> Option<(wgpu::TextureView, (u32, u32))> {
+                            Some((self.mask.clone(), self.size))
+                        }
+                    }
+                    let mut rect = identity_layer();
+                    // **1:1**：不套这一层的 transform（那会再缩放一次）。
+                    rect.transform = dhampir_timeline::schema::Transform {
+                        x: 0.0,
+                        y: 0.0,
+                        scale: 1.0,
+                        rotation_deg: 0.0,
+                    };
+                    rect.mask = Some(dhampir_timeline::layer::MaskSpec {
+                        gradient: None,
+                        asset_id: "backdrop-mask".to_string(),
+                        channel: dhampir_timeline::layer::MaskChannel::Alpha,
+                        invert: false,
+                    });
+                    rect.opacity = 1.0;
+                    let mut backdrop_sources = BackdropSources {
+                        filtered: &filtered_view,
+                        mask: &mask_view,
+                        size: target,
+                    };
+                    self.compose_layers(
+                        device, queue, encoder, &out_view, space, &[rect],
+                        &mut backdrop_sources, None,
+                    );
+                    current = Some(out);
+                }
+
+                Step::BlendFn { layer, mode } => {
+                    // **D13 的读回回路**：底在 `current` 那张纹理里，先不要动它。
+                    let Some(base) = current else {
+                        // 前面什么都没有：退化成一趟普通合成（`f(src, 透明)` = src 本身）。
+                        continue;
+                    };
+                    let mut readback = composite.layers[*layer].clone();
+                    // **单独渲这一层时它必须是 `Normal`**：混合由下面那一趟 blend-fn 做。
+                    // 留着 `Darken` 的话合成器会按规矩拒绝（"未实现的模式漏到渲染层"）——
+                    // 那条拒绝是对的，是这里没把"两趟各自的职责"分开。
+                    readback.blend = dhampir_timeline::layer::BlendMode::Normal;
+                    // ① 把这一层**单独**渲到一张新纹理（它自己的 opacity / 掩码 / 裁剪都在里面）。
+                    let fg = alloc_texture(
+                        device, self.format, extent, "dhampir blendfn layer", &mut textures, &mut views,
+                    );
+                    let fg_view = views[fg].clone();
+                    let layer_only = [readback];
+                    drawn += self.compose_layers(
+                        device, queue, encoder, &fg_view, space, &layer_only, resolver,
+                        Some(wgpu::Color::TRANSPARENT),
+                    );
+                    // ② `f(src, dst)` 写进又一张，`current` 换成它。
+                    //    （不能写回 base：这一趟要读它。）
+                    let out = alloc_texture(
+                        device, self.format, extent, "dhampir blendfn out", &mut textures, &mut views,
+                    );
+                    let out_view = views[out].clone();
+                    let base_view = views[base].clone();
+                    self.blend_fn.render(
+                        device, queue, encoder, &base_view, &fg_view, *mode, &out_view,
+                    );
+                    current = Some(out);
                 }
                 Step::Adjust { effects, opacity, .. } => {
                     let Some(from) = current else { continue };
@@ -998,12 +1381,118 @@ impl TimelineRenderer {
         // 结果是 **B 层的纹理配上 A 层的变换**。画面会错，但不崩、也不报错。
         // 配成对之后，错位在类型上就不可能发生。
         #[allow(clippy::type_complexity)]
-        let mut prepared: Vec<(&crate::compose::Layer, wgpu::TextureView, (u32, u32))> =
-            Vec::new();
+        let mut prepared: Vec<PreparedDraw<'_>> = Vec::new();
 
         for layer in layers {
             let Some((view, size)) = resolver.texture_for(&layer.source, layer.source_frame) else {
                 continue;
+            };
+            // 掩码：**这一层确定要画**之后再解析它（被跳过的层不该为掩码买单）。
+            //
+            // 解析不出来就**拒绝整帧**，而不是让这一层画成"没有掩码"的样子 ——
+            // 后者是静默降级里最难发现的一种：画面看着正常，只是少了遮罩。
+            // 多边形裁剪：**栅格化成一张掩码纹理**，走已经验过的掩码通路（着色器一行都不用改）。
+            //
+            // 口径：多边形是**图层框内的归一化坐标**，纹理按**源尺寸**建 —— 于是
+            // 归一化坐标 → 纹素只差一次乘法；而栅格化器在 core 里，两个宿主共用同一份。
+            // 多边形与路径都**栅格化成掩码纹理**（`path` 先细分成折线，再按**图层框的文档像素**
+            // 归一化 —— 因为路径坐标是文档像素，而栅格化器吃的是图层框内的归一化坐标）。
+            let polygon_mask = match &layer.clip {
+                Some(dhampir_timeline::layer::ClipShape::Polygon { points }) => {
+                    Some(points.clone())
+                }
+                Some(dhampir_timeline::layer::ClipShape::Path { data }) => {
+                    match crate::render::flatten_path(data) {
+                        Ok(flat) => {
+                            let scale = layer.transform.scale.abs().max(1e-6);
+                            let box_size = (size.0 as f32 * scale, size.1 as f32 * scale);
+                            Some(
+                                flat.into_iter()
+                                    .map(|point| [point[0] / box_size.0, point[1] / box_size.1])
+                                    .collect::<Vec<[f32; 2]>>(),
+                            )
+                        }
+                        Err(reason) => {
+                            // 校验层会先报（`clip_path_unparsable`）；这里 fail-closed。
+                            debug_assert!(false, "路径裁剪解析不了：{reason}");
+                            return 0;
+                        }
+                    }
+                }
+                _ => None,
+            };
+            let polygon_mask = match polygon_mask {
+                Some(points) => {
+                    let coverage = crate::render::rasterize_polygon_coverage(
+                        &points,
+                        size.0.max(1),
+                        size.1.max(1),
+                    );
+                    let (texture, view) =
+                        crate::render::coverage_texture(device, queue, size, &coverage, self.format);
+                    keep_alive.push(texture);
+                    Some(view)
+                }
+                None => None,
+            };
+            // 两个都给了就是校验该拦下的情况：这里**拒绝整帧**，不替作者挑一个。
+            if polygon_mask.is_some() && layer.mask.is_some() {
+                debug_assert!(false, "多边形裁剪与掩码同时出现 —— 校验层本该拦住");
+                return 0;
+            }
+            let mask = match polygon_mask {
+                Some(view) => Some(PreparedMask {
+                    view,
+                    channel: dhampir_timeline::layer::MaskChannel::Alpha,
+                    invert: false,
+                }),
+                None => match &layer.mask {
+                    None => None,
+                    Some(mask) => match &mask.gradient {
+                        // **程序化渐变**（第 47 轮）：在**这一层自己的尺寸**上栅格化。
+                        //
+                        // 为什么不是目标尺寸：掩码是按**图层局部坐标**采样的（D12），
+                        // 而 CSS 的渐变轴长规矩（`|w·sinθ| + |h·cosθ|`）是相对**元素自己的盒子**算的 ——
+                        // 拿目标尺寸去算，非等比缩放的层上角度会变形（而且只在那种层上看得出来）。
+                        Some(gradient) => {
+                            let stops: Vec<(f32, f32)> = gradient
+                                .stops
+                                .iter()
+                                .map(|stop| (stop.at, stop.coverage))
+                                .collect();
+                            let coverage = crate::render::rasterize_linear_gradient(
+                                gradient.angle_deg,
+                                &stops,
+                                size.0,
+                                size.1,
+                            );
+                            let (texture, view) = crate::render::coverage_texture(
+                                device,
+                                queue,
+                                size,
+                                &coverage,
+                                self.format,
+                            );
+                            keep_alive.push(texture);
+                            Some(PreparedMask {
+                                view,
+                                channel: mask.channel,
+                                invert: mask.invert,
+                            })
+                        }
+                        None => match resolver.mask_texture_for(&mask.asset_id) {
+                            Some((view, _mask_size)) => Some(PreparedMask {
+                                view,
+                                channel: mask.channel,
+                                invert: mask.invert,
+                            }),
+                            None => {
+                                debug_assert!(false, "掩码素材解析不出来：{}", mask.asset_id);
+                                return 0;
+                            }
+                        },
+                    },
+                },
             };
             // **实拍片段：显式声明 Source。**
             // 模糊跑在**源**纹理上（下面两张纹理都是 size = 源尺寸），
@@ -1018,7 +1507,16 @@ impl TimelineRenderer {
                 space,
             );
             if radius == 0 {
-                prepared.push((layer, view, size));
+                push_shadow_before(&mut prepared, &mut keep_alive, device, queue, self, layer, &view, size, &mask);
+                prepared.push(PreparedDraw {
+                    layer,
+                    view,
+                    size,
+                    mask,
+                    tint: None,
+                    extra_offset: (0.0, 0.0),
+                    opacity_scale: 1.0,
+                });
                 continue;
             }
             let blurred = device.create_texture(&wgpu::TextureDescriptor {
@@ -1066,18 +1564,40 @@ impl TimelineRenderer {
             );
             keep_alive.push(blurred);
             keep_alive.push(intermediate);
-            prepared.push((layer, blurred_view, size));
+            push_shadow_before(&mut prepared, &mut keep_alive, device, queue, self, layer, &view, size, &mask);
+            prepared.push(PreparedDraw {
+                layer,
+                view: blurred_view,
+                size,
+                mask,
+                tint: None,
+                extra_offset: (0.0, 0.0),
+                opacity_scale: 1.0,
+            });
         }
 
         // 不再 zip 两个序列 —— 直接从成对的 prepared 来，错位不可能发生。
         let draws: Vec<LayerDraw<'_>> = prepared
             .iter()
-            .map(|(layer, view, size)| LayerDraw {
+            .map(|prepared| {
+                let PreparedDraw { layer, view, size, mask, tint, extra_offset, opacity_scale } = prepared;
+                LayerDraw {
                 view,
                 source_size: *size,
                 transform: layer.transform,
-                opacity: layer.opacity,
+                opacity: layer.opacity * opacity_scale,
                 blend: layer.blend,
+                corner_radius: layer.corner_radius,
+                clip: layer.clip.clone(),
+                tint: *tint,
+                extra_offset: *extra_offset,
+                // 掩码：可能来自掩码素材，也可能来自**多边形栅格化**（上面准备好的那份）。
+                    mask: mask.as_ref().map(|prepared_mask| MaskInput {
+                        view: &prepared_mask.view,
+                        channel: prepared_mask.channel,
+                        invert: prepared_mask.invert,
+                    }),
+                }
             })
             .collect();
 
@@ -1383,6 +1903,34 @@ mod tests {
 pub enum Step {
     /// 把这几层依次画到当前底上（下标指向原清单）。
     Draw(Vec<usize>),
+    /// **背景滤镜**：对**已经画好的底**跑这一层的 `backdrop_effects`，
+    /// 结果只落在**这一层的矩形**里（CSS 的 `backdrop-filter` 就是"元素范围内"）。
+    ///
+    /// # 上一轮在这里栽过（记着它）
+    ///
+    /// 滤波结果在**目标分辨率**，而这一层的四边形是**缩放过的**。
+    /// 拿这一层的 `transform` 去贴结果 ⇒ 结果会被**再缩放一次**（第 35 轮实测：
+    /// 0.5 倍层把结果压成 2:1，蓝色只漏进来 6/255）。
+    /// 正确的做法：**1:1 贴**，用"这一层矩形的覆盖度掩码"把它裁出来。
+    Backdrop {
+        /// 这一层在 `composite.layers` 里的下标（它的 transform 就是"那块"）。
+        layer: usize,
+        /// 背景滤镜的清单。
+        effects: Vec<dhampir_timeline::schema::Effect>,
+    },
+
+    /// **读回型混合**：把这一层单独渲出来，再按 `f(src, dst)` 与已经画好的底逐像素算
+    /// （设计见 plan/web-animation-criteria.md 的 D13）。
+    ///
+    /// 为什么要单独一步：固定混合方程只需要 draw 的顺序，而 `f(src, dst)` 必须**读到**目标 ——
+    /// 一个 pass 里同时读和写同一张纹理做不到。所以它得先把"底"留在纹理里，再插一步。
+    BlendFn {
+        /// 这一层在 `composite.layers` 里的下标（**不要放进 `Draw`**：它会被当成固定方程画错）。
+        layer: usize,
+        /// 用哪条混合公式。
+        mode: dhampir_timeline::layer::BlendMode,
+    },
+
     /// 对**当前已经画好的结果**跑这一层（调整图层）的特效。
     ///
     /// # `opacity` 为什么必须在这里
@@ -1427,6 +1975,34 @@ pub fn plan_steps(layers: &[crate::compose::Layer]) -> Vec<Step> {
                 // **这一帧上这层的不透明度**（关键帧已经在求值层算好了）。
                 opacity: layer.opacity.clamp(0.0, 1.0),
             });
+        } else if !layer.backdrop_effects.is_empty() {
+            // 背景滤镜要读"身后已经画好的内容" ⇒ 先把攒着的同批画掉。
+            if !pending.is_empty() {
+                steps.push(Step::Draw(std::mem::take(&mut pending)));
+            }
+            steps.push(Step::Backdrop {
+                layer: index,
+                effects: layer.backdrop_effects.clone(),
+            });
+            // **这一层自己仍然要画**（画在滤波后的背景之上）。
+            if layer.blend.uses_fixed_equation() {
+                pending.push(index);
+            } else {
+                steps.push(Step::BlendFn {
+                    layer: index,
+                    mode: layer.blend,
+                });
+            }
+        } else if !layer.blend.uses_fixed_equation() {
+            // **读回型**：不能和别的层挤在同一趟里 —— 它要读"已经画好的底"。
+            // 所以先把攒着的同批画掉，再单独发一步。
+            if !pending.is_empty() {
+                steps.push(Step::Draw(std::mem::take(&mut pending)));
+            }
+            steps.push(Step::BlendFn {
+                layer: index,
+                mode: layer.blend,
+            });
         } else {
             pending.push(index);
         }
@@ -1455,6 +2031,7 @@ mod plan_tests {
 
     fn layer(id: &str, adjustment: bool) -> crate::compose::Layer {
         crate::compose::Layer {
+            backdrop_effects: Vec::new(),
             clip_id: id.to_string(),
             source: if adjustment { String::new() } else { format!("{id}.mp4") },
             source_frame: 0,
@@ -1472,6 +2049,10 @@ mod plan_tests {
             },
             frozen_for_transition: false,
             blend: BlendMode::Normal,
+            corner_radius: 0.0,
+            clip: None,
+            mask: None,
+            shadow: None,
             is_adjustment: adjustment,
         }
     }
@@ -1534,10 +2115,42 @@ mod plan_tests {
             match step {
                 Step::Draw(indices) => seen.extend(indices),
                 Step::Adjust { layer, .. } => seen.push(*layer),
+                Step::BlendFn { layer, .. } => seen.push(*layer),
+                // 背景滤镜那一步**不画这一层**（它在后面那段 `Draw` 里画）——
+                // 所以这里不 push，否则会被数成"画了两遍"。
+                Step::Backdrop { .. } => {}
             }
         }
         seen.sort_unstable();
         assert_eq!(seen, vec![0, 1, 2, 3, 4, 5], "每一层都要恰好出现一次");
+    }
+
+
+    #[test]
+    fn 读回型混合单独成步_不与别的层同批() {
+        let mut readback = layer("dark", false);
+        readback.blend = dhampir_timeline::layer::BlendMode::Darken;
+        let layers = vec![layer("a", false), layer("b", false), readback, layer("c", false)];
+        let steps = plan_steps(&layers);
+        assert_eq!(steps.len(), 3, "读回层应当把计划切成三段：{steps:?}");
+        assert!(
+            matches!(&steps[0], Step::Draw(indices) if indices == &vec![0, 1]),
+            "第一段应当是 [0, 1]：{steps:?}"
+        );
+        assert!(
+            matches!(&steps[1], Step::BlendFn { layer: 2, mode } if *mode == dhampir_timeline::layer::BlendMode::Darken),
+            "中间应当是读回层 2：{steps:?}"
+        );
+        assert!(
+            matches!(&steps[2], Step::Draw(indices) if indices == &vec![3]),
+            "最后一段应当是 [3]：{steps:?}"
+        );
+        // **读回层绝不能出现在任何 Draw 里** —— 那会被当成固定方程画错（不崩，只是画错）。
+        for step in &steps {
+            if let Step::Draw(indices) = step {
+                assert!(!indices.contains(&2), "读回层不该进 Draw：{indices:?}");
+            }
+        }
     }
 
     #[test]

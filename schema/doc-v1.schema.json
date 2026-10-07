@@ -197,6 +197,158 @@
         "difference"
       ]
     },
+    "ClipShape": {
+      "description": "裁剪形状。长度一律是**文档像素**。\n\n# 为什么只有这三种\n\n引擎用的是**每像素覆盖度**（着色器里一个无分支 SDF），能用同一套式子表达的只有\n圆 / 椭圆 / 圆角矩形 —— 正好是 CSS `clip-path` 里的 `circle()` / `ellipse()` / `inset()`。\n`polygon()` 与 `path()` 需要一般多边形求交或掩码纹理，**明确不做**（登记表里记着这个缺口，\n不在这里假装支持）。\n\n`center` 是**图层框内的归一化比例**（`[0.5, 0.5]` 就是正中间），`None` 等价于居中 ——\n与 CSS `at 50% 50%` 同一个口径。\n\n# 为什么是比例而不是像素\n\nCSS 的 `at X Y` 是相对**元素左上角**，而 `X%` 是相对元素尺寸的百分比。用比例表达，\n作者侧（`at 25% 75%`）与 DOM 侧（CSS 原文）**都不需要知道图层的像素尺寸** ——\n而尺寸是素材的属性，转译器根本不知道。像素值仍然拒绝：那需要尺寸才能换算。",
+      "oneOf": [
+        {
+          "description": "`circle(R at X Y)`。",
+          "type": "object",
+          "properties": {
+            "center": {
+              "description": "归一化中心（`[0.5, 0.5]` = 正中），`None` 等价于居中。",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "number",
+                "format": "float"
+              },
+              "maxItems": 2,
+              "minItems": 2
+            },
+            "kind": {
+              "type": "string",
+              "const": "circle"
+            },
+            "radius": {
+              "type": "number",
+              "format": "float"
+            }
+          },
+          "required": [
+            "kind",
+            "radius"
+          ]
+        },
+        {
+          "description": "`ellipse(RX RY at X Y)`。",
+          "type": "object",
+          "properties": {
+            "center": {
+              "description": "归一化中心（`[0.5, 0.5]` = 正中），`None` 等价于居中。",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "number",
+                "format": "float"
+              },
+              "maxItems": 2,
+              "minItems": 2
+            },
+            "kind": {
+              "type": "string",
+              "const": "ellipse"
+            },
+            "radius_x": {
+              "type": "number",
+              "format": "float"
+            },
+            "radius_y": {
+              "type": "number",
+              "format": "float"
+            }
+          },
+          "required": [
+            "kind",
+            "radius_x",
+            "radius_y"
+          ]
+        },
+        {
+          "description": "`polygon(x y, x y, …)`：顶点是**图层框内的归一化坐标**（0..1，与 `center` 同一套口径）。\n\n引擎把它**栅格化成一张掩码纹理**再走已经验过的掩码通路 —— 所以这一版\n着色器一行都不用改，而且**两个宿主共用同一份栅格化代码**（core 里纯 Rust）。\n\n口径（v1）：非零环绕规则；边缘用 2×2 超采样近似抗锯齿；顶点允许在框外\n（框外部分自然被裁掉，不报错）。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "polygon"
+            },
+            "points": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "format": "float"
+                },
+                "maxItems": 2,
+                "minItems": 2
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "points"
+          ]
+        },
+        {
+          "description": "`path(\"…\")`：SVG 路径数据，坐标是**文档像素**、原点是图层框的**左上角**\n（与 CSS `clip-path: path()` 同一套，所以 DOM 侧原样透传）。\n\n支持 `M L H V C Q Z`（含相对形式）；**弧 `A` 与光滑续接 `S`/`T` 明说不支持**\n（遇到就报错，不猜一个近似）。曲线按固定段数细分 —— 确定性优先。",
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "path"
+            }
+          },
+          "required": [
+            "kind",
+            "data"
+          ]
+        },
+        {
+          "description": "`inset(上 右 下 左 round R)`：四条边各缩进多少。",
+          "type": "object",
+          "properties": {
+            "bottom": {
+              "type": "number",
+              "format": "float"
+            },
+            "kind": {
+              "type": "string",
+              "const": "inset"
+            },
+            "left": {
+              "type": "number",
+              "format": "float"
+            },
+            "radius": {
+              "type": "number",
+              "format": "float"
+            },
+            "right": {
+              "type": "number",
+              "format": "float"
+            },
+            "top": {
+              "type": "number",
+              "format": "float"
+            }
+          },
+          "required": [
+            "kind",
+            "top",
+            "right",
+            "bottom",
+            "left"
+          ]
+        }
+      ]
+    },
     "DanmakuSpec": {
       "description": "弹幕参数。**放在轨道级**：一条弹幕轨 = 一份弹幕素材 + 一套泳道参数。",
       "type": "object",
@@ -329,25 +481,6 @@
         "asset_id"
       ]
     },
-    "Easing": {
-      "description": "缓动曲线。公式**写死在这里**，两端调同一个函数——\n各写一遍迟早在某个控制点上差一个像素，而那种差异最难归因。",
-      "oneOf": [
-        {
-          "type": "string",
-          "enum": [
-            "linear",
-            "ease_in",
-            "ease_out",
-            "ease_in_out"
-          ]
-        },
-        {
-          "description": "**回弹**：先冲过头再落回来（`back_out`）。\n\n# 与 `EaseOut` / `EaseIn` 的关系（值得写下来）\n\n参照实现 的三条缓动里，两条**已经**能对本仓的现成变体：\n\n```text\n参照实现  pow2_out(t) = 1-(1-t)^2   ==  EaseOut\n参照实现  pow2_in(t)  = t^2         ==  EaseIn\n```\n\n我先前在转译器里把运镜的过渡报成\"用 `ease_out` 近似\"——\n**那是错的，它们逐值相同**。所以这一条不是\"补一个近似\"，\n是\"第三条缓动（过冲）本仓确实没有\"。\n\n系数取经典的 `1.70158`（CSS 的 `easeOutBack` 同款）。参照实现 的贴纸\n弹入用的是 `s = 3`（更猛的过冲），差别只有峰值那一下（约 1.10 vs 1.25），\n而且只在 0.35 秒的窗口里 —— 转译器会把它报出来。",
-          "type": "string",
-          "const": "back_out"
-        }
-      ]
-    },
     "Effect": {
       "description": "特效：类型 + 参数。**不接受可上传的 shader**——那等于把两端一致性交给用户。\n\n# 三个字段各管一件事\n\n- `kind` / `params`：**算什么**（已有）\n- `window`：**哪几帧生效、强度怎么起落**（新增）—— 让\"第 30 帧闪一下白\"\n  不必发明一个新的特效类型\n- `opacity`：**整体混合多少**（新增）—— 与 `window` 相乘，且**可被关键帧驱动**\n\n`window` 与 `opacity` 分开而不是把强度塞进 `params`：\n它们是**所有**特效共有的量，而 `params` 是每个特效私有的。混在一起的话\n`params` 的键空间会被通用名污染（每个特效都得叫 `amount` 还是 `strength`？）。",
       "type": "object",
@@ -393,13 +526,39 @@
         }
       }
     },
+    "GradientStop": {
+      "description": "渐变的一个断点：位置与**覆盖度**（遮罩用的就是它）。",
+      "type": "object",
+      "properties": {
+        "at": {
+          "type": "number",
+          "format": "float"
+        },
+        "coverage": {
+          "type": "number",
+          "format": "float"
+        }
+      },
+      "required": [
+        "at",
+        "coverage"
+      ]
+    },
     "Keyframe": {
       "description": "关键帧。frame 是**相对片段起点**的偏移，不是绝对帧号——\n这样片段一挪，关键帧跟着走，不会静默错位。\n\n# `target`：这个键在驱动**哪个**量\n\n在它成为字段之前，求值函数叫 `opacity_from` —— **结构上只算一个标量**：\n既不问自己在驱动什么，也装不下第二条曲线。于是\"运镜\"（要同时驱动\n`scale` 与 `x/y`）在这份契约里**根本表达不出来**。\n\n取值：\n- `\"opacity\"`（缺省）/`\"x\"`/`\"y\"`/`\"scale\"`/`\"rotation\"` —— 驱动元素自身的量；\n- `\"effect.<下标>.<参数名>\"` —— 驱动**某条特效的参数**。\n  例：`\"effect.0.radius\"` 让第 0 条特效的模糊半径随帧变化 ——\n  \"模糊从小涨到大再回落\"这类**瞬时特效**因此不需要新的特效类型。\n\n**缺省是 `\"opacity\"`**：老工程里没有这个键，语义必须与从前逐字节一致。",
       "type": "object",
       "properties": {
         "easing": {
-          "$ref": "#/$defs/Easing",
-          "default": "linear"
+          "description": "**CSS 缓动语法的字符串**（口径见 plan/web-animation-criteria.md 的 D2）。\n\n已知取值：既是历史拼写 `linear` / `ease_in` / `ease_out` / `ease_in_out` / `back_out`，\n也接受 CSS 的 `ease` / `ease-in` / `ease-out` / `ease-in-out` / `step-start` / `step-end`\n与函数式 `cubic-bezier(x1,y1,x2,y2)` / `steps(n[, position])`。\n**注意下划线与连字符是两条不同的曲线**（前者是二次曲线，后者等于 cubic-bezier）。\n认不出来的取值会被校验层报成 `unknown_easing`。\n\n形状是**字符串**，不是枚举名列表 —— 所以用 `schemars(with = \"String\")` 把生成出来的\nJSON Schema 钉成 string（否则派生形状会按 Rust 的 `Css` 变体长成一个对象）。",
+          "type": "string",
+          "default": "linear",
+          "x-known-values": [
+            "linear",
+            "ease_in",
+            "ease_out",
+            "ease_in_out",
+            "back_out"
+          ]
         },
         "frame": {
           "type": "integer",
@@ -423,9 +582,32 @@
       "description": "基础元素 + 拓展。\n\n判定规则（三行，不需要额外字段）：\n- 有 `source` → 实拍片段；\n- **没有** `source`、**有** `effects` → **调整图层**（影响下面已画上去的全部内容）；\n- 都没有 → 占位。",
       "type": "object",
       "properties": {
+        "backdrop_effects": {
+          "description": "**背景滤镜**（`backdrop-filter`）：对**这一层下面已经画好的内容**跑这些特效，\n且**只在这一层的矩形里**生效（CSS 的规矩就是\"元素范围内\"）。\n\n与 `effects` 的区别是本条最要紧的一处：`effects` 改的是**这一层自己**的像素；\n背景滤镜读的是**它身后的东西**。空 = 不做 = 老行为（缺省不写进文件）。\n\n设计见 criteria 的 D13（读回型那一批的第二个用户）。",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Effect"
+          }
+        },
         "blend": {
           "$ref": "#/$defs/BlendMode",
           "default": "normal"
+        },
+        "clip": {
+          "description": "**裁剪形状**（`None` = 不裁 = 老行为，缺省不写进文件）。\n\n与 `corner_radius` 的关系：圆角裁的是**图层自己的矩形**，`clip` 裁的是形状 ——\n两者**同时生效**（各自算一个覆盖度再相乘），与 CSS 里 `border-radius` 与\n`clip-path` 同时写的行为一致。",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClipShape"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "corner_radius": {
+          "description": "**圆角半径**（文档像素）。0 = 无圆角 = 老行为（缺省不写进文件）。\n\n引擎在合成着色器里用一个**无分支**的圆角矩形 SDF 画它（见\n`plan/web-animation-criteria.md` 的 D10）：半径 0 时那条路径的输出**逐字节不变**，\n半径 > 0 时只切四个角（有 GPU 用例逐点钉着）。",
+          "type": "number",
+          "format": "float"
         },
         "effects": {
           "type": "array",
@@ -471,6 +653,17 @@
             "$ref": "#/$defs/Marker"
           }
         },
+        "mask": {
+          "description": "**掩码**（`None` = 不掩 = 老行为，缺省不写进文件）。\n\n契约先立、引擎还没画（设计见 D12）：渲染前由 [`unimplemented_masks`] 与\n文档校验的警告如实报出来 —— 与圆角 / 未实现的混合模式同一套形态。",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MaskSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "note": {
           "type": "string",
           "default": ""
@@ -479,6 +672,17 @@
           "type": "number",
           "format": "float",
           "default": 1.0
+        },
+        "shadow": {
+          "description": "**投影**（`None` = 不投 = 老行为，缺省不写进文件）。设计见 criteria 的 D13。",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ShadowSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "source": {
           "description": "没有它就不是实拍片段 —— 这正是调整图层能存在的原因。",
@@ -532,6 +736,27 @@
         "end"
       ]
     },
+    "LinearGradient": {
+      "description": "线性渐变的遮罩（程序化，不挂素材）。\n\n几何口径照 CSS：`angle_deg` 里 **0° 朝上、90° 朝右**（屏幕 y 向下），\n渐变轴过图层矩形中心，轴长 = `|w·sinθ| + |h·cosθ|`（CSS 对盒子的那条规矩）。",
+      "type": "object",
+      "properties": {
+        "angle_deg": {
+          "type": "number",
+          "format": "float"
+        },
+        "stops": {
+          "description": "断点，至少两个；位置非递减。",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GradientStop"
+          }
+        }
+      },
+      "required": [
+        "angle_deg",
+        "stops"
+      ]
+    },
     "Marker": {
       "description": "挂在元素上的标记。",
       "type": "object",
@@ -560,6 +785,50 @@
         "id",
         "frame"
       ]
+    },
+    "MaskChannel": {
+      "description": "掩码通道：拿素材的哪一路当遮罩（设计见 plan/web-animation-criteria.md 的 D12）。",
+      "oneOf": [
+        {
+          "description": "用 alpha（缺省）。",
+          "type": "string",
+          "const": "alpha"
+        },
+        {
+          "description": "用亮度。系数与 core 的 luma 同一组（Rec.709）—— 与 D6 的老规矩一致：\n**口径要写进文档**，不许两边各猜一组。",
+          "type": "string",
+          "const": "luminance"
+        }
+      ]
+    },
+    "MaskSpec": {
+      "description": "一层怎么被掩码。\n\n# 素材层（D12 的第一条决定）\n\n掩码是一张**登记过的素材**，所以契约是「层引用素材 id」而不是「层内嵌一张图」——\n素材的注册、时间基、URI 解析、\"引用不存在的素材要报错\"这套校验**都已经有了**。\n\n坐标口径（D12 的第三条决定，也是本设计里唯一一处新坐标）：掩码图的**整张**映射到\n**图层自己的矩形**上（拉伸填满），即**图层局部坐标** —— 与合成源的源像素坐标不是同一套。",
+      "type": "object",
+      "properties": {
+        "asset_id": {
+          "description": "指向 `assets` 里的一条。**与 `gradient` 二选一**（缺省空串）。",
+          "type": "string"
+        },
+        "channel": {
+          "description": "通道，缺省 `alpha`（缺省不写进文件）。",
+          "$ref": "#/$defs/MaskChannel"
+        },
+        "gradient": {
+          "description": "程序化渐变（第 46 轮）：不挂素材，直接按角度与断点生成遮罩。\n**与 `asset_id` 二选一**；缺省不写进文件。",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LinearGradient"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "invert": {
+          "description": "是否反相，缺省 false（缺省不写进文件）。",
+          "type": "boolean"
+        }
+      }
     },
     "Meta": {
       "description": "元信息。纯给人看的。",
@@ -590,6 +859,13 @@
       "description": "输出的**建议值**，宿主可覆盖（预览尺寸归宿主这条判断不变）。",
       "type": "object",
       "properties": {
+        "background": {
+          "description": "**画布底色**：`#rgb` / `#rrggbb` / `#rrggbbaa`。`None` = 透明（宿主/编码器那边就是黑）。\n\n# 为什么要有它（2026-10-06）\n\nYekiTrim 的「画面构成 → 背景 = 纯色/黑」在底座这条腿上**原先没有任何落地路径**：\n底座没有\"纯色图层\"原语，而加一层**有素材的图层**会触发分段路径的逐帧泄漏（长片 OOM，\n实测 2 层 1500 帧）。\n\n清屏色是**零图层**的落地方式：留边处直接是这个颜色，既不碰那条泄漏，也不用编一张 1×1 的图。\n语义上它等于\"主画面之外那块画布本来是什么颜色\"，与 CSS 里 `background` 的直觉一致。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "format": {
           "type": "string",
           "default": "mp4"
@@ -605,6 +881,33 @@
           "format": "uint32",
           "default": 1920,
           "minimum": 0
+        }
+      }
+    },
+    "ShadowSpec": {
+      "description": "层的**投影**（`filter: drop-shadow()` 那件事）。\n\n# 为什么它不是一条 effect pipeline\n\n逐像素管线（色彩 / 遮罩 / 重映射 / 模糊）都是\"**把这一层的像素改一下**\"；\n投影不是改像素，而是**同一层多画一张**（模糊 + 染色 + 偏移，画在本层**下面**）。\n把它塞进 pipeline 会让\"一趟逐像素\"的模型出现一个例外，而例外正是最难查的那种。\n\n# 口径\n\n- 长度都是**文档像素**；\n- `blur_sigma` 是 **CSS `drop-shadow()` 的那个模糊半径（σ）** —— 引擎按下界口径\n  换算成本仓的核半径（`radius = 2σ`，见 D5）；\n- 颜色 v1 **固定黑**（要彩色再加字段，不在这里偷偷支持）；\n- `opacity` 是整张阴影的浓淡（0..1），与图层自己的 opacity 相乘。",
+      "type": "object",
+      "properties": {
+        "blur_sigma": {
+          "description": "CSS `drop-shadow()` 的模糊半径（σ，文档像素）。",
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
+        "offset_x": {
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
+        "offset_y": {
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
+        "opacity": {
+          "type": "number",
+          "format": "float",
+          "default": 1.0
         }
       }
     },

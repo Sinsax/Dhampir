@@ -33,6 +33,15 @@ pub struct ColorAdjustParams {
     pub contrast: f32,
     pub saturation: f32,
     pub hue: f32,
+    /// 亮度（**乘性**）：CSS `brightness()` 的那一种。1.0 = 不变。
+    ///
+    /// 放在**末尾**是刻意的：前面几个字段的偏移不动，改动的爆炸半径最小。
+    /// `× 1.0` 在 f32 下是**逐位精确**的恒等，所以老工程（从不设它）出片一字不差。
+    pub scale: f32,
+    /// 色调（**CSS / SVG 规范矩阵**那一条），单位**弧度**。0.0 = 不变。
+    pub hue_css: f32,
+    /// 饱和度（**CSS / SVG 规范权重**那一条）。1.0 = 不变（且逐位精确）。
+    pub saturation_css: f32,
 }
 
 impl ColorAdjustParams {
@@ -44,6 +53,9 @@ impl ColorAdjustParams {
         contrast: 1.0,
         saturation: 1.0,
         hue: 0.0,
+        scale: 1.0,
+        hue_css: 0.0,
+        saturation_css: 1.0,
     };
 
     /// 是否恒等。恒等时调用方可以整条跳过 —— 少一趟就少一次纹理往返。
@@ -52,6 +64,9 @@ impl ColorAdjustParams {
             && self.contrast == 1.0
             && self.saturation == 1.0
             && self.hue == 0.0
+            && self.scale == 1.0
+            && self.hue_css == 0.0
+            && self.saturation_css == 1.0
     }
 }
 
@@ -221,11 +236,42 @@ mod tests {
 
     #[test]
     fn uniform_布局与着色器一致() {
-        // 裸内存布局：四个 f32，共 16 字节。
+        // 裸内存布局：**七个** f32，共 28 字节（第 42 轮 `scale`、第 44 轮 `hue_css`、第 45 轮 `saturation_css`）。
         // 改结构体而忘了改 WGSL 会**静默错位** —— 亮度会跑进对比度里，
         // 而这种错不报错、只是画面不对，最难归因。所以把大小钉住。
-        assert_eq!(std::mem::size_of::<ColorAdjustParams>(), 16);
+        assert_eq!(std::mem::size_of::<ColorAdjustParams>(), 28);
         assert_eq!(std::mem::align_of::<ColorAdjustParams>(), 4);
+
+        // **顺序也要钉住**：只钉大小抓不到"两个字段写反"。
+        // 第 44 轮就真反过一次（WGSL 把 `hue_css` 写在 `scale` 前面）——
+        // 表现是纯红转 90° 给出 `(184, 87, 0)`：一个**看起来完全合理**的错，
+        // 而且 `cargo check` 抓不到（WGSL 要到建管线时才校验）。
+        let wgsl_fields: Vec<&str> = COLOR_ADJUST_WGSL
+            .lines()
+            .skip_while(|line| !line.contains("struct ColorAdjustUniform"))
+            .skip(1)
+            .take_while(|line| !line.contains('}'))
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with("//") {
+                    return None;
+                }
+                trimmed.split(':').next().map(str::trim)
+            })
+            .collect();
+        assert_eq!(
+            wgsl_fields,
+            vec![
+                "brightness",
+                "contrast",
+                "saturation",
+                "hue",
+                "scale",
+                "hue_css",
+                "saturation_css"
+            ],
+            "WGSL 的字段顺序必须与 ColorAdjustParams 逐字对齐"
+        );
     }
 
     #[test]

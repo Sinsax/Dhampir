@@ -101,25 +101,6 @@
         "duration"
       ]
     },
-    "Easing": {
-      "description": "缓动曲线。公式**写死在这里**，两端调同一个函数——\n各写一遍迟早在某个控制点上差一个像素，而那种差异最难归因。",
-      "oneOf": [
-        {
-          "type": "string",
-          "enum": [
-            "linear",
-            "ease_in",
-            "ease_out",
-            "ease_in_out"
-          ]
-        },
-        {
-          "description": "**回弹**：先冲过头再落回来（`back_out`）。\n\n# 与 `EaseOut` / `EaseIn` 的关系（值得写下来）\n\n参照实现 的三条缓动里，两条**已经**能对本仓的现成变体：\n\n```text\n参照实现  pow2_out(t) = 1-(1-t)^2   ==  EaseOut\n参照实现  pow2_in(t)  = t^2         ==  EaseIn\n```\n\n我先前在转译器里把运镜的过渡报成\"用 `ease_out` 近似\"——\n**那是错的，它们逐值相同**。所以这一条不是\"补一个近似\"，\n是\"第三条缓动（过冲）本仓确实没有\"。\n\n系数取经典的 `1.70158`（CSS 的 `easeOutBack` 同款）。参照实现 的贴纸\n弹入用的是 `s = 3`（更猛的过冲），差别只有峰值那一下（约 1.10 vs 1.25），\n而且只在 0.35 秒的窗口里 —— 转译器会把它报出来。",
-          "type": "string",
-          "const": "back_out"
-        }
-      ]
-    },
     "Effect": {
       "description": "特效：类型 + 参数。**不接受可上传的 shader**——那等于把两端一致性交给用户。\n\n# 三个字段各管一件事\n\n- `kind` / `params`：**算什么**（已有）\n- `window`：**哪几帧生效、强度怎么起落**（新增）—— 让\"第 30 帧闪一下白\"\n  不必发明一个新的特效类型\n- `opacity`：**整体混合多少**（新增）—— 与 `window` 相乘，且**可被关键帧驱动**\n\n`window` 与 `opacity` 分开而不是把强度塞进 `params`：\n它们是**所有**特效共有的量，而 `params` 是每个特效私有的。混在一起的话\n`params` 的键空间会被通用名污染（每个特效都得叫 `amount` 还是 `strength`？）。",
       "type": "object",
@@ -156,8 +137,16 @@
       "type": "object",
       "properties": {
         "easing": {
-          "$ref": "#/$defs/Easing",
-          "default": "linear"
+          "description": "**CSS 缓动语法的字符串**（口径见 plan/web-animation-criteria.md 的 D2）。\n\n已知取值：既是历史拼写 `linear` / `ease_in` / `ease_out` / `ease_in_out` / `back_out`，\n也接受 CSS 的 `ease` / `ease-in` / `ease-out` / `ease-in-out` / `step-start` / `step-end`\n与函数式 `cubic-bezier(x1,y1,x2,y2)` / `steps(n[, position])`。\n**注意下划线与连字符是两条不同的曲线**（前者是二次曲线，后者等于 cubic-bezier）。\n认不出来的取值会被校验层报成 `unknown_easing`。\n\n形状是**字符串**，不是枚举名列表 —— 所以用 `schemars(with = \"String\")` 把生成出来的\nJSON Schema 钉成 string（否则派生形状会按 Rust 的 `Css` 变体长成一个对象）。",
+          "type": "string",
+          "default": "linear",
+          "x-known-values": [
+            "linear",
+            "ease_in",
+            "ease_out",
+            "ease_in_out",
+            "back_out"
+          ]
         },
         "frame": {
           "type": "integer",

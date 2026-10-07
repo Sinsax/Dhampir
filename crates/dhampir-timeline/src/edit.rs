@@ -191,12 +191,17 @@ pub fn insert_reference(
         None => unique_id(doc, &request.asset_id),
     };
     candidate.timeline.tracks[track_index].layers.push(Layer {
+        backdrop_effects: Vec::new(),
         id: id.clone(),
         start: request.at,
         end: request.at.saturating_add(request.length),
         transform: crate::layer::TransformV2::default(),
         opacity: 1.0,
         blend: crate::layer::BlendMode::Normal,
+        corner_radius: 0.0,
+        clip: None,
+        mask: None,
+        shadow: None,
         enabled: true,
         gain: 1.0,
         recorded: crate::layer::Recorded::default(),
@@ -291,7 +296,7 @@ fn seam_easing(keys: &[Keyframe], cut: Frame) -> Easing {
         .filter(|key| key.frame >= cut)
         .min_by_key(|key| key.frame)
         .or_else(|| keys.iter().max_by_key(|key| key.frame))
-        .map(|key| key.easing)
+        .map(|key| key.easing.clone())
         .unwrap_or_default()
 }
 
@@ -722,12 +727,17 @@ mod tests {
 
     fn layer(id: &str, start: Frame, end: Frame, source_in: Option<Frame>) -> Layer {
         Layer {
+            backdrop_effects: Vec::new(),
             id: id.to_string(),
             start,
             end,
             transform: TransformV2::default(),
             opacity: 1.0,
             blend: BlendMode::Normal,
+            corner_radius: 0.0,
+            clip: None,
+            mask: None,
+            shadow: None,
             enabled: true,
             gain: 1.0,
             recorded: Recorded::default(),

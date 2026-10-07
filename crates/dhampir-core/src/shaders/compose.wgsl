@@ -36,10 +36,29 @@ struct LayerUniform {
   source_size: vec2<f32>,
   opacity: f32,
   _padding: f32,
+  // 圆角：x = 半径（**源像素**）、y = 抗锯齿斜坡宽度（源像素）。半径 0 = 不裁。
+  corner: vec4<f32>,
+  // 裁剪形状的参数，都在**源像素**参照系里（换算见 Rust 侧 `clip_params`）：
+  //   clip_a = (形状码, 中心 x, 中心 y, 圆的半径)
+  //   clip_b = (半宽 或 椭圆 rx, 半高 或 椭圆 ry, 内缩矩形的圆角, 备用)
+  clip_a: vec4<f32>,
+  clip_b: vec4<f32>,
+  // 掩码开关（都是 0/1）：x = 有没有掩码、y = 是否反相、z = 用亮度（否则 alpha）、w = 备用。
+  mask_a: vec4<f32>,
+  // 染色：rgb 是要换上的颜色、a 是"要不要染"（0/1）。
+  //
+  // 用途是**投影**：同一层的纹理再画一张时把 rgb 换成阴影色（v1 固定黑），
+  // 而 alpha 保持原样 —— 形状还是那个形状。
+  // a = 0 时走 `select` 的那一边，输出与不染色**逐字节相同**。
+  tint: vec4<f32>,
 }
 
 @group(0) @binding(0) var source_texture: texture_2d<f32>;
 @group(0) @binding(1) var<uniform> layer: LayerUniform;
+// 掩码纹理。没有掩码时绑的是一张 1×1 的白图（`mask_a.x = 0` 会把它整个旁路掉）。
+//
+// **不用采样器**：与源纹理同一条纪律（滤波精度不许留给实现），所以双线性也自己写。
+@group(0) @binding(2) var mask_texture: texture_2d<f32>;
 
 @vertex
 fn vs_fullscreen(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
@@ -58,6 +77,12 @@ fn vs_fullscreen(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f
 fn load_clamped(c: vec2<i32>, w: i32, h: i32) -> vec4<f32> {
   let cc = vec2<i32>(clamp(c.x, 0, w - 1), clamp(c.y, 0, h - 1));
   return textureLoad(source_texture, cc, 0);
+}
+
+/// 取一个掩码纹素，**坐标钳到边缘**（与源那份同理，只是换了一张纹理）。
+fn load_mask_clamped(c: vec2<i32>, w: i32, h: i32) -> vec4<f32> {
+  let cc = vec2<i32>(clamp(c.x, 0, w - 1), clamp(c.y, 0, h - 1));
+  return textureLoad(mask_texture, cc, 0);
 }
 
 @fragment
@@ -92,6 +117,82 @@ fn fs_layer(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
   let bottom = mix(c01, c11, frac.x);
   let texel = mix(top, bottom, frac.y);
 
+  // **圆角**：在本层自己的矩形里算一个无分支的覆盖度。
+  //
+  // 为什么在**源像素**参照系里算：片元手里只有 `src_x/src_y`（逆变换算出来的），
+  // 而本层的矩形在源空间里就是 [0,w]×[0,h] —— 不必再传一套局部坐标进来。
+  // 半径与斜坡宽度也都由 Rust 侧换算成源像素（见 LayerUniform 的注释）。
+  //
+  // 为什么没有分支：允许表里 `if (` 只申报了一处（层的越界判定）。这里用 `select`
+  // 把「半径 > 0 才裁」压成一个因子；半径 0 时它**精确地**是 0，于是这条路径的输出
+  // 与从前逐字节相同（D10 的第一条判据）。
+  //
+  // 形状用圆角矩形的标准 SDF；覆盖度用一条约 1 像素宽的**线性**斜坡
+  // （不用 `smoothstep` —— 它不在允许表里）。
+  let half = layer.source_size * 0.5;
+  let r = layer.corner.x;
+  let p = vec2<f32>(src_x, src_y) - half;
+  let q = abs(p) - (half - vec2<f32>(r, r));
+  let dist = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
+  let coverage = clamp(0.5 - dist / layer.corner.y, 0.0, 1.0);
+  let masking = select(0.0, 1.0, r > 0.0);
+
+  // **裁剪形状**：与圆角同一套「每像素覆盖度」，最后两个覆盖度相乘。
+  //
+  // 形状码在 clip_a.x：0 不裁 / 1 圆 / 2 椭圆 / 3 内缩矩形。分派用 `select` —— 无分支，
+  // 且**两个分支都会被求值**（所以在没有裁剪时 Rust 侧给的是安全占位值，不是 0，
+  // 免得未选中的那一支算出 0/0）。
+  //
+  // 椭圆用的是「把圆按半径归一化」那个近似：**零集是精确的**（椭圆内外的判定没错），
+  // 差的只是远处的距离值 —— 而距离只用在做抗锯齿的那一圈，够用。
+  let cpc = vec2<f32>(src_x, src_y) - layer.clip_a.yz;
+  let d_circle = length(cpc) - layer.clip_a.w;
+  let d_ellipse = (length(cpc / layer.clip_b.xy) - 1.0) * min(layer.clip_b.x, layer.clip_b.y);
+  let cqi = abs(cpc) - (layer.clip_b.xy - vec2<f32>(layer.clip_b.z, layer.clip_b.z));
+  let d_inset = length(max(cqi, vec2<f32>(0.0))) + min(max(cqi.x, cqi.y), 0.0) - layer.clip_b.z;
+  let shape = layer.clip_a.x;
+  let d_none = -1.0e9;
+  let d_shape = select(select(select(d_none, d_circle, shape > 0.5), d_ellipse, shape > 1.5), d_inset, shape > 2.5);
+  let clip_coverage = clamp(0.5 - d_shape / layer.corner.y, 0.0, 1.0);
+  let clip_on = select(0.0, 1.0, shape > 0.5);
+
+  // **掩码**：整张掩码图铺在**图层自己的矩形**上（D12 的第三条决定）——
+  // 而片元手里的 `src_x/src_y` 就是源像素坐标，源矩形正是图层矩形，所以归一化坐标
+  // 直接由它除出来，不需要再传一套局部坐标。
+  //
+  // 双线性自己写（与源纹理同一套写法）：掩码图通常与图层不同分辨率，最近邻会在
+  // 掩码内部留下块状边界 —— 而 DOM 侧的 CSS `mask-image` 是**滤波**的，两边就对不上了。
+  let mask_on = layer.mask_a.x;
+  let mask_size = vec2<f32>(textureDimensions(mask_texture, 0));
+  let mask_uv = vec2<f32>(src_x / layer.source_size.x, src_y / layer.source_size.y);
+  let mask_pos = vec2<f32>(mask_uv.x * mask_size.x - 0.5, mask_uv.y * mask_size.y - 0.5);
+  let mask_base_f = vec2<f32>(floor(mask_pos.x), floor(mask_pos.y));
+  let mask_base = vec2<i32>(mask_base_f);
+  let mask_frac = vec2<f32>(mask_pos.x - mask_base_f.x, mask_pos.y - mask_base_f.y);
+  let mask_w = i32(mask_size.x);
+  let mask_h = i32(mask_size.y);
+  let m00 = load_mask_clamped(vec2<i32>(mask_base.x, mask_base.y), mask_w, mask_h);
+  let m10 = load_mask_clamped(vec2<i32>(mask_base.x + 1, mask_base.y), mask_w, mask_h);
+  let m01 = load_mask_clamped(vec2<i32>(mask_base.x, mask_base.y + 1), mask_w, mask_h);
+  let m11 = load_mask_clamped(vec2<i32>(mask_base.x + 1, mask_base.y + 1), mask_w, mask_h);
+  let mask_top = mix(m00, m10, mask_frac.x);
+  let mask_bottom = mix(m01, m11, mask_frac.x);
+  let mask_texel = mix(mask_top, mask_bottom, mask_frac.y);
+  // 通道：alpha 或**亮度**（Rec.709，与 core 的 luma 同一组系数 —— D6 的老规矩）。
+  let mask_alpha = mask_texel.a;
+  let mask_luma = dot(mask_texel.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+  let mask_value = select(mask_alpha, mask_luma, layer.mask_a.z > 0.5);
+  let mask_applied = select(mask_value, 1.0 - mask_value, layer.mask_a.y > 0.5);
+
+  // **染色**：投影那一张把颜色换成阴影色，形状（alpha）不动。
+  // `select` 两支都求值，所以不染色的那条路必须**逐字节同旧** —— 它取的正是 `texel.rgb`。
+  let tinted = select(texel.rgb, layer.tint.rgb, layer.tint.a > 0.5);
+
   // 乘不透明度：转场、淡入淡出、关键帧最终都落到这一个乘法上。
-  return vec4<f32>(texel.rgb, texel.a * layer.opacity);
+  // 圆角、裁剪、掩码各再乘一个覆盖度 —— 不裁/不掩时三者都是精确的 1.0。
+  return vec4<f32>(
+    tinted,
+    texel.a * layer.opacity * mix(1.0, coverage, masking) * mix(1.0, clip_coverage, clip_on)
+      * mix(1.0, mask_applied, mask_on),
+  );
 }

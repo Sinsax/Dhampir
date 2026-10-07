@@ -476,6 +476,54 @@ export class Engine {
   doc() {
     return this.projectFile;
   }
+  /**
+   * **把工程用到的掩码图交给宿主**（浏览器那条腿的掩码通路）。
+   *
+   * 为什么是**独立一步**而不是塞进 `open()`：`open` 是同步的，而取图要 await。
+   * 调用方在 `open` 之后 await 这一条即可（与源位图那条链分开：掩码只在换工程时上传一次，不逐帧）。
+   *
+   * 取不到的掩码**不在这里报错**，而是留给渲染时那条**响亮**的拒绝 ——
+   * `draw` 会因为 `missing_mask_assets` 非空而报错，说清楚是哪几个 asset。
+   * 那比"静默画一张没有掩码的图"好，也比在这里静默失败好。
+   *
+   * @returns {Promise<string[]>} 上传成功的 asset id
+   */
+  async uploadMasks(bitmaps = null) {
+    const doc = this.projectFile;
+    const assets = doc !== null && Array.isArray(doc.assets) ? doc.assets : [];
+    const tracks = doc !== null && doc.timeline !== undefined && Array.isArray(doc.timeline.tracks)
+      ? doc.timeline.tracks
+      : [];
+    const wanted = new Set();
+    for (const track of tracks) {
+      for (const layer of Array.isArray(track.layers) ? track.layers : []) {
+        const mask = layer.mask;
+        // 渐变遮罩是程序化生成的，不需要素材 —— 只认 asset_id 那种。
+        if (mask !== undefined && mask !== null && typeof mask.asset_id === "string" && mask.asset_id !== "") {
+          wanted.add(mask.asset_id);
+        }
+      }
+    }
+    const uploaded = [];
+    for (const id of wanted) {
+      const asset = assets.find((entry) => entry !== null && entry !== undefined && entry.id === id);
+      const uri = asset !== undefined && typeof asset.uri === "string" ? asset.uri : "";
+      if (uri === "") {
+        console.warn("dhampir: 掩码 " + id + " 没有 uri，取不到");
+        continue;
+      }
+      try {
+        // 优先用调用方给的位图（file:// 与无网场景下 fetch 会被拒）。
+        const given = bitmaps !== null && bitmaps[id] !== undefined ? bitmaps[id] : null;
+        const bitmap = given !== null ? given : await createImageBitmap(await (await fetch(uri)).blob());
+        this.mod.dhampir_project_set_mask_image(id, bitmap);
+        uploaded.push(id);
+      } catch (error) {
+        console.warn("dhampir: 掩码 " + id + " 取不到或解不开：" + error);
+      }
+    }
+    return uploaded;
+  }
 
   /**
    * 执行一次编辑操作。**规则在 Rust**（dhampir-timeline::edit）——

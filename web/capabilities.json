@@ -1,0 +1,496 @@
+{
+  "note": "网页动画的能力登记表（**真值**）。每条能力一个状态；status=supported 必须给出底座原语与判据证据，否则守卫判红。判据：scripts/check-capabilities.mjs",
+  "status_legend": {
+    "supported": "底座已经画得出来，而且有判据钉着",
+    "partial": "有，但有限制或还没对账（限制写在 note 里）",
+    "needs-primitive": "底座还没有对应原语 —— 要做就得先加原语（读回型 / 几何矢量型）",
+    "explicitly-not-doing": "明确不做，理由写在 note 里"
+  },
+  "stage_legend": {
+    "2": "阶段 2（转译器）",
+    "3": "阶段 3（HTML 宿主 / 求值）",
+    "5": "阶段 5（能力逐条迁移）",
+    "have": "引擎已经有",
+    "other": "另一个课题"
+  },
+  "meta": {
+    "truth": "web/capabilities.json",
+    "guard": "scripts/check-capabilities.mjs"
+  },
+  "dom_css_tokens": {
+    "transform": [
+      "transform"
+    ],
+    "opacity": [
+      "opacity"
+    ],
+    "filter": [
+      "filter.contrast",
+      "filter.saturation",
+      "filter.blur"
+    ],
+    "mixBlendMode": [
+      "blend-mode"
+    ],
+    "borderRadius": [
+      "geometry.corner-radius"
+    ],
+    "clipPath": [
+      "geometry.clip-path"
+    ],
+    "maskImage": [
+      "geometry.mask"
+    ],
+    "backdropFilter": [
+      "backdrop-filter"
+    ]
+  },
+  "capabilities": [
+    {
+      "id": "transform",
+      "label": "位移 / 缩放 / 旋转",
+      "status": "supported",
+      "stage": "have",
+      "dhampir": "Layer.transform {x,y,scale,rotation} + 五条关键帧通道之一",
+      "dom": "CSS transform",
+      "evidence": "crates/dhampir-core 里「位移的归一化落点与目标尺寸无关」；scripts/check-preview-parity.mjs 钉宿主有没有接上文档坐标系",
+      "evidence_paths": [
+        "crates/dhampir-core/src/render/compose.rs",
+        "scripts/check-preview-parity.mjs"
+      ],
+      "note": "旋转是角度制（契约规定，不由字段名暗示）"
+    },
+    {
+      "id": "opacity",
+      "label": "不透明度",
+      "status": "supported",
+      "stage": "have",
+      "dhampir": "Layer.opacity + opacity 通道关键帧",
+      "dom": "CSS opacity",
+      "evidence": "crates/dhampir-timeline/src/curve.rs 的关键帧用例；scripts/check-anim-eval.mjs 逐帧对照",
+      "evidence_paths": [
+        "crates/dhampir-timeline/src/curve.rs",
+        "scripts/check-anim-eval.mjs"
+      ],
+      "note": "转场权重会叠在这一层上，网页那份还没实现（判据用前置挡住）"
+    },
+    {
+      "id": "keyframes",
+      "label": "关键帧插值",
+      "status": "supported",
+      "stage": "have",
+      "dhampir": "Keyframe {frame,target,value,easing} + curve::channel_from 的四条规则",
+      "dom": "web/anim-eval.mjs 的 channelFrom（第二实现，判据钉着）",
+      "evidence": "scripts/check-anim-eval.mjs：31 帧 ×5 通道，实测偏差 9.37e-6，容差 1e-4 且有区分度；实测值与机器口径见 `plan/web-engine-measurements.md`",
+      "evidence_paths": [
+        "scripts/check-anim-eval.mjs",
+        "web/anim-eval.mjs"
+      ],
+      "note": "插值用的是**后一个键**的缓动"
+    },
+    {
+      "id": "easing.linear-cubic-steps",
+      "label": "CSS 缓动：关键字 / cubic-bezier / steps / **linear() 断点表**",
+      "status": "supported",
+      "stage": "have",
+      "dhampir": "crates/dhampir-timeline/src/easing.rs（唯一解析与求值）",
+      "dom": "web/anim-eval.mjs 的同名实现",
+      "evidence": "easing.rs 的单测（含 `linear()` 3 条：断点插值 / 位置补全 / 过冲）+ check-anim-eval.mjs 的逐值对照 + 浏览器参照 19 条（scripts/easing-reference.mjs）；实测值与机器口径见 `plan/web-engine-measurements.md`",
+      "evidence_paths": [
+        "crates/dhampir-timeline/src/easing.rs",
+        "scripts/check-anim-eval.mjs"
+      ],
+      "note": "steps 四态齐全；输出不夹（过冲是回弹的全部意义）；**第 37 轮补上 `linear()` 断点表**（本仓最后一条“明确不做”的缓动形式）：位置按规范补全（首 0%、末 100%、中间均匀铺开）、值允许过冲、位置相等取后一个；转译器侧也能镜像它（第 38 轮）"
+    },
+    {
+      "id": "easing.legacy-quad",
+      "label": "本仓既有缓动（ease_in/ease_out/ease_in_out/back_out）",
+      "status": "supported",
+      "stage": "have",
+      "dhampir": "同上（下划线的拼写走二次曲线，与 参照实现 逐值相同）",
+      "dom": "同上",
+      "evidence": "easing.rs 里「下划线与连字符是两条曲线_不许被归一化」",
+      "evidence_paths": [
+        "crates/dhampir-timeline/src/easing.rs"
+      ],
+      "note": "**下划线与连字符是两条不同的曲线**，不许互相归一化"
+    },
+    {
+      "id": "timing.iterations",
+      "label": "iterations（重复次数）",
+      "status": "partial",
+      "stage": "2",
+      "dhampir": "第一版靠转译期**展平**",
+      "dom": "同左（展平后就是普通关键帧）",
+      "evidence": "scripts/check-waapi2doc.mjs 的样本里 badge 因 iterations>1 被**明说跳过**",
+      "evidence_paths": [
+        "scripts/waapi2doc.mjs",
+        "scripts/check-waapi2doc.mjs"
+      ],
+      "note": "1..64 的整数次；**每一遍都展开**（早期版本只展开一遍且层长按一遍算 —— 那是个静默少渲染，已修，现在有「层长没按遍数算」这条自检变异盯着）。同向重播的跳变限制见 timing.direction",
+      "gap": "契约里**没有 `iterations` 字段**：转译器把它**展开成多遍关键帧**（求值端看到的是纯关键帧）。同向重播（normal/reverse）且首尾值不同时的跳变**明确不支持**（报出来，不近似）。"
+    },
+    {
+      "id": "timing.direction",
+      "label": "direction（反向 / 往返）",
+      "status": "partial",
+      "stage": "2",
+      "dhampir": "**转译期镜像展开**：反向那一遍把值序倒过来，并把每段缓动换成 E′(u) = 1 − E(1−u)",
+      "dom": "同左（展开后就是普通关键帧）",
+      "evidence": "check-waapi2doc 的既定答案（badge 的 24 帧键必须是 ease_out）+ 自检变异「镜像后的缓动被抹平成线性」",
+      "evidence_paths": [
+        "scripts/waapi2doc.mjs",
+        "scripts/check-waapi2doc.mjs",
+        "plan/web-animation-criteria.md"
+      ],
+      "note": "支持 normal / reverse / alternate / alternate-reverse。**不可镜像的缓动**（back_out、steps 的 jump-none / jump-both）与**同向重播的跳变**（normal/reverse 且首尾值不同）**明说不支持** —— 不近似，理由里带上具体原因。口径见 criteria 的 D7",
+      "gap": "同样靠**展开**表达，契约里没有 `direction` 字段。**不可镜像的缓动**（`back_out`、`steps` 的 jump-none/jump-both）明说不支持 —— 不近似，理由里带具体原因。"
+    },
+    {
+      "id": "timing.fill",
+      "label": "delay / endDelay / fill",
+      "status": "partial",
+      "stage": "2",
+      "dhampir": "用**层区间**吸收（start/end）",
+      "dom": "同左",
+      "evidence": "scripts/check-waapi2doc.mjs 钉 note 层落在 [9,28)",
+      "evidence_paths": [
+        "scripts/waapi2doc.mjs",
+        "scripts/check-waapi2doc.mjs"
+      ],
+      "note": "fill=none 表达不了「不进画面」，按 fill=both 处理并报警告",
+      "gap": "`fill: none` 表达不了「这一遍不进画面」—— 按 `fill: both` 处理并**报警告**（作者看得见，不静默）。"
+    },
+    {
+      "id": "timing.iterationStart",
+      "label": "iterationStart（相位）",
+      "status": "partial",
+      "stage": "5",
+      "dhampir": "只支持整数相位",
+      "dom": "同左",
+      "evidence": "`check-waapi2doc` 的既定答案 `drift`（起点 12、层长 25、三键 `1 → 0 → 1` 且**第 1 遍反向**）+ 自检变异「整数相位的起点没右移」必红",
+      "evidence_paths": [
+        "scripts/waapi2doc.mjs"
+      ],
+      "note": "非整数相位要额外一次量化，现在不支持",
+      "gap": "**整数相位：支持、精确、且已判**（层起点右移 `iterationStart × span`、奇偶性跟着变 —— `alternate` 下第 1 遍反向、层长 `iterations × span + 1`；判据是 `check-waapi2doc` 的既定答案 `drift`，配一条\"起点没右移\"的自检变异）。**非整数相位：明说不支持**，理由与「同向重播的跳变」**同源**（D7 第 48/49 轮）：它把第一遍变成**部分遍**，而\"在边界补一个键\"不成立 —— 键的 easing 描述整段，段尾一挪**段内每帧都偏**（`E(f/12)` vs `E(f/11)`）。精确表达要**按整数帧把那一遍烘开**（键数按遍长增长）⇒ **产品决定**，不是技术限制"
+    },
+    {
+      "id": "filter.blur",
+      "label": "filter: blur()",
+      "status": "supported",
+      "stage": "have",
+      "dhampir": "gaussian_blur 特效（SeparableBlur 管线）",
+      "dom": "**DOM 侧也用它**：web/dom-css.mjs 把它翻成 CSS（映射与等价性见那里与 criteria 的 D5/D6）；这一条逐值等价",
+      "evidence": "render::blur 的测试「css_的_blur_是本仓半径的两倍」（用权重之比 w[1]/w[0] = exp(-1/(2σ²)) 直接钉 σ；反向验证过：σ 改成 radius 即红）",
+      "evidence_paths": [
+        "crates/dhampir-core/src/render/blur.rs",
+        "crates/dhampir-core/src/effects.rs",
+        "scripts/waapi2doc.mjs",
+        "scripts/check-waapi2doc.mjs"
+      ],
+      "note": "**已对账**：CSS 的 blur(R) 参数就是 σ，本仓 radius 是核半径且 σ = radius/2 ⇒ **radius = 2R**（同一像素空间）。上界 radius ≤ 16 ⇒ CSS σ 上界 8（1:1 时，更大要加抽头）。**还没钉的一半**：转译器这一版还没有滤镜，所以「把 R 乘 2 写进工程」那一步还没有判据 —— 转译器学会滤镜时必须在同一次改动里补一条。；**转译器侧已学会**（第 15 轮）：WAAPI 快照里的 `filter:` / `mix-blend-mode` / `border-radius` 会按 D5/D6/D9/D10 的口径转成工程里的声明式数据，不等价的**明说并跳过整条动画**；参数还能**随关键帧变**（`effect.<i>.<param>` 通道 —— 引擎本来就有，第 18 轮转译器才接上）"
+    },
+    {
+      "id": "filter.contrast",
+      "label": "filter: contrast()",
+      "status": "supported",
+      "stage": "have",
+      "dhampir": "contrast 特效，amount ∈ [0,4]，恒等 1",
+      "dom": "**DOM 侧也用它**：web/dom-css.mjs 把它翻成 CSS（映射与等价性见那里与 criteria 的 D5/D6）；这一条逐值等价",
+      "evidence": "公式等价：两边都是 (c−0.5)·a+0.5。引擎侧的恒等约定由 render::timeline 的测试「四个恒等特效折出来仍然是恒等」钉着",
+      "evidence_paths": [
+        "crates/dhampir-core/src/shaders/color_adjust.wgsl",
+        "crates/dhampir-core/src/render/timeline.rs",
+        "scripts/waapi2doc.mjs",
+        "scripts/check-waapi2doc.mjs"
+      ],
+      "note": "**CSS ↔ 本仓：amount = k**（CSS 的 100% → 1.0）。这是四条里唯一逐值等价的；**转译器侧已学会**（第 15 轮）：WAAPI 快照里的 `filter:` / `mix-blend-mode` / `border-radius` 会按 D5/D6/D9/D10 的口径转成工程里的声明式数据，不等价的**明说并跳过整条动画**；参数还能**随关键帧变**（`effect.<i>.<param>` 通道 —— 引擎本来就有，第 18 轮转译器才接上）"
+    },
+    {
+      "id": "filter.saturation",
+      "label": "filter: saturate()（规范权重；第 45 轮新增那条）",
+      "status": "supported",
+      "stage": "have",
+      "dhampir": "`saturation_css{amount}` —— 灰度权重用规范那组取整值（0.213/0.715/0.072），第 45 轮**新增**；既有的 `saturation`（Rec.709）**没动**",
+      "dom": "CSS `saturate(k)` 原样搬（同一组权重）；**转译器侧也学会了**",
+      "evidence": "GPU 用例「规范权重饱和度_与_rec709_那条几乎一样但本源不同」：amount=1 逐位不变、手算 (200,137,73)、与 Rec.709 实测逐通道差 ≤ 1（**实测代替了原来那条文字容差登记**）；实测值与机器口径见 `plan/web-engine-measurements.md`（含 GPU 用例索引）",
+      "evidence_paths": [
+        "crates/dhampir-core/src/shaders/color_adjust.wgsl",
+        "plan/web-animation-criteria.md",
+        "scripts/waapi2doc.mjs",
+        "scripts/check-waapi2doc.mjs"
+      ],
+      "note": "**第 45 轮**：与亮度/色相同一套做法 —— **新增**一条按规范权重的饱和度，既有那条不动。原来那条 `filter.saturation_luma_rounding` 文字容差登记**已删**：差别现在被**实测**钉住（逐通道 ≤ 1 档），而不是据说很小"
+    },
+    {
+      "id": "filter.brightness",
+      "label": "filter: brightness()（乘性；第 42 轮新增那条）",
+      "status": "supported",
+      "stage": "5",
+      "dhampir": "`brightness_multiply`（`factor`，**乘性** `c·k`，保黑）—— 第 42 轮**新增**的一条；既有的 `brightness`（加性 `c+a`）**没动**（改它会动老工程的出片）",
+      "dom": "CSS `brightness(k)` 原样搬（两端都是 `c·k`）；**转译器侧也学会了**（WAAPI 快照里的 `filter: brightness(k)` ⇒ `brightness_multiply`）",
+      "evidence": "GPU 用例「乘性亮度保黑_与加性那条不是同一个函数」（10×1.5→15、10×0.5→5，而加性那条把 10 抬亮 —— 方向相反）+ DOM 判据「乘性亮度 ⇒ brightness(1.5)」+ 转译器判据（glow 落成 `brightness_multiply` 且 `factor = 1.5`）；实测值与机器口径见 `plan/web-engine-measurements.md`（含 GPU 用例索引）",
+      "evidence_paths": [
+        "crates/dhampir-core/src/effects.rs",
+        "crates/dhampir-core/src/render/color_adjust.rs",
+        "crates/dhampir-worker/tests/timeline.rs",
+        "web/dom-css.mjs",
+        "scripts/check-dom-css.mjs"
+      ],
+      "note": "**第 42 轮**：加性/乘性**分成两条**（`brightness` 加、`brightness_multiply` 乘）—— 理由是本仓铁律：**不改既有画法**。新增那条的 `scale` 放在 uniform **末尾**（老字段偏移不动），`× 1.0` 在 f32 下逐位精确 ⇒ 老工程出片一字不差"
+    },
+    {
+      "id": "filter.hue-rotate",
+      "label": "filter: hue-rotate()（规范矩阵；第 44 轮新增那条）",
+      "status": "supported",
+      "stage": "5",
+      "dhampir": "`hue_rotate_css{degrees}` —— 矩阵系数取自**规范自己的 MathML**（`fxtf-drafts/filter-effects/mathml/feColorMatrix03.mml`），第 44 轮**新增**；既有的 `hue`（YIQ / Rec.601）**没动**",
+      "dom": "CSS `hue-rotate(θ)` 原样搬（同一套矩阵）；**转译器侧也学会了**",
+      "evidence": "GPU 用例「规范色相旋转与_yiq_那条明显不同」：0° 逐位不变、90° 规范约 `(0,91,0)`、YIQ 约 `(119,234,0)`（手算）；DOM 判据 + 转译器判据；核心判据 `uniform_布局与着色器一致` 现在**连字段顺序一起钉**；实测值与机器口径见 `plan/web-engine-measurements.md`（含 GPU 用例索引）",
+      "evidence_paths": [
+        "crates/dhampir-core/src/effects.rs",
+        "crates/dhampir-core/src/render/color_adjust.rs",
+        "crates/dhampir-worker/tests/timeline.rs",
+        "web/dom-css.mjs",
+        "scripts/check-dom-css.mjs"
+      ],
+      "note": "**第 44 轮**：加性/乘性的教训照搬到色相上 —— **新增**一条按规范矩阵的旋转，既有的 YIQ 那条不动（改它会动老工程出片）。**踩过的坑值得记**：新字段插进了 WGSL 的**错位置**（写成 `hue, hue_css, scale`，而 Rust 是 `hue, scale, hue_css`）⇒ 着色器把 `scale` 当角度、把角度当乘数，纯红转 90° 给出 `(184, 87, 0)` —— 一个看起来完全合理的错。**`cargo check` 抓不到**（WGSL 要到建管线时才校验），而当时那条 `uniform_布局与着色器一致` 只钉了大小、没钉顺序。现在顺序也钉住了"
+    },
+    {
+      "id": "filter.drop-shadow",
+      "label": "filter: drop-shadow()",
+      "status": "supported",
+      "stage": "have",
+      "dhampir": "**合成器会画**（第 28–29 轮）：准备循环里为该层**多推一张** —— 先把轮廓（含圆角/裁剪/掩码）渲染进一张**带透明留白**的中间纹理，模糊它，再偏移 + 染色画在本层**下面**；着色器有 `tint` 开关（不染时 `select` 取原值 ⇒ 逐字节同旧）",
+      "dom": "CSS `filter: drop-shadow(dx dy 2σ rgb(0 0 0 / opacity))` —— 模糊按 `b = 2σ` 换算，浓淡用颜色 alpha 表达",
+      "evidence": "GPU 用例「投影在下面_偏移染色模糊浓淡都对」五条：偏移/染色、**画在下面**（本层像素与没投影时逐字节相同）、模糊确实跑、浓淡减半、**向外扩散**（且扩散有界：半径 × scale）+ DOM 判据 checkShadowCases；没有投影时出片逐字节不变；实测值与机器口径见 `plan/web-engine-measurements.md`（含 GPU 用例索引）",
+      "evidence_paths": [
+        "crates/dhampir-core/src/render/timeline.rs",
+        "crates/dhampir-core/src/shaders/compose.wgsl",
+        "crates/dhampir-worker/tests/timeline.rs",
+        "web/dom-css.mjs",
+        "scripts/check-dom-css.mjs"
+      ],
+      "note": "**第 27 轮**：契约 + 取值口径（σ ≤ 8 按 D5、opacity ∈ [0,1]）+ 拒绝。**第 28 轮**：多画一张。**第 29 轮**：把\"先画轮廓再模糊\"补上 —— 直接模糊源纹理只会向内软化（**模糊一个常量还是那个常量**），留白之后轮廓外才有衰减空间。留白宽度 = 模糊半径，扩散因此**有界**（半径 × scale）。形状烘进轮廓，阴影那一张不再重复裁剪（否则扩散出去那圈会被再裁一次）"
+    },
+    {
+      "id": "blend-mode",
+      "label": "mix-blend-mode",
+      "status": "partial",
+      "stage": "5",
+      "dhampir": "固定混合方程那 4 条走合成器；`darken` / `lighten` / `overlay` / `soft_light` / `difference` 走**读回型回路**（第 31 轮）：把底留在纹理里 → 这一层单独渲一张 → 按 W3C 的 `f(src,dst)`（branchless `select`，含 αb 的完整合成、并**先拆预乘**）写回",
+      "dom": "CSS `mix-blend-mode` 名对名；`add` 用 `plus-lighter` 近似并写明理由",
+      "evidence": "GPU 用例「读回型混合的五行公式逐条对得上」（纯色源、期望值按 W3C 手算：darken/lighten/difference/overlay/soft_light + 半透明那一支）+ 计划单测「读回型混合单独成步_不与别的层同批」+ 现有 4 条逐字节不变；**第 53 轮补的实测**：`add` 的颜色分量不看源 alpha（同一个加法层 opacity 1.0 与 0.5 出**同一张图**），与 CSS `plus-lighter` 的差恰好是 `(1−αs)·Cs` —— 这条把台账 `blend.add_plus_lighter` 里的\"未必逐值相同\"变成了精确关系；实测值与机器口径见 `plan/web-engine-measurements.md`（含 GPU 用例索引）",
+      "evidence_paths": [
+        "crates/dhampir-timeline/src/layer.rs",
+        "web/dom-css.mjs",
+        "scripts/check-dom-css.mjs",
+        "scripts/waapi2doc.mjs",
+        "scripts/check-waapi2doc.mjs",
+        "crates/dhampir-worker/tests/timeline.rs"
+      ],
+      "note": "引擎 **9/9 都能画**：`normal`/`add`/`multiply`/`screen` 走固定方程，`darken`/`lighten`/`overlay`/`soft_light`/`difference` 走**读回型回路**（第 31 轮，D13）；DOM 侧 9/9（`web/dom-css.mjs` 的 ENGINE_IMPLEMENTED_BLENDS 与 `layer.rs` 的 `is_implemented` 由判据比对）。**曾经的\"引擎实现 4\"是历史** —— 别再把那句抄回来",
+      "tolerance": "blend.add_plus_lighter",
+      "gap": "**引擎 9 条都能画**（4 条走固定方程、5 条走读回型回路），DOM 侧 9/9。剩下的差是 `add` 与 CSS `plus-lighter` **不是同一个函数**（近似，理由与登记见 `scripts/dom-parity-differences.toml` 的 `blend.add_plus_lighter`）。"
+    },
+    {
+      "id": "backdrop-filter",
+      "label": "backdrop-filter",
+      "status": "supported",
+      "stage": "have",
+      "dhampir": "**合成器会画了**（第 36 轮）：`Step::Backdrop` —— 对累积结果跑这一层的 `backdrop_effects`，再按**这一层矩形的覆盖度掩码**（复用多边形栅格化器）把结果 **1:1** 贴回去",
+      "dom": "CSS `backdrop-filter` —— 滤镜函数与 `filter` 同一套映射（复用 `layerFilters`，口径 D5/D6 不必重新论证）",
+      "evidence": "GPU 用例「背景滤镜只在层的矩形里生效_而且真的读了身后」+ 计划单测「背景滤镜单独成步_而且这一层自己仍然要画」+ 契约往返单测；实测值与机器口径见 `plan/web-engine-measurements.md`（含 GPU 用例索引）",
+      "evidence_paths": [
+        "crates/dhampir-core/src/render/timeline.rs",
+        "crates/dhampir-core/src/render/polygon.rs",
+        "crates/dhampir-worker/tests/timeline.rs"
+      ],
+      "note": "**第 34 轮进度**：契约 + 校验（**两张表走同一套注册表校验**：未知特效与参数越界都拦）+ 能力查询 `unimplemented_backdrops`。**与圆角/掩码不同：这里报错而不是警告** —— 背景滤镜改的是**这一层身后**的内容，静默忽略等于整幅画面不同，没有\"保留意图但不画\"的中间态。回路（`Step::Backdrop`：对累积结果跑特效 → 用这一层的矩形混合回去）是下一步。**第 36 轮落地**：回路做对了 —— 第 35 轮那次栽在\"用这一层缩放过的四边形去贴目标分辨率的结果 ⇒ 被再缩放一次\"（蓝只漏 6/255），现在改成 1:1 + 掩码。判据：矩形外逐字节不变、双色边界处两边互相染色、计划单测（这一层仍然要画）"
+    },
+    {
+      "id": "geometry.corner-radius",
+      "label": "圆角（corner_radius / border-radius）",
+      "status": "supported",
+      "stage": "have",
+      "dhampir": "`Layer.corner_radius`（文档像素，缺省 0 且为 0 不写进文件）；合成着色器里的**无分支**圆角椭圆 SDF（`length(max(q,0)) + min(max(q.x,q.y),0) - r`），覆盖度用一条 1 目标像素宽的线性斜坡",
+      "dom": "`border-radius: Rpx`（与引擎同一个形状概念；**抗锯齿不会逐像素相同** —— 容差另记）",
+      "evidence": "GPU 用例「圆角只切四个角_半径为零时一个像素都不动」（32×32：半径 8 时四角 α≤8、四条边中点与中心仍是红；半径 0 时四角也是红）；半径 0 的工程出片 sha256 与改动前基线**一字不差**（8b7d9e18a7320ee7）；WGSL 允许表 40 条全部申报、禁词 0 次；**边缘抗锯齿实测**（第 52 轮）：把圆角层转 30° 逼出真抗锯齿后，半透明像素 28 个 / 边缘总长 128 ⇒ **斜坡 ≈ 0.22 目标像素宽**（α ∈ [133, 236]）。台账 `geometry.edge_antialias` 里原先那句「1 目标像素宽的线性斜坡」是**论断**，被这次实测推翻（实际更窄）；实测值与机器口径见 `plan/web-engine-measurements.md`（含 GPU 用例索引）",
+      "evidence_paths": [
+        "crates/dhampir-core/src/shaders/compose.wgsl",
+        "crates/dhampir-core/src/render/compose.rs",
+        "crates/dhampir-worker/tests/compose.rs",
+        "web/dom-css.mjs",
+        "scripts/check-dom-css.mjs",
+        "scripts/waapi2doc.mjs",
+        "scripts/check-waapi2doc.mjs",
+        "crates/dhampir-worker/tests/timeline.rs"
+      ],
+      "note": "**已实现**（契约 → 引擎 → DOM 三步都落地）。半径是**文档像素**：换算到源像素只差一个 `1/scale`（`pixel_scale` 正好约掉），所以同一个圆角在不同导出尺寸下形状一样。抗锯齿：引擎用 1 目标像素线性斜坡，CSS 用自己的 —— 两端差异写进容差表，不改通过线（与浏览器的差异登记在 scripts/dom-parity-differences.toml 的 geometry.edge_antialias）；**转译器侧已学会**（第 15 轮）：WAAPI 快照里的 `filter:` / `mix-blend-mode` / `border-radius` 会按 D5/D6/D9/D10 的口径转成工程里的声明式数据，不等价的**明说并跳过整条动画**",
+      "tolerance": "geometry.edge_antialias"
+    },
+    {
+      "id": "geometry.clip-path",
+      "label": "裁剪形状（circle / ellipse / inset）",
+      "status": "supported",
+      "stage": "have",
+      "dhampir": "`Layer.clip`（文档像素）；合成着色器里一组**无分支** SDF，形状码用 `select` 分派，与圆角的覆盖度**相乘**",
+      "dom": "CSS `clip-path: circle() / ellipse() / inset()`（**只搬这三种**）；`center` 缺省时不写 `at`，与引擎的「图层中心」一致",
+      "evidence": "GPU 用例「裁剪形状_圆与椭圆与内缩矩形各切对地方」（含判别点：椭圆在 y 轴 (rx+ry)/2 处**必须透明**，画成圆的话那里会是红的）；契约往返单测；没有裁剪时出片 sha256 与基线一字不差（8b7d9e18a7320ee7）；实测值与机器口径见 `plan/web-engine-measurements.md`（含 GPU 用例索引）",
+      "evidence_paths": [
+        "crates/dhampir-core/src/shaders/compose.wgsl",
+        "crates/dhampir-core/src/render/compose.rs",
+        "crates/dhampir-worker/tests/compose.rs",
+        "web/dom-css.mjs",
+        "scripts/check-dom-css.mjs",
+        "scripts/waapi2doc.mjs",
+        "scripts/check-waapi2doc.mjs"
+      ],
+      "note": "三种形状共用一套 SDF；**椭圆用的是「把圆按半径归一化」那个近似** —— 零集（内外判定）精确，远处距离值不精确，而距离只用在做抗锯齿的那一圈。`select` **两支都会求值**，所以没有裁剪时 Rust 侧给的是安全占位值（半径 1、半宽 1）而不是 0，免得未选中那支算出 0/0；**转译器侧已学会**（第 17 轮）：`clip-path: circle()/ellipse()/inset()` 按规范展开简写，`polygon()`/`path()` 与百分比半径 / 像素位置**明说跳过**"
+    },
+    {
+      "id": "geometry.mask",
+      "label": "掩码（mask / mask-image）",
+      "status": "partial",
+      "stage": "have",
+      "dhampir": "**合成器已经会画**（第 21 轮）：bind group 第三项绑掩码纹理（没有掩码时绑 1×1 兜底图，`mask_a.x=0` 旁路掉）+ 自己写的**双线性**采样 + alpha/亮度(Rec.709) 通道 + 反相；**第 46/47 轮加了程序化渐变**（`MaskSpec.gradient`：角度 + 断点，与 `asset_id` 二选一；在**这一层自己的尺寸**上栅格化 —— 因为掩码按图层局部坐标采样，而 CSS 的轴长规矩是相对元素自己的盒子算的）",
+      "dom": "CSS `mask-image` —— **但只在素材 uri 能直接取到时才写**（`http:`/`blob:`/`data:`）；相对文件名**刻意不设**（浏览器取不到遮罩会把整个元素遮没，那比画不出掩码更坏），并把这件事实报出来。**这一版不做素材解码**，所以标「未实测」；反相在 CSS 里表达不了，也报出来",
+      "evidence": "GPU 用例「掩码按图层矩形铺开_四象限与反相与通道都对」（2×2 掩码铺 32×32：四象限、反相后反过来、alpha 与亮度两种通道）；没有掩码时出片 sha256 与基线一字不差（8b7d9e18a7320ee7）；WGSL 允许表 40 条全申报；第 46 轮的手算单测（0°/90° 方向、断点插值 191）+ 第 47 轮 GPU 用例「渐变遮罩按层自己的尺寸铺开_左右与反相都对」；实测值与机器口径见 `plan/web-engine-measurements.md`（含 GPU 用例索引）",
+      "evidence_paths": [
+        "crates/dhampir-core/src/shaders/compose.wgsl",
+        "crates/dhampir-core/src/render/compose.rs",
+        "crates/dhampir-worker/tests/compose.rs",
+        "crates/dhampir-core/src/render/gradient.rs"
+      ],
+      "note": "几何型里最贵的一档：要**掩码纹理**（多一张图、多一次采样、还要跟文档坐标系统一对齐）。它同时也是「矢量/位图遮罩」那条线的起点；设计：**D12**（掩码是一张素材（`assets` 里的一条）+ 图层局部坐标；v1 只做拉伸填满 + 环绕/钳边，渐变遮罩与 size/position 不做）。**第 20 轮进度**：契约已立（`Layer.mask`：素材 id + 通道 + 反相，缺省不写进文件）；文档校验会报 `unknown_asset`（掩码引用不存在的素材）与 `unimplemented_mask` 警告；**渲染前拒绝整帧**（在求值层那一层查，占位层也拦得住）。**还没做**：引擎那张掩码纹理（D12 第 3 步）与 DOM 侧的 `mask-image`（第 4 步）。**第 21 轮进度**：合成器已能画（GPU 用例钉住四象限/反相/两种通道）；**还差**把工程里的掩码素材解析成纹理（worker 的素材解码那一步）与 DOM 侧 `mask-image` —— 所以**工程路径仍然拒绝**（不给 `None` 让它悄悄画成没掩码的样子）。**第 23 轮进度**：\"素材 → 纹理\"接上了（`SourceResolver::mask_texture_for`，默认实现返回 `None`；worker 复用同一条解码通路取第 0 帧）—— 解析不出来就**拒绝整帧**，不静默。**仍未做**：渐变遮罩、`mask-size/position/repeat`、浏览器宿主的 `mask_texture_for`；DOM 侧的 `mask-image` 只在素材 uri 能直接取到时才写（见 dom 列） **三条差异分别记在台账的 `mask.availability`（取不到就不设，明确接受）、`mask.invert_dom`（反相在 CSS 里表达不了，明确接受）、`mask.interpolation_kernel`（插值核不同，引擎侧实测、DOM 侧未实测）** —— 第 54 轮从原来那一条里拆开（一条 `未实测` 会把\"刻意且已判\"的差异伪装成\"还没量\"）",
+      "tolerance": "mask.sampling_and_availability",
+      "gap": "**渐变遮罩已做**（第 46/47 轮：程序化生成覆盖度纹理，引擎与 DOM 都认）。还差的：`mask-size` / `mask-position` / `mask-repeat` 不做（D12 的 v1 口径：只做拉伸填满 + 环绕/钳边）；**浏览器宿主**的 `mask_texture_for` 还没接（那边拿不到素材表）；**反相**在 DOM 侧没画（CSS 的 mask-image 表达不了，引擎侧画了）"
+    },
+    {
+      "id": "color-interpolation",
+      "label": "颜色插值",
+      "status": "partial",
+      "stage": "2",
+      "dhampir": "颜色要**拆通道**（overlay 已经这么做）",
+      "dom": "CSS 原生（字符串颜色）",
+      "evidence": "crates/dhampir-core/src/effects.rs 的 OVERLAY 参数表（r/g/b + r2/g2/b2）",
+      "evidence_paths": [
+        "crates/dhampir-core/src/effects.rs"
+      ],
+      "note": "色彩空间（sRGB vs 线性）要写死，否则两端对同一个词的解释会分叉",
+      "gap": "两端必须在**同一个色彩空间**里插值并写死；现在两端各自按 sRGB 直接插，差别会出现在高饱和过渡上（**尚未逐值对表**）。"
+    },
+    {
+      "id": "text",
+      "label": "文字（排版与上屏）",
+      "status": "partial",
+      "stage": "have",
+      "dhampir": "行盒**结构**一致（text_layout）；字形像素允许不同",
+      "dom": "浏览器原生文字（这正是 DOM 侧快的地方）",
+      "evidence": "crates/dhampir-timeline/src/text_layout.rs 的模块头（度量模型与它的代价）",
+      "evidence_paths": [
+        "crates/dhampir-timeline/src/text_layout.rs"
+      ],
+      "note": "两端字体度量不同源；禁则 / 连字 / 字距明确不做",
+      "gap": "两端**字体度量不同源**；禁则 / 连字 / 字距**明确不做**（不是待办，是不在范围内）。"
+    },
+    {
+      "id": "gradient-fill",
+      "label": "渐变填充",
+      "status": "partial",
+      "stage": "5",
+      "dhampir": "overlay 有纯色 / 线性 / 径向（**全屏覆盖**，不按形状）",
+      "dom": "CSS 原生（按形状）",
+      "evidence": "crates/dhampir-core/src/effects.rs 的 OVERLAY 参数（shape 0/1/2 + angle）",
+      "evidence_paths": [
+        "crates/dhampir-core/src/effects.rs"
+      ],
+      "note": "几何原语（圆角 / 裁剪 / 多边形 / 路径 / 掩码）**都已就位**；剩下的是「渐变相对哪个盒子」这条坐标口径",
+      "gap": "几何原语已经齐了（圆角 / 裁剪 / 多边形 / 路径 / 掩码），差的是**按形状的渐变坐标**：引擎走特效管线、DOM 走 `background-image` —— 两端对「渐变相对哪个盒子」的解释还没统一。"
+    },
+    {
+      "id": "layout",
+      "label": "布局（flow / flex / grid）",
+      "status": "explicitly-not-doing",
+      "stage": "other",
+      "dhampir": "无（层是平的、坐标是绝对的）",
+      "dom": "CSS 原生",
+      "evidence": "层是平的：crates/dhampir-timeline/src/layer.rs 里 children/parent/group 均为 0 处",
+      "evidence_paths": [
+        "crates/dhampir-timeline/src/layer.rs"
+      ],
+      "note": "布局是**另一个课题**（受限布局器），不属于网页动画对齐这条线",
+      "why_not": "**本仓不是浏览器**：没有排版引擎，也不打算有。布局是浏览器的事 —— 作者在网页里排好版，工程只记录与它对齐的**内容与变换**（层的时间轴、位移、缩放、旋转）。要\"让引擎自己算 flex/grid\"等于重写一遍排版，而那正是本计划从一开始就划出去的部分（见 plan/web-animation-parity.md 的范围声明）"
+    },
+    {
+      "id": "dom-only-semantics",
+      "label": "autoAlpha / display / 伪元素 / 媒体查询",
+      "status": "explicitly-not-doing",
+      "stage": "other",
+      "dhampir": "无（DOM 特有语义）",
+      "dom": "CSS 原生",
+      "evidence": "plan/web-animation-parity.md §1.2 非目标",
+      "evidence_paths": [
+        "plan/web-animation-parity.md"
+      ],
+      "note": "DOM 特有语义不进契约",
+      "why_not": "这些描述的是**文档对象模型的状态**（`display` / 伪元素 / 媒体查询 / `autoAlpha` 的可见性与指针事件），不是\"这一帧该画成什么样\"。工程只记录**可渲染的东西**：一个元素在某一帧的位置、透明度、形状与特效。把 DOM 状态写进契约会让\"预览=成片\"这条前提失去意义 —— 因为 DOM 状态在出片端根本不存在"
+    },
+    {
+      "id": "plugins",
+      "label": "插件（ScrollTrigger / Draggable / Flip / Observer / 文本拆分…）",
+      "status": "explicitly-not-doing",
+      "stage": "other",
+      "dhampir": "无（运行时交互与布局测量）",
+      "dom": "取决于插件",
+      "evidence": "plan/web-animation-parity.md §1.2 非目标",
+      "evidence_paths": [
+        "plan/web-animation-parity.md"
+      ],
+      "note": "依赖滚动 / 指针 / 焦点 / 活 DOM 的布局测量 —— 服务端没有 DOM，不是工程量问题",
+      "why_not": "插件（ScrollTrigger / Draggable / Flip 一类）把**时间的推进交给外部事件**（滚动位置、指针拖动、布局变化），而本仓的求值必须是**时间的纯函数**：同一个时刻永远算出同一帧（这条是\"跳帧求值、并行求值、seek 到任意时刻结果都一样\"的前提，出片端正是靠它才敢并行）。要支持这类交互，正确的接法是在**宿主侧**把事件换算成一个时间值再喂给求值层 —— 而不是让契约里出现\"滚动到 50% 时\"这种不可复现的条件"
+    },
+    {
+      "id": "lottie",
+      "label": "Lottie / Rive（矢量动画格式）",
+      "status": "needs-primitive",
+      "stage": "other",
+      "dhampir": "无（要矢量渲染器）",
+      "dom": "有现成播放器",
+      "evidence": "plan/web-animation-parity.md §12（Lottie 归「素材格式」不归作者层）",
+      "evidence_paths": [
+        "plan/web-animation-parity.md",
+        "plan/web-animation-criteria.md"
+      ],
+      "note": "它是**素材格式**，自带渲染语义；用它先要有矢量原语（与浏览器的差异登记在 scripts/dom-parity-differences.toml 的 lottie.vector）；设计：**D14**（矢量栅格化器，量级与前面各档不同；要做只能在 core 里做纯 CPU 光栅化）",
+      "needs": "other",
+      "tolerance": "lottie.vector",
+      "design": "D14"
+    },
+    {
+      "id": "geometry.clip-path-polygon",
+      "label": "裁剪：polygon / path（多边形与路径）",
+      "status": "supported",
+      "stage": "have",
+      "dhampir": "`ClipShape::Polygon { points }`（**图层框内的归一化坐标**）→ 在 core 里**栅格化成掩码纹理**（`render/polygon.rs`），再走已经验过的掩码通路 —— **着色器一行都没改**；口径：非零环绕、2×2 超采样抗锯齿；**路径**（`ClipShape::Path { data }`，SVG `d`、**文档像素**）先细分成折线再走同一条栅格化通路 —— 细分器在 `dhampir-timeline`（校验层与渲染层用同一份解析），支持 `M L H V C Q Z`（含相对），**弧 `A` 与光滑续接 `S`/`T` 明说不支持**，曲线按固定段数细分（确定性优先）",
+      "dom": "CSS `polygon(x% y%, …)` 与 `path(\"…\")`（路径两边都是文档像素，**原样透传**）",
+      "evidence": "栅格化器 6 条单测（整框 / 三角形 / 绕向无关 / L 形凹口 / 顶点不够全零 / 框外顶点只被裁掉）+ GPU 用例「多边形裁剪只留下三角形那一半」+ 19 条栅格化/细分单测 + GPU 用例「路径裁剪的直线与曲线都对」+ DOM 逐字符串钉住；实测值与机器口径见 `plan/web-engine-measurements.md`（含 GPU 用例索引）",
+      "evidence_paths": [
+        "crates/dhampir-timeline/src/path.rs",
+        "crates/dhampir-core/src/render/polygon.rs",
+        "crates/dhampir-core/src/render/timeline.rs",
+        "crates/dhampir-worker/tests/timeline.rs",
+        "web/dom-css.mjs"
+      ],
+      "note": "**第 24 轮：从「明确不做」变成可做** —— 做法正是 D11 里写下的那条：**先栅格化成掩码纹理**。因为栅格化器在 core（纯 Rust、零 `#[cfg]`），两个宿主跑的是同一份代码、同一组浮点运算。两条口径在契约层报清：顶点少于 3 个 → `clip_polygon_too_few_points`；与掩码同时给 → `clip_polygon_with_mask`（都要占那条通路，**明说不支持**，不替作者挑一个）。**第 25 轮**：`path()` 也进来了（同一套通路，只多一步细分）；细分器搬到 timeline 是为了**校验层能先报** `clip_path_unparsable` / `clip_path_too_few_points`"
+    }
+  ],
+  "needs_legend": {
+    "ping-pong": "读回型：要中间纹理 + 读目标像素的合成回路。一次投入能带一批（5 条混合模式 + drop-shadow + backdrop-filter）（设计见 D13）",
+    "geometry": "几何型：每像素一个覆盖度（SDF 或掩码纹理）。一次投入能带一批（圆角 + clip-path + mask）（设计见 D12）",
+    "other": "不共用基建，单列（例如 Lottie 要一整套矢量渲染器）（设计见 D14）",
+    "compose": "合成层多画一张：不是读目标像素，而是同一层**再画一张**（模糊 + 染色 + 偏移）—— 一次投入能带「投影」与将来的纯色遮罩"
+  },
+  "needs_legend_note": "每条 needs-primitive 都必须：① 写明档位（needs）；② 指向 plan/web-animation-criteria.md 里**真的存在**的设计节（design: D<n>）。两条都由 check-capabilities 判 —— 「要新原语」不许只是一句话欠着。"
+}

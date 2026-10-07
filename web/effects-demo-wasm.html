@@ -1,0 +1,3603 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>全部枚举效果 · wasm 网页（dhampir wasm 宿主）</title>
+<style>
+  body { margin:0; background:#16161a; color:#ddd; font:13px/1.5 system-ui, sans-serif; }
+  header { padding:10px 14px; border-bottom:1px solid #2a2a30; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  main { display:flex; gap:14px; padding:14px; align-items:flex-start; flex-wrap:wrap; }
+  .pane { background:#1d1d22; border:1px solid #2a2a30; border-radius:8px; padding:10px; }
+  canvas { background:#000; display:block; width:640px; height:360px; }
+  #stage { position:relative; width:1920px; height:1080px; transform-origin:top left; background:#000; }
+  .dom-layer { position:absolute; box-sizing:border-box; overflow:hidden; }
+  input[type=range] { width:420px; }
+  button { background:#2a2a30; color:#ddd; border:1px solid #3a3a44; border-radius:6px; padding:5px 12px; cursor:pointer; }
+  button.on { background:#2f6f3f; }
+  .ok { color:#7ddc7d; } .bad { color:#ff8080; }
+  #report { white-space:pre-wrap; font-family:ui-monospace,monospace; font-size:12px; max-width:560px; }
+  img.sheet { width:520px; border:1px solid #2a2a30; border-radius:6px; }
+
+</style>
+</head>
+
+
+<body>
+<header>
+  <strong>全部枚举效果 · wasm 网页</strong>
+  <button id="play">▶ 播放</button>
+  <button id="stop">■ 回到 0</button>
+  帧 <input type="range" id="frame" min="0" max="860" value="0"> <span id="fnum">0</span>
+  <span id="status">…</span>
+</header>
+<main>
+  <div class="pane"><canvas id="preview" width="640" height="360"></canvas></div>
+  <div class="pane"><div style="margin-bottom:6px">native 联系表（同一份工程）</div>
+    <img class="sheet" src="effects-demo/effects-demo-contact-sheet.png" alt="联系表"></div>
+  <div class="pane"><div id="report"></div></div>
+</main>
+<script type="application/json" id="doc">{
+  "project_schema": 1,
+  "generator": {
+    "app": "dhampir",
+    "version": "0.0.1"
+  },
+  "meta": {
+    "title": "样本工程（工程文件形态）",
+    "created_at": null,
+    "modified_at": null
+  },
+  "assets": [
+    {
+      "id": "bg.png",
+      "kind": "image",
+      "name": "渐变背景",
+      "uri": "assets/bg.png",
+      "frame_count": 1,
+      "timebase": {
+        "num": 30,
+        "den": 1
+      },
+      "width": 1280,
+      "height": 720,
+      "tags": {},
+      "content_hash": null
+    },
+    {
+      "id": "tile.png",
+      "kind": "image",
+      "name": "半透明瓦片",
+      "uri": "assets/tile.png",
+      "frame_count": 1,
+      "timebase": {
+        "num": 30,
+        "den": 1
+      },
+      "width": 400,
+      "height": 400,
+      "tags": {},
+      "content_hash": null
+    },
+    {
+      "id": "mask.png",
+      "kind": "image",
+      "name": "掩码（alpha 渐变）",
+      "uri": "assets/mask.png",
+      "frame_count": 1,
+      "timebase": {
+        "num": 30,
+        "den": 1
+      },
+      "width": 256,
+      "height": 256,
+      "tags": {},
+      "content_hash": null
+    },
+    {
+      "id": "empty.png",
+      "kind": "image",
+      "name": "全透明（给背景滤镜用）",
+      "uri": "assets/empty.png",
+      "frame_count": 1,
+      "timebase": {
+        "num": 30,
+        "den": 1
+      },
+      "width": 64,
+      "height": 64,
+      "tags": {},
+      "content_hash": null
+    }
+  ],
+  "timeline": {
+    "schema": 3,
+    "timebase": {
+      "num": 30,
+      "den": 1
+    },
+    "markers": [],
+    "tracks": [
+      {
+        "id": "base",
+        "kind": "video",
+        "gain": 1,
+        "layers": [
+          {
+            "id": "blend-base-normal",
+            "start": 0,
+            "end": 20,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "blend-base-add",
+            "start": 20,
+            "end": 40,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "blend-base-multiply",
+            "start": 40,
+            "end": 60,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "blend-base-screen",
+            "start": 60,
+            "end": 80,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "blend-base-darken",
+            "start": 80,
+            "end": 100,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "blend-base-lighten",
+            "start": 100,
+            "end": 120,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "blend-base-overlay",
+            "start": 120,
+            "end": 140,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "blend-base-soft_light",
+            "start": 140,
+            "end": 160,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "blend-base-difference",
+            "start": 160,
+            "end": 180,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "feat-base-clip-circle",
+            "start": 180,
+            "end": 200,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "feat-base-clip-ellipse",
+            "start": 200,
+            "end": 220,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "feat-base-clip-inset",
+            "start": 220,
+            "end": 240,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "feat-base-clip-polygon",
+            "start": 240,
+            "end": 260,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "feat-base-clip-path",
+            "start": 260,
+            "end": 280,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "feat-base-corner-60",
+            "start": 280,
+            "end": 300,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "feat-base-mask-gradient",
+            "start": 300,
+            "end": 320,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "feat-base-mask-asset",
+            "start": 320,
+            "end": 340,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "feat-base-shadow",
+            "start": 340,
+            "end": 360,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "feat-base-backdrop",
+            "start": 360,
+            "end": 380,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "ease-base-0",
+            "start": 380,
+            "end": 400,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "ease-base-1",
+            "start": 400,
+            "end": 420,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "ease-base-2",
+            "start": 420,
+            "end": 440,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "ease-base-3",
+            "start": 440,
+            "end": 460,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "ease-base-4",
+            "start": 460,
+            "end": 480,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "ease-base-5",
+            "start": 480,
+            "end": 500,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "ease-base-6",
+            "start": 500,
+            "end": 520,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "ease-base-7",
+            "start": 520,
+            "end": 540,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-base-gaussian_blur",
+            "start": 540,
+            "end": 560,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-base-brightness",
+            "start": 560,
+            "end": 580,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-base-brightness_multiply",
+            "start": 580,
+            "end": 600,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-base-contrast",
+            "start": 600,
+            "end": 620,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-base-saturation",
+            "start": 620,
+            "end": 640,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-base-saturation_css",
+            "start": 640,
+            "end": 660,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-base-hue",
+            "start": 660,
+            "end": 680,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-base-hue_rotate_css",
+            "start": 680,
+            "end": 700,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-base-flash",
+            "start": 700,
+            "end": 720,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-base-vignette",
+            "start": 720,
+            "end": 740,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-base-noise",
+            "start": 740,
+            "end": 760,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-base-overlay",
+            "start": 760,
+            "end": 780,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-base-shake",
+            "start": 780,
+            "end": 800,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-base-zoom_bounce",
+            "start": 800,
+            "end": 820,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-base-pulse",
+            "start": 820,
+            "end": 840,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-base-split",
+            "start": 840,
+            "end": 860,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "bg.png",
+              "source_in": 0
+            }
+          }
+        ],
+        "subtitle": null,
+        "danmaku": null
+      },
+      {
+        "id": "tile",
+        "kind": "video",
+        "gain": 1,
+        "layers": [
+          {
+            "id": "blend-top-normal",
+            "start": 0,
+            "end": 20,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.42,
+              "rotation": 0
+            },
+            "opacity": 0.92,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "blend-top-add",
+            "start": 20,
+            "end": 40,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.42,
+              "rotation": 0
+            },
+            "opacity": 0.92,
+            "blend": "add",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "blend-top-multiply",
+            "start": 40,
+            "end": 60,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.42,
+              "rotation": 0
+            },
+            "opacity": 0.92,
+            "blend": "multiply",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "blend-top-screen",
+            "start": 60,
+            "end": 80,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.42,
+              "rotation": 0
+            },
+            "opacity": 0.92,
+            "blend": "screen",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "blend-top-darken",
+            "start": 80,
+            "end": 100,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.42,
+              "rotation": 0
+            },
+            "opacity": 0.92,
+            "blend": "darken",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "blend-top-lighten",
+            "start": 100,
+            "end": 120,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.42,
+              "rotation": 0
+            },
+            "opacity": 0.92,
+            "blend": "lighten",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "blend-top-overlay",
+            "start": 120,
+            "end": 140,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.42,
+              "rotation": 0
+            },
+            "opacity": 0.92,
+            "blend": "overlay",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "blend-top-soft_light",
+            "start": 140,
+            "end": 160,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.42,
+              "rotation": 0
+            },
+            "opacity": 0.92,
+            "blend": "soft_light",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "blend-top-difference",
+            "start": 160,
+            "end": 180,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.42,
+              "rotation": 0
+            },
+            "opacity": 0.92,
+            "blend": "difference",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "feat-clip-circle",
+            "start": 180,
+            "end": 200,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.42,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            },
+            "clip": {
+              "kind": "circle",
+              "center": [
+                0.5,
+                0.5
+              ],
+              "radius": 110
+            }
+          },
+          {
+            "id": "feat-clip-ellipse",
+            "start": 200,
+            "end": 220,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.42,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            },
+            "clip": {
+              "kind": "ellipse",
+              "center": [
+                0.5,
+                0.5
+              ],
+              "radius_x": 130,
+              "radius_y": 80
+            }
+          },
+          {
+            "id": "feat-clip-inset",
+            "start": 220,
+            "end": 240,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.42,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            },
+            "clip": {
+              "kind": "inset",
+              "top": 24,
+              "right": 24,
+              "bottom": 24,
+              "left": 24,
+              "radius": 12
+            }
+          },
+          {
+            "id": "feat-clip-polygon",
+            "start": 240,
+            "end": 260,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.42,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            },
+            "clip": {
+              "kind": "polygon",
+              "points": [
+                [
+                  0.5,
+                  0.02
+                ],
+                [
+                  0.98,
+                  0.94
+                ],
+                [
+                  0.02,
+                  0.94
+                ]
+              ]
+            }
+          },
+          {
+            "id": "feat-clip-path",
+            "start": 260,
+            "end": 280,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.42,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            },
+            "clip": {
+              "kind": "path",
+              "data": "M 0.1 0.1 L 0.9 0.1 L 0.9 0.9 L 0.1 0.9 Z"
+            }
+          },
+          {
+            "id": "feat-corner-60",
+            "start": 280,
+            "end": 300,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.42,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            },
+            "corner_radius": 60
+          },
+          {
+            "id": "feat-mask-gradient",
+            "start": 300,
+            "end": 320,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.42,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            },
+            "mask": {
+              "asset_id": "",
+              "channel": "alpha",
+              "invert": false,
+              "gradient": {
+                "angle_deg": 90,
+                "stops": [
+                  {
+                    "at": 0,
+                    "coverage": 0
+                  },
+                  {
+                    "at": 1,
+                    "coverage": 1
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "id": "feat-mask-asset",
+            "start": 320,
+            "end": 340,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.42,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            },
+            "mask": {
+              "asset_id": "mask.png",
+              "channel": "alpha",
+              "invert": false
+            }
+          },
+          {
+            "id": "feat-shadow",
+            "start": 340,
+            "end": 360,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.42,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            },
+            "shadow": {
+              "offset_x": 14,
+              "offset_y": 14,
+              "blur_sigma": 6,
+              "opacity": 0.8
+            }
+          },
+          {
+            "id": "feat-backdrop",
+            "start": 360,
+            "end": 380,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.5,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "empty.png",
+              "source_in": 0
+            },
+            "backdrop_effects": [
+              {
+                "kind": "gaussian_blur",
+                "params": {
+                  "radius": 8
+                }
+              }
+            ]
+          },
+          {
+            "id": "ease-0",
+            "start": 380,
+            "end": 400,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.18,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [
+              {
+                "frame": 0,
+                "target": "rotation",
+                "value": 0,
+                "easing": "linear"
+              },
+              {
+                "frame": 19,
+                "target": "rotation",
+                "value": 180,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "scale",
+                "value": 0.18,
+                "easing": "linear"
+              },
+              {
+                "frame": 19,
+                "target": "scale",
+                "value": 0.5,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "x",
+                "value": -160,
+                "easing": "linear"
+              },
+              {
+                "frame": 19,
+                "target": "x",
+                "value": 160,
+                "easing": "linear"
+              }
+            ],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "ease-1",
+            "start": 400,
+            "end": 420,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.18,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [
+              {
+                "frame": 0,
+                "target": "rotation",
+                "value": 0,
+                "easing": "cubic-bezier(0.25,0.1,0.25,1)"
+              },
+              {
+                "frame": 19,
+                "target": "rotation",
+                "value": 180,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "scale",
+                "value": 0.18,
+                "easing": "cubic-bezier(0.25,0.1,0.25,1)"
+              },
+              {
+                "frame": 19,
+                "target": "scale",
+                "value": 0.5,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "x",
+                "value": -160,
+                "easing": "cubic-bezier(0.25,0.1,0.25,1)"
+              },
+              {
+                "frame": 19,
+                "target": "x",
+                "value": 160,
+                "easing": "linear"
+              }
+            ],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "ease-2",
+            "start": 420,
+            "end": 440,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.18,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [
+              {
+                "frame": 0,
+                "target": "rotation",
+                "value": 0,
+                "easing": "ease-in-out"
+              },
+              {
+                "frame": 19,
+                "target": "rotation",
+                "value": 180,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "scale",
+                "value": 0.18,
+                "easing": "ease-in-out"
+              },
+              {
+                "frame": 19,
+                "target": "scale",
+                "value": 0.5,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "x",
+                "value": -160,
+                "easing": "ease-in-out"
+              },
+              {
+                "frame": 19,
+                "target": "x",
+                "value": 160,
+                "easing": "linear"
+              }
+            ],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "ease-3",
+            "start": 440,
+            "end": 460,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.18,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [
+              {
+                "frame": 0,
+                "target": "rotation",
+                "value": 0,
+                "easing": "back_out"
+              },
+              {
+                "frame": 19,
+                "target": "rotation",
+                "value": 180,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "scale",
+                "value": 0.18,
+                "easing": "back_out"
+              },
+              {
+                "frame": 19,
+                "target": "scale",
+                "value": 0.5,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "x",
+                "value": -160,
+                "easing": "back_out"
+              },
+              {
+                "frame": 19,
+                "target": "x",
+                "value": 160,
+                "easing": "linear"
+              }
+            ],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "ease-4",
+            "start": 460,
+            "end": 480,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.18,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [
+              {
+                "frame": 0,
+                "target": "rotation",
+                "value": 0,
+                "easing": "steps(4)"
+              },
+              {
+                "frame": 19,
+                "target": "rotation",
+                "value": 180,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "scale",
+                "value": 0.18,
+                "easing": "steps(4)"
+              },
+              {
+                "frame": 19,
+                "target": "scale",
+                "value": 0.5,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "x",
+                "value": -160,
+                "easing": "steps(4)"
+              },
+              {
+                "frame": 19,
+                "target": "x",
+                "value": 160,
+                "easing": "linear"
+              }
+            ],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "ease-5",
+            "start": 480,
+            "end": 500,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.18,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [
+              {
+                "frame": 0,
+                "target": "rotation",
+                "value": 0,
+                "easing": "linear(0, 0.25 75%, 1)"
+              },
+              {
+                "frame": 19,
+                "target": "rotation",
+                "value": 180,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "scale",
+                "value": 0.18,
+                "easing": "linear(0, 0.25 75%, 1)"
+              },
+              {
+                "frame": 19,
+                "target": "scale",
+                "value": 0.5,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "x",
+                "value": -160,
+                "easing": "linear(0, 0.25 75%, 1)"
+              },
+              {
+                "frame": 19,
+                "target": "x",
+                "value": 160,
+                "easing": "linear"
+              }
+            ],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "ease-6",
+            "start": 500,
+            "end": 520,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.18,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [
+              {
+                "frame": 0,
+                "target": "rotation",
+                "value": 0,
+                "easing": "cubic-bezier(0.68,-0.55,0.265,1.55)"
+              },
+              {
+                "frame": 19,
+                "target": "rotation",
+                "value": 180,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "scale",
+                "value": 0.18,
+                "easing": "cubic-bezier(0.68,-0.55,0.265,1.55)"
+              },
+              {
+                "frame": 19,
+                "target": "scale",
+                "value": 0.5,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "x",
+                "value": -160,
+                "easing": "cubic-bezier(0.68,-0.55,0.265,1.55)"
+              },
+              {
+                "frame": 19,
+                "target": "x",
+                "value": 160,
+                "easing": "linear"
+              }
+            ],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "ease-7",
+            "start": 520,
+            "end": 540,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 0.18,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [
+              {
+                "frame": 0,
+                "target": "rotation",
+                "value": 0,
+                "easing": "ease-in"
+              },
+              {
+                "frame": 19,
+                "target": "rotation",
+                "value": 180,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "scale",
+                "value": 0.18,
+                "easing": "ease-in"
+              },
+              {
+                "frame": 19,
+                "target": "scale",
+                "value": 0.5,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "x",
+                "value": -160,
+                "easing": "ease-in"
+              },
+              {
+                "frame": 19,
+                "target": "x",
+                "value": 160,
+                "easing": "linear"
+              }
+            ],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-tile-gaussian_blur",
+            "start": 540,
+            "end": 560,
+            "transform": {
+              "x": -140,
+              "y": 40,
+              "scale": 0.3,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [
+              {
+                "frame": 0,
+                "target": "x",
+                "value": -140,
+                "easing": "linear"
+              },
+              {
+                "frame": 19,
+                "target": "x",
+                "value": 140,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "rotation",
+                "value": -20,
+                "easing": "linear"
+              },
+              {
+                "frame": 19,
+                "target": "rotation",
+                "value": 20,
+                "easing": "linear"
+              }
+            ],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-tile-brightness",
+            "start": 560,
+            "end": 580,
+            "transform": {
+              "x": -140,
+              "y": 40,
+              "scale": 0.3,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [
+              {
+                "frame": 0,
+                "target": "x",
+                "value": -140,
+                "easing": "cubic-bezier(0.25,0.1,0.25,1)"
+              },
+              {
+                "frame": 19,
+                "target": "x",
+                "value": 140,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "rotation",
+                "value": -20,
+                "easing": "cubic-bezier(0.25,0.1,0.25,1)"
+              },
+              {
+                "frame": 19,
+                "target": "rotation",
+                "value": 20,
+                "easing": "linear"
+              }
+            ],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-tile-brightness_multiply",
+            "start": 580,
+            "end": 600,
+            "transform": {
+              "x": -140,
+              "y": 40,
+              "scale": 0.3,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [
+              {
+                "frame": 0,
+                "target": "x",
+                "value": -140,
+                "easing": "ease-in-out"
+              },
+              {
+                "frame": 19,
+                "target": "x",
+                "value": 140,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "rotation",
+                "value": -20,
+                "easing": "ease-in-out"
+              },
+              {
+                "frame": 19,
+                "target": "rotation",
+                "value": 20,
+                "easing": "linear"
+              }
+            ],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-tile-contrast",
+            "start": 600,
+            "end": 620,
+            "transform": {
+              "x": -140,
+              "y": 40,
+              "scale": 0.3,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [
+              {
+                "frame": 0,
+                "target": "x",
+                "value": -140,
+                "easing": "back_out"
+              },
+              {
+                "frame": 19,
+                "target": "x",
+                "value": 140,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "rotation",
+                "value": -20,
+                "easing": "back_out"
+              },
+              {
+                "frame": 19,
+                "target": "rotation",
+                "value": 20,
+                "easing": "linear"
+              }
+            ],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-tile-saturation",
+            "start": 620,
+            "end": 640,
+            "transform": {
+              "x": -140,
+              "y": 40,
+              "scale": 0.3,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [
+              {
+                "frame": 0,
+                "target": "x",
+                "value": -140,
+                "easing": "steps(4)"
+              },
+              {
+                "frame": 19,
+                "target": "x",
+                "value": 140,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "rotation",
+                "value": -20,
+                "easing": "steps(4)"
+              },
+              {
+                "frame": 19,
+                "target": "rotation",
+                "value": 20,
+                "easing": "linear"
+              }
+            ],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-tile-saturation_css",
+            "start": 640,
+            "end": 660,
+            "transform": {
+              "x": -140,
+              "y": 40,
+              "scale": 0.3,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [
+              {
+                "frame": 0,
+                "target": "x",
+                "value": -140,
+                "easing": "linear(0, 0.25 75%, 1)"
+              },
+              {
+                "frame": 19,
+                "target": "x",
+                "value": 140,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "rotation",
+                "value": -20,
+                "easing": "linear(0, 0.25 75%, 1)"
+              },
+              {
+                "frame": 19,
+                "target": "rotation",
+                "value": 20,
+                "easing": "linear"
+              }
+            ],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-tile-hue",
+            "start": 660,
+            "end": 680,
+            "transform": {
+              "x": -140,
+              "y": 40,
+              "scale": 0.3,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [
+              {
+                "frame": 0,
+                "target": "x",
+                "value": -140,
+                "easing": "cubic-bezier(0.68,-0.55,0.265,1.55)"
+              },
+              {
+                "frame": 19,
+                "target": "x",
+                "value": 140,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "rotation",
+                "value": -20,
+                "easing": "cubic-bezier(0.68,-0.55,0.265,1.55)"
+              },
+              {
+                "frame": 19,
+                "target": "rotation",
+                "value": 20,
+                "easing": "linear"
+              }
+            ],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-tile-hue_rotate_css",
+            "start": 680,
+            "end": 700,
+            "transform": {
+              "x": -140,
+              "y": 40,
+              "scale": 0.3,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [
+              {
+                "frame": 0,
+                "target": "x",
+                "value": -140,
+                "easing": "ease-in"
+              },
+              {
+                "frame": 19,
+                "target": "x",
+                "value": 140,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "rotation",
+                "value": -20,
+                "easing": "ease-in"
+              },
+              {
+                "frame": 19,
+                "target": "rotation",
+                "value": 20,
+                "easing": "linear"
+              }
+            ],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-tile-flash",
+            "start": 700,
+            "end": 720,
+            "transform": {
+              "x": -140,
+              "y": 40,
+              "scale": 0.3,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [
+              {
+                "frame": 0,
+                "target": "x",
+                "value": -140,
+                "easing": "linear"
+              },
+              {
+                "frame": 19,
+                "target": "x",
+                "value": 140,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "rotation",
+                "value": -20,
+                "easing": "linear"
+              },
+              {
+                "frame": 19,
+                "target": "rotation",
+                "value": 20,
+                "easing": "linear"
+              }
+            ],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-tile-vignette",
+            "start": 720,
+            "end": 740,
+            "transform": {
+              "x": -140,
+              "y": 40,
+              "scale": 0.3,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [
+              {
+                "frame": 0,
+                "target": "x",
+                "value": -140,
+                "easing": "cubic-bezier(0.25,0.1,0.25,1)"
+              },
+              {
+                "frame": 19,
+                "target": "x",
+                "value": 140,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "rotation",
+                "value": -20,
+                "easing": "cubic-bezier(0.25,0.1,0.25,1)"
+              },
+              {
+                "frame": 19,
+                "target": "rotation",
+                "value": 20,
+                "easing": "linear"
+              }
+            ],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-tile-noise",
+            "start": 740,
+            "end": 760,
+            "transform": {
+              "x": -140,
+              "y": 40,
+              "scale": 0.3,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [
+              {
+                "frame": 0,
+                "target": "x",
+                "value": -140,
+                "easing": "ease-in-out"
+              },
+              {
+                "frame": 19,
+                "target": "x",
+                "value": 140,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "rotation",
+                "value": -20,
+                "easing": "ease-in-out"
+              },
+              {
+                "frame": 19,
+                "target": "rotation",
+                "value": 20,
+                "easing": "linear"
+              }
+            ],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-tile-overlay",
+            "start": 760,
+            "end": 780,
+            "transform": {
+              "x": -140,
+              "y": 40,
+              "scale": 0.3,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [
+              {
+                "frame": 0,
+                "target": "x",
+                "value": -140,
+                "easing": "back_out"
+              },
+              {
+                "frame": 19,
+                "target": "x",
+                "value": 140,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "rotation",
+                "value": -20,
+                "easing": "back_out"
+              },
+              {
+                "frame": 19,
+                "target": "rotation",
+                "value": 20,
+                "easing": "linear"
+              }
+            ],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-tile-shake",
+            "start": 780,
+            "end": 800,
+            "transform": {
+              "x": -140,
+              "y": 40,
+              "scale": 0.3,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [
+              {
+                "frame": 0,
+                "target": "x",
+                "value": -140,
+                "easing": "steps(4)"
+              },
+              {
+                "frame": 19,
+                "target": "x",
+                "value": 140,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "rotation",
+                "value": -20,
+                "easing": "steps(4)"
+              },
+              {
+                "frame": 19,
+                "target": "rotation",
+                "value": 20,
+                "easing": "linear"
+              }
+            ],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-tile-zoom_bounce",
+            "start": 800,
+            "end": 820,
+            "transform": {
+              "x": -140,
+              "y": 40,
+              "scale": 0.3,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [
+              {
+                "frame": 0,
+                "target": "x",
+                "value": -140,
+                "easing": "linear(0, 0.25 75%, 1)"
+              },
+              {
+                "frame": 19,
+                "target": "x",
+                "value": 140,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "rotation",
+                "value": -20,
+                "easing": "linear(0, 0.25 75%, 1)"
+              },
+              {
+                "frame": 19,
+                "target": "rotation",
+                "value": 20,
+                "easing": "linear"
+              }
+            ],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-tile-pulse",
+            "start": 820,
+            "end": 840,
+            "transform": {
+              "x": -140,
+              "y": 40,
+              "scale": 0.3,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [
+              {
+                "frame": 0,
+                "target": "x",
+                "value": -140,
+                "easing": "cubic-bezier(0.68,-0.55,0.265,1.55)"
+              },
+              {
+                "frame": 19,
+                "target": "x",
+                "value": 140,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "rotation",
+                "value": -20,
+                "easing": "cubic-bezier(0.68,-0.55,0.265,1.55)"
+              },
+              {
+                "frame": 19,
+                "target": "rotation",
+                "value": 20,
+                "easing": "linear"
+              }
+            ],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          },
+          {
+            "id": "fx-tile-split",
+            "start": 840,
+            "end": 860,
+            "transform": {
+              "x": -140,
+              "y": 40,
+              "scale": 0.3,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [],
+            "keyframes": [
+              {
+                "frame": 0,
+                "target": "x",
+                "value": -140,
+                "easing": "ease-in"
+              },
+              {
+                "frame": 19,
+                "target": "x",
+                "value": 140,
+                "easing": "linear"
+              },
+              {
+                "frame": 0,
+                "target": "rotation",
+                "value": -20,
+                "easing": "ease-in"
+              },
+              {
+                "frame": 19,
+                "target": "rotation",
+                "value": 20,
+                "easing": "linear"
+              }
+            ],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "source": {
+              "asset_id": "tile.png",
+              "source_in": 0
+            }
+          }
+        ],
+        "subtitle": null,
+        "danmaku": null
+      },
+      {
+        "id": "fx",
+        "kind": "video",
+        "gain": 1,
+        "layers": [
+          {
+            "id": "fx-gaussian_blur",
+            "start": 540,
+            "end": 560,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 1,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [
+              {
+                "kind": "gaussian_blur",
+                "params": {
+                  "radius": 6
+                },
+                "opacity": 1
+              }
+            ],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "note": "模糊（可分离两趟）"
+          },
+          {
+            "id": "fx-brightness",
+            "start": 560,
+            "end": 580,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 1,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [
+              {
+                "kind": "brightness",
+                "params": {
+                  "amount": 0.15
+                },
+                "opacity": 1
+              }
+            ],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "note": "亮度（加性）"
+          },
+          {
+            "id": "fx-brightness_multiply",
+            "start": 580,
+            "end": 600,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 1,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [
+              {
+                "kind": "brightness_multiply",
+                "params": {
+                  "factor": 1.6
+                },
+                "opacity": 1
+              }
+            ],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "note": "亮度（乘性、保黑；对应 CSS brightness）"
+          },
+          {
+            "id": "fx-contrast",
+            "start": 600,
+            "end": 620,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 1,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [
+              {
+                "kind": "contrast",
+                "params": {
+                  "amount": 1.6
+                },
+                "opacity": 1
+              }
+            ],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "note": "对比度（绕 0.5 缩放）"
+          },
+          {
+            "id": "fx-saturation",
+            "start": 620,
+            "end": 640,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 1,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [
+              {
+                "kind": "saturation",
+                "params": {
+                  "amount": 1.6
+                },
+                "opacity": 1
+              }
+            ],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "note": "饱和度（Rec.709 权重）"
+          },
+          {
+            "id": "fx-saturation_css",
+            "start": 640,
+            "end": 660,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 1,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [
+              {
+                "kind": "saturation_css",
+                "params": {
+                  "amount": 1.6
+                },
+                "opacity": 1
+              }
+            ],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "note": "饱和度（CSS/SVG 规范权重）"
+          },
+          {
+            "id": "fx-hue",
+            "start": 660,
+            "end": 680,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 1,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [
+              {
+                "kind": "hue",
+                "params": {
+                  "degrees": 60
+                },
+                "opacity": 1
+              }
+            ],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "note": "色相（YIQ / Rec.601 矩阵）"
+          },
+          {
+            "id": "fx-hue_rotate_css",
+            "start": 680,
+            "end": 700,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 1,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [
+              {
+                "kind": "hue_rotate_css",
+                "params": {
+                  "degrees": 90
+                },
+                "opacity": 1
+              }
+            ],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "note": "色相（CSS/SVG 规范矩阵）"
+          },
+          {
+            "id": "fx-flash",
+            "start": 700,
+            "end": 720,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 1,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [
+              {
+                "kind": "flash",
+                "params": {
+                  "amount": 0.35,
+                  "r": 1,
+                  "g": 0.2,
+                  "b": 0.2
+                },
+                "opacity": 1
+              }
+            ],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "note": "闪白/闪色（常量色叠加）"
+          },
+          {
+            "id": "fx-vignette",
+            "start": 720,
+            "end": 740,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 1,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [
+              {
+                "kind": "vignette",
+                "params": {
+                  "amount": 0.7,
+                  "radius": 1.2,
+                  "softness": 0.4
+                },
+                "opacity": 1
+              }
+            ],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "note": "暗角"
+          },
+          {
+            "id": "fx-noise",
+            "start": 740,
+            "end": 760,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 1,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [
+              {
+                "kind": "noise",
+                "params": {
+                  "amount": 0.35,
+                  "seed": 3
+                },
+                "opacity": 1
+              }
+            ],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "note": "噪声"
+          },
+          {
+            "id": "fx-overlay",
+            "start": 760,
+            "end": 780,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 1,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [
+              {
+                "kind": "overlay",
+                "params": {
+                  "amount": 0.5,
+                  "r": 0.1,
+                  "g": 0.2,
+                  "b": 0.6,
+                  "r2": 0.7,
+                  "g2": 0.2,
+                  "b2": 0.1,
+                  "shape": 0,
+                  "angle": 45
+                },
+                "opacity": 1
+              }
+            ],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "note": "渐变叠加"
+          },
+          {
+            "id": "fx-shake",
+            "start": 780,
+            "end": 800,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 1,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [
+              {
+                "kind": "shake",
+                "params": {
+                  "amount": 0.06,
+                  "frequency": 12,
+                  "seed": 5
+                },
+                "opacity": 1
+              }
+            ],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "note": "抖动（Warp）"
+          },
+          {
+            "id": "fx-zoom_bounce",
+            "start": 800,
+            "end": 820,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 1,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [
+              {
+                "kind": "zoom_bounce",
+                "params": {
+                  "amount": 0.25,
+                  "frequency": 2
+                },
+                "opacity": 1
+              }
+            ],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "note": "缩放弹跳（Warp）"
+          },
+          {
+            "id": "fx-pulse",
+            "start": 820,
+            "end": 840,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 1,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [
+              {
+                "kind": "pulse",
+                "params": {
+                  "amount": 0.2,
+                  "frequency": 2
+                },
+                "opacity": 1
+              }
+            ],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "note": "脉动（Warp）"
+          },
+          {
+            "id": "fx-split",
+            "start": 840,
+            "end": 860,
+            "transform": {
+              "x": 0,
+              "y": 0,
+              "scale": 1,
+              "rotation": 0
+            },
+            "opacity": 1,
+            "blend": "normal",
+            "enabled": true,
+            "gain": 1,
+            "effects": [
+              {
+                "kind": "split",
+                "params": {
+                  "offset": 0.12,
+                  "skew": 12,
+                  "amount": 0.8
+                },
+                "opacity": 1
+              }
+            ],
+            "keyframes": [],
+            "markers": [],
+            "tags": {},
+            "loop_source": true,
+            "note": "错切分裂（Warp）"
+          }
+        ],
+        "subtitle": null,
+        "danmaku": null
+      }
+    ]
+  },
+  "view": {
+    "playhead": 0,
+    "selection": null,
+    "zoom": 1
+  },
+  "render_hints": {
+    "width": 640,
+    "height": 360,
+    "format": "mp4"
+  },
+  "extensions": {}
+}</script>
+<script type="module">
+import { loadEngine } from './engine.js';
+window.__step = 'boot';
+window.__err = null;
+const mark = (name) => { window.__step = name; console.log('[demo] ' + name); };
+window.addEventListener('unhandledrejection', (event) => {
+  window.__err = 'unhandledrejection: ' + (event.reason && event.reason.message ? event.reason.message : String(event.reason));
+  const el = document.getElementById('status'); if (el) { el.className = 'bad'; el.textContent = window.__err; }
+});
+window.addEventListener('error', (event) => {
+  window.__err = 'error: ' + event.message;
+  const el = document.getElementById('status'); if (el) { el.className = 'bad'; el.textContent = window.__err; }
+});
+mark('module-start');
+const doc = JSON.parse(document.getElementById('doc').textContent);
+const PREFIX = 'effects-demo/';
+const assetUri = new Map();
+for (const asset of doc.assets || []) assetUri.set(asset.id, PREFIX + asset.uri);
+const statusEl = document.getElementById('status');
+const report = document.getElementById('report');
+const frameEl = document.getElementById('frame');
+const fnum = document.getElementById('fnum');
+mark('loadEngine:begin');
+const engine = await loadEngine('/pkg/dhampir_wasm.js');
+mark('loadEngine:done');
+mark('open:begin');
+const opened = engine.open(JSON.stringify(doc));
+mark('open:done ok=' + opened.ok);
+if (opened.ok !== true) { statusEl.className = 'bad'; statusEl.textContent = '工程没通过：' + JSON.stringify(opened.issues || opened); }
+// 顺序照真实应用：open -> attach（attach 会按画布尺寸做 resize；
+// 在 attach 之前调 resize 会撞上「宿主尚未初始化」—— 实测就这么死的）。
+mark('attach:begin');
+await engine.attach('preview');
+mark('attach:done mode=' + engine.sourceMode);
+// 本工程的素材是**图片**（不是视频）⇒ 必须显式切到位图模式；
+// 否则宿主会去找 <video>（找不到）⇒ 画布一直空着。
+engine.setSourceMode('bitmap');
+mark('setSourceMode:done');
+
+// 掩码必须在 attach 之后交（否则宿主还没初始化 —— 实测就是这么死的）。
+// **声明必须在用它的代码之前**：上一版把掩码块挪到了这行之前 ⇒
+// "Cannot access 'bitmaps' before initialization"，页面直接死在第一次绘制前。
+const bitmaps = new Map();
+let maskIds = new Set();
+for (const track of doc.timeline.tracks) for (const layer of track.layers) {
+  const mask = layer.mask;
+  if (mask && typeof mask.asset_id === 'string' && mask.asset_id !== '') maskIds.add(mask.asset_id);
+}
+const maskBitmaps = {};
+for (const id of maskIds) { const b = await bitmapFor(id); if (b !== null) maskBitmaps[id] = b; }
+mark('masks:begin');
+const uploaded = await engine.uploadMasks(maskBitmaps);
+mark('masks:done n=' + uploaded.length);
+async function bitmapFor(assetId) {
+  if (bitmaps.has(assetId)) return bitmaps.get(assetId);
+  const uri = assetUri.get(assetId);
+  if (uri === undefined) return null;
+  const img = new Image();
+  img.src = uri;
+  await img.decode();
+  const bitmap = await createImageBitmap(img);
+  bitmaps.set(assetId, bitmap);
+  return bitmap;
+}
+window.__drawn = 0;
+mark('draw:defined');
+window.__err = null;
+async function draw() {
+  const frame = Number(frameEl.value);
+  fnum.textContent = String(frame);
+  try {
+    // **静态源必须走 `onPrepared` 这个缝隙**（引擎自己留的）：`prepare` 的第一件事是
+    // `clear_bitmaps()`，所以 seek 之前/之后随意交都会被下一次 prepare 清掉 —— 引擎注释里
+    // 记着这个实测现象：「交与不交，画面逐字节相同」。缝隙正好在「清完了、还没 draw」之间。
+    mark('seek:begin ' + frame);
+    await engine.seek(frame, {
+      onPrepared: async (f) => {
+        for (const entry of engine.sourcesFor(f)) {
+          const bitmap = await bitmapFor(entry.source);
+          if (bitmap !== null) engine.setSourceBitmap(entry.source, bitmap);
+        }
+      },
+    });
+    window.__drawn += 1;
+    mark('seek:done ' + frame);
+    statusEl.className = 'ok';
+    statusEl.textContent = 'wasm 已上屏 · 掩码 ' + uploaded.length + '/' + maskIds.size;
+  } catch (error) {
+    statusEl.className = 'bad';
+    window.__err = String(error && error.message ? error.message : error);
+    statusEl.textContent = '这一帧失败：' + window.__err;
+    throw error;
+  }
+}
+let playing = false, cur = 0;
+async function loop() {
+  while (playing) {
+    cur = cur >= 860 ? 0 : cur + 1;
+    frameEl.value = String(cur);
+    fnum.textContent = String(cur);
+    try { await draw(); } catch (error) { playing = false; break; }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+document.getElementById('play').addEventListener('click', (e) => {
+  playing = !playing;
+  e.target.classList.toggle('on', playing);
+  e.target.textContent = playing ? '⏸ 暂停' : '▶ 播放';
+  if (playing) { cur = Number(frameEl.value); loop(); }
+});
+document.getElementById('stop').addEventListener('click', () => { playing = false; document.getElementById('play').textContent = '▶ 播放'; cur = 0; frameEl.value = '0'; draw(); });
+frameEl.addEventListener('input', () => { playing = false; document.getElementById('play').textContent = '▶ 播放'; draw(); });
+await draw();
+</script>
+</body></html>

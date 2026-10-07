@@ -108,8 +108,17 @@ export function tsType(node, defs) {
     case 'integer':
     case 'number':
       return 'number';
-    case 'string':
+    case 'string': {
+      // **开放串**成例：schema 里它必须是 string（值域真是开放的），但已知取值要带上 ——
+      // 纯 string 会让编辑器不再补全。已知取值由 Rust 侧的
+      // `#[schemars(extend("x-known-values" = [...]))]` 给出：**真值仍在 Rust 那边**，
+      // 这里只负责把它翻译成 `"a" | "b" | (string & {})`（最后那一支保住补全）。
+      const known = Array.isArray(node['x-known-values']) ? node['x-known-values'] : [];
+      if (known.length > 0) {
+        return [...new Set(known.map((value) => JSON.stringify(value)))].join(' | ') + ' | (string & {})';
+      }
       return 'string';
+    }
     case 'boolean':
       return 'boolean';
     case 'null':
@@ -196,6 +205,16 @@ function runSelfTest() {
   cases.push([
     'const 出字面量',
     tsType({ type: 'string', const: 'subtitle' }, {}) === '"subtitle"',
+  ]);
+  // **开放串成例**：值域真是开放的（schema 里就是一个 string），但已知取值要带上，
+  // 否则编辑器不再补全。最后那一支 `(string & {})` 就是"任意串也合法"的写法。
+  cases.push([
+    '开放串带上已知取值',
+    tsType({ type: 'string', 'x-known-values': ['a', 'b'] }, {}) === '"a" | "b" | (string & {})',
+  ]);
+  cases.push([
+    '没有已知取值的串还是 string',
+    tsType({ type: 'string' }, {}) === 'string',
   ]);
   cases.push([
     'enum 与 const 混在 oneOf 里',
@@ -294,4 +313,7 @@ function main() {
   );
 }
 
-main();
+// 入口守卫：被 import 时不要执行 CLI（也让它能被别处复用 tsType/emitDts）。
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main();
+}
