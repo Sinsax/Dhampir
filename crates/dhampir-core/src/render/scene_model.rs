@@ -91,12 +91,16 @@ pub fn srgb_encode(linear: f64) -> f64 {
 
 /// 线性光 → 8 位字节（sRGB 编码后四舍五入）。
 pub fn byte_of_linear_light(linear: f64) -> u8 {
-    (BYTE_LEVELS * srgb_encode(linear)).round().clamp(0.0, BYTE_LEVELS) as u8
+    (BYTE_LEVELS * srgb_encode(linear))
+        .round()
+        .clamp(0.0, BYTE_LEVELS) as u8
 }
 
 /// 线性 alpha → 8 位字节。alpha 通道**不做** sRGB 编码（unorm 就是线性的）。
 pub fn byte_of_linear_alpha(alpha: f64) -> u8 {
-    (BYTE_LEVELS * clamp01(alpha)).round().clamp(0.0, BYTE_LEVELS) as u8
+    (BYTE_LEVELS * clamp01(alpha))
+        .round()
+        .clamp(0.0, BYTE_LEVELS) as u8
 }
 
 /// 线性 RGBA → 8 位 RGBA。三个颜色通道编码，alpha 不编码。
@@ -478,11 +482,7 @@ fn blur_h_at(size: (u32, u32), x: i32, y: i32, mode: EdgeMode, quantize: bool) -
         acc += BLUR_WEIGHTS[offset.unsigned_abs() as usize]
             * blur_source_sample(size, x + offset, y, mode);
     }
-    if quantize {
-        round_to_f16(acc)
-    } else {
-        acc
-    }
+    if quantize { round_to_f16(acc) } else { acc }
 }
 
 /// 两趟（先横后纵）在 `(x, y)` 上的结果，边界语义由 `mode` 决定。
@@ -713,8 +713,16 @@ mod tests {
         let zero = byte_of_linear_light(blur_at_with_edge(size, 0, 41, EdgeMode::Zero));
         let wrap = byte_of_linear_light(blur_at_with_edge(size, 0, 41, EdgeMode::Wrap));
         assert_eq!((clamp, zero, wrap), (189, 154, 161));
-        assert!(clamp.abs_diff(zero) >= 32, "clamp 与 zero 只差 {} 字节", clamp.abs_diff(zero));
-        assert!(clamp.abs_diff(wrap) >= 24, "clamp 与 wrap 只差 {} 字节", clamp.abs_diff(wrap));
+        assert!(
+            clamp.abs_diff(zero) >= 32,
+            "clamp 与 zero 只差 {} 字节",
+            clamp.abs_diff(zero)
+        );
+        assert!(
+            clamp.abs_diff(wrap) >= 24,
+            "clamp 与 wrap 只差 {} 字节",
+            clamp.abs_diff(wrap)
+        );
 
         // 另外四个点上三种语义必须**一样**——那说明它们不在边界附近，
         // 于是"哪个点负责验边界"这件事有唯一答案。
@@ -795,7 +803,10 @@ mod tests {
             let forward = alpha_stack_bytes(frame, StackOrder::Forward);
             let reverse = alpha_stack_bytes(frame, StackOrder::Reverse);
             let gap = distance_bytes(forward, reverse);
-            assert!(gap >= 16, "第 {frame} 帧：正序 {forward:?} 与逆序 {reverse:?} 只差 {gap} 字节");
+            assert!(
+                gap >= 16,
+                "第 {frame} 帧：正序 {forward:?} 与逆序 {reverse:?} 只差 {gap} 字节"
+            );
         }
     }
 
@@ -806,7 +817,10 @@ mod tests {
             let quantized = alpha_stack_bytes(frame, StackOrder::Forward);
             let ideal = bytes_of_linear_rgba(alpha_stack_ideal(frame, StackOrder::Forward));
             let gap = distance_bytes(quantized, ideal);
-            assert!(gap <= 1, "第 {frame} 帧：量化模型 {quantized:?} 与理想模型 {ideal:?} 差 {gap}");
+            assert!(
+                gap <= 1,
+                "第 {frame} 帧：量化模型 {quantized:?} 与理想模型 {ideal:?} 差 {gap}"
+            );
         }
     }
 
@@ -818,7 +832,10 @@ mod tests {
         let frame = 0;
         assert_eq!(layer_count(frame), 2);
         let alpha = alpha_stack_bytes(frame, StackOrder::Forward)[3];
-        assert_eq!(alpha, 192, "第 0 帧的 alpha 应当是 0.5×255 ≈ 128 之后逐层累积的值");
+        assert_eq!(
+            alpha, 192,
+            "第 0 帧的 alpha 应当是 0.5×255 ≈ 128 之后逐层累积的值"
+        );
         // 三层：0.25 + 0.5·(1-0.25) + 0.5·(1-0.25-0.375) 在字节域里的落点。
         assert_eq!(alpha_stack_bytes(1, StackOrder::Forward)[3], 208);
     }
@@ -832,7 +849,10 @@ mod tests {
         // ① checker 的通道置换（把偶格与奇格的颜色换过来）。
         let even = bytes_of_linear_rgba(checker_linear(0, 1, 1));
         let odd = bytes_of_linear_rgba(checker_linear(0, 5, 1));
-        assert!(distance_bytes(even, odd) >= 100, "棋盘两色太接近，换色看不出来");
+        assert!(
+            distance_bytes(even, odd) >= 100,
+            "棋盘两色太接近，换色看不出来"
+        );
 
         // ② srgb_linear 少一次解码：直接输出 k/8（线性域），会系统性偏亮。
         let mut worst_gap = 0_u8;
@@ -841,12 +861,19 @@ mod tests {
             let missing = byte_of_linear_light(f64::from(k) / 8.0);
             worst_gap = worst_gap.max(correct.abs_diff(missing));
         }
-        assert!(worst_gap >= 16, "漏一次解码在 8 位输出上只差 {worst_gap} 字节，判据太软");
+        assert!(
+            worst_gap >= 16,
+            "漏一次解码在 8 位输出上只差 {worst_gap} 字节，判据太软"
+        );
 
         // ③ gradient 相位差一格（1/16）：在锯齿那一侧会整段跳开。
         let t0 = bytes_of_linear_rgba(gradient_linear(size, 0, 48, 8));
         let t1 = bytes_of_linear_rgba(gradient_linear(size, 1, 48, 8));
-        assert!(distance_bytes(t0, t1) >= 32, "渐变相位差 1/16 只差 {} 字节", distance_bytes(t0, t1));
+        assert!(
+            distance_bytes(t0, t1) >= 32,
+            "渐变相位差 1/16 只差 {} 字节",
+            distance_bytes(t0, t1)
+        );
 
         // ④ alpha_stack 层数不随帧变（永远画两层）。
         let layer_frames = (0..4).map(layer_count).collect::<Vec<_>>();

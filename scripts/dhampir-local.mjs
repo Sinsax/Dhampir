@@ -34,7 +34,9 @@
 import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { dirname, extname, isAbsolute, join, resolve, sep } from 'node:path';
+// 注意：**没有** `isAbsolute` —— 它不是"POSIX 绝对"的判据，而是"本平台绝对"的判据，
+// 用它会引入平台相关行为（见 `isAbsoluteUri` 里那段说明）。这里刻意不引。
+import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -116,13 +118,20 @@ export function canTransition(from, to) {
  *
  * 规则与 Rust 侧 `is_absolute_uri`（crates/dhampir-worker/src/bin/dhampir.rs）逐条对应，
  * **不许只改一边**：
- * 1. 当前平台的绝对路径（`path.isAbsolute`，覆盖 POSIX 的 `/…`）；
+ * 1. POSIX 绝对：以 `/` 开头（**在 Windows 上也算绝对**）；
  * 2. 盘符绝对：字母 + ':' + 紧跟 '/' 或 '\\'（`C:foo` 是盘符相对，Windows 也不认它绝对）；
  * 3. UNC：以两个反斜杠开头（Linux 上它只是一个普通组件，只能看文本）。
+ *
+ * ⚠️ **不许用 `path.isAbsolute()` 来实现第 1 条**（原来是那么写的，2026-10-04 修）。
+ * Windows 上 `isAbsolute("/abs/a.mp4")` 是 **false** —— Windows 要求"盘符 + 根"，
+ * 光有根不算（见 node 文档与 Rust `Path::is_absolute` 的说明：`c:temp` 与 `\temp`
+ * 都不是绝对的）。于是 `/abs/a.mp4` 会被误判成相对、挂到 assetRoot 下面。
+ * 这条在 **Linux 上测不出来**（那边该调用返回 true，恰好兜住了），
+ * 是 CI 的 `windows-latest` 腿抓出来的 —— 同一处缺陷在 Rust 侧也有一份。
  */
 export function isAbsoluteUri(uri) {
   if (typeof uri !== 'string' || uri.length === 0) return false;
-  if (isAbsolute(uri)) return true;
+  if (uri.startsWith('/')) return true;
   if (/^[A-Za-z]:[\\/]/.test(uri)) return true;
   return uri.startsWith('\\\\');
 }
@@ -973,6 +982,10 @@ function runSelfTest() {
     [JSON.stringify({ project_schema: 1, assets })], '', 'x'
   ).get(id).file.replaceAll('\\', '/');
   expect('盘符绝对原样（正斜杠）', shown([{ id: 'c', uri: 'C:/abs/c.mp4' }], 'c') === 'C:/abs/c.mp4');
+  // **POSIX 绝对在 Windows 上也要原样**。这条是补出来的：原实现用 `path.isAbsolute()`
+  // 实现第 1 条，而 Windows 上 `isAbsolute('/abs/a.mp4')` 是 **false**（Windows 要求
+  // "盘符+根"），于是 `/abs/a.mp4` 会被挂到 assetRoot 下面。Linux 上测不出来。
+  expect('POSIX 绝对原样', shown([{ id: 'p', uri: '/abs/a.mp4' }], 'p') === '/abs/a.mp4');
   expect('盘符绝对原样（反斜杠）', shown([{ id: 'd', uri: 'D:\\abs\\d.mp4' }], 'd') === 'D:/abs/d.mp4');
   expect('盘符大小写不敏感', shown([{ id: 'e', uri: 'c:/abs/e.mp4' }], 'e') === 'c:/abs/e.mp4');
   expect('UNC 原样', shown([{ id: 'g', uri: '\\\\server\\share\\g.mp4' }], 'g') === '//server/share/g.mp4');

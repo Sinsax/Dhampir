@@ -266,7 +266,12 @@ pub fn rect_at(
         height
     };
     let y = spec.lane_top_ratio + item.lane as f32 * spacing;
-    Some(NormalizedRect { x, y, width, height })
+    Some(NormalizedRect {
+        x,
+        y,
+        width,
+        height,
+    })
 }
 
 /// 把一批弹幕**写成 ASS**（供旁挂导出），每条带 `\move`。
@@ -304,7 +309,12 @@ pub fn to_ass_danmaku(
     sequence: (u32, u32),
     style: &AssStyle,
 ) -> Result<String, String> {
-    let broken = || format!("时间基坏掉（{}/{}），算不出弹幕的时间", timebase.num, timebase.den);
+    let broken = || {
+        format!(
+            "时间基坏掉（{}/{}），算不出弹幕的时间",
+            timebase.num, timebase.den
+        )
+    };
     let base_ms = ms_at_frame(base, timebase).ok_or_else(broken)?;
     let font_size = spec.font_ratio * sequence.1 as f32;
     if !font_size.is_finite() || font_size <= 0.0 {
@@ -318,7 +328,10 @@ pub fn to_ass_danmaku(
 
     let mut out = crate::subtitle::ass_header(&style.font, font_size, style.margin_v);
     out.push_str("[Events]\n");
-    out.push_str(&format!("Format: {}\n", crate::subtitle::ASS_FIELDS.join(", ")));
+    out.push_str(&format!(
+        "Format: {}\n",
+        crate::subtitle::ASS_FIELDS.join(", ")
+    ));
     for item in items {
         let start = ms_at_frame(item.enter, timebase).ok_or_else(broken)?;
         let end = ms_at_frame(item.exit.saturating_add(1), timebase).ok_or_else(broken)?;
@@ -408,7 +421,12 @@ mod tests {
     }
 
     fn spec(lanes: u32, duration_ms: u64) -> DanmakuSpec {
-        DanmakuSpec { asset_id: "d".to_string(), lanes, duration_ms, ..DanmakuSpec::default() }
+        DanmakuSpec {
+            asset_id: "d".to_string(),
+            lanes,
+            duration_ms,
+            ..DanmakuSpec::default()
+        }
     }
 
     const SEQUENCE: (u32, u32) = (640, 360);
@@ -436,10 +454,12 @@ mod tests {
             "必须逐条用自己的 travel（轨道级会给出两个 1200）"
         );
         // 没有 travel 的那条回退到轨道级。
-        let fallback = layout(&vec![cue(0, "没写")], &spec, &tb);
-        assert_eq!(fallback.items[0].travel_frames, 1200, "读不到就该回退到轨道级");
+        let fallback = layout(&[cue(0, "没写")], &spec, &tb);
+        assert_eq!(
+            fallback.items[0].travel_frames, 1200,
+            "读不到就该回退到轨道级"
+        );
     }
-
 
     #[test]
     fn 弹幕素材里的_move_坐标不进文本() {
@@ -449,7 +469,10 @@ mod tests {
             Dialogue: 0,0:00:02.00,0:00:06.00,Default,,0,0,0,,普通一条\n";
         let report = parse_ass_danmaku(text).expect("能解析");
         assert_eq!(report.cues.len(), 2);
-        assert_eq!(report.cues[0].text, "路过一下", "覆盖标签（含 \\move）不该进文本");
+        assert_eq!(
+            report.cues[0].text, "路过一下",
+            "覆盖标签（含 \\move）不该进文本"
+        );
         assert_eq!(report.cues[1].text, "普通一条");
     }
 
@@ -474,10 +497,16 @@ mod tests {
         let laid = layout(&cues, &spec(8, 8000), &tb(30, 1));
         assert_eq!(laid.items.len(), 1);
         assert_eq!(laid.items[0].enter, 0);
-        assert_eq!(laid.items[0].exit, 149, "在屏窗口取 cue 的 end（开边界减一）");
+        assert_eq!(
+            laid.items[0].exit, 149,
+            "在屏窗口取 cue 的 end（开边界减一）"
+        );
         // 而 travel 仍然来自 spec：8 秒 @30fps = 240 帧。
         assert_eq!(laid.items[0].travel_frames, 240, "滚动时长仍然来自 spec");
-        assert!(laid.items[0].exit < laid.items[0].travel_frames, "窗口比 travel 短是常态");
+        assert!(
+            laid.items[0].exit < laid.items[0].travel_frames,
+            "窗口比 travel 短是常态"
+        );
         assert_eq!(laid.dropped, 0);
     }
 
@@ -487,7 +516,10 @@ mod tests {
         let cues = vec![cue(0, "甲"), cue(0, "乙"), cue(0, "丙")];
         let laid = layout(&cues, &spec(2, 8000), &tb(30, 1));
         assert_eq!(laid.items.len(), 2);
-        assert_eq!(laid.dropped, 1, "排不下要计数：少了几条看起来和素材里就那几条一样");
+        assert_eq!(
+            laid.dropped, 1,
+            "排不下要计数：少了几条看起来和素材里就那几条一样"
+        );
         assert_eq!(laid.items[0].lane, 0);
         assert_eq!(laid.items[1].lane, 1);
     }
@@ -510,9 +542,15 @@ mod tests {
         // 那样两条在第 29 帧同时在屏，必须换泳道。
         let cues = vec![cue(0, "先"), cue(967, "后")];
         let laid = layout(&cues, &spec(2, 8000), &tb(30, 1));
-        assert_eq!(laid.items[0].exit, 29, "在屏窗口来自 cue 的 End（开边界减一）");
+        assert_eq!(
+            laid.items[0].exit, 29,
+            "在屏窗口来自 cue 的 End（开边界减一）"
+        );
         assert_eq!(laid.items[1].enter, 29, "第 29 帧两条都在屏上");
-        assert_eq!(laid.items[1].lane, 1, "边界帧不能共用泳道，否则两条叠在一起");
+        assert_eq!(
+            laid.items[1].lane, 1,
+            "边界帧不能共用泳道，否则两条叠在一起"
+        );
     }
 
     #[test]
@@ -541,21 +579,43 @@ mod tests {
 
     #[test]
     fn 进入帧在右边缘离开帧移出左边() {
-        let item = DanmakuItem { text: "abc".to_string(), lane: 0, enter: 0, exit: 100 , color: None, scroll_start: 0, travel_frames: 100};
+        let item = DanmakuItem {
+            text: "abc".to_string(),
+            lane: 0,
+            enter: 0,
+            exit: 100,
+            color: None,
+            scroll_start: 0,
+            travel_frames: 100,
+        };
         let start = rect_at(&item, 0, &spec(8, 8000), SEQUENCE).expect("能算");
         assert_eq!(start.x, 1.0, "进入的那一帧左边缘在画面右边缘");
         let end = rect_at(&item, 100, &spec(8, 8000), SEQUENCE).expect("能算");
         // `1.0 + (-w - 1.0)` 与 `-w` 在浮点下差一个 ULP，按容差比。
-        assert!((end.x - (-end.width)).abs() < 1e-6, "离开的那一帧整条刚好移出左边");
+        assert!(
+            (end.x - (-end.width)).abs() < 1e-6,
+            "离开的那一帧整条刚好移出左边"
+        );
         // 中间线性：第 50 帧在两者的正中。
         let middle = rect_at(&item, 50, &spec(8, 8000), SEQUENCE).expect("能算");
-        assert!((middle.x - (start.x + end.x) / 2.0).abs() < 1e-6, "滚动不是线性的");
+        assert!(
+            (middle.x - (start.x + end.x) / 2.0).abs() < 1e-6,
+            "滚动不是线性的"
+        );
     }
 
     #[test]
     fn 区间外的帧被夹到两端() {
         // 首末两帧之外（调用方过滤前）也给出确定答案，而不是外推。
-        let item = DanmakuItem { text: "abc".to_string(), lane: 2, enter: 10, exit: 20 , color: None, scroll_start: 0, travel_frames: 100};
+        let item = DanmakuItem {
+            text: "abc".to_string(),
+            lane: 2,
+            enter: 10,
+            exit: 20,
+            color: None,
+            scroll_start: 0,
+            travel_frames: 100,
+        };
         let before = rect_at(&item, 0, &spec(8, 8000), SEQUENCE).expect("能算");
         // 用**真正越界**的帧（travel 是 100 帧）：进度夹到 1，整条刚好移出左边。
         let after = rect_at(&item, 200, &spec(8, 8000), SEQUENCE).expect("能算");
@@ -565,21 +625,43 @@ mod tests {
 
     #[test]
     fn 纵向由泳道决定且在最上面起算() {
-        let item = DanmakuItem { text: "x".to_string(), lane: 3, enter: 0, exit: 10 , color: None, scroll_start: 0, travel_frames: 100};
+        let item = DanmakuItem {
+            text: "x".to_string(),
+            lane: 3,
+            enter: 0,
+            exit: 10,
+            color: None,
+            scroll_start: 0,
+            travel_frames: 100,
+        };
         let rect = rect_at(&item, 0, &spec(8, 8000), SEQUENCE).expect("能算");
         // font_ratio 默认 0.04 -> 行盒高 0.048；第 3 条泳道在 3 倍处。
         let height = 0.04 * LINE_HEIGHT_EM;
         assert!((rect.height - height).abs() < 1e-6);
-        assert!((rect.y - 3.0 * height).abs() < 1e-6, "0 号泳道在最上面，往下顺排");
+        assert!(
+            (rect.y - 3.0 * height).abs() < 1e-6,
+            "0 号泳道在最上面，往下顺排"
+        );
     }
 
     #[test]
     fn 泳道带可以配起算点与间距() {
         // **默认（两个都是 0）必须复现老行为** —— 既有工程一字不变。
         let plain = spec(8, 8000);
-        let item = DanmakuItem { text: "x".to_string(), lane: 2, enter: 0, exit: 10, color: None, scroll_start: 0, travel_frames: 100 };
+        let item = DanmakuItem {
+            text: "x".to_string(),
+            lane: 2,
+            enter: 0,
+            exit: 10,
+            color: None,
+            scroll_start: 0,
+            travel_frames: 100,
+        };
         let base = rect_at(&item, 0, &plain, SEQUENCE).expect("能算");
-        assert!((base.y - 2.0 * (0.04 * LINE_HEIGHT_EM)).abs() < 1e-6, "默认是 0 起、间距取行盒高");
+        assert!(
+            (base.y - 2.0 * (0.04 * LINE_HEIGHT_EM)).abs() < 1e-6,
+            "默认是 0 起、间距取行盒高"
+        );
 
         // 配了之后按配的算（参照实现 的实测值：0.0781 起、0.0521 间距）。
         let mut banded = spec(8, 8000);
@@ -587,7 +669,11 @@ mod tests {
         banded.lane_spacing_ratio = 200.0 / 3840.0;
         let shifted = rect_at(&item, 0, &banded, SEQUENCE).expect("能算");
         let want = 300.0 / 3840.0 + 2.0 * (200.0 / 3840.0);
-        assert!((shifted.y - want).abs() < 1e-6, "期望 {want}，实得 {}", shifted.y);
+        assert!(
+            (shifted.y - want).abs() < 1e-6,
+            "期望 {want}，实得 {}",
+            shifted.y
+        );
         assert!(shifted.y > base.y, "配了起算点之后应当更低");
         // **行盒高不受影响**：带的位置与字号是两件事。
         assert!((shifted.height - base.height).abs() < 1e-6);
@@ -599,7 +685,15 @@ mod tests {
         let mut zero = spec(8, 8000);
         zero.lane_top_ratio = 0.1;
         zero.lane_spacing_ratio = 0.0;
-        let item = DanmakuItem { text: "x".to_string(), lane: 1, enter: 0, exit: 10, color: None, scroll_start: 0, travel_frames: 100 };
+        let item = DanmakuItem {
+            text: "x".to_string(),
+            lane: 1,
+            enter: 0,
+            exit: 10,
+            color: None,
+            scroll_start: 0,
+            travel_frames: 100,
+        };
         let rect = rect_at(&item, 0, &zero, SEQUENCE).expect("能算");
         let want = 0.1 + 1.0 * (0.04 * LINE_HEIGHT_EM);
         assert!((rect.y - want).abs() < 1e-6, "期望 {want}，实得 {}", rect.y);
@@ -607,22 +701,47 @@ mod tests {
 
     #[test]
     fn 归一化宽度依赖宽高比而不是渲染尺寸() {
-        let item = DanmakuItem { text: "半角abc".to_string(), lane: 0, enter: 0, exit: 10 , color: None, scroll_start: 0, travel_frames: 100};
+        let item = DanmakuItem {
+            text: "半角abc".to_string(),
+            lane: 0,
+            enter: 0,
+            exit: 10,
+            color: None,
+            scroll_start: 0,
+            travel_frames: 100,
+        };
         let a = rect_at(&item, 0, &spec(8, 8000), (640, 360)).expect("能算");
         let b = rect_at(&item, 0, &spec(8, 8000), (1280, 720)).expect("能算");
         let c = rect_at(&item, 0, &spec(8, 8000), (640, 480)).expect("能算");
-        assert!((a.width - b.width).abs() < 1e-6, "同宽高比下归一化宽度必须一样");
-        assert!((a.width - c.width).abs() > 1e-6, "换了宽高比，归一化宽度就该变（T1 的口径）");
+        assert!(
+            (a.width - b.width).abs() < 1e-6,
+            "同宽高比下归一化宽度必须一样"
+        );
+        assert!(
+            (a.width - c.width).abs() > 1e-6,
+            "换了宽高比，归一化宽度就该变（T1 的口径）"
+        );
     }
 
     #[test]
     fn 零尺寸或零字号没有可画的() {
-        let item = DanmakuItem { text: "x".to_string(), lane: 0, enter: 0, exit: 10 , color: None, scroll_start: 0, travel_frames: 100};
+        let item = DanmakuItem {
+            text: "x".to_string(),
+            lane: 0,
+            enter: 0,
+            exit: 10,
+            color: None,
+            scroll_start: 0,
+            travel_frames: 100,
+        };
         assert!(rect_at(&item, 0, &spec(8, 8000), (0, 360)).is_none());
         assert!(rect_at(&item, 0, &spec(8, 8000), (640, 0)).is_none());
         let mut zero_font = spec(8, 8000);
         zero_font.font_ratio = 0.0;
-        assert!(rect_at(&item, 0, &zero_font, SEQUENCE).is_none(), "字号为 0 就是没东西可画");
+        assert!(
+            rect_at(&item, 0, &zero_font, SEQUENCE).is_none(),
+            "字号为 0 就是没东西可画"
+        );
     }
 
     #[test]
@@ -637,9 +756,17 @@ mod tests {
 
     /// 从一行 Dialogue 里把 `\move(x1,y1,x2,y2)` 的四个数抠出来。
     fn move_of(line: &str) -> (i64, i64, i64, i64) {
-        let inside = line.split("\\move(").nth(1).expect("这行有 \\move").split(')').next().expect("有右括号");
-        let nums: Vec<i64> =
-            inside.split(',').map(|part| part.trim().parse().expect("是整数")).collect();
+        let inside = line
+            .split("\\move(")
+            .nth(1)
+            .expect("这行有 \\move")
+            .split(')')
+            .next()
+            .expect("有右括号");
+        let nums: Vec<i64> = inside
+            .split(',')
+            .map(|part| part.trim().parse().expect("是整数"))
+            .collect();
         assert_eq!(nums.len(), 4, "\\move 要四个数：{inside}");
         (nums[0], nums[1], nums[2], nums[3])
     }
@@ -658,9 +785,15 @@ mod tests {
         // 否则"导出再导入"会让弹幕越滚越长。
         let cues = vec![cue(0, "第一条"), cue(1000, "第二条")];
         let laid = layout(&cues, &spec(8, 8000), &tb(30, 1));
-        let text =
-            to_ass_danmaku(&laid.items, &spec(8, 8000), 0, &tb(30, 1), SEQUENCE, &AssStyle::default())
-                .expect("能写");
+        let text = to_ass_danmaku(
+            &laid.items,
+            &spec(8, 8000),
+            0,
+            &tb(30, 1),
+            SEQUENCE,
+            &AssStyle::default(),
+        )
+        .expect("能写");
         let back = parse_ass_danmaku(&text).expect("能读回自己写的");
         assert_eq!(back.skipped, 0);
         assert_eq!(back.cues.len(), 2);
@@ -674,11 +807,20 @@ mod tests {
         // 窗口比 travel 长的时候才会"滚到左边就停住"（参照实现 的 min(progress,1)），
         // 而这正是最该被钉住的那一种 —— 窗口与 travel 相等时两者分不开。
         let laid = layout(&[cue_span(0, 2000, "abc")], &spec(8, 1000), &tb(30, 1));
-        let text =
-            to_ass_danmaku(&laid.items, &spec(8, 1000), 0, &tb(30, 1), SEQUENCE, &AssStyle::default())
-                .expect("能写");
+        let text = to_ass_danmaku(
+            &laid.items,
+            &spec(8, 1000),
+            0,
+            &tb(30, 1),
+            SEQUENCE,
+            &AssStyle::default(),
+        )
+        .expect("能写");
         let line = dialogue_of(&text);
-        assert!(line.contains("\\an7"), "锚点必须是左上角，否则整条偏半条：{line}");
+        assert!(
+            line.contains("\\an7"),
+            "锚点必须是左上角，否则整条偏半条：{line}"
+        );
         let (x1, y1, x2, y2) = move_of(&line);
         assert_eq!(x1, 640, "进入帧的左边缘在序列右边缘");
         assert_eq!(y1, y2, "\\move 只横向滚，纵向不动");
@@ -701,9 +843,15 @@ mod tests {
     fn 泳道决定纵向像素位置() {
         // 两条弹幕竞泳道 0 与 1：y 必须不同，且都等于 rect_at 的 y 换像素。
         let laid = layout(&[cue(0, "甲"), cue(0, "乙")], &spec(2, 1000), &tb(30, 1));
-        let text =
-            to_ass_danmaku(&laid.items, &spec(2, 1000), 0, &tb(30, 1), SEQUENCE, &AssStyle::default())
-                .expect("能写");
+        let text = to_ass_danmaku(
+            &laid.items,
+            &spec(2, 1000),
+            0,
+            &tb(30, 1),
+            SEQUENCE,
+            &AssStyle::default(),
+        )
+        .expect("能写");
         let ys: Vec<i64> = text
             .lines()
             .filter(|line| line.starts_with("Dialogue:"))
@@ -722,20 +870,34 @@ mod tests {
         let spec = spec(8, 1000);
         let laid = layout(&[cue(1000, "甲")], &spec, &tb(30, 1));
         assert_eq!((laid.items[0].enter, laid.items[0].exit), (30, 59));
-        let text = to_ass_danmaku(&laid.items, &spec, 30, &tb(30, 1), SEQUENCE, &AssStyle::default())
-            .expect("能写");
+        let text = to_ass_danmaku(
+            &laid.items,
+            &spec,
+            30,
+            &tb(30, 1),
+            SEQUENCE,
+            &AssStyle::default(),
+        )
+        .expect("能写");
         let line = dialogue_of(&text);
-        assert!(line.starts_with("Dialogue: 0,0:00:00.00,0:00:01.00,Default,"), "{line}");
+        assert!(
+            line.starts_with("Dialogue: 0,0:00:00.00,0:00:01.00,Default,"),
+            "{line}"
+        );
     }
 
     #[test]
     fn 字号来自_font_ratio_乘序列高而不是传入的样式() {
         // 传入样式的字号写的是 48，但弹幕字号 = 0.04 × 360 = 14.4 -> 14。
         // 这条是"文件里的字与画面上的字一样大"的钉子。
-        let style = AssStyle { font: "某字体".to_string(), font_size: 48, margin_v: 36 };
+        let style = AssStyle {
+            font: "某字体".to_string(),
+            font_size: 48,
+            margin_v: 36,
+        };
         let laid = layout(&[cue(0, "甲")], &spec(8, 1000), &tb(30, 1));
-        let text =
-            to_ass_danmaku(&laid.items, &spec(8, 1000), 0, &tb(30, 1), SEQUENCE, &style).expect("能写");
+        let text = to_ass_danmaku(&laid.items, &spec(8, 1000), 0, &tb(30, 1), SEQUENCE, &style)
+            .expect("能写");
         assert!(text.contains("Style: Default,某字体, 14,"), "{text}");
         assert!(!text.contains(", 48,"), "不该把传入样式的字号原样写进去");
     }
@@ -745,11 +907,21 @@ mod tests {
         // 一帧短于 1ms 的时间基（ms_at_frame 会把相邻两帧压成同一毫秒）。
         let dense = tb(1_000_000, 1);
         let laid = layout(&[cue(0, "一闪")], &spec(8, 0), &dense);
-        let text = to_ass_danmaku(&laid.items, &spec(8, 0), 0, &dense, SEQUENCE, &AssStyle::default())
-            .expect("能写");
+        let text = to_ass_danmaku(
+            &laid.items,
+            &spec(8, 0),
+            0,
+            &dense,
+            SEQUENCE,
+            &AssStyle::default(),
+        )
+        .expect("能写");
         let back = parse_ass_danmaku(&text).expect("能读");
         assert_eq!(back.cues.len(), 1);
-        assert!(back.cues[0].end_ms >= back.cues[0].start_ms, "终点不能早于起点");
+        assert!(
+            back.cues[0].end_ms >= back.cues[0].start_ms,
+            "终点不能早于起点"
+        );
     }
 
     #[test]

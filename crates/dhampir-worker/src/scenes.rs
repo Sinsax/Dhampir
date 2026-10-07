@@ -38,9 +38,10 @@ use dhampir_core::render::{SELECTABLE_SCENES, SceneSpec, scene_by_name};
 
 // 搬到 core 的那些类型与函数在这里**原样再导出一次**：本模块的调用方与测试不用改一个字，
 // 而"东西住在哪"这件事由 core 决定。M2 的浏览器宿主导的是同一批名字。
-pub use dhampir_core::render::corpus::{Counts, PointReading, SceneFrame, SceneRun, frame_rel_path};
+pub use dhampir_core::render::corpus::{
+    Counts, PointReading, SceneFrame, SceneRun, frame_rel_path,
+};
 pub use dhampir_core::render::{leg_json, report_text};
-
 
 /// 跑满一个整周期需要的帧数：`gradient` 的平移周期是 16 帧，`checker` / `srgb_linear`
 /// / `alpha_stack` 的周期是 3 / 8 / 4——**都整除 16**。
@@ -137,7 +138,10 @@ pub fn parse_frames(value: &str) -> Result<(u32, u32), String> {
     }
 
     let (start, end) = match value.split_once("..") {
-        Some((start, end)) => (parse_frame_index(start, value)?, parse_frame_index(end, value)?),
+        Some((start, end)) => (
+            parse_frame_index(start, value)?,
+            parse_frame_index(end, value)?,
+        ),
         None => {
             let only = parse_frame_index(value, value)?;
             let end = only
@@ -198,7 +202,6 @@ pub fn run_scenes(
 ) -> Result<SceneRun, Box<dyn std::error::Error>> {
     Ok(pollster::block_on(corpus::render_run(ctx, specs, frames))?)
 }
-
 
 // ---------------------------------------------------------------------------
 // 写记录
@@ -357,7 +360,11 @@ fn compare_backend(
 
     let missing_in_current: Vec<String> = other_frames
         .iter()
-        .filter(|f| !current_frames.iter().any(|c| frame_label(c) == frame_label(f)))
+        .filter(|f| {
+            !current_frames
+                .iter()
+                .any(|c| frame_label(c) == frame_label(f))
+        })
         .map(frame_label)
         .collect();
 
@@ -450,7 +457,10 @@ fn adapter_name(backend: &serde_json::Value) -> serde_json::Value {
 /// 路径会被目录结构影响，而"哪一帧"不该跟着目录变。
 fn frame_label(frame: &serde_json::Value) -> String {
     let scene = frame.get("scene").and_then(|v| v.as_str()).unwrap_or("?");
-    let index = frame.get("frame").and_then(|v| v.as_u64()).unwrap_or(u64::MAX);
+    let index = frame
+        .get("frame")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(u64::MAX);
     format!("{scene} f{index:03}")
 }
 
@@ -480,11 +490,7 @@ mod tests {
 
     #[test]
     fn all_selection_keeps_registry_order() {
-        let names: Vec<&str> = SceneSelection::All
-            .specs()
-            .iter()
-            .map(|s| s.name)
-            .collect();
+        let names: Vec<&str> = SceneSelection::All.specs().iter().map(|s| s.name).collect();
         assert_eq!(names, scene_names());
     }
 
@@ -505,9 +511,15 @@ mod tests {
             assert!(parse_frames(bad).is_err(), "{bad:?} 不该被接受");
         }
         // 上限按**要跑几帧**算，不按终点算。
-        assert!(parse_frames("1000..2024").is_ok(), "正好 {MAX_FRAMES} 帧应当合规");
+        assert!(
+            parse_frames("1000..2024").is_ok(),
+            "正好 {MAX_FRAMES} 帧应当合规"
+        );
         assert!(parse_frames("1000..2025").is_err(), "多一帧就该被拦下");
-        assert!(parse_frames("0..4294967295").is_err(), "端点顶到 u32 上限也要报错而不是回绕");
+        assert!(
+            parse_frames("0..4294967295").is_err(),
+            "端点顶到 u32 上限也要报错而不是回绕"
+        );
     }
 
     // ---- 跨进程比对 ------------------------------------------------------

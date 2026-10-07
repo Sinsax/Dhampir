@@ -479,8 +479,10 @@ impl Issue {
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Default)]
 pub enum Window {
     /// 一直生效（缺省）。强度恒为 1，除非被关键帧驱动。
+    #[default]
     Always,
     /// 瞬时：上升 `attack` 帧、满值 `hold` 帧、回落 `release` 帧，**之后归零**。
     ///
@@ -501,20 +503,11 @@ pub enum Window {
         fall_to_zero: bool,
     },
     /// 图层区间内线性淡入淡出，中间满值。用于"整段轻微变暗"这类**持续**效果。
-    Fade {
-        fade_in: Frame,
-        fade_out: Frame,
-    },
+    Fade { fade_in: Frame, fade_out: Frame },
 }
 
 fn yes() -> bool {
     true
-}
-
-impl Default for Window {
-    fn default() -> Self {
-        Self::Always
-    }
 }
 
 impl Window {
@@ -528,7 +521,12 @@ impl Window {
         let local = local.max(0);
         match self {
             Self::Always => 1.0,
-            Self::Transient { attack, hold, release, fall_to_zero } => {
+            Self::Transient {
+                attack,
+                hold,
+                release,
+                fall_to_zero,
+            } => {
                 let attack = (*attack).max(0);
                 let hold = (*hold).max(0);
                 let release = (*release).max(0);
@@ -687,12 +685,18 @@ impl WindowDefault {
 impl EffectSpec {
     /// 某个参数的上界。找不到就是 None（调用方不该猜一个默认上界）。
     pub fn param_max(&self, name: &str) -> Option<f32> {
-        self.params.iter().find(|(n, _, _)| *n == name).map(|(_, _, max)| *max)
+        self.params
+            .iter()
+            .find(|(n, _, _)| *n == name)
+            .map(|(_, _, max)| *max)
     }
 
     /// 某个参数的下界。
     pub fn param_min(&self, name: &str) -> Option<f32> {
-        self.params.iter().find(|(n, _, _)| *n == name).map(|(_, min, _)| *min)
+        self.params
+            .iter()
+            .find(|(n, _, _)| *n == name)
+            .map(|(_, min, _)| *min)
     }
 }
 
@@ -719,7 +723,11 @@ pub fn validate_project_with_effects(project: &Project, effects: &[EffectSpec]) 
     }
 
     if let Err(message) = project.timebase.to_timebase() {
-        issues.push(Issue::new("invalid_timebase", "timebase", message.to_string()));
+        issues.push(Issue::new(
+            "invalid_timebase",
+            "timebase",
+            message.to_string(),
+        ));
     }
 
     // 片段 id 必须全局唯一：否则"选中哪个片段"就成了未定义行为。
@@ -728,7 +736,11 @@ pub fn validate_project_with_effects(project: &Project, effects: &[EffectSpec]) 
     for (track_index, track) in project.tracks.iter().enumerate() {
         let track_path = format!("tracks[{}]", track_index);
         if track.id.is_empty() {
-            issues.push(Issue::new("empty_track_id", &track_path, "轨道的 id 不能为空".to_string()));
+            issues.push(Issue::new(
+                "empty_track_id",
+                &track_path,
+                "轨道的 id 不能为空".to_string(),
+            ));
         }
 
         // 轨道内重叠：同一条轨上两个片段占了同一帧。
@@ -759,7 +771,11 @@ pub fn validate_project_with_effects(project: &Project, effects: &[EffectSpec]) 
             let clip_path = format!("{}.clips[{}]", track_path, clip_index);
 
             if clip.id.is_empty() {
-                issues.push(Issue::new("empty_clip_id", &clip_path, "片段的 id 不能为空".to_string()));
+                issues.push(Issue::new(
+                    "empty_clip_id",
+                    &clip_path,
+                    "片段的 id 不能为空".to_string(),
+                ));
             } else if let Some(first) = seen_clip_ids.insert(clip.id.as_str(), clip_path.clone()) {
                 issues.push(Issue::new(
                     "duplicate_clip_id",
@@ -870,7 +886,10 @@ pub fn validate_project_with_effects(project: &Project, effects: &[EffectSpec]) 
                     issues.push(Issue::new(
                         "transition_longer_than_clip",
                         &format!("{}.transition_in.duration", clip_path),
-                        format!("转场要 {} 帧，而片段本身只有 {} 帧", transition.duration, clip.duration),
+                        format!(
+                            "转场要 {} 帧，而片段本身只有 {} 帧",
+                            transition.duration, clip.duration
+                        ),
                     ));
                 }
                 // 转场要和前一个片段**紧邻**——否则「淡出」的那一头根本不存在，
@@ -894,7 +913,11 @@ pub fn validate_project_with_effects(project: &Project, effects: &[EffectSpec]) 
                         None => issues.push(Issue::new(
                             "unknown_effect",
                             &effect_path,
-                            format!("没有登记叫 {} 的特效；可用的是 {}", effect.kind, known_kinds(effects)),
+                            format!(
+                                "没有登记叫 {} 的特效；可用的是 {}",
+                                effect.kind,
+                                known_kinds(effects)
+                            ),
                         )),
                         Some(spec) => {
                             for (name, value) in &effect.params {
@@ -909,7 +932,10 @@ pub fn validate_project_with_effects(project: &Project, effects: &[EffectSpec]) 
                                             issues.push(Issue::new(
                                                 "effect_param_out_of_range",
                                                 &format!("{}.params.{}", effect_path, name),
-                                                format!("参数 {} 必须在 {}..={}，得到 {}", name, min, max, value),
+                                                format!(
+                                                    "参数 {} 必须在 {}..={}，得到 {}",
+                                                    name, min, max, value
+                                                ),
                                             ));
                                         }
                                     }
@@ -958,7 +984,12 @@ mod tests {
         //
         // 段边界（左闭右开）：上升 [0,2)、满值 [2,5)、回落 [5,9)、之后 0。
         // 第 5 帧是**回落段的起点**，所以它仍是满值（`1 - 0/4`）。
-        let window = Window::Transient { attack: 2, hold: 3, release: 4, fall_to_zero: true };
+        let window = Window::Transient {
+            attack: 2,
+            hold: 3,
+            release: 4,
+            fall_to_zero: true,
+        };
         let at = |local| window.envelope(local, 60);
         // 上升段：从 0 线性涨到 1（第 0 帧是 0.0，第 1 帧是 0.5）。
         assert_eq!(at(0), 0.0);
@@ -979,7 +1010,12 @@ mod tests {
     fn 瞬时窗口能选择不回落() {
         // `fall_to_zero = false`：涨上去就保持。**它不等于 `Always`** ——
         // `Always` 从第 0 帧就是满值，这个从 0 开始爬。
-        let window = Window::Transient { attack: 2, hold: 3, release: 4, fall_to_zero: false };
+        let window = Window::Transient {
+            attack: 2,
+            hold: 3,
+            release: 4,
+            fall_to_zero: false,
+        };
         assert_eq!(window.envelope(0, 60), 0.0);
         assert_eq!(window.envelope(1, 60), 0.5);
         assert_eq!(window.envelope(4, 60), 1.0);
@@ -991,14 +1027,22 @@ mod tests {
     fn 零长的瞬时窗口是合法的() {
         // 全 0 会得到"瞬间满值再瞬间归零"。**合法输入**（不是错误）——
         // 拒绝它会把"最难的那一帧"变成不可表达。
-        let window = Window::Transient { attack: 0, hold: 0, release: 0, fall_to_zero: true };
+        let window = Window::Transient {
+            attack: 0,
+            hold: 0,
+            release: 0,
+            fall_to_zero: true,
+        };
         assert_eq!(window.envelope(0, 60), 0.0, "零窗口在第 0 帧就结束了");
         assert_eq!(window.envelope(5, 60), 0.0);
     }
 
     #[test]
     fn 淡入淡出窗口在中间是满值() {
-        let window = Window::Fade { fade_in: 10, fade_out: 10 };
+        let window = Window::Fade {
+            fade_in: 10,
+            fade_out: 10,
+        };
         let at = |local| window.envelope(local, 100);
         assert_eq!(at(0), 0.0);
         assert!((at(5) - 0.5).abs() < 1e-6, "淡入一半：实得 {}", at(5));
@@ -1012,7 +1056,10 @@ mod tests {
     fn 负数帧被当成第零帧() {
         // 求值层不该给出负数，但真给了也不许出 NaN 或越界 ——
         // 那会在画面上变成一个难查的亮点。
-        let window = Window::Fade { fade_in: 10, fade_out: 10 };
+        let window = Window::Fade {
+            fade_in: 10,
+            fade_out: 10,
+        };
         assert_eq!(window.envelope(-5, 100), window.envelope(0, 100));
     }
 
@@ -1022,12 +1069,33 @@ mod tests {
         // 变成负的或超过满值，那在着色器里表现为"反相"或"过曝"。
         let windows = [
             Window::Always,
-            Window::Transient { attack: 1, hold: 1, release: 4, fall_to_zero: true },
-            Window::Transient { attack: 0, hold: 0, release: 0, fall_to_zero: true },
-            Window::Transient { attack: 5, hold: 0, release: 0, fall_to_zero: false },
-            Window::Fade { fade_in: 3, fade_out: 7 },
+            Window::Transient {
+                attack: 1,
+                hold: 1,
+                release: 4,
+                fall_to_zero: true,
+            },
+            Window::Transient {
+                attack: 0,
+                hold: 0,
+                release: 0,
+                fall_to_zero: true,
+            },
+            Window::Transient {
+                attack: 5,
+                hold: 0,
+                release: 0,
+                fall_to_zero: false,
+            },
+            Window::Fade {
+                fade_in: 3,
+                fade_out: 7,
+            },
             // 淡入淡出比时长还长：这是"图层太短"的常见情形，不许算出界。
-            Window::Fade { fade_in: 200, fade_out: 200 },
+            Window::Fade {
+                fade_in: 200,
+                fade_out: 200,
+            },
         ];
         for window in windows {
             for local in -3..120 {
@@ -1048,7 +1116,12 @@ mod tests {
         // 反例是"用累积时间/随机数算包络"：那样顺序播放到第 N 帧
         // 与直接跳到第 N 帧会得到不同的强度 —— 而那正是最难归因的一类差异
         // （成片与预览不一致，但两边各自的逻辑都"看着对"）。
-        let window = Window::Transient { attack: 3, hold: 5, release: 7, fall_to_zero: true };
+        let window = Window::Transient {
+            attack: 3,
+            hold: 5,
+            release: 7,
+            fall_to_zero: true,
+        };
         for local in 0..20 {
             // 反复求、乱序求、掺入别的调用 —— 结果必须一模一样。
             let first = window.envelope(local, 60);
@@ -1058,7 +1131,11 @@ mod tests {
         }
         // 正着走一遍与倒着走一遍，逐帧结果相同（回放/seek 的等价性）。
         let forward: Vec<f32> = (0..20).map(|f| window.envelope(f, 60)).collect();
-        let backward: Vec<f32> = (0..20).rev().map(|f| window.envelope(f, 60)).rev().collect();
+        let backward: Vec<f32> = (0..20)
+            .rev()
+            .map(|f| window.envelope(f, 60))
+            .rev()
+            .collect();
         assert_eq!(forward, backward, "顺序求值与逆序求值结果不同");
     }
 
@@ -1067,7 +1144,12 @@ mod tests {
         let effect = Effect {
             kind: "flash".to_string(),
             params: BTreeMap::new(),
-            window: Window::Transient { attack: 2, hold: 0, release: 2, fall_to_zero: true },
+            window: Window::Transient {
+                attack: 2,
+                hold: 0,
+                release: 2,
+                fall_to_zero: true,
+            },
             opacity: 0.5,
         };
         // 第 0 帧包络 0 -> 总强度 0。
@@ -1102,7 +1184,10 @@ mod tests {
     fn minimal() -> Project {
         Project {
             schema: SCHEMA_VERSION,
-            timebase: TimebaseDto { num: 30000, den: 1001 },
+            timebase: TimebaseDto {
+                num: 30000,
+                den: 1001,
+            },
             tracks: vec![Track {
                 id: "v1".to_string(),
                 kind: TrackKind::Video,
@@ -1162,7 +1247,7 @@ mod tests {
             opacity: 1.0,
             effects: Vec::new(),
             keyframes: Vec::new(),
-                    transition_in: None,
+            transition_in: None,
         });
         assert!(validate_project(&project).is_empty(), "紧邻不该算重叠");
 
@@ -1182,18 +1267,31 @@ mod tests {
         let issues = validate_project(&project);
         let mut got = codes(&issues);
         got.sort_unstable();
-        assert_eq!(got, vec!["duration_not_positive", "negative_source_in", "negative_track_at"]);
+        assert_eq!(
+            got,
+            vec![
+                "duration_not_positive",
+                "negative_source_in",
+                "negative_track_at"
+            ]
+        );
     }
 
     #[test]
     fn 不透明度越界与_nan_都被报出() {
         let mut project = minimal();
         project.tracks[0].clips[0].opacity = 1.5;
-        assert_eq!(codes(&validate_project(&project)), vec!["opacity_out_of_range"]);
+        assert_eq!(
+            codes(&validate_project(&project)),
+            vec!["opacity_out_of_range"]
+        );
 
         // NaN 是最危险的那种：所有比较都为假，若不用 is_finite 就会静默通过
         project.tracks[0].clips[0].opacity = f32::NAN;
-        assert_eq!(codes(&validate_project(&project)), vec!["opacity_out_of_range"]);
+        assert_eq!(
+            codes(&validate_project(&project)),
+            vec!["opacity_out_of_range"]
+        );
     }
 
     #[test]
@@ -1201,13 +1299,29 @@ mod tests {
         let mut project = minimal();
         // duration = 60，合法范围是 0..=59
         project.tracks[0].clips[0].keyframes = vec![
-            Keyframe { frame: 0, target: opacity_target(), value: 0.0, easing: Easing::Linear },
-            Keyframe { frame: 59, target: opacity_target(), value: 1.0, easing: Easing::EaseInOut },
+            Keyframe {
+                frame: 0,
+                target: opacity_target(),
+                value: 0.0,
+                easing: Easing::Linear,
+            },
+            Keyframe {
+                frame: 59,
+                target: opacity_target(),
+                value: 1.0,
+                easing: Easing::EaseInOut,
+            },
         ];
-        assert!(validate_project(&project).is_empty(), "边界上的 0 与 59 都应当合法");
+        assert!(
+            validate_project(&project).is_empty(),
+            "边界上的 0 与 59 都应当合法"
+        );
 
         project.tracks[0].clips[0].keyframes[1].frame = 60;
-        assert_eq!(codes(&validate_project(&project)), vec!["keyframe_out_of_clip"]);
+        assert_eq!(
+            codes(&validate_project(&project)),
+            vec!["keyframe_out_of_clip"]
+        );
     }
 
     #[test]
@@ -1217,7 +1331,10 @@ mod tests {
         second.track_at = 60;
         // id 保持一样
         project.tracks[0].clips.push(second);
-        assert_eq!(codes(&validate_project(&project)), vec!["duplicate_clip_id"]);
+        assert_eq!(
+            codes(&validate_project(&project)),
+            vec!["duplicate_clip_id"]
+        );
     }
 
     #[test]
@@ -1239,15 +1356,21 @@ mod tests {
 
         // 参数越界
         project.tracks[0].clips[0].effects[0].kind = "gaussian_blur".to_string();
-        project.tracks[0].clips[0].effects[0].params.insert("radius".to_string(), 100.0);
+        project.tracks[0].clips[0].effects[0]
+            .params
+            .insert("radius".to_string(), 100.0);
         assert_eq!(
             codes(&validate_project_with_effects(&project, &[BLUR])),
             vec!["effect_param_out_of_range"]
         );
 
         // 参数名不存在
-        project.tracks[0].clips[0].effects[0].params.remove("radius");
-        project.tracks[0].clips[0].effects[0].params.insert("sigma".to_string(), 1.0);
+        project.tracks[0].clips[0].effects[0]
+            .params
+            .remove("radius");
+        project.tracks[0].clips[0].effects[0]
+            .params
+            .insert("sigma".to_string(), 1.0);
         assert_eq!(
             codes(&validate_project_with_effects(&project, &[BLUR])),
             vec!["unknown_effect_param"]
@@ -1271,7 +1394,6 @@ mod tests {
         project.timebase = TimebaseDto { num: 0, den: 1 };
         assert_eq!(codes(&validate_project(&project)), vec!["invalid_timebase"]);
     }
-
 
     #[test]
     fn 转场必须紧邻前一片段() {
@@ -1320,13 +1442,19 @@ mod tests {
             kind: transition_kind::CROSS_DISSOLVE.to_string(),
             duration: 0,
         });
-        assert_eq!(codes(&validate_project(&project)), vec!["transition_duration_invalid"]);
+        assert_eq!(
+            codes(&validate_project(&project)),
+            vec!["transition_duration_invalid"]
+        );
 
         project.tracks[0].clips[1].transition_in = Some(TransitionSpec {
             kind: transition_kind::CROSS_DISSOLVE.to_string(),
             duration: 31,
         });
-        assert_eq!(codes(&validate_project(&project)), vec!["transition_longer_than_clip"]);
+        assert_eq!(
+            codes(&validate_project(&project)),
+            vec!["transition_longer_than_clip"]
+        );
 
         project.tracks[0].clips[1].transition_in = Some(TransitionSpec {
             kind: transition_kind::CROSS_DISSOLVE.to_string(),
@@ -1363,8 +1491,16 @@ mod tests {
             Easing::EaseInOut,
             Easing::BackOut,
         ] {
-            assert!((easing.apply(0.0) - 0.0).abs() < 1e-6, "{:?} 在 0 处应当是 0", easing);
-            assert!((easing.apply(1.0) - 1.0).abs() < 1e-6, "{:?} 在 1 处应当是 1", easing);
+            assert!(
+                (easing.apply(0.0) - 0.0).abs() < 1e-6,
+                "{:?} 在 0 处应当是 0",
+                easing
+            );
+            assert!(
+                (easing.apply(1.0) - 1.0).abs() < 1e-6,
+                "{:?} 在 1 处应当是 1",
+                easing
+            );
             // 越界输入要被夹住，而不是外推
             assert!((easing.apply(-5.0) - 0.0).abs() < 1e-6);
             assert!((easing.apply(5.0) - 1.0).abs() < 1e-6);
@@ -1386,7 +1522,10 @@ mod tests {
         let ease_out_peak = (1..100)
             .map(|i| Easing::EaseOut.apply(i as f32 / 100.0))
             .fold(f32::MIN, f32::max);
-        assert!(ease_out_peak <= 1.0 + 1e-6, "EaseOut 不该过冲，实得 {ease_out_peak}");
+        assert!(
+            ease_out_peak <= 1.0 + 1e-6,
+            "EaseOut 不该过冲，实得 {ease_out_peak}"
+        );
     }
 
     #[test]
@@ -1396,7 +1535,10 @@ mod tests {
             (r#"{"frame":0,"value":1.0,"easing":"linear"}"#, "linear"),
             (r#"{"frame":0,"value":1.0,"easing":"ease_in"}"#, "ease_in"),
             (r#"{"frame":0,"value":1.0,"easing":"ease_out"}"#, "ease_out"),
-            (r#"{"frame":0,"value":1.0,"easing":"ease_in_out"}"#, "ease_in_out"),
+            (
+                r#"{"frame":0,"value":1.0,"easing":"ease_in_out"}"#,
+                "ease_in_out",
+            ),
             (r#"{"frame":0,"value":1.0,"easing":"back_out"}"#, "back_out"),
             (
                 r#"{"frame":0,"value":1.0,"easing":"cubic-bezier(0.2,0.8,0.4,1)"}"#,
@@ -1429,7 +1571,10 @@ mod tests {
         let key: Keyframe = serde_json::from_str(r#"{"frame":3,"value":0.5}"#).expect("能读回");
         assert_eq!(key.easing, Easing::Linear);
         let written = serde_json::to_string(&key).unwrap();
-        assert!(written.contains(r#""easing":"linear""#), "缺省应当写成 linear：{written}");
+        assert!(
+            written.contains(r#""easing":"linear""#),
+            "缺省应当写成 linear：{written}"
+        );
     }
 
     #[test]
@@ -1452,8 +1597,14 @@ mod tests {
             let t = i as f32 / 20.0;
             let want_out = 1.0 - (1.0 - t) * (1.0 - t);
             let want_in = t * t;
-            assert!((Easing::EaseOut.apply(t) - want_out).abs() < 1e-6, "pow2_out 在 {t} 处");
-            assert!((Easing::EaseIn.apply(t) - want_in).abs() < 1e-6, "pow2_in 在 {t} 处");
+            assert!(
+                (Easing::EaseOut.apply(t) - want_out).abs() < 1e-6,
+                "pow2_out 在 {t} 处"
+            );
+            assert!(
+                (Easing::EaseIn.apply(t) - want_in).abs() < 1e-6,
+                "pow2_in 在 {t} 处"
+            );
         }
     }
 
@@ -1493,7 +1644,9 @@ mod tests {
         let issues = validate_project(&project);
         let text = serde_json::to_string(&issues).expect("问题清单应当能序列化");
         assert!(text.contains("duration_not_positive"));
-        assert!(text.contains("tracks[0].clips[0].duration"), "路径要能定位到字段：{text}");
+        assert!(
+            text.contains("tracks[0].clips[0].duration"),
+            "路径要能定位到字段：{text}"
+        );
     }
 }
-

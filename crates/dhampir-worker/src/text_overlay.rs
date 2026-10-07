@@ -332,7 +332,13 @@ impl OverlayPainter {
         // `rasterizer` 要**可变**借、字体解析只要**不可变**借 ——
         // 写成 `self.font_for(..)` 那样的方法会把整个 `self` 借住，两边打架。
         // 拆成几个字段 + 一个自由函数，借用就分开了。
-        let Self { rasterizer, font_file, bold_file, font_dir, stats } = self;
+        let Self {
+            rasterizer,
+            font_file,
+            bold_file,
+            font_dir,
+            stats,
+        } = self;
         let font_for = |style: &dhampir_core::overlay::TextStyle| {
             pick_font(font_file, bold_file, font_dir, style)
         };
@@ -379,8 +385,10 @@ fn font_missing_reason(
     style: &dhampir_core::overlay::TextStyle,
 ) -> String {
     match (font_dir, style.family.as_deref(), font_file) {
-        (None, _, _) => "宿主没有给字体（--font-file 没给，--font-dir 也没给）。本仓不内嵌字体、也不猜系统字体"
-            .to_string(),
+        (None, _, _) => {
+            "宿主没有给字体（--font-file 没给，--font-dir 也没给）。本仓不内嵌字体、也不猜系统字体"
+                .to_string()
+        }
         (Some(dir), Some(family), _) => format!(
             "工程里点名了 `font_family: {family}`，但 --font-dir {} 里找不到这份字体。按名字找不着就画不出来（**不会**静默换一个相似字体 —— 换了之后「字长得不对」看起来像「字号配错了」）",
             dir.display()
@@ -500,7 +508,6 @@ enum Painted {
 /// 滚动中越界是常态（见模块文档）。**这个开关在这里而不是在调用方事后过滤**：
 /// 事后过滤意味着问题已经记进 `IssueLog` 了，而它没有撤回 —— 弹幕一出画面
 /// 整次出片就会被判失败。
-#[allow(clippy::too_many_arguments)]
 /// **逐段画一行**（`.hl` 分支）。见 [`paint_one`] 里那段说明。
 ///
 /// 每一段各自栅格化（自己的文字、自己的行内偏移、自己的颜色），
@@ -603,8 +610,7 @@ fn paint_parts(
                 return Painted::Failed;
             }
         };
-        let report = match blit_scaled(image, &bitmap, placement.x, placement.y + offset_y, alpha)
-        {
+        let report = match blit_scaled(image, &bitmap, placement.x, placement.y + offset_y, alpha) {
             Ok(report) => report,
             Err(error) => {
                 log.record("subtitle_blit_failed", &path, error);
@@ -612,7 +618,8 @@ fn paint_parts(
             }
         };
         if judge_clip {
-            if let Some(message) = clip_message(&run.text, &bitmap, placement, target, report.skipped)
+            if let Some(message) =
+                clip_message(&run.text, &bitmap, placement, target, report.skipped)
             {
                 log.record("subtitle_ink_clipped", &path, message);
                 clipped = true;
@@ -710,6 +717,15 @@ fn paint_shadow(
     }
 }
 
+// ⚠️ `too_many_arguments`：**allow，不是拆结构体**。
+//
+// 这 14 个参数是"画一行字幕"所需的全部事实，彼此没有从属关系可归并：
+// 栅格化闭包 / 字体 / 画布 / 目标尺寸 / 文本 / 落点 / 颜色 / 缩放 / 分段 / 样式 /
+// 不透明度 / 纵偏移 / 是否判裁切 / 日志。其中颜色、缩放、分段三者**逐条不同**
+// （同一行的高亮分段各有自己的颜色），所以它们也不能提到轨道级。
+// 造一个 `LineDraw` 结构体只是把参数挪个地方，却要改掉本文件全部调用点 ——
+// 收益是把 lint 关掉，代价是让这条热路径更难顺着读。不值。
+#[allow(clippy::too_many_arguments)]
 fn paint_one(
     rasterize: &mut impl FnMut(&TextRasterKey) -> Result<Rc<TextBitmap>, String>,
     font_file: Option<PathBuf>,
@@ -862,13 +878,7 @@ fn paint_one(
             return Painted::Failed;
         }
     };
-    let report = match blit_scaled(
-        image,
-        &bitmap,
-        placement.x,
-        placement.y + offset_y,
-        alpha,
-    ) {
+    let report = match blit_scaled(image, &bitmap, placement.x, placement.y + offset_y, alpha) {
         Ok(report) => report,
         Err(error) => {
             log.record("subtitle_blit_failed", &path, error);
@@ -1068,7 +1078,10 @@ mod font_reason_tests {
 
         // ③ 给了目录、工程没写名字：说的是"没名字可找"。
         let unnamed = font_missing_reason(&None, &Some(dir.clone()), &style_with(None));
-        assert!(unnamed.contains("font_family"), "要点出缺的是名字：{unnamed}");
+        assert!(
+            unnamed.contains("font_family"),
+            "要点出缺的是名字：{unnamed}"
+        );
 
         // **反向**：三种说法的确互不相同 —— 否则"各有各的说法"就是空话。
         assert_ne!(none, named);
@@ -1136,7 +1149,10 @@ mod tests {
     }
 
     /// 只有弹幕、没有字幕的一帧。`dropped_danmaku` 是泳道排不下丢掉的那几条。
-    fn danmaku_overlay(items: &[(&str, NormalizedRect, u32)], dropped_danmaku: usize) -> TextOverlay {
+    fn danmaku_overlay(
+        items: &[(&str, NormalizedRect, u32)],
+        dropped_danmaku: usize,
+    ) -> TextOverlay {
         TextOverlay {
             items: Vec::new(),
             danmaku: items
@@ -1619,12 +1635,15 @@ mod tests {
         let got_shadow = image.pixel(cx as u32, shadow_y as u32).expect("在画面里");
         assert_eq!(got_text, [255, 255, 255, 255], "文字应当在最上面");
         assert_eq!(
-            got_shadow, [0, 0, 255, 255],
+            got_shadow,
+            [0, 0, 255, 255],
             "阴影必须落在**偏移之后**的位置（dy=20）—— 落在文字原处就是没挪"
         );
         // 反向：偏移方向**上方**（文字原处）不能是阴影色。
         assert_ne!(
-            image.pixel(cx as u32, (text_y - 20) as u32).expect("在画面里"),
+            image
+                .pixel(cx as u32, (text_y - 20) as u32)
+                .expect("在画面里"),
             [0, 0, 255, 255],
             "偏移的反方向出现了阴影色：说明它被贴到了别处"
         );
@@ -1712,7 +1731,11 @@ mod tests {
             &mut log,
             &mut painter.stats,
         );
-        assert!(log.is_empty(), "弹幕滚出画面是常态，不该记问题：{:?}", log.into_vec());
+        assert!(
+            log.is_empty(),
+            "弹幕滚出画面是常态，不该记问题：{:?}",
+            log.into_vec()
+        );
         let stats = painter.stats();
         assert_eq!(stats.danmaku_drawn, 2);
         assert_eq!(stats.danmaku_dropped, 2);

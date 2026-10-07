@@ -764,7 +764,9 @@ pub const LIBASS_PLAY_RES_Y: f64 = 288.0;
 /// 所以判据是"字号看起来一致"，不是"墨迹高度逐像素相同"。
 pub fn ass_font_size(font_px: u32, bitmap_height: u32) -> u32 {
     let play_res_scale = LIBASS_PLAY_RES_Y / f64::from(bitmap_height.max(1));
-    (f64::from(font_px) * 1.25 * play_res_scale).round().max(1.0) as u32
+    (f64::from(font_px) * 1.25 * play_res_scale)
+        .round()
+        .max(1.0) as u32
 }
 
 /// drawtext/契约的描边宽度（em 侧像素）→ ASS 的 `Outline`。
@@ -1098,7 +1100,11 @@ fn run_ffmpeg(
     // **libass 的覆盖度在 RGB 里、alpha 恒为 0** —— 先搬成 drawtext 那种
     // 「覆盖度预乘」形态，再交给同一个 [`tint`]。搬运与判据见 [`coverage_from_libass`]。
     let premultiplied = coverage_from_libass(&output.stdout);
-    TextBitmap::new(key.width, key.height, tint(&premultiplied, key.tint_color()))
+    TextBitmap::new(
+        key.width,
+        key.height,
+        tint(&premultiplied, key.tint_color()),
+    )
 }
 
 /// libass 的输出 → `drawtext` 那种**覆盖度预乘**形态，喂给同一个 [`tint`]。
@@ -1214,7 +1220,12 @@ impl CoverageProfile {
             max_y = max_y.max(y);
         }
         let bounds = any.then_some((min_x, min_y, max_x, max_y));
-        Self { width, height, values, bounds }
+        Self {
+            width,
+            height,
+            values,
+            bounds,
+        }
     }
 
     /// 取一个点（越界给 0）。
@@ -1292,11 +1303,7 @@ impl CoverageProfile {
     /// 这里的搜索只是把每个字形内部那半个像素的取整差找回来；
     /// 搜索半径刻意只有 ±[`ALIGN_RADIUS`] 像素 ——
     /// 大了就变成"随便挪到最像为止"，判据会失去意义。
-    pub fn best_alignment(
-        &self,
-        other: &CoverageProfile,
-        radius: i64,
-    ) -> (i64, i64, f32) {
+    pub fn best_alignment(&self, other: &CoverageProfile, radius: i64) -> (i64, i64, f32) {
         let (Some((ox, oy, _, _)), Some((sx, sy, _, _))) = (other.bounds, self.bounds) else {
             return (0, 0, f32::MAX);
         };
@@ -1458,10 +1465,7 @@ pub const EDGE_TOLERANCE: f32 = 64.0;
 /// `candidate` 会先在 **±[`ALIGN_RADIUS`] 像素**内找最好的对齐再比 ——
 /// 见 [`CoverageProfile::best_alignment`] 那一节（不这么做会把亚像素偏移
 /// 放大成假差异）。
-pub fn compare_edges(
-    reference: &CoverageProfile,
-    candidate: &CoverageProfile,
-) -> EdgeDifference {
+pub fn compare_edges(reference: &CoverageProfile, candidate: &CoverageProfile) -> EdgeDifference {
     let (dx, dy, _) = reference.best_alignment(candidate, ALIGN_RADIUS);
     let aligned = candidate.shifted(dx, dy);
     let mut union: Vec<usize> = reference.edge_pixels();
@@ -1484,9 +1488,8 @@ pub fn compare_edges(
         .map(|index| {
             let x = *index as u32 % reference.width;
             let y = *index as u32 / reference.width;
-            (reference.at(i64::from(x), i64::from(y))
-                - aligned.at(i64::from(x), i64::from(y)))
-            .abs()
+            (reference.at(i64::from(x), i64::from(y)) - aligned.at(i64::from(x), i64::from(y)))
+                .abs()
         })
         .collect();
     diffs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -1494,7 +1497,8 @@ pub fn compare_edges(
     let max = diffs.last().copied().unwrap_or(0.0);
     let median = diffs[compared / 2];
     let mean = diffs.iter().sum::<f32>() / compared as f32;
-    let within = diffs.iter().filter(|diff| **diff <= EDGE_TOLERANCE).count() as f32 / compared as f32;
+    let within =
+        diffs.iter().filter(|diff| **diff <= EDGE_TOLERANCE).count() as f32 / compared as f32;
     EdgeDifference {
         compared,
         max,
@@ -1647,7 +1651,10 @@ mod tests {
             "-f".to_string(),
             "lavfi".to_string(),
             "-i".to_string(),
-            format!("color=c=black@0.0:s={}x{},format=rgba", key.width, key.height),
+            format!(
+                "color=c=black@0.0:s={}x{},format=rgba",
+                key.width, key.height
+            ),
             "-vf".to_string(),
             // **这是 T2 的新冻结串**（libass 路线）。老的那一条是
             // `drawtext=fontfile=…:textfile=…:expansion=none:…`，它下面那几个
@@ -1842,7 +1849,12 @@ mod tests {
         let dangerous = "危险:文本'带引号,逗号[方括号];分号 100% %{n}";
         let mut k = key("", 20);
         k.text = dangerous.to_string();
-        let args = drawtext_args(&k, &k.font_file, Path::new("C:/fake"), Path::new("C:/tmp/dhampir-text-1.txt"));
+        let args = drawtext_args(
+            &k,
+            &k.font_file,
+            Path::new("C:/fake"),
+            Path::new("C:/tmp/dhampir-text-1.txt"),
+        );
         let joined = args.join(" ");
         assert!(!joined.contains("危险"), "文本进了命令行：{joined}");
         assert!(!joined.contains("带引号"), "文本进了命令行：{joined}");
@@ -1887,7 +1899,13 @@ mod tests {
     #[test]
     fn 描边开关决定有没有_outline项() {
         let plain_key = key("字", 20);
-        let plain = drawtext_args(&plain_key, &plain_key.font_file, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
+        let plain = drawtext_args(
+            &plain_key,
+            &plain_key.font_file,
+            Path::new("C:/fake"),
+            Path::new("t.txt"),
+        )
+        .join(" ");
         // **不描边时必须显式写 `Outline=0`**：ASS 的默认样式**带描边**，
         // 不写的话"没开描边"的工程会突然多出一圈黑边 —— 那正是那种
         // "看着像是字体变粗了"而查不出原因的错。
@@ -1899,7 +1917,13 @@ mod tests {
         let mut outlined = key("字", 20);
         outlined.outline = true;
         outlined.font_px = 48;
-        let joined = drawtext_args(&outlined, &outlined.font_file, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
+        let joined = drawtext_args(
+            &outlined,
+            &outlined.font_file,
+            Path::new("C:/fake"),
+            Path::new("t.txt"),
+        )
+        .join(" ");
         assert!(
             joined.contains("Outline=3"),
             "字号 48 的描边是 3 像素：{joined}"
@@ -1979,8 +2003,17 @@ mod tests {
         styled.outline = true;
         styled.stroke_px = 12;
         styled.stroke_color = [0x40, 0x3c, 0x3b, 255];
-        let joined = drawtext_args(&styled, &styled.font_file, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
-        assert!(joined.contains("Outline=12"), "宽度要用契约给的 12，实得：{joined}");
+        let joined = drawtext_args(
+            &styled,
+            &styled.font_file,
+            Path::new("C:/fake"),
+            Path::new("t.txt"),
+        )
+        .join(" ");
+        assert!(
+            joined.contains("Outline=12"),
+            "宽度要用契约给的 12，实得：{joined}"
+        );
         // **描边色不进参数串**：libass 那条路上填充与描边共用同一张覆盖度 mask，
         // 描边的颜色由 tint 决定（见 coverage_from_libass 里写的那条口径收窄）。
         // 这里断言的是"用了白墨"，不是"用了契约色" —— 后者已经**不再**由这一步负责。
@@ -1994,8 +2027,17 @@ mod tests {
         let mut legacy = key("字", 48);
         legacy.outline = true;
         legacy.font_px = 48;
-        let legacy_args = drawtext_args(&legacy, &legacy.font_file, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
-        assert!(legacy_args.contains("Outline=3"), "老行为：字号 48 -> 3 像素，实得：{legacy_args}");
+        let legacy_args = drawtext_args(
+            &legacy,
+            &legacy.font_file,
+            Path::new("C:/fake"),
+            Path::new("t.txt"),
+        )
+        .join(" ");
+        assert!(
+            legacy_args.contains("Outline=3"),
+            "老行为：字号 48 -> 3 像素，实得：{legacy_args}"
+        );
         assert!(
             legacy_args.contains(&format!("OutlineColour={WHITE_INK}")),
             "描边一律用白墨，实得：{legacy_args}"
@@ -2017,25 +2059,38 @@ mod tests {
         // 无描边（老工程的默认：`stroke_ratio` 默认 0 且 `outline` 默认 true 时走另一支，
         // 所以这里两种都验）。
         let plain = key("字", 20);
-        assert_eq!(drawtext_args(&plain, &plain.font_file, Path::new("C:/fake"), Path::new("C:/tmp/dhampir-text-1.txt")), frozen_argv(&plain));
+        assert_eq!(
+            drawtext_args(
+                &plain,
+                &plain.font_file,
+                Path::new("C:/fake"),
+                Path::new("C:/tmp/dhampir-text-1.txt")
+            ),
+            frozen_argv(&plain)
+        );
 
         // 有描边：老路径（宽度从字号推、颜色写死黑）。
         let mut outlined = key("字", 20);
         outlined.outline = true;
         let mut expected = frozen_argv(&outlined);
-        let at = expected.iter().position(|arg| arg.starts_with("subtitles=")).expect("有 -vf");
+        let at = expected
+            .iter()
+            .position(|arg| arg.starts_with("subtitles="))
+            .expect("有 -vf");
         // 描边在 ASS 里就是 `force_style` 里的两项，追加在 `Outline=0` 的位置上。
         // 这里**照着实现改**（把 `Outline=0` 替换成带宽度与颜色的那两项），
         // 而不是重新拼一遍 —— 重拼会让这条测试与实现同源，那就验不出东西了。
         expected[at] = expected[at].replace(
             "Outline=0",
-            &format!(
-                "Outline={},OutlineColour={WHITE_INK}",
-                border_px(32)
-            ),
+            &format!("Outline={},OutlineColour={WHITE_INK}", border_px(32)),
         );
         assert_eq!(
-            drawtext_args(&outlined, &outlined.font_file, Path::new("C:/fake"), Path::new("C:/tmp/dhampir-text-1.txt")),
+            drawtext_args(
+                &outlined,
+                &outlined.font_file,
+                Path::new("C:/fake"),
+                Path::new("C:/tmp/dhampir-text-1.txt")
+            ),
             expected,
             "有描边的默认路径也一个字符都不能变（多一个字符像素就不一样）"
         );
@@ -2054,9 +2109,17 @@ mod tests {
     fn 画阴影时用白字加模糊而不是描边() {
         let text = key("字", 20);
         let shadow = shadow_key(&text, [0, 0, 0, 102], 4, 3, 2);
-        let args = drawtext_args(&shadow, &shadow.font_file, Path::new("C:/fake"), Path::new("C:/tmp/dhampir-text-1.txt"));
+        let args = drawtext_args(
+            &shadow,
+            &shadow.font_file,
+            Path::new("C:/fake"),
+            Path::new("C:/tmp/dhampir-text-1.txt"),
+        );
         let joined = args.join(" ");
-        assert!(joined.contains("gblur=sigma=2"), "σ 应当是 blur/2 = 2：{joined}");
+        assert!(
+            joined.contains("gblur=sigma=2"),
+            "σ 应当是 blur/2 = 2：{joined}"
+        );
         assert!(
             joined.contains("Outline=0"),
             "阴影不许带描边（描边是黑的，会被 tint 染成黑边）：{joined}"
@@ -2083,7 +2146,13 @@ mod tests {
     #[test]
     fn 硬阴影不带_gblur() {
         let shadow = shadow_key(&key("字", 20), [0, 0, 0, 255], 0, 0, 4);
-        let joined = drawtext_args(&shadow, &shadow.font_file, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
+        let joined = drawtext_args(
+            &shadow,
+            &shadow.font_file,
+            Path::new("C:/fake"),
+            Path::new("t.txt"),
+        )
+        .join(" ");
         assert!(!joined.contains("gblur"), "硬阴影不该有模糊：{joined}");
         assert!(joined.contains("Outline=0"), "阴影不许带描边：{joined}");
         assert_eq!(shadow_pad_px(0, 0, 4), 4, "偏移仍要余量");
@@ -2135,7 +2204,10 @@ mod tests {
                 })
                 .unwrap();
         }
-        assert_eq!(calls, 3, "文本、阴影、另一档模糊各要一次；同键不许重复栅格化");
+        assert_eq!(
+            calls, 3,
+            "文本、阴影、另一档模糊各要一次；同键不许重复栅格化"
+        );
         assert_eq!(cache.hits, 2);
     }
 
@@ -2214,16 +2286,20 @@ mod tests {
         );
         let staged = staged_font.path().to_path_buf();
 
-        assert!(staged.is_file(), "搬完之后那一份必须真的在：{}", staged.display());
         assert!(
-            staged
-                .to_string_lossy()
-                .bytes()
-                .all(|byte| byte.is_ascii()),
+            staged.is_file(),
+            "搬完之后那一份必须真的在：{}",
+            staged.display()
+        );
+        assert!(
+            staged.to_string_lossy().bytes().all(|byte| byte.is_ascii()),
             "临时路径自己必须全是 ASCII，否则搬了等于没搬：{}",
             staged.display()
         );
-        assert!(staged.starts_with(std::env::temp_dir()), "临时文件要落在临时目录里");
+        assert!(
+            staged.starts_with(std::env::temp_dir()),
+            "临时文件要落在临时目录里"
+        );
         assert!(
             staged
                 .file_name()
@@ -2266,11 +2342,7 @@ mod tests {
 
         let a = ascii_font_path(&first).unwrap();
         let b = ascii_font_path(&second).unwrap();
-        assert_ne!(
-            a.path(),
-            b.path(),
-            "内容不同的两份字体不许共用同一个临时名"
-        );
+        assert_ne!(a.path(), b.path(), "内容不同的两份字体不许共用同一个临时名");
         // 内容相同（路径不同）时**应当**共用：同一次出片里同一份字体只搬一次。
         let twin = dir.join("字体丙.ttf");
         std::fs::write(&twin, b"AAAA").unwrap();
@@ -2304,9 +2376,11 @@ mod tests {
             "不搬时必须**原样**给回调用方那条路径"
         );
         // 连反斜杠这种"看着像转义"的 ASCII 字符也不许触发。
-        assert!(!ascii_font_path(Path::new("C:\\Windows\\Fonts\\simhei.ttf"))
-            .unwrap()
-            .is_staged());
+        assert!(
+            !ascii_font_path(Path::new("C:\\Windows\\Fonts\\simhei.ttf"))
+                .unwrap()
+                .is_staged()
+        );
     }
 
     /// **反向用例（会红的那一半）**：源文件不在时，搬这一步必须**响亮报错**，
@@ -2350,7 +2424,8 @@ mod tests {
             "参数串里仍是非 ASCII 那条路径上的名字 —— 搬了却没换上：{joined}"
         );
         // **反向**：不搬时名字就该来自键上那条。
-        let direct = drawtext_args(&k, &k.font_file, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
+        let direct =
+            drawtext_args(&k, &k.font_file, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
         assert!(
             direct.contains("FontName=乐米"),
             "不搬时名字该来自键上那条路径：{direct}"
@@ -2385,7 +2460,8 @@ mod tests {
         assert_eq!(staged.path(), font.as_path(), "不搬时路径必须原样返回");
         // 于是参数串里用的就是**这份字体**（libass 路线下以**家族名**出现），
         // 且没有被换成一条临时路径。
-        let joined = drawtext_args(&k, &k.font_file, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
+        let joined =
+            drawtext_args(&k, &k.font_file, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
         assert!(
             joined.contains(&format!("FontName={}", font_family_name(&k, &font))),
             "参数串里该是这份字体的家族名：{joined}"
@@ -2408,7 +2484,10 @@ mod tests {
         if font.to_string_lossy().bytes().all(|byte| byte.is_ascii()) {
             // 本机没有非 ASCII 名的字体：这条**跳过**而不是假装通过 ——
             // 拿一个 ASCII 路径跑出来的绿，证明不了这一条要证的事。
-            eprintln!("本机 test_font() 是 ASCII 路径（{}），这条测试跳过", font.display());
+            eprintln!(
+                "本机 test_font() 是 ASCII 路径（{}），这条测试跳过",
+                font.display()
+            );
             return;
         }
         let font_px = 40u32;
@@ -2434,7 +2513,10 @@ mod tests {
         // 四个字、字号 40：墨迹至少上千像素。给一个宽松但能证伪的下限。
         // **下限也要挡得住"回退到 ArialMT"**：那种回退画不出 CJK，
         // 实测只剩 318 个覆盖像素（见模块文档里那张 fontselect 表）。
-        assert!(inked > 1000, "墨迹只有 {inked} 像素，像是没画全（回退到无 CJK 的字体？）");
+        assert!(
+            inked > 1000,
+            "墨迹只有 {inked} 像素，像是没画全（回退到无 CJK 的字体？）"
+        );
         assert!(!bitmap.ink_touches_edge(), "字被切了");
     }
 
@@ -2486,9 +2568,16 @@ mod tests {
                 &TextBitmap::new(width, height, old_raw).expect("字节数应当对得上"),
             );
 
-            let new_raw =
-                probe_libass_white(&font, glyph, font_px, width, height, dir.as_deref(), &family)
-                    .expect("新路必须画得出来");
+            let new_raw = probe_libass_white(
+                &font,
+                glyph,
+                font_px,
+                width,
+                height,
+                dir.as_deref(),
+                &family,
+            )
+            .expect("新路必须画得出来");
             // 走 `coverage_from_libass` 搬运后再抽剖面：这**同时验了搬运**
             // —— 搬运写错的话这里会抽到全 0，下面的断言会直接红。
             let moved = coverage_from_libass(&new_raw);
@@ -2507,8 +2596,7 @@ mod tests {
 
             // 字形**尺寸**也要对得上：差太多就不是"覆盖度口径"的问题，
             // 而是字号/几何算错了（PlayRes 补偿那一条盯的就是这个）。
-            let (Some((ox0, oy0, ox1, oy1)), Some((nx0, ny0, nx1, ny1))) =
-                (old.bounds, new.bounds)
+            let (Some((ox0, oy0, ox1, oy1)), Some((nx0, ny0, nx1, ny1))) = (old.bounds, new.bounds)
             else {
                 unreachable!("上面断言过两边都有墨迹")
             };
@@ -2675,8 +2763,16 @@ mod tests {
         let dir = font.parent().map(Path::to_path_buf);
         let family = font_family_name(&key(glyph, 20), &font);
 
-        let raw = probe_libass_white(&font, glyph, font_px, width, height, dir.as_deref(), &family)
-            .expect("新路必须画得出来");
+        let raw = probe_libass_white(
+            &font,
+            glyph,
+            font_px,
+            width,
+            height,
+            dir.as_deref(),
+            &family,
+        )
+        .expect("新路必须画得出来");
 
         // ---- 反面：**不搬运**，按 alpha 读 ----
         let wrong = CoverageProfile::from_premultiplied(
@@ -2695,8 +2791,7 @@ mod tests {
 
         // ---- 正面：**搬运之后**，同样的字节必须出墨 ----
         let right = CoverageProfile::from_premultiplied(
-            &TextBitmap::new(width, height, coverage_from_libass(&raw))
-                .expect("字节数应当对得上"),
+            &TextBitmap::new(width, height, coverage_from_libass(&raw)).expect("字节数应当对得上"),
         );
         assert!(
             right.bounds.is_some(),
@@ -2712,7 +2807,10 @@ mod tests {
         // 同一份原始字节：「按 alpha 读」全空、「搬运后读」有墨。
         // 这一条就是"搬平那一步不可省"的可复算证据。
         let raw_ink = raw.chunks_exact(4).filter(|px| px[3] != 0).count();
-        assert_eq!(raw_ink, 0, "libass 的 alpha 本该恒为 0，实测有 {raw_ink} 个非 0");
+        assert_eq!(
+            raw_ink, 0,
+            "libass 的 alpha 本该恒为 0，实测有 {raw_ink} 个非 0"
+        );
     }
 
     /// 起一次 ffmpeg，把 `rawvideo` 的 stdout 原样拿回来。
@@ -2756,7 +2854,10 @@ mod tests {
         if !font.to_string_lossy().contains("乐米波波体") {
             // 这条判据盯的是**那份缺字的字体**。本机没有它就跳过，
             // 而不是拿另一份字体跑出一个证明不了这件事的绿。
-            eprintln!("本机 test_font() 不是乐米（{}），这条测试跳过", font.display());
+            eprintln!(
+                "本机 test_font() 不是乐米（{}），这条测试跳过",
+                font.display()
+            );
             return;
         }
         let font_px = 40u32;
@@ -2838,7 +2939,8 @@ mod tests {
         k.font_file = PathBuf::from("C:/fonts/乐米波波体（免费商用）_爱给网_aigei_com.ttf");
         // 契约给了名字：用它，**不推**。
         k.font_family = Some("乐米波波体".to_string());
-        let joined = drawtext_args(&k, &k.font_file, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
+        let joined =
+            drawtext_args(&k, &k.font_file, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
         assert!(
             joined.contains("FontName=乐米波波体,"),
             "契约给了家族名就该用它：{joined}"
@@ -2850,7 +2952,8 @@ mod tests {
 
         // 契约没给：退回文件名主干 —— 这是**有把握的降级**，不是"能用的默认"。
         k.font_family = None;
-        let fallback = drawtext_args(&k, &k.font_file, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
+        let fallback =
+            drawtext_args(&k, &k.font_file, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
         assert!(
             fallback.contains("FontName=乐米波波体（免费商用）_爱给网_aigei_com,"),
             "没给家族名时退回文件名主干：{fallback}"
@@ -2858,7 +2961,8 @@ mod tests {
 
         // 空白名字等于没给（空串会把 FontName 写成空的，libass 只能回退）。
         k.font_family = Some("   ".to_string());
-        let blank = drawtext_args(&k, &k.font_file, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
+        let blank =
+            drawtext_args(&k, &k.font_file, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
         assert!(
             blank.contains("FontName=乐米波波体（免费商用）"),
             "空白家族名要当作没给，而不是写一个空的 FontName：{blank}"
@@ -2872,9 +2976,11 @@ mod tests {
     #[test]
     fn 字体目录进参数串且跟着键走() {
         let k = key("字", 20);
-        let a = drawtext_args(&k, &k.font_file, Path::new("C:/fontsA"), Path::new("t.txt")).join(" ");
+        let a =
+            drawtext_args(&k, &k.font_file, Path::new("C:/fontsA"), Path::new("t.txt")).join(" ");
         assert!(a.contains(r"fontsdir='C\:/fontsA'"), "字体目录要进串：{a}");
-        let b = drawtext_args(&k, &k.font_file, Path::new("C:/fontsB"), Path::new("t.txt")).join(" ");
+        let b =
+            drawtext_args(&k, &k.font_file, Path::new("C:/fontsB"), Path::new("t.txt")).join(" ");
         assert!(b.contains(r"fontsdir='C\:/fontsB'"), "换目录要跟着换：{b}");
         assert_ne!(a, b, "换字体目录必须换参数串（回退落在哪个字体上会变）");
     }
@@ -2892,7 +2998,10 @@ mod tests {
         // **同一个目标字号、不同的位图高**：FontSize 必须跟着变，且与高成反比。
         let tall = ass_font_size(40, 360);
         let short = ass_font_size(40, 90);
-        assert_ne!(tall, short, "位图高不同，FontSize 必须不同（否则就是没补偿）");
+        assert_ne!(
+            tall, short,
+            "位图高不同，FontSize 必须不同（否则就是没补偿）"
+        );
         // 90 高时缩放因子是 360 高时的 4 倍。
         let ratio = f64::from(short) / f64::from(tall);
         assert!(
@@ -2916,9 +3025,15 @@ mod tests {
     #[test]
     fn 字体目录定不下来要响亮报错() {
         // 显式给了一个不存在的目录。
-        let err = font_dir(Some(Path::new("C:/nope/not-a-dir")), Path::new("C:/fake/font.ttf"))
-            .unwrap_err();
-        assert!(err.contains("--font-dir"), "错误里要点出该改哪个参数：{err}");
+        let err = font_dir(
+            Some(Path::new("C:/nope/not-a-dir")),
+            Path::new("C:/fake/font.ttf"),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("--font-dir"),
+            "错误里要点出该改哪个参数：{err}"
+        );
         // 没给目录、字体又没有可用的父目录。
         let err = font_dir(None, Path::new("font.ttf")).unwrap_err();
         assert!(err.contains("字体目录"), "要有一条人话：{err}");

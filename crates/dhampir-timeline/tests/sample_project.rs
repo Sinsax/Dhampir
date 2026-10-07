@@ -13,11 +13,7 @@ fn 样本工程能解析并通过校验() {
     let project: dhampir_timeline::schema::Project =
         serde_json::from_str(SAMPLE).expect("样本工程必须是合法 JSON 且符合 schema");
     let issues = dhampir_timeline::schema::validate_project(&project);
-    assert!(
-        issues.is_empty(),
-        "样本工程没能通过校验：{:#?}",
-        issues
-    );
+    assert!(issues.is_empty(), "样本工程没能通过校验：{:#?}", issues);
 }
 
 #[test]
@@ -37,7 +33,10 @@ fn 样本工程覆盖了该覆盖的东西() {
         video_clips.len()
     );
 
-    let transitions = video_clips.iter().filter(|clip| clip.transition_in.is_some()).count();
+    let transitions = video_clips
+        .iter()
+        .filter(|clip| clip.transition_in.is_some())
+        .count();
     assert_eq!(transitions, 1, "应当恰好有 1 个转场");
 
     let effects: usize = video_clips.iter().map(|clip| clip.effects.len()).sum();
@@ -48,11 +47,17 @@ fn 样本工程覆盖了该覆盖的东西() {
         }
     }
 
-    let keyframed = video_clips.iter().filter(|clip| !clip.keyframes.is_empty()).count();
+    let keyframed = video_clips
+        .iter()
+        .filter(|clip| !clip.keyframes.is_empty())
+        .count();
     assert!(keyframed >= 1, "应当至少有一个片段带关键帧");
 
     assert!(
-        project.tracks.iter().any(|track| track.kind == dhampir_timeline::schema::TrackKind::Audio),
+        project
+            .tracks
+            .iter()
+            .any(|track| track.kind == dhampir_timeline::schema::TrackKind::Audio),
         "应当有一条音频轨——它不进渲染图，但要参与时间线长度"
     );
 }

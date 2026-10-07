@@ -168,7 +168,11 @@ impl WarpRenderer {
             mapped_at_creation: false,
         });
 
-        Self { pipeline, bind_group_layout, uniform }
+        Self {
+            pipeline,
+            bind_group_layout,
+            uniform,
+        }
     }
 
     /// 跑一趟坐标重映射：`source` -> `target`。

@@ -55,11 +55,36 @@
 
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+// deflateRawSync：纯 Node 打 zip 用（Linux / macOS 那条路，见 makeZipWithNode）。
+import { deflateRawSync } from 'node:zlib';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
+// ---------------------------------------------------------------- zip 用到的常量
+//
+// ⚠️ **这几个必须在 makeZip 被调用之前求值**。它们原来是 `const`、写在文件末尾，
+// 而 `makeZip(...)` 在本文件**上半部分**就被调用了 —— 于是踩了 ESM 的暂时性死区
+// （`Cannot access 'CRC_TABLE' before initialization`）。
+// 那个报错只在**真跑**时出现，`node --check` 看不出来（语法是合法的）。放在这里最省事。
+//
+// CRC-32（PNG / zip / gzip 都用同一条多项式）。
+/// 手写是为了不引入依赖 —— 本仓的 node 依赖面刻意保持为零（没有 package.json）。
+const CRC_TABLE = (() => {
+  const table = new Int32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c;
+  }
+  return table;
+})();
+
+// DOS 时间戳的固定值：1980-01-01 00:00:00 —— 见 makeZipWithNode 的说明。
+const dosTime = 0;
+const dosDate = (1 << 9) | (1 << 5) | 1;
 
 function arg(name, fallback) {
   const i = process.argv.indexOf(name);
@@ -275,9 +300,37 @@ if (!has('--no-zip')) {
 /// 最后打印一行 `zip : <路径>`，那个路径却不存在。
 ///
 /// 那正是最难查的一类失败：产物清单说打了包，实际没有。
-/// 所以这里换成 .NET 的 `ZipFile.CreateFromDirectory`（同一台机器的 API，
-/// 不吃时间戳），并在**压完立刻验一次文件在不在** —— 少一个「应该成功了」。
+/// 所以 Windows 上用 .NET 的 `ZipFile.CreateFromDirectory`（同一台机器的 API，
+/// 不吃时间戳）。
+///
+/// # 为什么 Linux / macOS 上不是同一条路（2026-10-04 补）
+///
+/// `powershell` 在 Linux 上通常**不存在**（本机实测 ENOENT）—— 于是这条发布流程
+/// 在 Linux 上走到压包就断了，产物只出得了 Windows 的。而这与 README 的承诺
+/// 「两端都得能活」是矛盾的：Linux 是**服务端出片的目标环境**，它更需要一份定版产物。
+///
+/// 所以按平台分叉，且**判据只认结果**：**不管走哪条路，压完都要验 zip 真的在、
+/// 且能被读回来**（见 verifyZip）。不验的话，"换了实现"就是从
+/// 「说了但没做」换成「换了个地方说了但没做」。
+///
+/// 这里**不用** `zip` 命令行：它不一定装（本机没有），且不同发行版的 `-x`/`-r`
+/// 语义有出入。用 Node 自己写 zip 容器，依赖只有 `node:zlib`。
 function makeZip(from, zip) {
+  if (process.platform === 'win32') {
+    makeZipWithPowerShell(from, zip);
+  } else {
+    makeZipWithNode(from, zip);
+  }
+  // 退出码 0 还不足以说明它在 —— 上面踩的就是「说了但没做」。
+  if (!existsSync(zip)) {
+    console.error('✗ 压 zip 报成功但文件不在：' + zip);
+    process.exit(1);
+  }
+  // 非 Windows 上连可执行位一起验（见 verifyZip 的说明）。
+  verifyZip(zip, process.platform === 'win32' ? null : 'bin/dhampir');
+}
+
+function makeZipWithPowerShell(from, zip) {
   const script = join(REPO, 'target', 'make-zip.ps1');
   mkdirSync(dirname(script), { recursive: true });
   writeFileSync(
@@ -301,11 +354,165 @@ function makeZip(from, zip) {
     console.error('✗ 压 zip 失败：' + zip);
     process.exit(1);
   }
-  // 退出码 0 还不足以说明它在 —— 上面踩的就是「说了但没做」。
-  if (!existsSync(zip)) {
-    console.error('✗ 压 zip 报成功但文件不在：' + zip);
+}
+
+/// 纯 Node 的 zip 写出（Linux / macOS 那条路）。
+///
+/// **为什么手写容器**：`execFileSync('zip', …)` 与本仓一贯的纪律冲突 ——
+/// 依赖外部工具就得处理"装没装 / 版本差异"，而这类失败的表现恰恰是
+/// "看起来跑了，产物不对"。zip 的 stored/deflate 两种条目各几十行，可控。
+///
+/// 三个刻意的选择，都为了让**产物可被任意解压器读**：
+///   * 路径分隔符固定 `/`（zip 规范要求，与建包平台无关）；
+///   * 目录条目也写（`preview/` 这种），否则某些解压器建不出空目录层级；
+///   * **时间戳用固定的 `1980-01-01`**（DOS 时间的下限）。理由与 Windows 那条路
+///     一致：**不吃文件时间戳**。副作用是 zip 可复现——同样的输入两次压出同样字节，
+///     这对"下载地址钉固的字节"是有价值的性质。
+function makeZipWithNode(from, zip) {
+  const entries = [];
+  const walk = (dir, prefix) => {
+    for (const name of readdirSync(dir).sort()) {
+      const full = join(dir, name);
+      const rel = prefix ? prefix + '/' + name : name;
+      const st = statSync(full);
+      if (st.isDirectory()) {
+        entries.push({ name: rel + '/', dir: true, mode: st.mode });
+        walk(full, rel);
+      } else if (st.isFile()) {
+        // 不是普通文件（符号链接等）就跳过：产物里不该有它们，静默跟着走更坏。
+        entries.push({ name: rel, data: readFileSync(full), mode: st.mode });
+      }
+    }
+  };
+  walk(from, '');
+
+  const chunks = [];
+  const central = [];
+  let offset = 0;
+  for (const entry of entries) {
+    const nameBytes = Buffer.from(entry.name, 'utf8');
+    let method = 0;
+    let payload = Buffer.alloc(0);
+    if (!entry.dir) {
+      payload = entry.data;
+      const deflated = deflateRawSync(payload);
+      // 压不小就用 stored（小文件常见）—— 与主流 zip 工具同样的取舍。
+      if (deflated.length < payload.length) {
+        method = 8;
+        payload = deflated;
+      }
+    }
+    const crc = entry.dir ? 0 : crc32(entry.data);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0); // 本地文件头签名
+    local.writeUInt16LE(20, 4); // 解压所需版本 2.0
+    local.writeUInt16LE(0x0800, 6); // 通用位标记：文件名是 UTF-8
+    local.writeUInt16LE(method, 8);
+    local.writeUInt16LE(dosTime, 10);
+    local.writeUInt16LE(dosDate, 12);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(payload.length, 18);
+    local.writeUInt32LE(entry.dir ? 0 : entry.data.length, 22);
+    local.writeUInt16LE(nameBytes.length, 26);
+    local.writeUInt16LE(0, 28); // 无扩展字段
+    chunks.push(local, nameBytes, payload);
+
+    const cd = Buffer.alloc(46);
+    cd.writeUInt32LE(0x02014b50, 0); // 中央目录头签名
+    // 制作版本 = 3 (Unix) << 8 | 20。**这一位必须写对**：不写的话解压器按 MS-DOS
+    // 解释 external_attr，`bin/dhampir` 就没有可执行位 —— 产物解出来跑不了。
+    // （实测踩过：zip 里 external_attr=0x0，解开是 -rw-r--r--。）
+    cd.writeUInt16LE((3 << 8) | 20, 4);
+    cd.writeUInt16LE(20, 6); // 解压所需版本
+    cd.writeUInt16LE(0x0800, 8);
+    cd.writeUInt16LE(method, 10);
+    cd.writeUInt16LE(dosTime, 12);
+    cd.writeUInt16LE(dosDate, 14);
+    cd.writeUInt32LE(crc, 16);
+    cd.writeUInt32LE(payload.length, 20);
+    cd.writeUInt32LE(entry.dir ? 0 : entry.data.length, 24);
+    cd.writeUInt16LE(nameBytes.length, 28);
+    // 外部属性高 16 位放 UNIX 权限位（低 16 位留给 DOS 属性，目录位 0x10）。
+    // 只取低 12 位（0777）：`st.mode` 上部还有文件类型位（普通文件 0100000），
+    // 一起写进去会让某些解压器认不出来。
+    const unixMode = entry.mode & 0o777;
+    cd.writeUInt32LE(((entry.dir ? 0x10 : 0) | (unixMode << 16)) >>> 0, 38);
+    cd.writeUInt32LE(offset, 42);
+    central.push(cd, nameBytes);
+
+    offset += local.length + nameBytes.length + payload.length;
+  }
+
+  const centralBuf = Buffer.concat(central);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); // 中央目录结束记录
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(centralBuf.length, 12);
+  end.writeUInt32LE(offset, 16);
+  writeFileSync(zip, Buffer.concat([...chunks, centralBuf, end]));
+}
+
+/// 读回 zip 并核条目数 —— **"写了字节"不等于"是个能读的 zip"**。
+///
+/// 只核中央目录结束记录存在、且里面的条目数与实际写进去的一致。不做完整解压：
+/// 那需要另写一遍 inflate 的路径，而这里要挡的是"容器写歪了"，那个用签名就能发现。
+///
+/// `mustExec`：在**非 Windows** 上要求 `bin/<exe>` 带着可执行位。
+/// 这条是补出来的 —— 第一版没写 external_attr，产物解开是 `-rw-r--r--`，
+/// **跑不起来**。而"zip 打得开、文件都在"这种自检完全发现不了它。
+function verifyZip(zip, mustExec) {
+  const buf = readFileSync(zip);
+  // 中央目录结束记录在最尾 22 字节（本仓不写注释，故无变长尾部）。
+  const tail = buf.subarray(buf.length - 22);
+  if (tail.readUInt32LE(0) !== 0x06054b50) {
+    console.error('✗ zip 的中央目录结束记录不在预期位置：' + zip);
     process.exit(1);
   }
+  const declared = tail.readUInt16LE(10);
+  if (declared === 0) {
+    console.error('✗ zip 里一个条目都没有：' + zip);
+    process.exit(1);
+  }
+  if (mustExec) {
+    const centralOffset = tail.readUInt32LE(16);
+    const count = declared;
+    let p = centralOffset;
+    let checked = false;
+    for (let i = 0; i < count; i++) {
+      if (buf.readUInt32LE(p) !== 0x02014b50) break;
+      const nameLen = buf.readUInt16LE(p + 28);
+      const extraLen = buf.readUInt16LE(p + 30);
+      const commentLen = buf.readUInt16LE(p + 32);
+      const name = buf.subarray(p + 46, p + 46 + nameLen).toString('utf8');
+      if (name === mustExec) {
+        // 偏移 4 的 2 字节是「制作版本 + 制作系统」，且**顺序与直觉相反**：
+        //   低字节 = 制作**版本**（20），高字节 = 制作**系统**（3 = Unix）。
+        //   实测该字段是 0x0314 —— 我先写成低字节=系统，于是判据把自己刚写对的 zip 判红了。
+        //   解压器（与 python zipfile）读的是**高字节**。
+        const createSystem = buf.readUInt8(p + 5);
+        const mode = buf.readUInt32LE(p + 38) >>> 16;
+        if (createSystem !== 3 || (mode & 0o111) === 0) {
+          console.error('✗ zip 里 ' + mustExec + ' 没有可执行位（create_system=' + createSystem +
+            '，mode=' + mode.toString(8) + '）—— 解开后跑不起来。');
+          process.exit(1);
+        }
+        checked = true;
+      }
+      p += 46 + nameLen + extraLen + commentLen;
+    }
+    if (!checked) {
+      console.error('✗ zip 里找不到 ' + mustExec + ' —— 产物不齐。');
+      process.exit(1);
+    }
+  }
+  return declared;
+}
+
+function crc32(buf) {
+  let c = -1;
+  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ -1) >>> 0;
 }
 
 /// 文件的 sha256（十六进制小写）。

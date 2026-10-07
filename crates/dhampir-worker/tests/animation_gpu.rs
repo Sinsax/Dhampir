@@ -45,7 +45,11 @@ fn top_left(ctx: &dhampir_core::gpu::GpuContext, view: &wgpu::TextureView) -> Ve
     // 所以这里按 view 的尺寸重建一张、把 view 的内容画进去。
     let target = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dhampir animation test readback"),
-        size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -54,15 +58,21 @@ fn top_left(ctx: &dhampir_core::gpu::GpuContext, view: &wgpu::TextureView) -> Ve
         view_formats: &[],
     });
     let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
-    let blit = dhampir_core::render::BlitRenderer::new(&ctx.device, wgpu::TextureFormat::Rgba8Unorm);
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("dhampir animation test encoder"),
-    });
+    let blit =
+        dhampir_core::render::BlitRenderer::new(&ctx.device, wgpu::TextureFormat::Rgba8Unorm);
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dhampir animation test encoder"),
+        });
     blit.render(&ctx.device, &mut encoder, view, &target_view);
     ctx.queue.submit([encoder.finish()]);
-    let image =
-        pollster::block_on(readback::read_texture_rgba8(&ctx.device, &ctx.queue, &target))
-            .expect("读回失败");
+    let image = pollster::block_on(readback::read_texture_rgba8(
+        &ctx.device,
+        &ctx.queue,
+        &target,
+    ))
+    .expect("读回失败");
     image.pixels[..4].to_vec()
 }
 
@@ -76,7 +86,10 @@ fn 上传后按帧号取到的是不同的帧() {
 
     assert_eq!(cache.frame_count("sticker"), Some(4));
     assert_eq!(cache.frame_count("sticker"), Some(animation.frames.len()));
-    assert_eq!(cache.delays_ms("sticker"), Some(animation.delays_ms().as_slice()));
+    assert_eq!(
+        cache.delays_ms("sticker"),
+        Some(animation.delays_ms().as_slice())
+    );
     assert_eq!(cache.memory_bytes(), u64::from(SIZE * SIZE * 4) * 4);
 
     // 每一帧的颜色都不同 —— 这是「帧号真的被用上了」的证据。
@@ -104,15 +117,23 @@ fn 越界停在最后一帧而未知资产取不到() {
     cache.upload("sticker", &animation).expect("上传失败");
 
     let last = cache.texture_for("sticker", 2).expect("取不到最后一帧");
-    let beyond = cache.texture_for("sticker", 99).expect("越界应当停在最后一帧");
+    let beyond = cache
+        .texture_for("sticker", 99)
+        .expect("越界应当停在最后一帧");
     assert_eq!(
         top_left(&ctx, &last.0),
         top_left(&ctx, &beyond.0),
         "越界没有停在最后一帧"
     );
-    let negative = cache.texture_for("sticker", -5).expect("负帧号应当落第零帧");
+    let negative = cache
+        .texture_for("sticker", -5)
+        .expect("负帧号应当落第零帧");
     let first = cache.texture_for("sticker", 0).expect("取不到第零帧");
-    assert_eq!(top_left(&ctx, &negative.0), top_left(&ctx, &first.0), "负帧号没有落第零帧");
+    assert_eq!(
+        top_left(&ctx, &negative.0),
+        top_left(&ctx, &first.0),
+        "负帧号没有落第零帧"
+    );
 
     // 没登记过的资产必须取不到 —— 否则「引擎供帧」与「宿主供帧」会同时成立。
     assert!(cache.texture_for("nope", 0).is_none());
@@ -130,15 +151,28 @@ fn 超预算明确拒绝而不是悄悄吃显存() {
     let mut cache = AnimationTextures::new(ctx.device.clone(), ctx.queue.clone(), one_frame * 3);
     assert_eq!(cache.budget_bytes(), one_frame * 3);
 
-    cache.upload("ok", &solid_animation(3, 30)).expect("三帧应当放得下");
-    let error = cache.upload("too_big", &solid_animation(4, 30)).expect_err("四帧应当被拒");
+    cache
+        .upload("ok", &solid_animation(3, 30))
+        .expect("三帧应当放得下");
+    let error = cache
+        .upload("too_big", &solid_animation(4, 30))
+        .expect_err("四帧应当被拒");
     let message = error.to_string();
-    assert!(message.contains("预算"), "拒绝理由没说是预算问题：{message}");
-    assert_eq!(cache.memory_bytes(), one_frame * 3, "被拒的那次不该动已上传的账");
+    assert!(
+        message.contains("预算"),
+        "拒绝理由没说是预算问题：{message}"
+    );
+    assert_eq!(
+        cache.memory_bytes(),
+        one_frame * 3,
+        "被拒的那次不该动已上传的账"
+    );
     assert!(!cache.contains("too_big"));
 
     // 替换成更小的应当成功，并且账目按替换后的算（不是累加）。
-    cache.upload("ok", &solid_animation(2, 30)).expect("换小应当成功");
+    cache
+        .upload("ok", &solid_animation(2, 30))
+        .expect("换小应当成功");
     assert_eq!(cache.memory_bytes(), one_frame * 2);
     assert_eq!(cache.frame_count("ok"), Some(2));
 }
@@ -150,11 +184,12 @@ fn 帧字节数与画布对不上时报错而不是传错位像素() {
     let mut cache = AnimationTextures::new(ctx.device.clone(), ctx.queue.clone(), 0);
     let mut animation = solid_animation(2, 30);
     animation.frames[1].rgba.truncate(4);
-    let error = cache.upload("broken", &animation).expect_err("对不上应当被拒");
+    let error = cache
+        .upload("broken", &animation)
+        .expect_err("对不上应当被拒");
     assert!(error.to_string().contains("对不上"), "理由不对：{error}");
     assert!(!cache.contains("broken"));
 }
-
 
 /// **真素材规模的形状判据**：所有帧进**一张** `D2Array` 纹理，而不是每帧一张。
 ///
@@ -214,10 +249,18 @@ fn 真素材规模的上传走一张数组纹理() {
         assert_eq!(size, (side, side));
         seen.push(top_left(&ctx, &view));
     }
-    assert_ne!(seen[0], seen[1], "第 0 帧与中间帧是同一个像素 —— 层号没接上");
-    assert_ne!(seen[1], seen[2], "中间帧与最后一帧是同一个像素 —— 层号没接上");
+    assert_ne!(
+        seen[0], seen[1],
+        "第 0 帧与中间帧是同一个像素 —— 层号没接上"
+    );
+    assert_ne!(
+        seen[1], seen[2],
+        "中间帧与最后一帧是同一个像素 —— 层号没接上"
+    );
 
     // 越界仍然停在最后一帧（不与上面那条重复：这里走的是钳制那条路）
-    let (last, _) = cache.texture_for("big", 9999).expect("越界应当钳到最后一帧");
+    let (last, _) = cache
+        .texture_for("big", 9999)
+        .expect("越界应当钳到最后一帧");
     assert_eq!(top_left(&ctx, &last), seen[2]);
 }

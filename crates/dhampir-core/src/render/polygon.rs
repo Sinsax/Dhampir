@@ -76,7 +76,11 @@ pub fn coverage_texture(
     let height = size.1.max(1);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dhampir polygon clip coverage"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -87,7 +91,10 @@ pub fn coverage_texture(
     let mut pixels = Vec::with_capacity((width as usize) * (height as usize) * 4);
     for y in 0..height {
         for x in 0..width {
-            let value = coverage.get((y as usize) * (width as usize) + (x as usize)).copied().unwrap_or(0);
+            let value = coverage
+                .get((y as usize) * (width as usize) + (x as usize))
+                .copied()
+                .unwrap_or(0);
             // rgb 也填成覆盖度（亮度通道也就跟着对了），alpha 是主通道。
             pixels.extend_from_slice(&[value, value, value, value]);
         }
@@ -105,7 +112,11 @@ pub fn coverage_texture(
             bytes_per_row: Some(width * 4),
             rows_per_image: Some(height),
         },
-        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
     );
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     (texture, view)
@@ -121,8 +132,12 @@ mod tests {
 
     #[test]
     fn 整框多边形处处都是满覆盖() {
-        let coverage = rasterize_polygon_coverage(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]], 16, 16);
-        assert!(coverage.iter().all(|value| *value == 255), "整框应当处处 255");
+        let coverage =
+            rasterize_polygon_coverage(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]], 16, 16);
+        assert!(
+            coverage.iter().all(|value| *value == 255),
+            "整框应当处处 255"
+        );
     }
 
     #[test]
@@ -148,7 +163,14 @@ mod tests {
     #[test]
     fn 凹多边形按非零环绕填() {
         // 一个 L 形：右下角那块凹口**不该**被填上。
-        let points = [[0.0, 0.0], [1.0, 0.0], [1.0, 0.5], [0.5, 0.5], [0.5, 1.0], [0.0, 1.0]];
+        let points = [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 0.5],
+            [0.5, 0.5],
+            [0.5, 1.0],
+            [0.0, 1.0],
+        ];
         let coverage = rasterize_polygon_coverage(&points, 32, 32);
         assert_eq!(at(&coverage, 32, 4, 4), 255, "左上在 L 里");
         assert_eq!(at(&coverage, 32, 4, 28), 255, "左下在 L 里");

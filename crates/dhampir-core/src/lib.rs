@@ -44,11 +44,11 @@
 pub mod animation;
 pub mod cache;
 pub mod compose;
-pub mod overlay;
 pub mod effects;
 pub mod gpu;
 pub mod io;
 pub mod metric;
+pub mod overlay;
 pub mod readback;
 pub mod render;
 

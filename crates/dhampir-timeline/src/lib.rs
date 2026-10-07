@@ -63,8 +63,8 @@ pub mod subtitle;
 // 结构由这里算一份，宿主只负责把字画进给定的矩形。
 #[cfg(feature = "serde")]
 pub mod danmaku;
-pub mod text_layout;
 pub mod selfcheck;
+pub mod text_layout;
 pub mod timebase;
 pub mod timecode;
 

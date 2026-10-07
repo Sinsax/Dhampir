@@ -99,7 +99,9 @@ pub fn compare_rgba8_with(
     height: u32,
     window: u32,
 ) -> Option<Comparison> {
-    let need = (width as usize).checked_mul(height as usize)?.checked_mul(4)?;
+    let need = (width as usize)
+        .checked_mul(height as usize)?
+        .checked_mul(4)?;
     if a.len() < need || b.len() < need || width == 0 || height == 0 || window == 0 {
         return None;
     }
@@ -165,7 +167,11 @@ pub fn compare_rgba8_with(
     }
     let samples = f64::from(width * height * 3);
     let mse = sum_sq_error / samples;
-    let psnr_db = if mse == 0.0 { f64::INFINITY } else { 10.0 * (255.0 * 255.0 / mse).log10() };
+    let psnr_db = if mse == 0.0 {
+        f64::INFINITY
+    } else {
+        10.0 * (255.0 * 255.0 / mse).log10()
+    };
 
     Some(Comparison {
         ssim: sum_ssim / windows as f64,
@@ -217,7 +223,12 @@ mod tests {
         let white = solid(8, 8, [255, 255, 255, 255]);
         let result = compare_rgba8(&black, &white, 8, 8).expect("应当能比对");
         let expected = 6.5025 / (255.0 * 255.0 + 6.5025);
-        assert!((result.ssim - expected).abs() < 1e-9, "得到 {}，期望 {}", result.ssim, expected);
+        assert!(
+            (result.ssim - expected).abs() < 1e-9,
+            "得到 {}，期望 {}",
+            result.ssim,
+            expected
+        );
         assert!(result.ssim < 0.001);
         assert!(result.psnr_db.is_finite(), "全黑对全白不该是无穷 PSNR");
         assert!((result.mae - 255.0).abs() < 1e-9);
@@ -241,8 +252,16 @@ mod tests {
         }
         let result = compare_rgba8(&clean, &noisy, 16, 16).expect("应当能比对");
         assert!(result.ssim < 1.0, "改过了就不该还是 1");
-        assert!(result.ssim > 0.9, "只改了一点点，不该掉太多：{}", result.ssim);
-        assert!(result.psnr_db.is_finite() && result.psnr_db > 20.0, "得到 {}", result.psnr_db);
+        assert!(
+            result.ssim > 0.9,
+            "只改了一点点，不该掉太多：{}",
+            result.ssim
+        );
+        assert!(
+            result.psnr_db.is_finite() && result.psnr_db > 20.0,
+            "得到 {}",
+            result.psnr_db
+        );
     }
 
     #[test]
@@ -252,18 +271,34 @@ mod tests {
         let red = solid(8, 8, [255, 0, 0, 255]);
         let gray = solid(8, 8, [77, 77, 77, 255]);
         let result = compare_rgba8(&red, &gray, 8, 8).expect("应当能比对");
-        assert!((result.ssim - 1.0).abs() < 1e-12, "同亮度应当 SSIM=1，得到 {}", result.ssim);
-        assert!(result.psnr_db.is_finite(), "但 RGB 上确实不同，PSNR 必须看出差别");
+        assert!(
+            (result.ssim - 1.0).abs() < 1e-12,
+            "同亮度应当 SSIM=1，得到 {}",
+            result.ssim
+        );
+        assert!(
+            result.psnr_db.is_finite(),
+            "但 RGB 上确实不同，PSNR 必须看出差别"
+        );
         assert!(result.mae > 50.0, "MAE 也该看出差别，得到 {}", result.mae);
     }
 
     #[test]
     fn 尺寸与长度不匹配一律返回_none() {
         let image = solid(8, 8, [1, 2, 3, 255]);
-        assert!(compare_rgba8(&image, &image, 4, 8).is_none(), "尺寸不匹配不该给结论");
-        assert!(compare_rgba8(&image[..100], &image, 8, 8).is_none(), "长度不足不该给结论");
+        assert!(
+            compare_rgba8(&image, &image, 4, 8).is_none(),
+            "尺寸不匹配不该给结论"
+        );
+        assert!(
+            compare_rgba8(&image[..100], &image, 8, 8).is_none(),
+            "长度不足不该给结论"
+        );
         assert!(compare_rgba8(&image, &image, 0, 8).is_none());
-        assert!(compare_rgba8_with(&image, &image, 8, 8, 16).is_none(), "窗口比图大就不给结论");
+        assert!(
+            compare_rgba8_with(&image, &image, 8, 8, 16).is_none(),
+            "窗口比图大就不给结论"
+        );
     }
 
     #[test]
@@ -295,5 +330,3 @@ mod tests {
         assert!(compare_rgba8(&small, &small, 13, 7).is_none());
     }
 }
-
-

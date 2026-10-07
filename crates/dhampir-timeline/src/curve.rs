@@ -38,7 +38,12 @@ use crate::schema::{Frame, Keyframe};
 ///
 /// **只挑出 `target` 匹配的那些键**再走上面四步。一个键都不匹配 → 返回 `fallback`
 /// （调用方给的静态值）。于是老工程（所有键都是缺省的 `"opacity"`）结果逐字节不变。
-pub fn channel_from(fallback: f32, keyframes: &[Keyframe], target: &str, local_frame: Frame) -> f32 {
+pub fn channel_from(
+    fallback: f32,
+    keyframes: &[Keyframe],
+    target: &str,
+    local_frame: Frame,
+) -> f32 {
     let mut keys: Vec<&Keyframe> = keyframes
         .iter()
         .filter(|key| key.target == target)
@@ -61,7 +66,11 @@ pub fn channel_from(fallback: f32, keyframes: &[Keyframe], target: &str, local_f
         if local_frame >= a.frame && local_frame <= b.frame {
             let span = (b.frame - a.frame) as f32;
             // span 为 0 时两个关键帧在同一帧上——取后一个的值，别除零。
-            let t = if span <= 0.0 { 1.0 } else { (local_frame - a.frame) as f32 / span };
+            let t = if span <= 0.0 {
+                1.0
+            } else {
+                (local_frame - a.frame) as f32 / span
+            };
             let eased = b.easing.apply(t);
             return a.value + (b.value - a.value) * eased;
         }
@@ -85,11 +94,21 @@ mod tests {
     use crate::schema::Easing;
 
     fn key(frame: Frame, value: f32, easing: Easing) -> Keyframe {
-        Keyframe { frame, target: "opacity".to_string(), value, easing }
+        Keyframe {
+            frame,
+            target: "opacity".to_string(),
+            value,
+            easing,
+        }
     }
 
     fn keyed(frame: Frame, target: &str, value: f32) -> Keyframe {
-        Keyframe { frame, target: target.to_string(), value, easing: Easing::Linear }
+        Keyframe {
+            frame,
+            target: target.to_string(),
+            value,
+            easing: Easing::Linear,
+        }
     }
 
     #[test]
@@ -124,7 +143,10 @@ mod tests {
     fn 插值用的是后一个键的缓动() {
         // 前一个键写 Linear、后一个写 EaseIn：斜率由**后一个**决定。
         let keys = [key(0, 0.0, Easing::Linear), key(10, 1.0, Easing::EaseIn)];
-        assert!((opacity_from(0.0, &keys, 5) - 0.25).abs() < 1e-6, "ease_in 是 t*t");
+        assert!(
+            (opacity_from(0.0, &keys, 5) - 0.25).abs() < 1e-6,
+            "ease_in 是 t*t"
+        );
     }
 
     // ===== T8：按 target 取通道 =====
@@ -188,7 +210,14 @@ mod tests {
 
     #[test]
     fn 不是_effect_形状的串一律不解析() {
-        for bad in ["opacity", "effect", "effect.", "effect.x.radius", "effect.0.", "effect.0"] {
+        for bad in [
+            "opacity",
+            "effect",
+            "effect.",
+            "effect.x.radius",
+            "effect.0.",
+            "effect.0",
+        ] {
             assert!(
                 crate::schema::parse_effect_target(bad).is_none(),
                 "不该解析成功：{bad}"

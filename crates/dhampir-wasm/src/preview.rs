@@ -150,7 +150,12 @@ impl CanvasFrameSink {
             .get_default_config(adapter, width, height)
             .ok_or_else(|| "该 adapter 不支持这个 canvas surface".to_string())?;
         // 优先 sRGB：两端要"看起来一致"，色彩空间差异先在预览侧消掉。
-        if let Some(srgb) = caps.formats.iter().copied().find(wgpu::TextureFormat::is_srgb) {
+        if let Some(srgb) = caps
+            .formats
+            .iter()
+            .copied()
+            .find(wgpu::TextureFormat::is_srgb)
+        {
             config.format = srgb;
         }
         // Fifo：预览是给人看的，撕裂会干扰"看起来对不对"的判断。
@@ -200,7 +205,6 @@ impl CanvasFrameSink {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // 宿主：把两个接缝接起来
 // ---------------------------------------------------------------------------
@@ -218,9 +222,12 @@ impl PreviewHost {
     pub fn draw(&mut self, frame: i64) {
         let source_view = self.source.frame_view(&self.ctx.device, frame);
         let sink_view = self.sink.acquire(&self.ctx.device);
-        let mut encoder = self.ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("dhampir preview encoder"),
-        });
+        let mut encoder = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("dhampir preview encoder"),
+            });
         self.renderer
             .render(&self.ctx.device, &mut encoder, &source_view, &sink_view);
         self.ctx.queue.submit([encoder.finish()]);
@@ -233,9 +240,9 @@ pub(crate) fn element_by_id<T: JsCast>(id: &str, what: &str) -> Result<T, JsValu
     let document = window
         .document()
         .ok_or_else(|| js_err("没有 document 对象"))?;
-    let element = document.get_element_by_id(id).ok_or_else(|| {
-        js_err(format!("页面上找不到 id={id} 的元素"))
-    })?;
+    let element = document
+        .get_element_by_id(id)
+        .ok_or_else(|| js_err(format!("页面上找不到 id={id} 的元素")))?;
     element
         .dyn_into::<T>()
         .map_err(|_| js_err(format!("id={id} 的元素不是{what}")))
@@ -277,7 +284,14 @@ pub async fn dhampir_preview_init(canvas_id: String, video_id: String) -> Result
         "{{\"name\":\"{}\",\"backend\":\"{:?}\",\"size\":\"{}x{}\"}}",
         info.name, info.backend, size.0, size.1
     );
-    PREVIEW_HOST.with(|h| *h.borrow_mut() = Some(PreviewHost { ctx, source, sink, renderer }));
+    PREVIEW_HOST.with(|h| {
+        *h.borrow_mut() = Some(PreviewHost {
+            ctx,
+            source,
+            sink,
+            renderer,
+        })
+    });
     Ok(json)
 }
 
@@ -306,8 +320,7 @@ pub async fn dhampir_preview_probe_digest(video_id: String) -> Result<String, Js
         .await
         .map_err(|e| js_err(e.to_string()))?;
 
-    let mut source =
-        VideoFrameSource::new(&ctx.device, &ctx.queue, video).map_err(js_err)?;
+    let mut source = VideoFrameSource::new(&ctx.device, &ctx.queue, video).map_err(js_err)?;
     let (width, height) = source.size();
     let target = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dhampir preview probe target"),
@@ -327,9 +340,11 @@ pub async fn dhampir_preview_probe_digest(video_id: String) -> Result<String, Js
 
     let renderer = BlitRenderer::new(&ctx.device, PREVIEW_FORMAT);
     let source_view = source.frame_view(&ctx.device, 0);
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("dhampir preview probe encoder"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dhampir preview probe encoder"),
+        });
     renderer.render(&ctx.device, &mut encoder, &source_view, &target_view);
     ctx.queue.submit([encoder.finish()]);
 
@@ -358,7 +373,9 @@ impl FrameSink for CanvasFrameSink {
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
             other => panic!("取 canvas 纹理失败：{other:?}"),
         };
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
         self.current = Some(frame);
         view
     }

@@ -59,7 +59,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
             })
             .collect();
-        println!("{}", serde_json::json!({ "frame": frame, "layers": layers }));
+        println!(
+            "{}",
+            serde_json::json!({ "frame": frame, "layers": layers })
+        );
     }
     Ok(())
 }

@@ -232,9 +232,7 @@ pub enum SceneDraw {
 #[derive(Clone, Copy, Debug)]
 pub enum ScenePasses {
     /// 一趟，直接画进目标纹理。
-    Single {
-        fragment: &'static str,
-    },
+    Single { fragment: &'static str },
     /// 三趟：图案 → 横向 → 纵向。
     ///
     /// 前两趟写 [`BLUR_INTERMEDIATE_FORMAT`] 中间纹理，最后一趟直接写目标纹理。
@@ -602,7 +600,13 @@ pub struct SampleVerdict {
 
 impl SampleVerdict {
     /// 写进 `records/` 的一行。格式固定，便于跨版本 `diff`。
-    pub fn report_line(&self, spec: &SceneSpec, frame: u32, point: SamplePoint, measured: [u8; 4]) -> String {
+    pub fn report_line(
+        &self,
+        spec: &SceneSpec,
+        frame: u32,
+        point: SamplePoint,
+        measured: [u8; 4],
+    ) -> String {
         format!(
             "{:<12} f{:<3} ({:>3},{:>3}) {:<14} 实测 {:>3} {:>3} {:>3} {:>3} | 模型 {:>3} {:>3} {:>3} {:>3} | 距离 {} 容差 {} {} — {}",
             spec.name,
@@ -638,15 +642,13 @@ pub fn expected_bytes(spec: &SceneSpec, frame: u32, point: SamplePoint) -> [u8; 
         "gradient" => scene_model::bytes_of_linear_rgba(scene_model::gradient_linear(
             spec.size, frame, point.x, point.y,
         )),
-        "checker" => scene_model::bytes_of_linear_rgba(scene_model::checker_linear(
-            frame, point.x, point.y,
-        )),
+        "checker" => {
+            scene_model::bytes_of_linear_rgba(scene_model::checker_linear(frame, point.x, point.y))
+        }
         "srgb_linear" => scene_model::bytes_of_linear_rgba(scene_model::transfer_linear(
             spec.size, frame, point.x,
         )),
-        "alpha_stack" => {
-            scene_model::alpha_stack_bytes(frame, StackOrder::Forward)
-        }
+        "alpha_stack" => scene_model::alpha_stack_bytes(frame, StackOrder::Forward),
         "blur" => {
             let value = scene_model::blur_at(spec.size, point.x, point.y);
             scene_model::bytes_of_linear_rgba([value, value, value, 1.0])
@@ -672,7 +674,9 @@ pub fn judge_sample(
 ) -> SampleVerdict {
     let expected = expected_bytes(spec, frame, point);
     let detail = match spec.name {
-        "gradient" => model_detail(scene_model::gradient_linear(spec.size, frame, point.x, point.y)),
+        "gradient" => model_detail(scene_model::gradient_linear(
+            spec.size, frame, point.x, point.y,
+        )),
         "checker" => model_detail(scene_model::checker_linear(frame, point.x, point.y)),
         "srgb_linear" => {
             let k = scene_model::transfer_stripe_at(spec.size, frame, point.x);
@@ -720,7 +724,10 @@ fn model_detail(linear: [f64; 4]) -> String {
 fn alpha_stack_detail(frame: u32, measured: [u8; 4]) -> String {
     let layers = scene_model::layer_count(frame);
     let reverse = scene_model::alpha_stack_bytes(frame, StackOrder::Reverse);
-    let ideal = scene_model::bytes_of_linear_rgba(scene_model::alpha_stack_ideal(frame, StackOrder::Forward));
+    let ideal = scene_model::bytes_of_linear_rgba(scene_model::alpha_stack_ideal(
+        frame,
+        StackOrder::Forward,
+    ));
     let opaque_min = (0..layers as usize)
         .map(|index| scene_model::distance_bytes(measured, scene_model::opaque_layer_bytes(index)))
         .min()
@@ -986,7 +993,11 @@ impl SceneRenderer {
                     horizontal: horizontal_pipeline,
                     vertical: vertical_pipeline,
                 };
-                (pipeline, vec![a_view, b_view], vec![group_b, group_a, group_b2])
+                (
+                    pipeline,
+                    vec![a_view, b_view],
+                    vec![group_b, group_a, group_b2],
+                )
             }
         };
 
@@ -1275,7 +1286,9 @@ mod tests {
     ///
     /// 读的是文本而不是运行结果：顺序与取值只存在于文本里，而这两件事都要被钉住。
     fn taps_of<'a>(code: &'a str, entry: &str) -> Vec<(i32, &'a str)> {
-        let start = code.find(&format!("fn {entry}(")).expect("入口不在着色器里");
+        let start = code
+            .find(&format!("fn {entry}("))
+            .expect("入口不在着色器里");
         let body = &code[start..];
         let body = &body[..body.find("\n}").expect("找不到函数结尾")];
         let marker = " * load_texel(texel";
@@ -1291,8 +1304,18 @@ mod tests {
             let offset = if let Some(tail) = after.strip_prefix(" + vec2<i32>(") {
                 let close = tail.find(')').expect("抽头坐标没有右括号");
                 let mut parts = tail[..close].split(',');
-                let dx: i32 = parts.next().expect("坐标少一个分量").trim().parse().expect("dx 不是整数");
-                let dy: i32 = parts.next().expect("坐标少一个分量").trim().parse().expect("dy 不是整数");
+                let dx: i32 = parts
+                    .next()
+                    .expect("坐标少一个分量")
+                    .trim()
+                    .parse()
+                    .expect("dx 不是整数");
+                let dy: i32 = parts
+                    .next()
+                    .expect("坐标少一个分量")
+                    .trim()
+                    .parse()
+                    .expect("dy 不是整数");
                 if dx != 0 { dx } else { dy }
             } else if after.starts_with(',') {
                 0 // 中心抽头写的是 `load_texel(texel, dim)`
@@ -1403,11 +1426,20 @@ mod tests {
         // 逐字段写出来，是为了让"正在被考的是哪条式子"看得见；这条断言保证手写的
         // 那份恰好等于标准常量——任何一个字段偏了都会红。
         assert_eq!(LAYER_BLEND_STATE, wgpu::BlendState::ALPHA_BLENDING);
-        assert_eq!(LAYER_BLEND_STATE.color.src_factor, wgpu::BlendFactor::SrcAlpha);
-        assert_eq!(LAYER_BLEND_STATE.color.dst_factor, wgpu::BlendFactor::OneMinusSrcAlpha);
+        assert_eq!(
+            LAYER_BLEND_STATE.color.src_factor,
+            wgpu::BlendFactor::SrcAlpha
+        );
+        assert_eq!(
+            LAYER_BLEND_STATE.color.dst_factor,
+            wgpu::BlendFactor::OneMinusSrcAlpha
+        );
         assert_eq!(LAYER_BLEND_STATE.color.operation, wgpu::BlendOperation::Add);
         assert_eq!(LAYER_BLEND_STATE.alpha.src_factor, wgpu::BlendFactor::One);
-        assert_eq!(LAYER_BLEND_STATE.alpha.dst_factor, wgpu::BlendFactor::OneMinusSrcAlpha);
+        assert_eq!(
+            LAYER_BLEND_STATE.alpha.dst_factor,
+            wgpu::BlendFactor::OneMinusSrcAlpha
+        );
         assert_eq!(LAYER_BLEND_STATE.alpha.operation, wgpu::BlendOperation::Add);
         // 两个常量**只有颜色通道不同**：这正是"alpha 看着对、颜色偏亮"的来源。
         assert_ne!(
@@ -1460,9 +1492,17 @@ mod tests {
         );
         for spec in SELECTABLE_SCENES.iter() {
             let found = scene_by_name(spec.name).expect("注册表里的名字必须查得到");
-            assert!(std::ptr::eq(found, spec), "{} 查到的不是同一个 spec", spec.name);
+            assert!(
+                std::ptr::eq(found, spec),
+                "{} 查到的不是同一个 spec",
+                spec.name
+            );
             assert!(!spec.description.is_empty(), "{} 没有说明", spec.name);
-            assert_eq!(spec.size, SCENE_TARGET_SIZE, "{} 的尺寸不是 corpus 尺寸", spec.name);
+            assert_eq!(
+                spec.size, SCENE_TARGET_SIZE,
+                "{} 的尺寸不是 corpus 尺寸",
+                spec.name
+            );
         }
         assert!(scene_by_name("Gradient").is_none(), "名字区分大小写");
         assert!(scene_by_name("").is_none());
@@ -1485,10 +1525,19 @@ mod tests {
     fn pass_count_and_draw_kind_agree_with_the_entry_list() {
         for spec in SELECTABLE_SCENES.iter() {
             let entries = spec.fragment_entries();
-            assert_eq!(entries.len() as u32, spec.pass_count(), "{} 的趟数与入口数对不上", spec.name);
+            assert_eq!(
+                entries.len() as u32,
+                spec.pass_count(),
+                "{} 的趟数与入口数对不上",
+                spec.name
+            );
             assert_eq!(
                 spec.pass_count(),
-                if matches!(spec.passes, ScenePasses::Blur { .. }) { 3 } else { 1 }
+                if matches!(spec.passes, ScenePasses::Blur { .. }) {
+                    3
+                } else {
+                    1
+                }
             );
             assert_eq!(
                 matches!(spec.draw, SceneDraw::Layers(_)),
@@ -1576,7 +1625,10 @@ mod tests {
                 .iter()
                 .map(|(_, weight)| weight.parse::<f64>().expect("权重不是字面量"))
                 .sum();
-            assert!((sum - 1.0).abs() < 1e-9, "{entry} 的七个权重之和是 {sum}，不是 1");
+            assert!(
+                (sum - 1.0).abs() < 1e-9,
+                "{entry} 的七个权重之和是 {sum}，不是 1"
+            );
         }
     }
 
@@ -1591,11 +1643,23 @@ mod tests {
         assert_eq!(
             table,
             vec![
-                ("gradient", vec![(8, 128), (32, 128), (48, 128), (104, 128), (200, 128)]),
-                ("checker", vec![(3, 1), (4, 1), (7, 1), (8, 1), (11, 1), (12, 1), (255, 255)]),
-                ("srgb_linear", vec![(16, 128), (80, 128), (144, 128), (240, 128)]),
+                (
+                    "gradient",
+                    vec![(8, 128), (32, 128), (48, 128), (104, 128), (200, 128)]
+                ),
+                (
+                    "checker",
+                    vec![(3, 1), (4, 1), (7, 1), (8, 1), (11, 1), (12, 1), (255, 255)]
+                ),
+                (
+                    "srgb_linear",
+                    vec![(16, 128), (80, 128), (144, 128), (240, 128)]
+                ),
                 ("alpha_stack", vec![(128, 128), (8, 248)]),
-                ("blur", vec![(19, 19), (35, 27), (38, 41), (41, 41), (0, 41)]),
+                (
+                    "blur",
+                    vec![(19, 19), (35, 27), (38, 41), (41, 41), (0, 41)]
+                ),
             ]
         );
     }
@@ -1617,8 +1681,17 @@ mod tests {
                     point.x,
                     point.y
                 );
-                assert!(!point.label.is_empty() && !point.purpose.is_empty(), "{} 有采样点没写名字或理由", spec.name);
-                assert!(!labels.contains(&point.label), "{} 里标签 {} 重了", spec.name, point.label);
+                assert!(
+                    !point.label.is_empty() && !point.purpose.is_empty(),
+                    "{} 有采样点没写名字或理由",
+                    spec.name
+                );
+                assert!(
+                    !labels.contains(&point.label),
+                    "{} 里标签 {} 重了",
+                    spec.name,
+                    point.label
+                );
                 labels.push(point.label);
             }
         }
@@ -1872,7 +1945,11 @@ mod tests {
             .filter(|(d, ..)| *d > 0)
             .min_by_key(|(distance, ..)| *distance)
             .expect("总会有 k > 0 的样本");
-        assert_eq!(closest.0, 17, "漏一次解码最近的距离变了（f{} {}）", closest.1, closest.2);
+        assert_eq!(
+            closest.0, 17,
+            "漏一次解码最近的距离变了（f{} {}）",
+            closest.1, closest.2
+        );
 
         // ③ 半像素相位（`floor(frag.x)` 与像素中心的差）。这一项最有说头：抓住它的是
         //    b 通道那条周期 32 像素的锯齿——**每个样本**都差 2 字节以上，整张表最近的
@@ -1916,7 +1993,10 @@ mod tests {
         );
         assert_eq!(saw_sees, watched, "锯齿通道没能逐个样本抓住半像素相位");
         assert_eq!(ramp_sees, 5, "斜坡通道单独看得见半像素相位的样本数变了");
-        assert_eq!(ramp_worst, 6, "斜坡通道最差的距离变了（绕回 0 之后落进线性段）");
+        assert_eq!(
+            ramp_worst, 6,
+            "斜坡通道最差的距离变了（绕回 0 之后落进线性段）"
+        );
         assert!(
             flat_worst <= BYTE_TOLERANCE,
             "`1 - t` 通道也超过容差了（{flat_worst} 字节）"
@@ -1943,11 +2023,18 @@ mod tests {
         assert_eq!(boxy.iter().filter(|(d, _)| *d == 0).count(), 2);
         boxy.sort_by_key(|(distance, _)| *distance);
         assert_eq!(
-            boxy.iter().find(|(d, _)| *d > 0).expect("总会有非平坦的样本").0,
+            boxy.iter()
+                .find(|(d, _)| *d > 0)
+                .expect("总会有非平坦的样本")
+                .0,
             12,
             "盒式滤波最**近**的（能看见的）样本差变了"
         );
-        assert!(boxy.iter().filter(|(d, _)| *d > 0).all(|(d, _)| *d > BYTE_TOLERANCE));
+        assert!(
+            boxy.iter()
+                .filter(|(d, _)| *d > 0)
+                .all(|(d, _)| *d > BYTE_TOLERANCE)
+        );
         // 最远的是高光块里那个样本：1.0 的脉冲在 7×7 均值里被摊平，而高斯给它最大的权重。
         assert_eq!(
             boxy.last().expect("五点都在").0,
@@ -1968,15 +2055,26 @@ mod tests {
                 )
             })
             .collect();
-        let closest = orders.iter().min_by_key(|(distance, _)| *distance).expect("四帧都在");
-        assert!(closest.0 >= 37, "层序反了在 f{} 只差 {} 字节", closest.1, closest.0);
+        let closest = orders
+            .iter()
+            .min_by_key(|(distance, _)| *distance)
+            .expect("四帧都在");
+        assert!(
+            closest.0 >= 37,
+            "层序反了在 f{} 只差 {} 字节",
+            closest.1,
+            closest.0
+        );
 
         // ⑥ 混合状态误用 `PREMULTIPLIED_ALPHA_BLENDING`。它的症状值得单独钉住：
         //    **alpha 通道完全一样**，只有颜色通道偏——"alpha 看着对"正是它难查的原因。
         for frame in 0..frame_span(alpha) {
             let correct = expected_bytes(alpha, frame, alpha.samples[0]);
             let broken = premultiplied_color_bytes(frame);
-            assert_eq!(correct[3], broken[3], "用错常量不该改变 alpha 通道——这正是它难查的原因");
+            assert_eq!(
+                correct[3], broken[3],
+                "用错常量不该改变 alpha 通道——这正是它难查的原因"
+            );
             assert!(
                 scene_model::distance_bytes(correct, broken) >= 52,
                 "第 {frame} 帧用错混合状态只差 {} 字节",
@@ -1993,7 +2091,8 @@ mod tests {
         let blur = scene_by_name("blur").expect("blur 必须在");
         let mut witness: Vec<(&str, u8, u8)> = Vec::new();
         for point in blur.samples {
-            let clamp = scene_model::bytes_of_linear_rgba(edge_bytes(blur, *point, EdgeMode::Clamp));
+            let clamp =
+                scene_model::bytes_of_linear_rgba(edge_bytes(blur, *point, EdgeMode::Clamp));
             let zero = scene_model::bytes_of_linear_rgba(edge_bytes(blur, *point, EdgeMode::Zero));
             let wrap = scene_model::bytes_of_linear_rgba(edge_bytes(blur, *point, EdgeMode::Wrap));
             let to_zero = scene_model::distance_bytes(clamp, zero);
@@ -2002,10 +2101,17 @@ mod tests {
                 witness.push((point.label, to_zero, to_wrap));
             }
         }
-        assert_eq!(witness.len(), 1, "看得见边界语义的采样点不止一个或多于一个：{witness:?}");
+        assert_eq!(
+            witness.len(),
+            1,
+            "看得见边界语义的采样点不止一个或多于一个：{witness:?}"
+        );
         let (label, to_zero, to_wrap) = witness[0];
         assert_eq!(label, "左边缘");
-        assert!(to_zero >= 20 && to_wrap >= 20, "距离缩到 {to_zero} / {to_wrap} 了，边界语义要抓不住了");
+        assert!(
+            to_zero >= 20 && to_wrap >= 20,
+            "距离缩到 {to_zero} / {to_wrap} 了，边界语义要抓不住了"
+        );
     }
 
     #[test]
@@ -2019,7 +2125,10 @@ mod tests {
         assert_eq!(exact.distance, 0);
         assert_eq!(exact.expected, expected);
         assert_eq!(exact.tolerance, BYTE_TOLERANCE);
-        assert!(exact.detail.contains("模型线性"), "说明里要能读出模型算的是什么");
+        assert!(
+            exact.detail.contains("模型线性"),
+            "说明里要能读出模型算的是什么"
+        );
 
         // 逐通道偏 1（容差内）与偏 2（容差外）。跳过会溢出 255 的通道——
         // 那里 `saturating_add` 不生效，偏 1 会变成"没偏"。
@@ -2065,8 +2174,7 @@ mod tests {
             samples: &GRADIENT_SAMPLES,
         };
         let point = bogus.samples[0];
-        let panicked =
-            std::panic::catch_unwind(|| expected_bytes(&bogus, 0, point)).is_err();
+        let panicked = std::panic::catch_unwind(|| expected_bytes(&bogus, 0, point)).is_err();
         assert!(panicked, "未知场景名没有让模型预测 panic");
         let panicked =
             std::panic::catch_unwind(|| judge_sample(&bogus, 0, point, [0, 0, 0, 0])).is_err();

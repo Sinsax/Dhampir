@@ -121,7 +121,9 @@ fn normalize(text: &str) -> String {
 /// 解析 SRT / WebVTT 风格的时间戳：00:00:01,500 或 00:00:01.500。
 pub fn parse_srt_time(text: &str) -> Option<u64> {
     let trimmed = text.trim();
-    let (clock, fraction) = trimmed.split_once(',').or_else(|| trimmed.split_once('.'))?;
+    let (clock, fraction) = trimmed
+        .split_once(',')
+        .or_else(|| trimmed.split_once('.'))?;
     let mut parts = clock.split(':');
     let hours: u64 = parts.next()?.trim().parse().ok()?;
     let minutes: u64 = parts.next()?.trim().parse().ok()?;
@@ -305,7 +307,11 @@ fn ass_text_to_plain(raw: &str) -> AssTags {
             _ => out.push(ch),
         }
     }
-    AssTags { text: out, color, travel_ms }
+    AssTags {
+        text: out,
+        color,
+        travel_ms,
+    }
 }
 
 /// 从一串覆盖标签里抽出来的东西。
@@ -408,7 +414,11 @@ pub struct AssStyle {
 
 impl Default for AssStyle {
     fn default() -> Self {
-        Self { font: "Microsoft YaHei".to_string(), font_size: 48, margin_v: 36 }
+        Self {
+            font: "Microsoft YaHei".to_string(),
+            font_size: 48,
+            margin_v: 36,
+        }
     }
 }
 
@@ -438,7 +448,10 @@ pub fn parse_ass(text: &str) -> Result<ParseReport, String> {
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("Format:") {
-            fields = rest.split(',').map(|part| part.trim().to_string()).collect();
+            fields = rest
+                .split(',')
+                .map(|part| part.trim().to_string())
+                .collect();
             continue;
         }
         let Some(rest) = trimmed.strip_prefix("Dialogue:") else {
@@ -476,7 +489,10 @@ pub fn parse_ass(text: &str) -> Result<ParseReport, String> {
             end_ms: end,
             text: body,
             travel_ms: tags.travel_ms,
-            style: CueStyle { color: tags.color, ..CueStyle::default() },
+            style: CueStyle {
+                color: tags.color,
+                ..CueStyle::default()
+            },
         });
     }
     Ok(report.sorted())
@@ -606,7 +622,10 @@ mod tests {
         assert_eq!(report.cues.len(), 2);
         assert_eq!(report.cues[0].start_ms, 1000);
         assert_eq!(report.cues[0].end_ms, 3500);
-        assert_eq!(report.cues[0].text, "上面\n第二行", "覆盖标签要去掉，换行标记要还原");
+        assert_eq!(
+            report.cues[0].text, "上面\n第二行",
+            "覆盖标签要去掉，换行标记要还原"
+        );
     }
 
     #[test]
@@ -614,7 +633,10 @@ mod tests {
         // 有的工具把 Start / End 写反 —— 写死列序就会读错。
         let text = "[Events]\nFormat: Layer, End, Start, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:09.00,0:00:02.00,Default,,0,0,0,,正文\n";
         let report = parse_ass(text).expect("能解析");
-        assert_eq!(report.cues[0].start_ms, 2000, "Start 要按名字找，不按第几列");
+        assert_eq!(
+            report.cues[0].start_ms, 2000,
+            "Start 要按名字找，不按第几列"
+        );
         assert_eq!(report.cues[0].end_ms, 9000);
     }
 
@@ -673,7 +695,11 @@ mod tests {
                     Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,{\\move(2136,0,-216,0)}{\\c&HFF0000}蓝的\n";
         let report = parse_ass(text).expect("能解析");
         assert_eq!(report.cues[0].text, "蓝的");
-        assert_eq!(report.cues[0].style.color, Some([0x00, 0x00, 0xFF, 255]), "`FF0000`(BGR) 是纯蓝");
+        assert_eq!(
+            report.cues[0].style.color,
+            Some([0x00, 0x00, 0xFF, 255]),
+            "`FF0000`(BGR) 是纯蓝"
+        );
     }
 
     /// **`\move` 的显式时长**：只认 6 参数那一版。
@@ -684,11 +710,15 @@ mod tests {
     fn 只认六参数的_move_时长() {
         let head = "[Script Info]\n[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n";
         let cue = |tags: &str| {
-            let text = format!("{head}Dialogue: 0,0:00:01.00,0:00:05.00,Default,,0,0,0,,{tags}字\n");
+            let text =
+                format!("{head}Dialogue: 0,0:00:01.00,0:00:05.00,Default,,0,0,0,,{tags}字\n");
             parse_ass(&text).expect("能解析").cues
         };
         // 6 参数：取出 t2 - t1。
-        assert_eq!(cue("{\\move(1920,20,-200,20,0,16800)}")[0].travel_ms, Some(16_800));
+        assert_eq!(
+            cue("{\\move(1920,20,-200,20,0,16800)}")[0].travel_ms,
+            Some(16_800)
+        );
         // 3 参数：**没有**显式时长 —— 必须回退（这里读出 None）。
         assert_eq!(cue("{\\move(1920,20,-200,20)}")[0].travel_ms, None);
         // 静态 `\pos`：本来就不滚。
@@ -699,14 +729,30 @@ mod tests {
         // 与颜色同一条 cue（真实素材就是混着的）。
         let both = cue("{\\move(1920,20,-200,20,0,14000)}{\\c&HFF0000}红");
         assert_eq!(both[0].travel_ms, Some(14_000));
-        assert_eq!(both[0].style.color, Some([0, 0, 255, 255]), "颜色仍要抽出来（ASS 是 BGR）");
+        assert_eq!(
+            both[0].style.color,
+            Some([0, 0, 255, 255]),
+            "颜色仍要抽出来（ASS 是 BGR）"
+        );
     }
 
     #[test]
     fn ass_往返稳定() {
         let cues = vec![
-            Cue { start_ms: 1000, end_ms: 3500, text: "第一句".to_string(), travel_ms: None, style: CueStyle::default() },
-            Cue { start_ms: 60_000, end_ms: 62_000, text: "两行\n第二行".to_string(), travel_ms: None, style: CueStyle::default() },
+            Cue {
+                start_ms: 1000,
+                end_ms: 3500,
+                text: "第一句".to_string(),
+                travel_ms: None,
+                style: CueStyle::default(),
+            },
+            Cue {
+                start_ms: 60_000,
+                end_ms: 62_000,
+                text: "两行\n第二行".to_string(),
+                travel_ms: None,
+                style: CueStyle::default(),
+            },
         ];
         let written = to_ass(&cues, &AssStyle::default());
         let back = parse_ass(&written).expect("能解析自己写的");
@@ -753,7 +799,13 @@ mod tests {
         //   2. 起点随帧号不减（不然文件里的时间会倒着走）。
         // 有余数时的"顶多早那么零点几毫秒"是 floor 的代价，这里不假装它不存在，
         // 只钉住"不会晚"这一边 —— 晚才是会把画面和文件拆开的方向。
-        for timebase in [tb(60, 1), tb(30, 1), tb(25, 1), tb(30000, 1001), tb(24000, 1001)] {
+        for timebase in [
+            tb(60, 1),
+            tb(30, 1),
+            tb(25, 1),
+            tb(30000, 1001),
+            tb(24000, 1001),
+        ] {
             let mut previous = ms_at_frame(0, &timebase).expect("能换算");
             for frame in 1..=2000i64 {
                 let start = ms_at_frame(frame, &timebase).expect("能换算");
@@ -774,8 +826,11 @@ mod tests {
             assert_eq!(parse_srt_time(&format_srt_time(ms)), Some(ms), "srt {ms}");
             // ASS 只有厘秒精度，所以要先截到 10ms。
             let truncated = (ms / 10) * 10;
-            assert_eq!(parse_ass_time(&format_ass_time(ms)), Some(truncated), "ass {ms}");
+            assert_eq!(
+                parse_ass_time(&format_ass_time(ms)),
+                Some(truncated),
+                "ass {ms}"
+            );
         }
     }
 }
-

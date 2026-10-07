@@ -37,7 +37,9 @@ fn value_of(args: &[String], name: &str, fallback: Option<&str>) -> Result<Strin
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|item| item == "--help" || item == "-h") {
-        eprintln!("用法：layout_subtitles --srt <文件> [--fps 30/1] [--frame 0] [--sequence 640x360] [--font-ratio 0.055] [--max-lines 2]");
+        eprintln!(
+            "用法：layout_subtitles --srt <文件> [--fps 30/1] [--frame 0] [--sequence 640x360] [--font-ratio 0.055] [--max-lines 2]"
+        );
         return Ok(());
     }
 
@@ -48,8 +50,10 @@ fn main() -> Result<(), String> {
     let fps = value_of(&args, "--fps", Some("30/1"))?;
     let (num, den) = match fps.split_once('/') {
         Some((num, den)) => (
-            num.parse::<u32>().map_err(|_| format!("帧率分子不是数：{num}"))?,
-            den.parse::<u32>().map_err(|_| format!("帧率分母不是数：{den}"))?,
+            num.parse::<u32>()
+                .map_err(|_| format!("帧率分子不是数：{num}"))?,
+            den.parse::<u32>()
+                .map_err(|_| format!("帧率分母不是数：{den}"))?,
         ),
         None => return Err(format!("帧率要写成 分子/分母，得到 {fps}")),
     };
@@ -65,8 +69,12 @@ fn main() -> Result<(), String> {
     let sequence_text = value_of(&args, "--sequence", Some("640x360"))?;
     let (width, height) = match sequence_text.split_once('x') {
         Some((width, height)) => (
-            width.parse::<u32>().map_err(|_| format!("宽不是数：{width}"))?,
-            height.parse::<u32>().map_err(|_| format!("高不是数：{height}"))?,
+            width
+                .parse::<u32>()
+                .map_err(|_| format!("宽不是数：{width}"))?,
+            height
+                .parse::<u32>()
+                .map_err(|_| format!("高不是数：{height}"))?,
         ),
         None => return Err(format!("文档坐标系要写成 宽x高，得到 {sequence_text}")),
     };
@@ -74,13 +82,15 @@ fn main() -> Result<(), String> {
         return Err("文档坐标系不能有 0".to_string());
     }
 
-    let mut style = SubtitleStyle::default();
-    style.font_ratio = value_of(&args, "--font-ratio", Some("0.055"))?
-        .parse()
-        .map_err(|_| "--font-ratio 不是数".to_string())?;
-    style.max_lines = value_of(&args, "--max-lines", Some("2"))?
-        .parse()
-        .map_err(|_| "--max-lines 不是整数".to_string())?;
+    let style = SubtitleStyle {
+        font_ratio: value_of(&args, "--font-ratio", Some("0.055"))?
+            .parse()
+            .map_err(|_| "--font-ratio 不是数".to_string())?,
+        max_lines: value_of(&args, "--max-lines", Some("2"))?
+            .parse()
+            .map_err(|_| "--max-lines 不是整数".to_string())?,
+        ..SubtitleStyle::default()
+    };
 
     let report = parse_srt(&text)?;
 

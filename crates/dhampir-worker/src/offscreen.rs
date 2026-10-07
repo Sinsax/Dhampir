@@ -100,10 +100,7 @@ impl ProbeRun {
         );
         map.insert(
             "target_size".into(),
-            serde_json::Value::String(format!(
-                "{}x{}",
-                PROBE_TARGET_SIZE.0, PROBE_TARGET_SIZE.1
-            )),
+            serde_json::Value::String(format!("{}x{}", PROBE_TARGET_SIZE.0, PROBE_TARGET_SIZE.1)),
         );
         map.insert(
             "crate_version".into(),

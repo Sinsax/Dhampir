@@ -9,7 +9,8 @@
 use dhampir_core::gpu::{GpuContext, NATIVE_BACKENDS};
 use dhampir_core::readback;
 use dhampir_core::render::{
-    Compositor, InkBounds, LayerDraw, MaskInput, OverlayItem, RenderSpace, compose_overlay, ink_report,
+    Compositor, InkBounds, LayerDraw, MaskInput, OverlayItem, RenderSpace, compose_overlay,
+    ink_report,
 };
 use dhampir_core::timeline::schema::Transform;
 use dhampir_core::timeline::text_layout::{LinePlacement, NormalizedRect, place_line};
@@ -20,7 +21,13 @@ use dhampir_worker::baseline::open_leg;
 /// 这条要证的混合是纯算术，任何色彩转换都会把结论变成「转换的往返是否精确」。
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
-fn solid(device: &wgpu::Device, queue: &wgpu::Queue, size: u32, rgba: [u8; 4], label: &str) -> wgpu::Texture {
+fn solid(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    size: u32,
+    rgba: [u8; 4],
+    label: &str,
+) -> wgpu::Texture {
     solid_rect(device, queue, size, size, rgba, label)
 }
 
@@ -35,7 +42,11 @@ fn solid_rect(
 ) -> wgpu::Texture {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -60,7 +71,11 @@ fn solid_rect(
             bytes_per_row: Some(width * 4),
             rows_per_image: Some(height),
         },
-        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
     );
     texture
 }
@@ -72,7 +87,11 @@ fn target(device: &wgpu::Device, size: u32) -> wgpu::Texture {
 fn target_rect(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dhampir compose test target"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -84,7 +103,12 @@ fn target_rect(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture 
 
 fn pixel(image: &dhampir_core::readback::Rgba8Image, size: u32, x: u32, y: u32) -> [u8; 4] {
     let at = ((y * size + x) * 4) as usize;
-    [image.pixels[at], image.pixels[at + 1], image.pixels[at + 2], image.pixels[at + 3]]
+    [
+        image.pixels[at],
+        image.pixels[at + 1],
+        image.pixels[at + 2],
+        image.pixels[at + 3],
+    ]
 }
 
 fn near(got: [u8; 4], want: [u8; 4], tolerance: i32) -> bool {
@@ -99,14 +123,28 @@ fn 两层按不透明度叠加() {
     const SIZE: u32 = 8;
     let (ctx, _init) = open_leg(NATIVE_BACKENDS).expect("拿不到 GPU 上下文");
 
-    let red = solid(&ctx.device, &ctx.queue, SIZE, [255, 0, 0, 255], "dhampir compose red");
-    let blue = solid(&ctx.device, &ctx.queue, SIZE, [0, 0, 255, 255], "dhampir compose blue");
+    let red = solid(
+        &ctx.device,
+        &ctx.queue,
+        SIZE,
+        [255, 0, 0, 255],
+        "dhampir compose red",
+    );
+    let blue = solid(
+        &ctx.device,
+        &ctx.queue,
+        SIZE,
+        [0, 0, 255, 255],
+        "dhampir compose blue",
+    );
     let out = target(&ctx.device, SIZE);
 
     let renderer = Compositor::new(&ctx.device, FORMAT);
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("dhampir compose test encoder"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dhampir compose test encoder"),
+        });
     let red_view = red.create_view(&wgpu::TextureViewDescriptor::default());
     let blue_view = blue.create_view(&wgpu::TextureViewDescriptor::default());
     renderer.compose(
@@ -116,8 +154,30 @@ fn 两层按不透明度叠加() {
         &out.create_view(&wgpu::TextureViewDescriptor::default()),
         RenderSpace::square((SIZE, SIZE)),
         &[
-            LayerDraw { view: &red_view, source_size: (SIZE, SIZE), transform: Transform::default(), opacity: 1.0, blend: dhampir_core::timeline::layer::BlendMode::Normal, corner_radius: 0.0, clip: None, mask: None, tint: None, extra_offset: (0.0, 0.0) },
-            LayerDraw { view: &blue_view, source_size: (SIZE, SIZE), transform: Transform::default(), opacity: 0.5, blend: dhampir_core::timeline::layer::BlendMode::Normal, corner_radius: 0.0, clip: None, mask: None, tint: None, extra_offset: (0.0, 0.0) },
+            LayerDraw {
+                view: &red_view,
+                source_size: (SIZE, SIZE),
+                transform: Transform::default(),
+                opacity: 1.0,
+                blend: dhampir_core::timeline::layer::BlendMode::Normal,
+                corner_radius: 0.0,
+                clip: None,
+                mask: None,
+                tint: None,
+                extra_offset: (0.0, 0.0),
+            },
+            LayerDraw {
+                view: &blue_view,
+                source_size: (SIZE, SIZE),
+                transform: Transform::default(),
+                opacity: 0.5,
+                blend: dhampir_core::timeline::layer::BlendMode::Normal,
+                corner_radius: 0.0,
+                clip: None,
+                mask: None,
+                tint: None,
+                extra_offset: (0.0, 0.0),
+            },
         ],
         Some(wgpu::Color::TRANSPARENT),
     );
@@ -151,13 +211,21 @@ fn 缩放把层缩到中心而四周保持背景() {
     const SIZE: u32 = 8;
     let (ctx, _init) = open_leg(NATIVE_BACKENDS).expect("拿不到 GPU 上下文");
 
-    let red = solid(&ctx.device, &ctx.queue, SIZE, [255, 0, 0, 255], "dhampir compose red");
+    let red = solid(
+        &ctx.device,
+        &ctx.queue,
+        SIZE,
+        [255, 0, 0, 255],
+        "dhampir compose red",
+    );
     let out = target(&ctx.device, SIZE);
 
     let renderer = Compositor::new(&ctx.device, FORMAT);
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("dhampir compose scale encoder"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dhampir compose scale encoder"),
+        });
     let red_view = red.create_view(&wgpu::TextureViewDescriptor::default());
     renderer.compose(
         &ctx.device,
@@ -169,7 +237,12 @@ fn 缩放把层缩到中心而四周保持背景() {
             view: &red_view,
             source_size: (SIZE, SIZE),
             // 缩到一半：只盖住中心，四周应当留着背景（清屏色）
-            transform: Transform { x: 0.0, y: 0.0, scale: 0.5, rotation_deg: 0.0 },
+            transform: Transform {
+                x: 0.0,
+                y: 0.0,
+                scale: 0.5,
+                rotation_deg: 0.0,
+            },
             opacity: 1.0,
             blend: dhampir_core::timeline::layer::BlendMode::Normal,
             corner_radius: 0.0,
@@ -186,7 +259,10 @@ fn 缩放把层缩到中心而四周保持背景() {
         .expect("读回失败");
 
     let center = pixel(&image, SIZE, 4, 4);
-    assert!(near(center, [255, 0, 0, 255], 2), "中心应当是实心红，得到 {center:?}");
+    assert!(
+        near(center, [255, 0, 0, 255], 2),
+        "中心应当是实心红，得到 {center:?}"
+    );
 
     // 四个角必须在层之外：源坐标越界 -> 全透明 -> 目标保持清屏色（全 0）。
     // 这条同时证明了「不用 discard」这条路是通的：透明片段确实没动目标。
@@ -271,7 +347,12 @@ fn 文字的落点与行盒逐个像素一致() {
     let placements: Vec<LinePlacement> = TEXT_RECTS
         .iter()
         .map(|(x, y, box_width, box_height)| {
-            let rect = NormalizedRect { x: *x, y: *y, width: *box_width, height: *box_height };
+            let rect = NormalizedRect {
+                x: *x,
+                y: *y,
+                width: *box_width,
+                height: *box_height,
+            };
             place_line(rect, TEXT_TARGET, TEXT_FONT_RATIO).expect("行盒有高度，应当给得出落点")
         })
         .collect();
@@ -305,9 +386,11 @@ fn 文字的落点与行盒逐个像素一致() {
         })
         .collect();
 
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("dhampir text overlay encoder"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dhampir text overlay encoder"),
+        });
     // 先按常规路径建立底（清屏），再叠文字 —— 这正是宿主那两行的顺序。
     compositor.compose(
         &ctx.device,
@@ -344,7 +427,10 @@ fn 文字的落点与行盒逐个像素一致() {
                 }
             }
             let got = pixel(&image, width, x, y);
-            assert!(near(got, expected, 2), "({x},{y}) 应当是 {expected:?}，得到 {got:?}");
+            assert!(
+                near(got, expected, 2),
+                "({x},{y}) 应当是 {expected:?}，得到 {got:?}"
+            );
         }
     }
 
@@ -355,7 +441,11 @@ fn 文字的落点与行盒逐个像素一致() {
         pixels: vec![0; (width * height * 4) as usize],
     };
     let ink = ink_report(&empty, &image).expect("两张同尺寸");
-    assert_eq!(ink.bounds, union_bounds(&placements, TEXT_TARGET), "墨迹包围盒与落点对不上");
+    assert_eq!(
+        ink.bounds,
+        union_bounds(&placements, TEXT_TARGET),
+        "墨迹包围盒与落点对不上"
+    );
 }
 
 #[test]
@@ -369,11 +459,20 @@ fn 没有可叠的行时目标一个字节都不改() {
     let compositor = Compositor::new(&ctx.device, FORMAT);
     let target_view = out.create_view(&wgpu::TextureViewDescriptor::default());
 
-    let base = solid_rect(&ctx.device, &ctx.queue, width, height, [40, 80, 120, 255], "dhampir text base");
+    let base = solid_rect(
+        &ctx.device,
+        &ctx.queue,
+        width,
+        height,
+        [40, 80, 120, 255],
+        "dhampir text base",
+    );
     let base_view = base.create_view(&wgpu::TextureViewDescriptor::default());
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("dhampir text base encoder"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dhampir text base encoder"),
+        });
     compositor.compose(
         &ctx.device,
         &ctx.queue,
@@ -398,9 +497,11 @@ fn 没有可叠的行时目标一个字节都不改() {
     let before = pollster::block_on(readback::read_texture_rgba8(&ctx.device, &ctx.queue, &out))
         .expect("读回失败");
 
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("dhampir text overlay empty encoder"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dhampir text overlay empty encoder"),
+        });
     let report = compose_overlay(
         &compositor,
         &ctx.device,
@@ -436,7 +537,12 @@ fn 位图尺寸与落点不符时一行都不画() {
     let target_view = out.create_view(&wgpu::TextureViewDescriptor::default());
 
     let placed = place_line(
-        NormalizedRect { x: 0.25, y: 0.6, width: 0.5, height: 0.15 },
+        NormalizedRect {
+            x: 0.25,
+            y: 0.6,
+            width: 0.5,
+            height: 0.15,
+        },
         TEXT_TARGET,
         TEXT_FONT_RATIO,
     )
@@ -454,11 +560,20 @@ fn 位图尺寸与落点不符时一行都不画() {
     let bitmap_view = bitmap.create_view(&wgpu::TextureViewDescriptor::default());
 
     // 底铺满整张（清屏色与文字色不同）：否则「没画」会被「底色一样」蒙过去。
-    let base = solid_rect(&ctx.device, &ctx.queue, width, height, [10, 20, 30, 255], "dhampir text base");
+    let base = solid_rect(
+        &ctx.device,
+        &ctx.queue,
+        width,
+        height,
+        [10, 20, 30, 255],
+        "dhampir text base",
+    );
     let base_view = base.create_view(&wgpu::TextureViewDescriptor::default());
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("dhampir text base encoder"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dhampir text base encoder"),
+        });
     compositor.compose(
         &ctx.device,
         &ctx.queue,
@@ -483,9 +598,11 @@ fn 位图尺寸与落点不符时一行都不画() {
     let before = pollster::block_on(readback::read_texture_rgba8(&ctx.device, &ctx.queue, &out))
         .expect("读回失败");
 
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("dhampir text overlay mismatch encoder"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dhampir text overlay mismatch encoder"),
+        });
     let report = compose_overlay(
         &compositor,
         &ctx.device,
@@ -493,7 +610,11 @@ fn 位图尺寸与落点不符时一行都不画() {
         &mut encoder,
         &target_view,
         TEXT_TARGET,
-        &[OverlayItem { view: &bitmap_view, bitmap_size: actual, placement: placed }],
+        &[OverlayItem {
+            view: &bitmap_view,
+            bitmap_size: actual,
+            placement: placed,
+        }],
     );
     assert_eq!(report.drawn, 0, "尺寸不符的位图不许画");
     assert_eq!(report.size_mismatch, 1, "尺寸不符必须数出来");
@@ -523,12 +644,20 @@ fn 圆角只切四个角_半径为零时一个像素都不动() {
     let renderer = Compositor::new(&ctx.device, FORMAT);
 
     let render_once = |radius: f32| -> dhampir_core::readback::Rgba8Image {
-        let red = solid(&ctx.device, &ctx.queue, SIZE, [255, 0, 0, 255], "dhampir corner red");
+        let red = solid(
+            &ctx.device,
+            &ctx.queue,
+            SIZE,
+            [255, 0, 0, 255],
+            "dhampir corner red",
+        );
         let out = target(&ctx.device, SIZE);
         let red_view = red.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("dhampir corner test encoder"),
-        });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("dhampir corner test encoder"),
+            });
         renderer.compose(
             &ctx.device,
             &ctx.queue,
@@ -550,7 +679,8 @@ fn 圆角只切四个角_半径为零时一个像素都不动() {
             Some(wgpu::Color::TRANSPARENT),
         );
         ctx.queue.submit([encoder.finish()]);
-        pollster::block_on(readback::read_texture_rgba8(&ctx.device, &ctx.queue, &out)).expect("读回失败")
+        pollster::block_on(readback::read_texture_rgba8(&ctx.device, &ctx.queue, &out))
+            .expect("读回失败")
     };
 
     let corners = [(0, 0), (SIZE - 1, 0), (0, SIZE - 1), (SIZE - 1, SIZE - 1)];
@@ -559,7 +689,10 @@ fn 圆角只切四个角_半径为零时一个像素都不动() {
     let flat = render_once(0.0);
     for (x, y) in corners {
         let got = pixel(&flat, SIZE, x, y);
-        assert!(near(got, [255, 0, 0, 255], 1), "半径 0 时 ({x},{y}) 应当是红的，得到 {got:?}");
+        assert!(
+            near(got, [255, 0, 0, 255], 1),
+            "半径 0 时 ({x},{y}) 应当是红的，得到 {got:?}"
+        );
     }
 
     // 半径 = SIZE/4：四角透明，边中点与中心照旧。
@@ -577,7 +710,10 @@ fn 圆角只切四个角_半径为零时一个像素都不动() {
     ];
     for (x, y) in untouched {
         let got = pixel(&rounded, SIZE, x, y);
-        assert!(near(got, [255, 0, 0, 255], 2), "圆角不该动 ({x},{y})，得到 {got:?}");
+        assert!(
+            near(got, [255, 0, 0, 255], 2),
+            "圆角不该动 ({x},{y})，得到 {got:?}"
+        );
     }
 }
 
@@ -624,13 +760,28 @@ fn 裁剪形状_圆与椭圆与内缩矩形各切对地方() {
         ctx.queue.submit([encoder.finish()]);
         pollster::block_on(readback::read_texture_rgba8(&ctx.device, &ctx.queue, &out)).expect("读回失败")
     };
-    let red_at = |image: &dhampir_core::readback::Rgba8Image, x: u32, y: u32| near(pixel(image, SIZE, x, y), [255, 0, 0, 255], 2);
-    let clear_at = |image: &dhampir_core::readback::Rgba8Image, x: u32, y: u32| pixel(image, SIZE, x, y)[3] <= 8;
+    let red_at = |image: &dhampir_core::readback::Rgba8Image, x: u32, y: u32| {
+        near(pixel(image, SIZE, x, y), [255, 0, 0, 255], 2)
+    };
+    let clear_at = |image: &dhampir_core::readback::Rgba8Image, x: u32, y: u32| {
+        pixel(image, SIZE, x, y)[3] <= 8
+    };
 
     // ① 不裁：到处都是红的（这条钉的是"没有裁剪时那个覆盖度精确是 1"）。
     let none = render_with(None);
-    for (x, y) in [(0, 0), (SIZE - 1, 0), (0, SIZE - 1), (SIZE - 1, SIZE - 1), (SIZE / 2, 0), (0, SIZE / 2)] {
-        assert!(red_at(&none, x, y), "不裁时 ({x},{y}) 应当是红的，得到 {:?}", pixel(&none, SIZE, x, y));
+    for (x, y) in [
+        (0, 0),
+        (SIZE - 1, 0),
+        (0, SIZE - 1),
+        (SIZE - 1, SIZE - 1),
+        (SIZE / 2, 0),
+        (0, SIZE / 2),
+    ] {
+        assert!(
+            red_at(&none, x, y),
+            "不裁时 ({x},{y}) 应当是红的，得到 {:?}",
+            pixel(&none, SIZE, x, y)
+        );
     }
 
     // ② 圆：四角与**四条边中点**都透明（圆角只会切四角 —— 这就是判别点）。
@@ -638,8 +789,21 @@ fn 裁剪形状_圆与椭圆与内缩矩形各切对地方() {
         radius: 10.0,
         center: None,
     }));
-    for (x, y) in [(0, 0), (SIZE - 1, 0), (0, SIZE - 1), (SIZE - 1, SIZE - 1), (SIZE / 2, 0), (SIZE / 2, SIZE - 1), (0, SIZE / 2), (SIZE - 1, SIZE / 2)] {
-        assert!(clear_at(&circle, x, y), "圆外 ({x},{y}) 应当透明，得到 {:?}", pixel(&circle, SIZE, x, y));
+    for (x, y) in [
+        (0, 0),
+        (SIZE - 1, 0),
+        (0, SIZE - 1),
+        (SIZE - 1, SIZE - 1),
+        (SIZE / 2, 0),
+        (SIZE / 2, SIZE - 1),
+        (0, SIZE / 2),
+        (SIZE - 1, SIZE / 2),
+    ] {
+        assert!(
+            clear_at(&circle, x, y),
+            "圆外 ({x},{y}) 应当透明，得到 {:?}",
+            pixel(&circle, SIZE, x, y)
+        );
     }
     assert!(red_at(&circle, SIZE / 2, SIZE / 2), "圆心必须是红的");
     assert!(red_at(&circle, 8, 16), "半径内 2 像素处应当是红的");
@@ -650,10 +814,22 @@ fn 裁剪形状_圆与椭圆与内缩矩形各切对地方() {
         radius_y: 6.0,
         center: None,
     }));
-    assert!(clear_at(&ellipse, SIZE / 2, SIZE / 2 + 8), "椭圆在 y 轴 8 像素处应当透明（判别点）");
-    assert!(red_at(&ellipse, SIZE / 2, SIZE / 2 + 4), "椭圆内 y 轴 4 像素处应当是红的");
-    assert!(red_at(&ellipse, SIZE / 2 + 8, SIZE / 2), "椭圆内 x 轴 8 像素处应当是红的");
-    assert!(clear_at(&ellipse, SIZE / 2 + 12, SIZE / 2), "椭圆外 x 轴 12 像素处应当透明");
+    assert!(
+        clear_at(&ellipse, SIZE / 2, SIZE / 2 + 8),
+        "椭圆在 y 轴 8 像素处应当透明（判别点）"
+    );
+    assert!(
+        red_at(&ellipse, SIZE / 2, SIZE / 2 + 4),
+        "椭圆内 y 轴 4 像素处应当是红的"
+    );
+    assert!(
+        red_at(&ellipse, SIZE / 2 + 8, SIZE / 2),
+        "椭圆内 x 轴 8 像素处应当是红的"
+    );
+    assert!(
+        clear_at(&ellipse, SIZE / 2 + 12, SIZE / 2),
+        "椭圆外 x 轴 12 像素处应当透明"
+    );
 
     // ④ 内缩 4 像素：边界一圈透明，往里 5 像素处仍红。
     let inset = render_with(Some(dhampir_core::timeline::layer::ClipShape::Inset {
@@ -664,7 +840,11 @@ fn 裁剪形状_圆与椭圆与内缩矩形各切对地方() {
         radius: 0.0,
     }));
     for (x, y) in [(1, 1), (SIZE / 2, 1), (1, SIZE / 2), (SIZE - 2, SIZE / 2)] {
-        assert!(clear_at(&inset, x, y), "内缩矩形外 ({x},{y}) 应当透明，得到 {:?}", pixel(&inset, SIZE, x, y));
+        assert!(
+            clear_at(&inset, x, y),
+            "内缩矩形外 ({x},{y}) 应当透明，得到 {:?}",
+            pixel(&inset, SIZE, x, y)
+        );
     }
     assert!(red_at(&inset, 5, 5), "内缩边界内应当是红的");
     assert!(red_at(&inset, SIZE / 2, SIZE / 2), "内缩矩形中心必须是红的");
@@ -676,8 +856,14 @@ fn 裁剪形状_圆与椭圆与内缩矩形各切对地方() {
         radius: 6.0,
         center: Some([0.25, 0.5]),
     }));
-    assert!(red_at(&moved, SIZE / 4, SIZE / 2), "圆心应当在宽度的 1/4 处（红）");
-    assert!(clear_at(&moved, SIZE / 2, SIZE / 2), "原来的正中应当变成圆外（透明）");
+    assert!(
+        red_at(&moved, SIZE / 4, SIZE / 2),
+        "圆心应当在宽度的 1/4 处（红）"
+    );
+    assert!(
+        clear_at(&moved, SIZE / 2, SIZE / 2),
+        "原来的正中应当变成圆外（透明）"
+    );
     assert!(clear_at(&moved, 0, 0), "左上角在圆外，应当透明");
 }
 
@@ -693,17 +879,43 @@ fn 掩码按图层矩形铺开_四象限与反相与通道都对() {
     let renderer = Compositor::new(&ctx.device, FORMAT);
 
     // 2×2：左上、右下不透明；右上、左下透明 —— 用来测 **alpha 通道**。
-    let alpha_mask = pixels_2x2(&ctx, [[255, 255, 255, 255], [0, 0, 0, 0], [0, 0, 0, 0], [255, 255, 255, 255]], "dhampir mask alpha");
+    let alpha_mask = pixels_2x2(
+        &ctx,
+        [
+            [255, 255, 255, 255],
+            [0, 0, 0, 0],
+            [0, 0, 0, 0],
+            [255, 255, 255, 255],
+        ],
+        "dhampir mask alpha",
+    );
     // 2×2：左上、右下是白；右上、左下是黑，alpha 全满 —— 用来测 **亮度通道**。
-    let luma_mask = pixels_2x2(&ctx, [[255, 255, 255, 255], [0, 0, 0, 255], [0, 0, 0, 255], [255, 255, 255, 255]], "dhampir mask luma");
+    let luma_mask = pixels_2x2(
+        &ctx,
+        [
+            [255, 255, 255, 255],
+            [0, 0, 0, 255],
+            [0, 0, 0, 255],
+            [255, 255, 255, 255],
+        ],
+        "dhampir mask luma",
+    );
 
     let render_with = |mask: Option<MaskInput<'_>>| -> dhampir_core::readback::Rgba8Image {
-        let red = solid(&ctx.device, &ctx.queue, SIZE, [255, 0, 0, 255], "dhampir mask red");
+        let red = solid(
+            &ctx.device,
+            &ctx.queue,
+            SIZE,
+            [255, 0, 0, 255],
+            "dhampir mask red",
+        );
         let out = target(&ctx.device, SIZE);
         let red_view = red.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("dhampir mask test encoder"),
-        });
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("dhampir mask test encoder"),
+            });
         renderer.compose(
             &ctx.device,
             &ctx.queue,
@@ -725,14 +937,18 @@ fn 掩码按图层矩形铺开_四象限与反相与通道都对() {
             Some(wgpu::Color::TRANSPARENT),
         );
         ctx.queue.submit([encoder.finish()]);
-        pollster::block_on(readback::read_texture_rgba8(&ctx.device, &ctx.queue, &out)).expect("读回失败")
+        pollster::block_on(readback::read_texture_rgba8(&ctx.device, &ctx.queue, &out))
+            .expect("读回失败")
     };
-    let alpha_at = |image: &dhampir_core::readback::Rgba8Image, x: u32, y: u32| pixel(image, SIZE, x, y)[3];
+    let alpha_at =
+        |image: &dhampir_core::readback::Rgba8Image, x: u32, y: u32| pixel(image, SIZE, x, y)[3];
     // **两档而不是精确值**：2×2 铺 32×32 时没有哪个像素中心正好落在纹素中心上
     // （实测"留"的那两档是 240、"切"的是 15 —— 差的正是双线性在 3% 处的混合）。
     // 断言要求精确值会变成"测试双线性的小数位"，那是另一件事。
-    let kept = |image: &dhampir_core::readback::Rgba8Image, x: u32, y: u32| alpha_at(image, x, y) >= 200;
-    let cut = |image: &dhampir_core::readback::Rgba8Image, x: u32, y: u32| alpha_at(image, x, y) <= 40;
+    let kept =
+        |image: &dhampir_core::readback::Rgba8Image, x: u32, y: u32| alpha_at(image, x, y) >= 200;
+    let cut =
+        |image: &dhampir_core::readback::Rgba8Image, x: u32, y: u32| alpha_at(image, x, y) <= 40;
 
     // ① 不挂掩码：到处都不透明（兜底图 + `mask_a.x = 0` 的旁路必须精确）。
     let none = render_with(None);
@@ -747,10 +963,26 @@ fn 掩码按图层矩形铺开_四象限与反相与通道都对() {
         channel: dhampir_core::timeline::layer::MaskChannel::Alpha,
         invert: false,
     }));
-    assert!(kept(&alpha, 8, 8), "左上是掩码的不透明象限，得到 {}", alpha_at(&alpha, 8, 8));
-    assert!(kept(&alpha, 24, 24), "右下是掩码的不透明象限，得到 {}", alpha_at(&alpha, 24, 24));
-    assert!(cut(&alpha, 24, 8), "右上是掩码的透明象限，得到 {}", alpha_at(&alpha, 24, 8));
-    assert!(cut(&alpha, 8, 24), "左下是掩码的透明象限，得到 {}", alpha_at(&alpha, 8, 24));
+    assert!(
+        kept(&alpha, 8, 8),
+        "左上是掩码的不透明象限，得到 {}",
+        alpha_at(&alpha, 8, 8)
+    );
+    assert!(
+        kept(&alpha, 24, 24),
+        "右下是掩码的不透明象限，得到 {}",
+        alpha_at(&alpha, 24, 24)
+    );
+    assert!(
+        cut(&alpha, 24, 8),
+        "右上是掩码的透明象限，得到 {}",
+        alpha_at(&alpha, 24, 8)
+    );
+    assert!(
+        cut(&alpha, 8, 24),
+        "左下是掩码的透明象限，得到 {}",
+        alpha_at(&alpha, 8, 24)
+    );
 
     // ③ 反相：正好反过来。
     let inverted = render_with(Some(MaskInput {
@@ -758,10 +990,26 @@ fn 掩码按图层矩形铺开_四象限与反相与通道都对() {
         channel: dhampir_core::timeline::layer::MaskChannel::Alpha,
         invert: true,
     }));
-    assert!(cut(&inverted, 8, 8), "反相后左上应当被切掉，得到 {}", alpha_at(&inverted, 8, 8));
-    assert!(cut(&inverted, 24, 24), "反相后右下应当被切掉，得到 {}", alpha_at(&inverted, 24, 24));
-    assert!(kept(&inverted, 24, 8), "反相后右上应当留下，得到 {}", alpha_at(&inverted, 24, 8));
-    assert!(kept(&inverted, 8, 24), "反相后左下应当留下，得到 {}", alpha_at(&inverted, 8, 24));
+    assert!(
+        cut(&inverted, 8, 8),
+        "反相后左上应当被切掉，得到 {}",
+        alpha_at(&inverted, 8, 8)
+    );
+    assert!(
+        cut(&inverted, 24, 24),
+        "反相后右下应当被切掉，得到 {}",
+        alpha_at(&inverted, 24, 24)
+    );
+    assert!(
+        kept(&inverted, 24, 8),
+        "反相后右上应当留下，得到 {}",
+        alpha_at(&inverted, 24, 8)
+    );
+    assert!(
+        kept(&inverted, 8, 24),
+        "反相后左下应当留下，得到 {}",
+        alpha_at(&inverted, 8, 24)
+    );
 
     // ④ 通道切换：同一张图，按 **alpha** 看是"全留"，按**亮度**看是四个象限。
     let luma_view = luma_mask.create_view(&wgpu::TextureViewDescriptor::default());
@@ -770,21 +1018,36 @@ fn 掩码按图层矩形铺开_四象限与反相与通道都对() {
         channel: dhampir_core::timeline::layer::MaskChannel::Alpha,
         invert: false,
     }));
-    assert!(kept(&as_alpha, 24, 8) && alpha_at(&as_alpha, 24, 8) == 255, "这张图 alpha 全满 ⇒ 按 alpha 看应当一个像素都不切（精确 255）");
+    assert!(
+        kept(&as_alpha, 24, 8) && alpha_at(&as_alpha, 24, 8) == 255,
+        "这张图 alpha 全满 ⇒ 按 alpha 看应当一个像素都不切（精确 255）"
+    );
     let as_luma = render_with(Some(MaskInput {
         view: &luma_view,
         channel: dhampir_core::timeline::layer::MaskChannel::Luminance,
         invert: false,
     }));
-    assert!(kept(&as_luma, 8, 8), "按亮度看：左上白 ⇒ 留下，得到 {}", alpha_at(&as_luma, 8, 8));
-    assert!(cut(&as_luma, 24, 8), "按亮度看：右上黑 ⇒ 切掉，得到 {}", alpha_at(&as_luma, 24, 8));
+    assert!(
+        kept(&as_luma, 8, 8),
+        "按亮度看：左上白 ⇒ 留下，得到 {}",
+        alpha_at(&as_luma, 8, 8)
+    );
+    assert!(
+        cut(&as_luma, 24, 8),
+        "按亮度看：右上黑 ⇒ 切掉，得到 {}",
+        alpha_at(&as_luma, 24, 8)
+    );
 }
 
 /// 造一张 2×2 的纹理（行优先：`[左上, 右上, 左下, 右下]`）。
 fn pixels_2x2(ctx: &GpuContext, texels: [[u8; 4]; 4], label: &str) -> wgpu::Texture {
     let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
-        size: wgpu::Extent3d { width: 2, height: 2, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: 2,
+            height: 2,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -809,7 +1072,11 @@ fn pixels_2x2(ctx: &GpuContext, texels: [[u8; 4]; 4], label: &str) -> wgpu::Text
             bytes_per_row: Some(8),
             rows_per_image: Some(2),
         },
-        wgpu::Extent3d { width: 2, height: 2, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width: 2,
+            height: 2,
+            depth_or_array_layers: 1,
+        },
     );
     texture
 }

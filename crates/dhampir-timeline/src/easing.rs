@@ -75,7 +75,9 @@ pub enum EasingForm {
     ///
     /// 值**允许在 [0,1] 之外**（CSS 里 `linear(0, 1.2 50%, 1)` 是合法的过冲写法），
     /// 所以这里不做值域校验 —— 只校验位置。
-    LinearStops { stops: Vec<(f32, f32)> },
+    LinearStops {
+        stops: Vec<(f32, f32)>,
+    },
 }
 
 /// 解析失败的原因。**分类**而不是一句话：调用方要能按类别决定怎么处置。
@@ -159,13 +161,13 @@ pub fn parse(text: &str) -> Result<EasingForm, EasingError> {
             return Ok(EasingForm::Steps {
                 count: 1,
                 position: StepPosition::JumpStart,
-            })
+            });
         }
         "step-end" => {
             return Ok(EasingForm::Steps {
                 count: 1,
                 position: StepPosition::JumpEnd,
-            })
+            });
         }
         _ => {}
     }
@@ -478,23 +480,41 @@ mod tests {
     fn linear_断点表按位置线性插值() {
         // `linear(0, 0.25 75%, 1)` ⇒ 断点 (0,0) (0.75,0.25) (1,1)。
         let form = parse("linear(0, 0.25 75%, 1)").expect("能解析");
-        assert_eq!(form, EasingForm::LinearStops { stops: vec![(0.0, 0.0), (0.75, 0.25), (1.0, 1.0)] });
+        assert_eq!(
+            form,
+            EasingForm::LinearStops {
+                stops: vec![(0.0, 0.0), (0.75, 0.25), (1.0, 1.0)]
+            }
+        );
         assert!((form.apply(0.0) - 0.0).abs() < 1e-6);
         assert!((form.apply(0.75) - 0.25).abs() < 1e-6, "断点上的值应当精确");
         assert!((form.apply(1.0) - 1.0).abs() < 1e-6);
         // 0.5 落在第一段 (0,0)→(0.75,0.25)：0 + 0.25 × (0.5/0.75) = 1/6。
-        assert!((form.apply(0.5) - 1.0 / 6.0).abs() < 1e-5, "得到 {}", form.apply(0.5));
+        assert!(
+            (form.apply(0.5) - 1.0 / 6.0).abs() < 1e-5,
+            "得到 {}",
+            form.apply(0.5)
+        );
     }
 
     #[test]
     fn linear_没写位置的那些均匀铺开() {
         let form = parse("linear(0, 0.5, 1)").expect("能解析");
-        assert_eq!(form, EasingForm::LinearStops { stops: vec![(0.0, 0.0), (0.5, 0.5), (1.0, 1.0)] });
+        assert_eq!(
+            form,
+            EasingForm::LinearStops {
+                stops: vec![(0.0, 0.0), (0.5, 0.5), (1.0, 1.0)]
+            }
+        );
         assert!((form.apply(0.25) - 0.25).abs() < 1e-6);
         // 位置也可以只写中间那个：`linear(0, 1 25%, 0)` ⇒ (0,0) (0.25,1) (1,0)
         let spike = parse("linear(0, 1 25%, 0)").expect("能解析");
         assert!((spike.apply(0.25) - 1.0).abs() < 1e-6);
-        assert!((spike.apply(0.625) - 0.5).abs() < 1e-6, "得到 {}", spike.apply(0.625));
+        assert!(
+            (spike.apply(0.625) - 0.5).abs() < 1e-6,
+            "得到 {}",
+            spike.apply(0.625)
+        );
     }
 
     #[test]
@@ -502,7 +522,10 @@ mod tests {
         // 值越过 1 是合法的 CSS 写法（过冲），不该被拦。
         let overshoot = parse("linear(0, 1.2 50%, 1)").expect("能解析");
         assert!((overshoot.apply(0.5) - 1.2).abs() < 1e-6);
-        assert!(parse("linear(0, 1 50%, 1 10%)").is_err(), "位置递减应当报错");
+        assert!(
+            parse("linear(0, 1 50%, 1 10%)").is_err(),
+            "位置递减应当报错"
+        );
         assert!(parse("linear(0, 1 150%)").is_err(), "位置越界应当报错");
         assert!(parse("linear(0)").is_err(), "单断点应当报错");
     }
@@ -511,87 +534,100 @@ mod tests {
         parse(text).unwrap_or_else(|error| panic!("{text} 应当能解析：{error}"))
     }
 
-
-/// 与**浏览器原生缓动**的逐值对照（阶段 1-B 的判据）。
-///
-/// 数据不是本仓算出来的：它由 `web/easing-probe.html` 在**真实浏览器**里采集，
-/// 经 `scripts/easing-reference.mjs` 落到 `target/easing-reference.json`。
-/// 采集必须在普通终端里跑 —— 本仓的 agent 会话起不了浏览器。
-///
-/// # 为什么是 `#[ignore]`
-///
-/// 这份数据要本机上的东西（浏览器），与仓库里那些 ignored 测试同一个理由。
-/// **不在空文件集上通过**：读不到数据就**报错退出**，不假装对过了。
-///
-/// # 两个数组各是什么（别比错）
-///
-/// * `values` —— 由 `opacity` 采出来。**浏览器会把 opacity 夹到 [0,1]**，
-///   所以它对应 `apply(t).clamp(0,1)`；
-/// * `unclamped` —— 由 `translateX` 除以位移量采出来，**不被夹**，
-///   所以它对应 `apply(t)` 本身。过冲（`back_out` / y 越界的贝塞尔）只能在这里看出来。
-#[test]
-#[ignore = "需要浏览器采到的 target/easing-reference.json（先跑 node scripts/easing-reference.mjs）"]
-fn 与浏览器原生缓动逐值对得上() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("target")
-        .join("easing-reference.json");
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|error| {
-        panic!(
-            "读不到 {}：{error}\n先在普通终端里跑：node scripts/easing-reference.mjs",
-            path.display()
-        )
-    });
-    let data: serde_json::Value = serde_json::from_str(&text).expect("参考数据应当是 JSON 对象");
-    let table = data
-        .as_object()
-        .unwrap_or_else(|| panic!("参考数据的顶层应当是对象（每个缓动串一项）"));
-
-    // 只有"浏览器认了的串"才可比；认不得的（error 项）跳过但要数出来。
-    let mut compared = 0usize;
-    let mut refused = 0usize;
-    let mut worst: (f32, String) = (0.0, String::new());
-    for (easing, entry) in table {
-        if entry.get("error").is_some() {
-            refused += 1;
-            println!("浏览器不认这个串，跳过：{easing}");
-            continue;
-        }
-        let form = parse(easing).unwrap_or_else(|error| {
-            panic!("浏览器认了 {easing}，本仓却不认：{error}（这正是转译会踩的坑）")
+    /// 与**浏览器原生缓动**的逐值对照（阶段 1-B 的判据）。
+    ///
+    /// 数据不是本仓算出来的：它由 `web/easing-probe.html` 在**真实浏览器**里采集，
+    /// 经 `scripts/easing-reference.mjs` 落到 `target/easing-reference.json`。
+    /// 采集必须在普通终端里跑 —— 本仓的 agent 会话起不了浏览器。
+    ///
+    /// # 为什么是 `#[ignore]`
+    ///
+    /// 这份数据要本机上的东西（浏览器），与仓库里那些 ignored 测试同一个理由。
+    /// **不在空文件集上通过**：读不到数据就**报错退出**，不假装对过了。
+    ///
+    /// # 两个数组各是什么（别比错）
+    ///
+    /// * `values` —— 由 `opacity` 采出来。**浏览器会把 opacity 夹到 [0,1]**，
+    ///   所以它对应 `apply(t).clamp(0,1)`；
+    /// * `unclamped` —— 由 `translateX` 除以位移量采出来，**不被夹**，
+    ///   所以它对应 `apply(t)` 本身。过冲（`back_out` / y 越界的贝塞尔）只能在这里看出来。
+    #[test]
+    #[ignore = "需要浏览器采到的 target/easing-reference.json（先跑 node scripts/easing-reference.mjs）"]
+    fn 与浏览器原生缓动逐值对得上() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("target")
+            .join("easing-reference.json");
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!(
+                "读不到 {}：{error}\n先在普通终端里跑：node scripts/easing-reference.mjs",
+                path.display()
+            )
         });
-        for key in ["values", "unclamped"] {
-            let samples = entry
-                .get(key)
-                .and_then(|value| value.as_array())
-                .unwrap_or_else(|| panic!("{easing} 的 {key} 应当是数组"));
-            let count = samples.len();
-            for (index, sample) in samples.iter().enumerate() {
-                let Some(expected) = sample.as_f64() else {
-                    continue; // 采集时是 null（浏览器没给出这个点）——不猜
-                };
-                let t = index as f32 / (count - 1) as f32;
-                let mine = form.apply(t);
-                let mine = if key == "values" { mine.clamp(0.0, 1.0) } else { mine };
-                let delta = (mine - expected as f32).abs();
-                // 浏览器给的是 getComputedStyle 的十进制文本，只到小数点后几位，
-                // 所以容差按"读数的分辨率"取，不按浮点误差取。
-                let tolerance = if key == "values" { 2e-3 } else { 5e-3 };
-                if delta > worst.0 {
-                    worst = (delta, format!("{easing} @ t={t:.2}（{key}）：浏览器 {expected}，本仓 {mine}"));
+        let data: serde_json::Value =
+            serde_json::from_str(&text).expect("参考数据应当是 JSON 对象");
+        let table = data
+            .as_object()
+            .unwrap_or_else(|| panic!("参考数据的顶层应当是对象（每个缓动串一项）"));
+
+        // 只有"浏览器认了的串"才可比；认不得的（error 项）跳过但要数出来。
+        let mut compared = 0usize;
+        let mut refused = 0usize;
+        let mut worst: (f32, String) = (0.0, String::new());
+        for (easing, entry) in table {
+            if entry.get("error").is_some() {
+                refused += 1;
+                println!("浏览器不认这个串，跳过：{easing}");
+                continue;
+            }
+            let form = parse(easing).unwrap_or_else(|error| {
+                panic!("浏览器认了 {easing}，本仓却不认：{error}（这正是转译会踩的坑）")
+            });
+            for key in ["values", "unclamped"] {
+                let samples = entry
+                    .get(key)
+                    .and_then(|value| value.as_array())
+                    .unwrap_or_else(|| panic!("{easing} 的 {key} 应当是数组"));
+                let count = samples.len();
+                for (index, sample) in samples.iter().enumerate() {
+                    let Some(expected) = sample.as_f64() else {
+                        continue; // 采集时是 null（浏览器没给出这个点）——不猜
+                    };
+                    let t = index as f32 / (count - 1) as f32;
+                    let mine = form.apply(t);
+                    let mine = if key == "values" {
+                        mine.clamp(0.0, 1.0)
+                    } else {
+                        mine
+                    };
+                    let delta = (mine - expected as f32).abs();
+                    // 浏览器给的是 getComputedStyle 的十进制文本，只到小数点后几位，
+                    // 所以容差按"读数的分辨率"取，不按浮点误差取。
+                    let tolerance = if key == "values" { 2e-3 } else { 5e-3 };
+                    if delta > worst.0 {
+                        worst = (
+                            delta,
+                            format!("{easing} @ t={t:.2}（{key}）：浏览器 {expected}，本仓 {mine}"),
+                        );
+                    }
+                    assert!(
+                        delta <= tolerance,
+                        "{easing} 在 t={t:.2} 对不上（{key}）：浏览器 {expected}，本仓 {mine}，差 {delta}",
+                    );
+                    compared += 1;
                 }
-                assert!(
-                    delta <= tolerance,
-                    "{easing} 在 t={t:.2} 对不上（{key}）：浏览器 {expected}，本仓 {mine}，差 {delta}",
-                );
-                compared += 1;
             }
         }
+        assert!(
+            compared >= 100,
+            "比对点太少（{compared}）——参考数据不完整，不许当它通过"
+        );
+        println!(
+            "逐值对照通过：{compared} 个点，浏览器拒绝 {refused} 个串，最大偏差 {:.6}（{}）",
+            worst.0, worst.1
+        );
     }
-    assert!(compared >= 100, "比对点太少（{compared}）——参考数据不完整，不许当它通过");
-    println!("逐值对照通过：{compared} 个点，浏览器拒绝 {refused} 个串，最大偏差 {:.6}（{}）", worst.0, worst.1);
-}
 
     #[test]
     fn 关键字各就各位() {
@@ -606,11 +642,17 @@ fn 与浏览器原生缓动逐值对得上() {
         assert_eq!(form("ease-in-out"), cubic(CSS_EASE_IN_OUT));
         assert_eq!(
             form("step-start"),
-            EasingForm::Steps { count: 1, position: StepPosition::JumpStart }
+            EasingForm::Steps {
+                count: 1,
+                position: StepPosition::JumpStart
+            }
         );
         assert_eq!(
             form("step-end"),
-            EasingForm::Steps { count: 1, position: StepPosition::JumpEnd }
+            EasingForm::Steps {
+                count: 1,
+                position: StepPosition::JumpEnd
+            }
         );
     }
 
@@ -648,7 +690,10 @@ fn 与浏览器原生缓动逐值对得上() {
         for step in 0..=20 {
             let t = step as f32 / 20.0;
             let value = identity.apply(t);
-            assert!((value - t).abs() < 1e-4, "cubic-bezier(0,0,1,1) 在 {t} 处应当等于 t，得到 {value}");
+            assert!(
+                (value - t).abs() < 1e-4,
+                "cubic-bezier(0,0,1,1) 在 {t} 处应当等于 t，得到 {value}"
+            );
         }
     }
 
@@ -687,15 +732,26 @@ fn 与浏览器原生缓动逐值对得上() {
             let easing = form(text);
             let start = easing.apply(0.0);
             let end = easing.apply(1.0);
-            assert!((0.0..=1.0).contains(&start), "{text} 在 0 处的输出越界：{start}");
-            assert!((end - 1.0).abs() < 1e-5, "{text} 在 1 处应当是 1，得到 {end}");
+            assert!(
+                (0.0..=1.0).contains(&start),
+                "{text} 在 0 处的输出越界：{start}"
+            );
+            assert!(
+                (end - 1.0).abs() < 1e-5,
+                "{text} 在 1 处应当是 1，得到 {end}"
+            );
         }
     }
 
     #[test]
     fn 不过冲的缓动单调不减() {
         // y 的控制点落在 [0,1] 之内时曲线单调；这是单调与过冲的分界。
-        for text in ["linear", "ease", "ease-in-out", "cubic-bezier(0.2,0.9,0.8,0.1)"] {
+        for text in [
+            "linear",
+            "ease",
+            "ease-in-out",
+            "cubic-bezier(0.2,0.9,0.8,0.1)",
+        ] {
             let easing = form(text);
             let mut previous = f32::NEG_INFINITY;
             for step in 0..=100 {
@@ -747,7 +803,10 @@ fn 与浏览器原生缓动逐值对得上() {
             let easing = form(text);
             for step in -5..=25 {
                 let value = easing.apply(step as f32 / 20.0);
-                assert!((0.0..=1.0).contains(&value), "{text} 在越界输入处给出了 {value}");
+                assert!(
+                    (0.0..=1.0).contains(&value),
+                    "{text} 在越界输入处给出了 {value}"
+                );
             }
         }
     }
@@ -767,16 +826,40 @@ fn 与浏览器原生缓动逐值对得上() {
         // `linear()` 第 37 轮起**是支持的** —— 这条旧断言正是那时过期的。
         // 现在 `Unsupported` 这个分类**暂时没有用户**（CSS 定义的缓动形式本仓都有了），
         // 但留着它：下一版 CSS 加新形式时，"认识但这一版不做"要能表达出来。
-        assert!(parse("linear(0, 0.5, 1)").is_ok(), "linear() 现在应当能解析");
+        assert!(
+            parse("linear(0, 0.5, 1)").is_ok(),
+            "linear() 现在应当能解析"
+        );
         // 真的画不出来的形式仍然归"不认识"。
-        assert!(matches!(parse("wobble(1, 2)"), Err(EasingError::Unknown(_))));
-        assert!(matches!(parse("cubic-bezier(1,0,0)"), Err(EasingError::Malformed(_))));
-        assert!(matches!(parse("cubic-bezier(1,,0,0)"), Err(EasingError::Malformed(_))));
-        assert!(matches!(parse("cubic-bezier(1.2,0,0,1)"), Err(EasingError::OutOfRange(_))));
+        assert!(matches!(
+            parse("wobble(1, 2)"),
+            Err(EasingError::Unknown(_))
+        ));
+        assert!(matches!(
+            parse("cubic-bezier(1,0,0)"),
+            Err(EasingError::Malformed(_))
+        ));
+        assert!(matches!(
+            parse("cubic-bezier(1,,0,0)"),
+            Err(EasingError::Malformed(_))
+        ));
+        assert!(matches!(
+            parse("cubic-bezier(1.2,0,0,1)"),
+            Err(EasingError::OutOfRange(_))
+        ));
         assert!(matches!(parse("steps(0)"), Err(EasingError::Malformed(_))));
-        assert!(matches!(parse("steps(1, jump-none)"), Err(EasingError::Malformed(_))));
-        assert!(matches!(parse("steps(4, sideways)"), Err(EasingError::Malformed(_))));
-        assert!(matches!(parse("steps(4, end, extra)"), Err(EasingError::Malformed(_))));
+        assert!(matches!(
+            parse("steps(1, jump-none)"),
+            Err(EasingError::Malformed(_))
+        ));
+        assert!(matches!(
+            parse("steps(4, sideways)"),
+            Err(EasingError::Malformed(_))
+        ));
+        assert!(matches!(
+            parse("steps(4, end, extra)"),
+            Err(EasingError::Malformed(_))
+        ));
         assert_eq!(parse("bounce").unwrap_err().code(), "unknown_easing");
     }
 }

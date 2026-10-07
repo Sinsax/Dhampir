@@ -133,7 +133,10 @@ pub fn flatten_path(data: &str) -> Result<Vec<[f32; 2]>, String> {
                 let values = take(4)?;
                 // 第一个控制点是**上一个三次控制点关于当前点的镜像**（前面不是 C/S 时就取当前点）。
                 let c1 = match last_cubic_control {
-                    Some(previous) => [2.0 * current[0] - previous[0], 2.0 * current[1] - previous[1]],
+                    Some(previous) => [
+                        2.0 * current[0] - previous[0],
+                        2.0 * current[1] - previous[1],
+                    ],
                     None => current,
                 };
                 let c2 = offset(values[0], values[1]);
@@ -149,7 +152,10 @@ pub fn flatten_path(data: &str) -> Result<Vec<[f32; 2]>, String> {
             'T' => {
                 let values = take(2)?;
                 let control = match last_quadratic_control {
-                    Some(previous) => [2.0 * current[0] - previous[0], 2.0 * current[1] - previous[1]],
+                    Some(previous) => [
+                        2.0 * current[0] - previous[0],
+                        2.0 * current[1] - previous[1],
+                    ],
                     None => current,
                 };
                 let end = offset(values[0], values[1]);
@@ -199,7 +205,9 @@ pub fn flatten_path(data: &str) -> Result<Vec<[f32; 2]>, String> {
 fn unsupported(letter: char) -> String {
     let mut text = String::from("不支持路径命令 ");
     text.push(letter);
-    text.push_str("（本仓只做 M / L / H / V / C / Q / Z；弧 A 与光滑续接 S/T 明说不支持，不猜近似）");
+    text.push_str(
+        "（本仓只做 M / L / H / V / C / Q / Z；弧 A 与光滑续接 S/T 明说不支持，不猜近似）",
+    );
     text
 }
 
@@ -252,7 +260,11 @@ fn arc_points(
     let angle = |ux: f32, uy: f32, vx: f32, vy: f32| -> f32 {
         let dot = ux * vx + uy * vy;
         let len = ((ux * ux + uy * uy) * (vx * vx + vy * vy)).sqrt();
-        let mut value = if len == 0.0 { 0.0 } else { (dot / len).clamp(-1.0, 1.0).acos() };
+        let mut value = if len == 0.0 {
+            0.0
+        } else {
+            (dot / len).clamp(-1.0, 1.0).acos()
+        };
         if ux * vy - uy * vx < 0.0 {
             value = -value;
         }
@@ -373,9 +385,16 @@ mod tests {
     #[test]
     fn 三次曲线的终点对得上而且点数确定() {
         let points = flatten_path("M 0 0 C 0 10 10 10 10 0").expect("能解析");
-        assert_eq!(points.len(), 1 + CUBIC_SEGMENTS as usize, "固定段数 ⇒ 点数可预期");
+        assert_eq!(
+            points.len(),
+            1 + CUBIC_SEGMENTS as usize,
+            "固定段数 ⇒ 点数可预期"
+        );
         let last = points[points.len() - 1];
-        assert!((last[0] - 10.0).abs() < 1e-4 && last[1].abs() < 1e-4, "终点应当是 (10, 0)");
+        assert!(
+            (last[0] - 10.0).abs() < 1e-4 && last[1].abs() < 1e-4,
+            "终点应当是 (10, 0)"
+        );
         let middle = points[CUBIC_SEGMENTS as usize / 2];
         assert!(middle[1] > 1.0, "中点应当被曲线抬起来，得到 {middle:?}");
     }
@@ -435,7 +454,10 @@ mod tests {
         assert!(a * b < 0.0, "两种 sweep 应当往相反方向鼓：{a} vs {b}");
         for point in clockwise.iter().chain(counter.iter()) {
             let distance = ((point[0] - 5.0).powi(2) + point[1].powi(2)).sqrt();
-            assert!((distance - 5.0).abs() < 1e-2, "点 {point:?} 应当在半径 5 的圆上");
+            assert!(
+                (distance - 5.0).abs() < 1e-2,
+                "点 {point:?} 应当在半径 5 的圆上"
+            );
         }
     }
 
@@ -443,7 +465,8 @@ mod tests {
     fn 光滑续接与显式写出控制点等价() {
         // C 之后用 S 镜像 —— 与把镜像出来的控制点**显式写出来**必须完全一致。
         let smooth = flatten_path("M 0 0 C 0 10 10 10 10 0 S 20 -10 20 0").expect("能解析");
-        let explicit = flatten_path("M 0 0 C 0 10 10 10 10 0 C 10 -10 20 -10 20 0").expect("能解析");
+        let explicit =
+            flatten_path("M 0 0 C 0 10 10 10 10 0 C 10 -10 20 -10 20 0").expect("能解析");
         assert_eq!(smooth.len(), explicit.len());
         for (a, b) in smooth.iter().zip(explicit.iter()) {
             assert!(

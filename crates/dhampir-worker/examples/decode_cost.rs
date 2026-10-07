@@ -43,7 +43,7 @@ use std::time::Instant;
 
 use dhampir_core::compose;
 use dhampir_core::overlay::SubtitleTable;
-use dhampir_core::timeline::project::{load_doc, ProjectDoc};
+use dhampir_core::timeline::project::{ProjectDoc, load_doc};
 use dhampir_worker::pipeline::{
     AudioMode, RenderPlan, SourceTable, frame_bytes, render_frames_png_run,
 };
@@ -105,7 +105,11 @@ fn png_encode_stats(frames: &[dhampir_worker::pipeline::FramePng], sample: usize
 }
 
 /// 量一个工程。
-fn measure(project: &str, limit: Option<i64>, png_sample: usize) -> Result<serde_json::Value, String> {
+fn measure(
+    project: &str,
+    limit: Option<i64>,
+    png_sample: usize,
+) -> Result<serde_json::Value, String> {
     let root = repo_root();
     let path = root.join(project);
     let text = std::fs::read_to_string(&path).map_err(|e| format!("读不了 {project}：{e}"))?;
@@ -196,7 +200,11 @@ fn measure(project: &str, limit: Option<i64>, png_sample: usize) -> Result<serde
 
 /// 商；分母为 0 时给 0（**不是** Infinity，也不是 panic）。
 fn ratio(total: f64, count: usize) -> f64 {
-    if count == 0 { 0.0 } else { total / count as f64 }
+    if count == 0 {
+        0.0
+    } else {
+        total / count as f64
+    }
 }
 
 fn round2(value: f64) -> f64 {
@@ -227,7 +235,10 @@ fn main() {
             }
             "--png-sample" => {
                 index += 1;
-                match args.get(index).and_then(|value| value.parse::<usize>().ok()) {
+                match args
+                    .get(index)
+                    .and_then(|value| value.parse::<usize>().ok())
+                {
                     Some(count) => png_sample = count,
                     None => {
                         eprintln!("--png-sample 要一个整数");

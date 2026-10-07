@@ -43,7 +43,6 @@
 //!
 //! **不渲染。** 本模块只出视频。有音轨就在 stderr 明说，不给一份「看起来很成功」的哑片。
 
-
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::io::{BufReader, Read, Write};
@@ -255,7 +254,11 @@ impl OffscreenFrameSink {
     pub fn new(device: &wgpu::Device, width: u32, height: u32, label: &'static str) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -445,6 +448,11 @@ pub fn encoder_fps(timebase: &TimebaseDto) -> Result<f64, String> {
         return Err("工程的 timebase 分母为 0".to_string());
     }
     let fps = f64::from(timebase.num) / f64::from(timebase.den);
+    // ⚠️ `clippy::neg_cmp_op_on_partial_ord` 在这里**是误报**：`!(fps > 0.0)` 与
+    // `fps <= 0.0` 在 NaN 上不等价 —— `NaN <= 0.0` 是 false，会让 NaN 帧率**溜过去**，
+    // 而 NaN 一旦进了编码器参数，症状是 ffmpeg 报一句看不懂的错而不是这条人话错误。
+    // 所以保留原判据，用 allow 说明。
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
     if !(fps > 0.0) {
         return Err(format!(
             "工程的 timebase 不是正帧率：{}/{}",
@@ -831,7 +839,6 @@ impl SourcePool {
     }
 }
 
-
 /// 把**动图解码器读出来的延迟表**并进资产时间表（方案 §8.3-2「时间真值归一」）。
 ///
 /// # 为什么在**建计划**的时候就要做
@@ -971,7 +978,6 @@ impl<'a> DecodingSources<'a> {
         format!("frame[{}].source[{}]", self.current_frame, source)
     }
 
-
     /// 需要时才把这一路**当动图**加载：读文件头认 magic，是动图就整段解码。
     ///
     /// 返回「现在动图缓存里有它」。三条规矩：
@@ -997,12 +1003,10 @@ impl<'a> DecodingSources<'a> {
         };
         let mut head = [0u8; 12];
         let is_animation = match std::fs::File::open(&file) {
-            Ok(mut handle) => {
-                match handle.read(&mut head) {
-                    Ok(read) => dhampir_core::animation::detect_format(&head[..read]).is_some(),
-                    Err(_) => false,
-                }
-            }
+            Ok(mut handle) => match handle.read(&mut head) {
+                Ok(read) => dhampir_core::animation::detect_format(&head[..read]).is_some(),
+                Err(_) => false,
+            },
             Err(_) => false,
         };
         if !is_animation {
@@ -1026,7 +1030,8 @@ impl<'a> DecodingSources<'a> {
                 let path = self.path_of(source);
                 // 记 issue 而不是让它掉到 ffmpeg 那条路：ffmpeg 对着一张**坏掉的动图**
                 // 的报错（"没有视频流"）会把病因指错方向。
-                self.log.record("animation_decode_failed", &path, error.to_string());
+                self.log
+                    .record("animation_decode_failed", &path, error.to_string());
                 return false;
             }
         };
@@ -1037,7 +1042,8 @@ impl<'a> DecodingSources<'a> {
             Ok(()) => true,
             Err(error) => {
                 let path = self.path_of(source);
-                self.log.record("animation_upload_failed", &path, error.to_string());
+                self.log
+                    .record("animation_upload_failed", &path, error.to_string());
                 false
             }
         }
@@ -1443,7 +1449,9 @@ fn write_silence(
 /// 每段的代价是"从素材头解到这段末尾"（而不是只解这一段），
 /// 这个代价量在 `plan/t6-evidence.md` 里 —— 别把它当成"不要钱"。
 fn extract_segment(segment: &AudioSegment, out: &mut impl Write) -> Result<i64, String> {
-    extract_segment_samples(segment, |chunk| out.write_all(chunk).map_err(|e| e.to_string()))
+    extract_segment_samples(segment, |chunk| {
+        out.write_all(chunk).map_err(|e| e.to_string())
+    })
 }
 
 /// 与 [`extract_segment`] 相同，但把每块 PCM 交给回调而不是自己写文件。
@@ -1821,8 +1829,9 @@ pub fn render_plan(
         // 每块一个线程、一套 GPU 上下文、一个 ffmpeg 进程 —— 与 参照实现 的
         // `render/pipeline.rs:173`（`parallelism` 块各一个 `thread::spawn`）同一个形状。
         // 本仓先前是单线程逐帧 `submit` + 同步读回 + 同步写管道，三者完全不重叠。
-        let bounds: Vec<(Frame, Frame)> =
-            (0..workers).map(|index| chunk_bounds(plan.from, plan.to, workers, index)).collect();
+        let bounds: Vec<(Frame, Frame)> = (0..workers)
+            .map(|index| chunk_bounds(plan.from, plan.to, workers, index))
+            .collect();
         let parts: Vec<PathBuf> = (0..workers)
             .map(|index| sidecar_path(plan.output, &format!("chunk_{index}.mp4")))
             .collect();
@@ -1840,9 +1849,7 @@ pub fn render_plan(
                     let done = &done;
                     scope.spawn(move || {
                         let mut local = |_: usize, _: usize| {
-                            let seen = done
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                                + 1;
+                            let seen = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                             if let Ok(mut callback) = progress.lock() {
                                 (**callback)(seen, total);
                             }
@@ -1853,7 +1860,9 @@ pub fn render_plan(
                 .collect();
             for handle in handles {
                 outcomes.push(
-                    handle.join().unwrap_or_else(|_| Err("分块线程 panic".to_string())),
+                    handle
+                        .join()
+                        .unwrap_or_else(|_| Err("分块线程 panic".to_string())),
                 );
             }
         });
@@ -1968,7 +1977,9 @@ struct RangeReport {
 /// 要速度就显式开。
 fn resolve_workers(plan: &RenderPlan, total: usize) -> usize {
     let requested = plan.chunk_workers;
-    let available = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let available = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
     // **自动档的上限是 4，不是核数。**
     //
     // 实测（16 核，1920x1080 60fps，2000 帧）：
@@ -1984,7 +1995,11 @@ fn resolve_workers(plan: &RenderPlan, total: usize) -> usize {
     // 只有**一块 GPU**：每个 worker 各开一套 wgpu 上下文、各自同步读回，
     // 开到 5 个以上就开始互相抢设备，"并行"变成"排队 + 额外的上下文开销"。
     // 所以自动档按 4 封顶 —— 拿核数当上限会在这台机器上白白慢 22%。
-    let workers = if requested == 0 { available.min(4) } else { requested };
+    let workers = if requested == 0 {
+        available.min(4)
+    } else {
+        requested
+    };
     // 帧数比 worker 还少时多开的线程只会互相抢设备、不会更快。
     workers.min(total).max(1)
 }
@@ -2024,7 +2039,12 @@ fn render_range(
     let renderer = TimelineRenderer::new(&ctx.device, WORK_FORMAT);
 
     // 走 `io::FrameSink` 在 native 侧的形态：纹理归它、生命周期 = 一次渲染运行（与原来逐值一致）。
-    let target = OffscreenFrameSink::new(&ctx.device, plan.width, plan.height, "dhampir pipeline target");
+    let target = OffscreenFrameSink::new(
+        &ctx.device,
+        plan.width,
+        plan.height,
+        "dhampir pipeline target",
+    );
 
     // **先把这一趟要哪些 (源, 源内帧) 算出来**：池子靠它决定"读到的帧要不要留下"。
     // 这一步是纯的、不碰 GPU 也不碰解码器，所以它失败不了，也不会让出片慢多少。
@@ -2052,9 +2072,11 @@ fn render_range(
             .filter(|layer| !layer.is_adjustment)
             .count();
 
-        let mut command = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("dhampir pipeline encoder"),
-        });
+        let mut command = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("dhampir pipeline encoder"),
+            });
         let drawn = renderer.render_frame_at(
             &ctx.device,
             &ctx.queue,
@@ -2239,10 +2261,7 @@ pub fn render_frames_png(plan: &RenderPlan, frames: &[Frame]) -> Result<Vec<Fram
 }
 
 /// 与 [`render_frames_png`] 同一条路，只是把**解码侧的账**也交出来。
-pub fn render_frames_png_run(
-    plan: &RenderPlan,
-    frames: &[Frame],
-) -> Result<PngRun, String> {
+pub fn render_frames_png_run(plan: &RenderPlan, frames: &[Frame]) -> Result<PngRun, String> {
     if plan.width == 0 || plan.height == 0 {
         return Err(format!("输出尺寸不合法：{}x{}", plan.width, plan.height));
     }
@@ -2255,15 +2274,13 @@ pub fn render_frames_png_run(
     let (ctx, _init) =
         open_leg(NATIVE_BACKENDS).map_err(|error| format!("拿不到 GPU 上下文：{error}"))?;
     let renderer = TimelineRenderer::new(&ctx.device, WORK_FORMAT);
-    let target = OffscreenFrameSink::new(&ctx.device, plan.width, plan.height, "dhampir frame target");
+    let target =
+        OffscreenFrameSink::new(&ctx.device, plan.width, plan.height, "dhampir frame target");
     // 与出片那条路**同一条**规矩：需求先算出来，再交给池子。
     // 一次只要一帧时需求就是那一帧，池子于是退化成"直接读过去、只留那一帧"。
     // 取 min/max 而不是 first/last：调用方给的帧号不保证有序，
     // 而 `from..=to` 反着给会**悄悄变成空集**（于是池子不留任何帧）。
-    let demand = match (
-        frames.iter().copied().min(),
-        frames.iter().copied().max(),
-    ) {
+    let demand = match (frames.iter().copied().min(), frames.iter().copied().max()) {
         (Some(first), Some(last)) => demand_of(&request_schedule(
             plan.timeline,
             plan.asset_timebases,
@@ -2281,17 +2298,19 @@ pub fn render_frames_png_run(
         .to_path_buf();
     std::fs::create_dir_all(&dir).map_err(|e| format!("建不了目录 {}：{e}", dir.display()))?;
 
-    let mut painter = OverlayPainter::new(plan.font_file)
-        .with_fonts(plan.font_bold_file, plan.font_dir);
+    let mut painter =
+        OverlayPainter::new(plan.font_file).with_fonts(plan.font_bold_file, plan.font_dir);
     let mut written = Vec::new();
     for frame in frames {
         let frame = *frame;
         sources.begin_frame(frame);
         let composite =
             compose::evaluate_v2_with_assets(plan.timeline, frame, Some(plan.asset_timebases));
-        let mut command = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("dhampir frame encoder"),
-        });
+        let mut command = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("dhampir frame encoder"),
+            });
         renderer.render_frame(
             &ctx.device,
             &ctx.queue,
@@ -2364,12 +2383,17 @@ mod tests {
             let to = from + total as i64 - 1;
             for workers in 1..=8usize {
                 let workers = workers.min(total);
-                let parts: Vec<(Frame, Frame)> =
-                    (0..workers).map(|i| chunk_bounds(from, to, workers, i)).collect();
+                let parts: Vec<(Frame, Frame)> = (0..workers)
+                    .map(|i| chunk_bounds(from, to, workers, i))
+                    .collect();
                 // 第一块从头开始
                 assert_eq!(parts[0].0, from, "total={total} workers={workers} 起点不对");
                 // 最后一块到尾结束
-                assert_eq!(parts[workers - 1].1, to, "total={total} workers={workers} 终点不对");
+                assert_eq!(
+                    parts[workers - 1].1,
+                    to,
+                    "total={total} workers={workers} 终点不对"
+                );
                 // 首尾相接、不重不漏
                 for pair in parts.windows(2) {
                     assert_eq!(
@@ -2382,7 +2406,10 @@ mod tests {
                 }
                 // 帧数合计必须等于总数
                 let counted: i64 = parts.iter().map(|(a, b)| b - a + 1).sum();
-                assert_eq!(counted, total as i64, "total={total} workers={workers} 帧数对不上");
+                assert_eq!(
+                    counted, total as i64,
+                    "total={total} workers={workers} 帧数对不上"
+                );
             }
         }
     }

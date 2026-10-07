@@ -22,7 +22,7 @@ use dhampir_timeline::schema::{EffectPipeline, EffectSpace, EffectSpec, WindowDe
 /// 有一条测试把两者钉在一起。
 pub const GAUSSIAN_BLUR: EffectSpec = EffectSpec {
     kind: "gaussian_blur",
-    params: &[("radius", 0.0, crate::render::BLUR_MAX_RADIUS as f32)],    // **这个 space 是「默认空间」，不是唯一真相。**
+    params: &[("radius", 0.0, crate::render::BLUR_MAX_RADIUS as f32)], // **这个 space 是「默认空间」，不是唯一真相。**
     //
     // 同一个 kind 在两个空间里都会出现：实拍片段上的 gaussian_blur 跑在源纹理上
     // （源像素，不换算），调整图层上的同名特效跑在目标尺寸上（文档像素，要换算）。
@@ -38,7 +38,11 @@ pub const GAUSSIAN_BLUR: EffectSpec = EffectSpec {
     space: EffectSpace::Document,
     pipeline: EffectPipeline::SeparableBlur,
     // 瞬时模糊（参照实现 的 blur 事件）：涨 2 帧、满 3 帧、落 5 帧 ≈ 0.33 秒 @30fps。
-    window_default: Some(WindowDefault { attack: 2, hold: 3, release: 5 }),
+    window_default: Some(WindowDefault {
+        attack: 2,
+        hold: 3,
+        release: 5,
+    }),
 };
 
 /// 四个逐像素色彩调整。**同一条管线**，所以这里登记四次、渲染只写一次。
@@ -184,16 +188,28 @@ pub const FLASH: EffectSpec = EffectSpec {
     ],
     space: EffectSpace::Source,
     pipeline: EffectPipeline::ColorMask,
-    window_default: Some(WindowDefault { attack: 1, hold: 1, release: 4 }),
+    window_default: Some(WindowDefault {
+        attack: 1,
+        hold: 1,
+        release: 4,
+    }),
 };
 
 /// 暗角：从中心到边缘逐渐压暗。`amount` 是边缘处的压暗量。
 pub const VIGNETTE: EffectSpec = EffectSpec {
     kind: "vignette",
-    params: &[("amount", 0.0, 1.0), ("radius", 0.1, 2.0), ("softness", 0.0, 1.0)],
+    params: &[
+        ("amount", 0.0, 1.0),
+        ("radius", 0.1, 2.0),
+        ("softness", 0.0, 1.0),
+    ],
     space: EffectSpace::Document,
     pipeline: EffectPipeline::ColorMask,
-    window_default: Some(WindowDefault { attack: 2, hold: 4, release: 6 }),
+    window_default: Some(WindowDefault {
+        attack: 2,
+        hold: 4,
+        release: 6,
+    }),
 };
 
 /// 噪声。`amount` 是叠加强度，`seed` 决定这一份噪声长什么样（**可复现**）。
@@ -205,7 +221,11 @@ pub const NOISE: EffectSpec = EffectSpec {
     params: &[("amount", 0.0, 1.0), ("seed", 0.0, 4096.0)],
     space: EffectSpace::Source,
     pipeline: EffectPipeline::ColorMask,
-    window_default: Some(WindowDefault { attack: 1, hold: 4, release: 4 }),
+    window_default: Some(WindowDefault {
+        attack: 1,
+        hold: 4,
+        release: 4,
+    }),
 };
 
 /// 纯色/渐变覆盖层。`shape` 0=纯色 1=线性渐变 2=径向渐变。
@@ -238,10 +258,18 @@ pub const OVERLAY: EffectSpec = EffectSpec {
 /// 抖动：高频小幅位移。`amount` 是位移幅度（画面宽度的比例），`frequency` 是每秒振荡次数。
 pub const SHAKE: EffectSpec = EffectSpec {
     kind: "shake",
-    params: &[("amount", 0.0, 0.2), ("frequency", 1.0, 60.0), ("seed", 0.0, 4096.0)],
+    params: &[
+        ("amount", 0.0, 0.2),
+        ("frequency", 1.0, 60.0),
+        ("seed", 0.0, 4096.0),
+    ],
     space: EffectSpace::Document,
     pipeline: EffectPipeline::Warp,
-    window_default: Some(WindowDefault { attack: 1, hold: 4, release: 4 }),
+    window_default: Some(WindowDefault {
+        attack: 1,
+        hold: 4,
+        release: 4,
+    }),
 };
 
 /// 缩放弹跳：`amount` 是最大放大倍数（0.1 = 放大 10%）。
@@ -250,7 +278,11 @@ pub const ZOOM_BOUNCE: EffectSpec = EffectSpec {
     params: &[("amount", 0.0, 1.0), ("frequency", 0.5, 30.0)],
     space: EffectSpace::Document,
     pipeline: EffectPipeline::Warp,
-    window_default: Some(WindowDefault { attack: 2, hold: 4, release: 6 }),
+    window_default: Some(WindowDefault {
+        attack: 2,
+        hold: 4,
+        release: 6,
+    }),
 };
 
 /// 脉冲：低频呼吸式缩放，比 zoom_bounce 缓和。
@@ -259,7 +291,11 @@ pub const PULSE: EffectSpec = EffectSpec {
     params: &[("amount", 0.0, 1.0), ("frequency", 0.5, 30.0)],
     space: EffectSpace::Document,
     pipeline: EffectPipeline::Warp,
-    window_default: Some(WindowDefault { attack: 3, hold: 4, release: 5 }),
+    window_default: Some(WindowDefault {
+        attack: 3,
+        hold: 4,
+        release: 5,
+    }),
 };
 
 /// 分屏：把画面沿中线切成两半，各自横移并倾斜。
@@ -267,10 +303,18 @@ pub const PULSE: EffectSpec = EffectSpec {
 /// `offset` 是两半分开的距离（画面宽度的比例），`skew` 是倾斜（度）。
 pub const SPLIT: EffectSpec = EffectSpec {
     kind: "split",
-    params: &[("offset", 0.0, 0.5), ("skew", -45.0, 45.0), ("amount", 0.0, 1.0)],
+    params: &[
+        ("offset", 0.0, 0.5),
+        ("skew", -45.0, 45.0),
+        ("amount", 0.0, 1.0),
+    ],
     space: EffectSpace::Document,
     pipeline: EffectPipeline::Warp,
-    window_default: Some(WindowDefault { attack: 1, hold: 4, release: 4 }),
+    window_default: Some(WindowDefault {
+        attack: 1,
+        hold: 4,
+        release: 4,
+    }),
 };
 
 /// 按类型串查登记项。
@@ -299,9 +343,16 @@ mod tests {
         // 这条是**跨模块的一致性闸**：着色器展开多少抽头，登记表就只准报多大半径。
         // 两边各写一个数，迟早会出现「UI 能拖、后端算不到」。
         let spec = spec_of("gaussian_blur").expect("应当登记了 gaussian_blur");
-        let (_, _, max) = spec.params.iter().find(|(name, _, _)| *name == "radius").expect("应当有 radius");
+        let (_, _, max) = spec
+            .params
+            .iter()
+            .find(|(name, _, _)| *name == "radius")
+            .expect("应当有 radius");
         assert_eq!(*max, crate::render::BLUR_MAX_RADIUS as f32);
-        assert_eq!(crate::render::BLUR_TAPS, 2 * crate::render::BLUR_MAX_RADIUS as usize + 1);
+        assert_eq!(
+            crate::render::BLUR_TAPS,
+            2 * crate::render::BLUR_MAX_RADIUS as usize + 1
+        );
     }
 
     #[test]
@@ -377,7 +428,8 @@ mod tests {
         // 所以这里要求每一项都显式给出，并且管线必须是**已实现**的那种。
         for spec in REGISTRY {
             // 断言它真的有一个明确的空间（枚举只有两个值，这里确认不是靠默认值蒙混）。
-            let space_is_explicit = matches!(spec.space, EffectSpace::Source | EffectSpace::Document);
+            let space_is_explicit =
+                matches!(spec.space, EffectSpace::Source | EffectSpace::Document);
             assert!(space_is_explicit, "{} 没有声明像素空间", spec.kind);
 
             // 管线必须是渲染器真的认的那一种。将来加了枚举变体却没实现时，
@@ -401,7 +453,11 @@ mod tests {
                     let has_param = spec.params.iter().any(|(name, _, _)| {
                         *name == "amount" || *name == "degrees" || *name == "factor"
                     });
-                    assert!(!spec.params.is_empty(), "{} 走 ColorAdjust 却没有参数", spec.kind);
+                    assert!(
+                        !spec.params.is_empty(),
+                        "{} 走 ColorAdjust 却没有参数",
+                        spec.kind
+                    );
                     assert!(
                         has_param,
                         "{} 的参数名既不是 amount / degrees 也不是 factor",
@@ -445,7 +501,7 @@ mod tests {
                         spec.kind
                     );
                     // 位移量用**归一化**比例（画面宽度的几分之几），不许用像素：
-                    // 像素在预览 640x360 与成片 1920x1080 里含义不同 —— 
+                    // 像素在预览 640x360 与成片 1920x1080 里含义不同 ——
                     // 与 SubtitleStyle 用 font_ratio 是同一条理由。
                     let (_, max) = spec
                         .params
@@ -531,7 +587,9 @@ mod tests {
         let mut bad = project.clone();
         // 越界值从登记表推：上界 + 1
         let over = spec_of("gaussian_blur").expect("应当登记了").params[0].2 + 1.0;
-        bad.tracks[0].clips[0].effects[0].params.insert("radius".to_string(), over);
+        bad.tracks[0].clips[0].effects[0]
+            .params
+            .insert("radius".to_string(), over);
         let issues = validate_project_with_effects(&bad, REGISTRY);
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].code, "effect_param_out_of_range");

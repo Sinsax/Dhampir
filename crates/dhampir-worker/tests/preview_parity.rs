@@ -57,7 +57,11 @@ fn block_source(
     }
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dhampir preview parity source"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -78,7 +82,11 @@ fn block_source(
             bytes_per_row: Some(width * 4),
             rows_per_image: Some(height),
         },
-        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
     );
     texture
 }
@@ -104,7 +112,11 @@ fn alpha_bbox(pixels: &[u8], size: (u32, u32)) -> Option<(u32, u32, u32, u32)> {
 }
 
 /// 量一次：给定目标尺寸与坐标系，返回包围盒中心的**归一化**落点。
-fn 落点(ctx: &dhampir_core::gpu::GpuContext, target_size: (u32, u32), space: RenderSpace) -> (f32, f32) {
+fn 落点(
+    ctx: &dhampir_core::gpu::GpuContext,
+    target_size: (u32, u32),
+    space: RenderSpace,
+) -> (f32, f32) {
     let source = block_source(&ctx.device, &ctx.queue, SOURCE, BLOCK);
     let target = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dhampir preview parity target"),
@@ -122,13 +134,17 @@ fn 落点(ctx: &dhampir_core::gpu::GpuContext, target_size: (u32, u32), space: R
     });
 
     let renderer = Compositor::new(&ctx.device, FORMAT);
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("dhampir preview parity encoder"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dhampir preview parity encoder"),
+        });
     let source_view = source.create_view(&wgpu::TextureViewDescriptor::default());
-    let mut transform = Transform::default();
-    transform.x = OFFSET.0;
-    transform.y = OFFSET.1;
+    let transform = Transform {
+        x: OFFSET.0,
+        y: OFFSET.1,
+        ..Transform::default()
+    };
     renderer.compose(
         &ctx.device,
         &ctx.queue,
@@ -151,13 +167,21 @@ fn 落点(ctx: &dhampir_core::gpu::GpuContext, target_size: (u32, u32), space: R
     );
     ctx.queue.submit([encoder.finish()]);
 
-    let image = pollster::block_on(readback::read_texture_rgba8(&ctx.device, &ctx.queue, &target))
-        .expect("读回失败");
-    let bbox = alpha_bbox(&image.pixels, target_size)
-        .unwrap_or_else(|| panic!("目标 {target_size:?} 上一个非透明像素都没有 —— 那一层根本没画出来"));
+    let image = pollster::block_on(readback::read_texture_rgba8(
+        &ctx.device,
+        &ctx.queue,
+        &target,
+    ))
+    .expect("读回失败");
+    let bbox = alpha_bbox(&image.pixels, target_size).unwrap_or_else(|| {
+        panic!("目标 {target_size:?} 上一个非透明像素都没有 —— 那一层根本没画出来")
+    });
     let centre_x = (bbox.0 + bbox.2) as f32 / 2.0;
     let centre_y = (bbox.1 + bbox.3) as f32 / 2.0;
-    (centre_x / target_size.0 as f32, centre_y / target_size.1 as f32)
+    (
+        centre_x / target_size.0 as f32,
+        centre_y / target_size.1 as f32,
+    )
 }
 
 /// **T1 的端到端判据**：同一份工程、同一个位移，换目标尺寸之后归一化落点不变。
@@ -175,7 +199,10 @@ fn 同一工程在不同目标尺寸下的落点一致() {
 
     let mut measured: Vec<((u32, u32), (f32, f32))> = Vec::new();
     for target_size in [(640_u32, 360_u32), (320, 180), (1280, 720)] {
-        let space = RenderSpace { sequence: SEQUENCE, target: target_size };
+        let space = RenderSpace {
+            sequence: SEQUENCE,
+            target: target_size,
+        };
         let point = 落点(&ctx, target_size, space);
         assert!(
             (point.0 - expected.0).abs() < 0.02 && (point.1 - expected.1).abs() < 0.02,
@@ -200,7 +227,14 @@ fn 拿目标尺寸当坐标系时落点会明显不同() {
     let (ctx, _init) = open_leg(NATIVE_BACKENDS).expect("拿不到 GPU 上下文");
     const TARGET: (u32, u32) = (320, 180);
 
-    let correct = 落点(&ctx, TARGET, RenderSpace { sequence: SEQUENCE, target: TARGET });
+    let correct = 落点(
+        &ctx,
+        TARGET,
+        RenderSpace {
+            sequence: SEQUENCE,
+            target: TARGET,
+        },
+    );
     // 修复前的行为：坐标系 == 目标尺寸。
     let broken = 落点(&ctx, TARGET, RenderSpace::square(TARGET));
 

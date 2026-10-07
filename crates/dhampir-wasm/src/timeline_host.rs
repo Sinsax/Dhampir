@@ -114,24 +114,22 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
+use dhampir_core::animation::{decode as decode_animation, detect_format};
 use dhampir_core::compose::{self, Composite};
 use dhampir_core::io::{FrameSink, FrameSource};
 use dhampir_core::overlay::{DanmakuTextItem, SubtitleTable, evaluate_overlay};
 use dhampir_core::readback::Rgba8Image;
-use dhampir_core::animation::{detect_format, decode as decode_animation};
 use dhampir_core::render::{
     AnimationTextures, OverlayItem, RenderSpace, SourceResolver, compose_overlay, ink_report,
 };
 // 宿主 API 的返回体形状：**有名字、有测试钉住**，不再用宏手写。
 use dhampir_core::timeline::history::History;
 use dhampir_core::timeline::host_api;
-use dhampir_core::wgpu;
-use dhampir_core::timeline::project::{
-    AssetKind, ProjectDoc, load_doc, validate_project_doc,
-};
+use dhampir_core::timeline::project::{AssetKind, ProjectDoc, load_doc, validate_project_doc};
 use dhampir_core::timeline::schema::Issue;
 use dhampir_core::timeline::subtitle::{parse_ass, parse_srt};
-use dhampir_core::timeline::text_layout::{border_px, LinePlacement, NormalizedRect, place_line};
+use dhampir_core::timeline::text_layout::{LinePlacement, NormalizedRect, border_px, place_line};
+use dhampir_core::wgpu;
 use wasm_bindgen::prelude::*;
 use web_sys::{HtmlCanvasElement, HtmlVideoElement};
 
@@ -197,7 +195,6 @@ fn clear_animations() {
     });
 }
 
-
 /// **预渲染缓存整表作废**（阶段 5 的失效判据，唯一入口之一）。
 ///
 /// 三个失效维度**都在这里点名**，因为它们各自的触发点散在三处，而漏掉任何一维的症状
@@ -256,7 +253,6 @@ thread_local! {
     /// 那种错看起来像「字幕本来就只到那儿」，属于最难查的一类。
     static SUBTITLES: RefCell<SubtitleTable> = RefCell::new(SubtitleTable::new());
 }
-
 
 // ---------------------------------------------------------------------------
 // W0：工程帧上 canvas
@@ -521,7 +517,10 @@ impl FrameCache {
 
     /// 这个槽位里**真的有一张纹理**吗？（惰性分配 ⇒ "索引里有"不等于"纹理建过"）
     fn ready(&self, slot: usize) -> bool {
-        self.slots.get(slot).map(|slot| slot.is_some()).unwrap_or(false)
+        self.slots
+            .get(slot)
+            .map(|slot| slot.is_some())
+            .unwrap_or(false)
     }
 
     /// 取第 `slot` 个槽位的纹理与 view；还没建就建。
@@ -779,7 +778,8 @@ impl BoundVideos<'_> {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        self.textures.insert(source.to_string(), (texture, view, size));
+        self.textures
+            .insert(source.to_string(), (texture, view, size));
     }
 }
 
@@ -787,7 +787,9 @@ impl SourceResolver for BoundVideos<'_> {
     /// 掩码图：**注册过就给，没注册就 None**（调用方会转成"整帧拒绝"并报出来）。
     /// 这一条是浏览器腿掩码通路的最后一环：JS 侧解码完调 set_mask_image，渲染这一趟就能取到。
     fn mask_texture_for(&mut self, source: &str) -> Option<(wgpu::TextureView, (u32, u32))> {
-        self.masks.get(source).map(|(_, view, size)| (view.clone(), *size))
+        self.masks
+            .get(source)
+            .map(|(_, view, size)| (view.clone(), *size))
     }
 
     fn texture_for(
@@ -869,7 +871,11 @@ impl SourceResolver for BoundVideos<'_> {
             // 行为与改前逐字节相同。
             self.uploads.insert(
                 source.to_string(),
-                SourceUpload { handle: (texture, view.clone()), size, id: stamp },
+                SourceUpload {
+                    handle: (texture, view.clone()),
+                    size,
+                    id: stamp,
+                },
             );
             return Some((view, size));
         }
@@ -950,8 +956,12 @@ fn text_lines(
     frame: i64,
     subtitles: &SubtitleTable,
     target: (u32, u32),
-) -> (Option<dhampir_core::overlay::TextOverlay>, Vec<TextLineSpec>) {
-    let Some(overlay) = evaluate_overlay(&doc.timeline, frame, doc.sequence_size(), Some(subtitles))
+) -> (
+    Option<dhampir_core::overlay::TextOverlay>,
+    Vec<TextLineSpec>,
+) {
+    let Some(overlay) =
+        evaluate_overlay(&doc.timeline, frame, doc.sequence_size(), Some(subtitles))
     else {
         return (None, Vec::new());
     };
@@ -1052,7 +1062,10 @@ fn upload_text_bitmaps(
         // 而同一行字的位图跨帧逐字节相同（内容由 JS 的栅格化缓存保证）。
         if !dirty.contains(&(index as u32)) {
             match previous.get(index) {
-                Some(slot) => { out.push(slot.clone()); continue; }
+                Some(slot) => {
+                    out.push(slot.clone());
+                    continue;
+                }
                 None => {}
             }
         }
@@ -1163,7 +1176,12 @@ fn check_ink(
     target: (u32, u32),
 ) -> InkCheck {
     let Some(bounds) = report.bounds else {
-        return InkCheck { pixels: 0, bounds: None, inside: true, on_edge: false };
+        return InkCheck {
+            pixels: 0,
+            bounds: None,
+            inside: true,
+            on_edge: false,
+        };
     };
     let right = placement.x + placement.bitmap_width as i32;
     let bottom = placement.y + placement.bitmap_height as i32;
@@ -1263,7 +1281,12 @@ impl ProjectHost {
         let needed = PROJECT.with(|slot| {
             slot.borrow()
                 .as_ref()
-                .map(|doc| dhampir_core::timeline::layer::missing_mask_assets(&doc.timeline, &registered_mask_ids))
+                .map(|doc| {
+                    dhampir_core::timeline::layer::missing_mask_assets(
+                        &doc.timeline,
+                        &registered_mask_ids,
+                    )
+                })
                 .unwrap_or_default()
         });
         if !needed.is_empty() {
@@ -1354,7 +1377,9 @@ impl ProjectHost {
         //
         // **默认关**：`cache_request` 为 `None` 或 `enabled == false` ⇒ 整表丢掉，
         // 走"直渲画布"那条旧路（与阶段 5 之前逐字节相同）。
-        let cache_wanted = cache_request.map(|request| request.enabled).unwrap_or(false);
+        let cache_wanted = cache_request
+            .map(|request| request.enabled)
+            .unwrap_or(false);
         if !cache_wanted {
             *frame_cache = None;
         }
@@ -1402,7 +1427,11 @@ impl ProjectHost {
                 // 惰性分配 ⇒ "索引里有"不等于"纹理建过"。这一层不靠"不可能"活着。
                 return None;
             }
-            cache.slots.get(slot)?.as_ref().map(|handle| handle.1.clone())
+            cache
+                .slots
+                .get(slot)?
+                .as_ref()
+                .map(|handle| handle.1.clone())
         });
         if let Some(slot_view) = cached_view {
             if let Some(cache) = frame_cache.as_mut() {
@@ -1415,9 +1444,10 @@ impl ProjectHost {
             }
             let sink_view = sink.acquire(&ctx.device);
             let mut hit_encoder =
-                ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("dhampir cache hit"),
-                });
+                ctx.device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("dhampir cache hit"),
+                    });
             blit.render(&ctx.device, &mut hit_encoder, &slot_view, &sink_view);
             ctx.queue.submit([hit_encoder.finish()]);
             sink.finish(frame);
@@ -1440,7 +1470,11 @@ impl ProjectHost {
             if frame_target.as_ref().map(|target| target.2) != Some((width, height)) {
                 let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("dhampir frame target"),
-                    size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                    size: wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
@@ -1476,7 +1510,10 @@ impl ProjectHost {
         } else {
             sink.acquire(&ctx.device)
         };
-        let space = RenderSpace { sequence: sequence, target: (width, height) };
+        let space = RenderSpace {
+            sequence,
+            target: (width, height),
+        };
         let mut resolver = BoundVideos {
             device: &ctx.device,
             queue: &ctx.queue,
@@ -1587,7 +1624,11 @@ impl ProjectHost {
                         origin: wgpu::Origin3d::ZERO,
                         aspect: wgpu::TextureAspect::All,
                     },
-                    wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                    wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
                 );
                 cache.stored += 1;
             }
@@ -1829,11 +1870,16 @@ pub fn dhampir_asset_load_animation(asset_id: String, bytes: &[u8]) -> String {
         let Some(host) = borrowed.as_mut() else {
             return Err("还没 attach 上 canvas：动图现在只能先记账".to_string());
         };
-        host.animations.upload(&asset_id, &animation).map_err(|error| error.to_string())
+        host.animations
+            .upload(&asset_id, &animation)
+            .map_err(|error| error.to_string())
     });
 
     let bytes_used = PROJECT_HOST.with(|h| {
-        h.borrow().as_ref().map(|host| host.animations.memory_bytes()).unwrap_or(0)
+        h.borrow()
+            .as_ref()
+            .map(|host| host.animations.memory_bytes())
+            .unwrap_or(0)
     });
     let info = host_api::AnimInfoView {
         format: animation.format.as_str().to_string(),
@@ -1894,7 +1940,10 @@ pub fn dhampir_asset_animation_info(asset_id: String) -> String {
             format: format.as_str().to_string(),
             width: 0,
             height: 0,
-            frame_count: host.animations.frame_count(&asset_id).unwrap_or(delays.len()),
+            frame_count: host
+                .animations
+                .frame_count(&asset_id)
+                .unwrap_or(delays.len()),
             loop_count: host.animations.loop_count(&asset_id).unwrap_or(0),
             total_ms: host.animations.total_ms(&asset_id).unwrap_or(0),
             frame_delays_ms: delays,
@@ -1915,7 +1964,6 @@ pub fn dhampir_asset_animation_info(asset_id: String) -> String {
     }
 }
 
-
 /// 执行一次编辑操作。**与 CLI 走同一份实现**（dhampir_core::timeline::edit）。
 ///
 /// 返回 {ok, summary, issues}；成功时新工程会写回宿主，
@@ -1933,7 +1981,7 @@ pub fn dhampir_project_edit(op_json: &str) -> String {
                 "ok": false,
                 "summary": "",
                 "issues": [Issue::new("bad_op", "op", format!("不认识的编辑操作：{error}"))],
-            }))
+            }));
         }
     };
     // **先把当前工程克隆出来再改。** PROJECT 是 RefCell：一边 borrow 一边 borrow_mut
@@ -1993,7 +2041,11 @@ fn project_history_step(undo: bool) -> String {
     };
     let restored = HISTORY.with(|h| {
         let mut history = h.borrow_mut();
-        if undo { history.undo(doc) } else { history.redo(doc) }
+        if undo {
+            history.undo(doc)
+        } else {
+            history.redo(doc)
+        }
     });
     let Some(snapshot) = restored else {
         let (code, message) = if undo {
@@ -2053,12 +2105,14 @@ pub fn dhampir_project_frame(frame: i32) -> String {
     PROJECT.with(|slot| {
         let borrowed = slot.borrow();
         match borrowed.as_ref() {
-            None => dhampir_core::timeline::host_api::to_json(&dhampir_core::timeline::host_api::FrameResult {
-                frame: i64::from(frame),
-                layers: Vec::new(),
-                overlay: None,
-                error: Some("还没有载入通过校验的工程".to_string()),
-            }),
+            None => dhampir_core::timeline::host_api::to_json(
+                &dhampir_core::timeline::host_api::FrameResult {
+                    frame: i64::from(frame),
+                    layers: Vec::new(),
+                    overlay: None,
+                    error: Some("还没有载入通过校验的工程".to_string()),
+                },
+            ),
             Some(doc) => {
                 let assets = assets_with_animation_truth(doc);
                 host_api::to_json(&composite_result(
@@ -2109,15 +2163,14 @@ pub async fn dhampir_project_render_probe(
     width: u32,
     height: u32,
 ) -> Result<String, JsValue> {
-    let composite = PROJECT.with(|slot| {
-        slot.borrow()
-            .as_ref()
-            .map(|doc| {
+    let composite = PROJECT
+        .with(|slot| {
+            slot.borrow().as_ref().map(|doc| {
                 let assets = assets_with_animation_truth(doc);
                 compose::evaluate_v2_with_assets(&doc.timeline, i64::from(frame), Some(&assets))
             })
-    })
-    .ok_or_else(|| js_err("还没有载入通过校验的工程"))?;
+        })
+        .ok_or_else(|| js_err("还没有载入通过校验的工程"))?;
 
     let video = element_by_id(&video_id, "video")?;
     let instance = new_instance();
@@ -2323,7 +2376,11 @@ impl SourceResolver for SyntheticSources<'_> {
                     bytes_per_row: Some(width * 4),
                     rows_per_image: Some(height),
                 },
-                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
             );
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
             self.cache.insert(key.clone(), (texture, view));
@@ -2546,9 +2603,10 @@ pub fn dhampir_project_begin_frame(sources_json: &str) -> String {
         // 这一帧在不在表里？JS 靠它决定要不要**整条准备路径都跳过** ——
         // 只在 `draw` 里判的话，省下的只有渲染，"整圈"不会明显下降，缓存也就看不出有什么用。
         let cached = match (plan.frame, host.frame_cache.as_ref()) {
-            (Some(frame), Some(cache)) => {
-                cache.lookup(frame).map(|slot| cache.ready(slot)).unwrap_or(false)
-            }
+            (Some(frame), Some(cache)) => cache
+                .lookup(frame)
+                .map(|slot| cache.ready(slot))
+                .unwrap_or(false),
             _ => false,
         };
         // 缓存读数（**只给人看，不参与任何判定**）。走这个导出回报，是为了不给契约再加承诺面。
@@ -2650,7 +2708,11 @@ fn parse_frame_sources(text: &str) -> Result<FramePlan, String> {
             _ => return Err("来源项得是字符串或带 source 的对象".to_string()),
         }
     }
-    Ok(FramePlan { frame, sources, cache })
+    Ok(FramePlan {
+        frame,
+        sources,
+        cache,
+    })
 }
 
 /// 解析 `cache` 那一层。**一个数只调"多大"，不改前/后的比**（3:2，与用户口径一致）。
@@ -2701,12 +2763,18 @@ fn parse_cache_request(
             }
             (total * 0.6, total * 0.4)
         }
-        None | Some(serde_json::Value::Null) => {
-            (positive("forward_seconds", 3.0)?, positive("back_seconds", 2.0)?)
-        }
+        None | Some(serde_json::Value::Null) => (
+            positive("forward_seconds", 3.0)?,
+            positive("back_seconds", 2.0)?,
+        ),
         Some(_) => return Err("cache.seconds 得是数字或两元数组".to_string()),
     };
-    Ok(CacheRequest { enabled, forward_seconds, back_seconds, max_mb })
+    Ok(CacheRequest {
+        enabled,
+        forward_seconds,
+        back_seconds,
+        max_mb,
+    })
 }
 
 /// JS 把某个 source **当前帧**转成位图交给宿主。
@@ -2816,7 +2884,8 @@ pub fn dhampir_project_set_mask_image(
             },
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        host.masks.insert(asset_id, (texture, view, (width, height)));
+        host.masks
+            .insert(asset_id, (texture, view, (width, height)));
         // 影子清单跟着宿主那份走（重建成一份，避免两份漂开）。
         let ids: Vec<String> = host.masks.keys().cloned().collect();
         MASK_IDS.with(|cell| *cell.borrow_mut() = ids);
@@ -3279,7 +3348,9 @@ pub fn dhampir_project_set_subtitles(asset_id: String, text: String, format: Str
     let parsed = match format.to_ascii_lowercase().as_str() {
         "srt" => parse_srt(&text),
         "ass" | "ssa" => parse_ass(&text),
-        other => Err(format!("不认得这个字幕格式：{other}（现在只认 srt/ass/ssa）")),
+        other => Err(format!(
+            "不认得这个字幕格式：{other}（现在只认 srt/ass/ssa）"
+        )),
     };
     let report = match parsed {
         Ok(report) => report,
@@ -3294,7 +3365,7 @@ pub fn dhampir_project_set_subtitles(asset_id: String, text: String, format: Str
                     "assets",
                     format!("{asset_id} 解析失败：{error}"),
                 )],
-            }))
+            }));
         }
     };
     let cues = report.cues.len();
@@ -3309,8 +3380,8 @@ pub fn dhampir_project_set_subtitles(asset_id: String, text: String, format: Str
     PROJECT_HOST.with(|h| {
         if let Some(host) = h.borrow_mut().as_mut() {
             host.invalidate_text();
-        // 落点体系变了：连已上传的纹理一起扔（见 invalidate_text_uploads 的说明）。
-        host.invalidate_text_uploads();
+            // 落点体系变了：连已上传的纹理一起扔（见 invalidate_text_uploads 的说明）。
+            host.invalidate_text_uploads();
         }
     });
     host_api::to_json(&serde_json::json!({
@@ -3332,7 +3403,10 @@ pub fn dhampir_project_set_subtitles(asset_id: String, text: String, format: Str
 /// 越界的下标**报错而不是丢掉**：那说明 JS 拿的清单与宿主手上的不是同一份，
 /// 而"丢掉"会让那一行静默消失。
 #[wasm_bindgen]
-pub fn dhampir_project_set_text_bitmap(index: u32, bitmap: web_sys::ImageBitmap) -> Result<(), JsValue> {
+pub fn dhampir_project_set_text_bitmap(
+    index: u32,
+    bitmap: web_sys::ImageBitmap,
+) -> Result<(), JsValue> {
     PROJECT_HOST.with(|h| {
         let mut borrowed = h.borrow_mut();
         let host = borrowed
@@ -3363,7 +3437,10 @@ pub fn dhampir_project_set_text_bitmap(index: u32, bitmap: web_sys::ImageBitmap)
 ///
 /// 越界与替换旧位图的规矩与字幕那一个完全一致（报错而不是丢掉、换掉时 `close()`）。
 #[wasm_bindgen]
-pub fn dhampir_project_set_danmaku_bitmap(index: u32, bitmap: web_sys::ImageBitmap) -> Result<(), JsValue> {
+pub fn dhampir_project_set_danmaku_bitmap(
+    index: u32,
+    bitmap: web_sys::ImageBitmap,
+) -> Result<(), JsValue> {
     PROJECT_HOST.with(|h| {
         let mut borrowed = h.borrow_mut();
         let host = borrowed
@@ -3414,134 +3491,149 @@ pub async fn dhampir_project_text_probe(frame: i32) -> Result<String, JsValue> {
     }
 
     let frame_number = i64::from(frame);
-    let doc = PROJECT.with(|slot| slot.borrow().clone())
+    let doc = PROJECT
+        .with(|slot| slot.borrow().clone())
         .ok_or_else(|| js_err("还没有载入通过校验的工程"))?;
     let subtitle_assets = SUBTITLES.with(|slot| registered_subtitles(&doc, &slot.borrow()));
 
     // GPU 的活全在这一段里同步做完（渲染是同步的），读回在借用外面 await：
     // RefCell 的借用不许跨 await 拿在手上（一句 `borrow_mut` 撞上另一句就是 unreachable）。
-    let mut prepared = PROJECT_HOST.with(|h| -> Result<PreparedProbe, String> {
-        let mut borrowed = h.borrow_mut();
-        let Some(host) = borrowed.as_mut() else {
-            return Err("工程预览宿主尚未初始化，先调 dhampir_project_attach".to_string());
-        };
-        // **只判「刚算过的那一份清单」**：`draw` 画的就是它，判另一份等于判了个寂寞。
-        if host.text_frame != Some(frame_number) {
-            return Err(format!(
-                "这一帧的行清单还没算过（现在存的是 {:?}）——先调 dhampir_project_text_frame",
-                host.text_frame
-            ));
-        }
-        let (width, height) = host.size;
-        let sequence = doc.sequence_size();
-        let assets = assets_with_animation_truth(&doc);
-        let composite =
-            compose::evaluate_v2_with_assets(&doc.timeline, frame_number, Some(&assets));
-        let format = host.sink.format();
-        let uploaded =
-            upload_text_bitmaps(&host.ctx.device, &host.ctx.queue, format, &host.text_lines, &host.text_bitmaps, &host.text_uploads, &host.text_dirty);
-
-        // 0 = 无字，1 = 全都有，2+i = 减去第 i 行。
-        let mut textures = Vec::with_capacity(2 + host.text_lines.len());
-        for _ in 0..2 + host.text_lines.len() {
-            textures.push(host.ctx.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("dhampir project text probe"),
-                size: wgpu::Extent3d {
-                    width: width.max(1),
-                    height: height.max(1),
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
+    let mut prepared = PROJECT_HOST
+        .with(|h| -> Result<PreparedProbe, String> {
+            let mut borrowed = h.borrow_mut();
+            let Some(host) = borrowed.as_mut() else {
+                return Err("工程预览宿主尚未初始化，先调 dhampir_project_attach".to_string());
+            };
+            // **只判「刚算过的那一份清单」**：`draw` 画的就是它，判另一份等于判了个寂寞。
+            if host.text_frame != Some(frame_number) {
+                return Err(format!(
+                    "这一帧的行清单还没算过（现在存的是 {:?}）——先调 dhampir_project_text_frame",
+                    host.text_frame
+                ));
+            }
+            let (width, height) = host.size;
+            let sequence = doc.sequence_size();
+            let assets = assets_with_animation_truth(&doc);
+            let composite =
+                compose::evaluate_v2_with_assets(&doc.timeline, frame_number, Some(&assets));
+            let format = host.sink.format();
+            let uploaded = upload_text_bitmaps(
+                &host.ctx.device,
+                &host.ctx.queue,
                 format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            }));
-        }
-        let views: Vec<wgpu::TextureView> = textures
-            .iter()
-            .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()))
-            .collect();
-        // 判定路径**刻意不碰跨帧的源纹理**：它要的是"这一帧画出来长什么样"，
-        // 借用一份本地空表 ⇒ 每一层都现拷一次（与判定之前的行为一致）。
-        // 复用那一套的判据是"内容标识"，而判定关心的不是省没省，是**画出来一样不一样**。
-        let mut probe_uploads: HashMap<String, SourceUpload> = HashMap::new();
-        let mut probe_stats = UploadStats::default();
-        let mut resolver = BoundVideos {
-            device: &host.ctx.device,
-            queue: &host.ctx.queue,
-            videos: &host.videos,
-            bitmaps: &host.bitmaps,
-            masks: &host.masks,
-            require_bitmap: host.require_bitmap,
-            format,
-            textures: HashMap::new(),
-            uploads: &mut probe_uploads,
-            // 标识照旧读宿主的：它不改变"现拷一次"这件事，只决定写不写进那份本地空表。
-            bitmap_ids: &host.bitmap_ids,
-            stats: &mut probe_stats,
-            animations: &host.animations,
-        };
-        let mut encoder = host.ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("dhampir project text probe encoder"),
-        });
-        let space = RenderSpace { sequence, target: (width, height) };
-        for (pass, view) in views.iter().enumerate() {
-            // **每一趟都显式清屏**：两趟的底必须是同一张，
-            // 不然比出来的「墨迹」里混着两次底的差异。
-            host.renderer.render_frame(
-                &host.ctx.device,
-                &host.ctx.queue,
-                &mut encoder,
-                view,
-                space,
-                &composite,
-                &mut resolver,
-                wgpu::Color::TRANSPARENT,
+                &host.text_lines,
+                &host.text_bitmaps,
+                &host.text_uploads,
+                &host.text_dirty,
             );
-            let skip = match pass {
-                0 => Some(None), // 一趟都不画
-                1 => None,       // 全画
-                other => Some(Some(other - 2)),
-            };
-            let items = match skip {
-                Some(None) => Vec::new(),
-                Some(Some(index)) => overlay_items(&host.text_lines, &uploaded, Some(index)),
-                None => overlay_items(&host.text_lines, &uploaded, None),
-            };
-            compose_overlay(
-                host.renderer.compositor(),
-                &host.ctx.device,
-                &host.ctx.queue,
-                &mut encoder,
-                view,
-                (width, height),
-                &items,
-            );
-        }
-        host.ctx.queue.submit([encoder.finish()]);
-        Ok(PreparedProbe {
-            device: host.ctx.device.clone(),
-            queue: host.ctx.queue.clone(),
-            width,
-            height,
-            textures,
-            lines: host.text_lines.clone(),
-            bitmaps: uploaded
+
+            // 0 = 无字，1 = 全都有，2+i = 减去第 i 行。
+            let mut textures = Vec::with_capacity(2 + host.text_lines.len());
+            for _ in 0..2 + host.text_lines.len() {
+                textures.push(host.ctx.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("dhampir project text probe"),
+                    size: wgpu::Extent3d {
+                        width: width.max(1),
+                        height: height.max(1),
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                }));
+            }
+            let views: Vec<wgpu::TextureView> = textures
                 .iter()
-                .map(|slot| slot.as_ref().map(|(_, _, size)| *size))
-                .collect(),
-            report: serde_json::json!({
-                "frame": frame_number,
-                "sequence": [sequence.0, sequence.1],
-                "target": [width, height],
-                "subtitle_assets": subtitle_assets,
-            }),
-            issues: Vec::new(),
+                .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()))
+                .collect();
+            // 判定路径**刻意不碰跨帧的源纹理**：它要的是"这一帧画出来长什么样"，
+            // 借用一份本地空表 ⇒ 每一层都现拷一次（与判定之前的行为一致）。
+            // 复用那一套的判据是"内容标识"，而判定关心的不是省没省，是**画出来一样不一样**。
+            let mut probe_uploads: HashMap<String, SourceUpload> = HashMap::new();
+            let mut probe_stats = UploadStats::default();
+            let mut resolver = BoundVideos {
+                device: &host.ctx.device,
+                queue: &host.ctx.queue,
+                videos: &host.videos,
+                bitmaps: &host.bitmaps,
+                masks: &host.masks,
+                require_bitmap: host.require_bitmap,
+                format,
+                textures: HashMap::new(),
+                uploads: &mut probe_uploads,
+                // 标识照旧读宿主的：它不改变"现拷一次"这件事，只决定写不写进那份本地空表。
+                bitmap_ids: &host.bitmap_ids,
+                stats: &mut probe_stats,
+                animations: &host.animations,
+            };
+            let mut encoder =
+                host.ctx
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("dhampir project text probe encoder"),
+                    });
+            let space = RenderSpace {
+                sequence,
+                target: (width, height),
+            };
+            for (pass, view) in views.iter().enumerate() {
+                // **每一趟都显式清屏**：两趟的底必须是同一张，
+                // 不然比出来的「墨迹」里混着两次底的差异。
+                host.renderer.render_frame(
+                    &host.ctx.device,
+                    &host.ctx.queue,
+                    &mut encoder,
+                    view,
+                    space,
+                    &composite,
+                    &mut resolver,
+                    wgpu::Color::TRANSPARENT,
+                );
+                let skip = match pass {
+                    0 => Some(None), // 一趟都不画
+                    1 => None,       // 全画
+                    other => Some(Some(other - 2)),
+                };
+                let items = match skip {
+                    Some(None) => Vec::new(),
+                    Some(Some(index)) => overlay_items(&host.text_lines, &uploaded, Some(index)),
+                    None => overlay_items(&host.text_lines, &uploaded, None),
+                };
+                compose_overlay(
+                    host.renderer.compositor(),
+                    &host.ctx.device,
+                    &host.ctx.queue,
+                    &mut encoder,
+                    view,
+                    (width, height),
+                    &items,
+                );
+            }
+            host.ctx.queue.submit([encoder.finish()]);
+            Ok(PreparedProbe {
+                device: host.ctx.device.clone(),
+                queue: host.ctx.queue.clone(),
+                width,
+                height,
+                textures,
+                lines: host.text_lines.clone(),
+                bitmaps: uploaded
+                    .iter()
+                    .map(|slot| slot.as_ref().map(|(_, _, size)| *size))
+                    .collect(),
+                report: serde_json::json!({
+                    "frame": frame_number,
+                    "sequence": [sequence.0, sequence.1],
+                    "target": [width, height],
+                    "subtitle_assets": subtitle_assets,
+                }),
+                issues: Vec::new(),
+            })
         })
-    })
-    .map_err(js_err)?;
+        .map_err(js_err)?;
 
     let plain = read_image(&prepared.device, &prepared.queue, &prepared.textures[0]).await?;
     let full = read_image(&prepared.device, &prepared.queue, &prepared.textures[1]).await?;
@@ -3550,8 +3642,12 @@ pub async fn dhampir_project_text_probe(frame: i32) -> Result<String, JsValue> {
     let mut lines_pixels = 0_u64;
     let mut line_reports = Vec::with_capacity(prepared.lines.len());
     for (index, line) in prepared.lines.iter().enumerate() {
-        let without =
-            read_image(&prepared.device, &prepared.queue, &prepared.textures[2 + index]).await?;
+        let without = read_image(
+            &prepared.device,
+            &prepared.queue,
+            &prepared.textures[2 + index],
+        )
+        .await?;
         let ink = ink_report(&without, &full).map_err(js_err)?;
         let check = check_ink(&ink, line.placement, (prepared.width, prepared.height));
         let visible = is_visible(&line.text);
@@ -3715,7 +3811,6 @@ pub fn dhampir_project_resize(width: u32, height: u32) -> Result<(), JsValue> {
     })
 }
 
-
 /// 出片前的预检：这份工程里有没有**超出对端能力**的东西。
 ///
 /// # 为什么在前端做这件事，但规则不写在前端
@@ -3736,7 +3831,7 @@ pub fn dhampir_project_precheck(capabilities_json: &str) -> String {
         Err(error) => {
             return host_api::to_json(&host_api::OpenResult::unparsed(format!(
                 "能力声明解析失败：{error}"
-            )))
+            )));
         }
     };
 
@@ -3859,7 +3954,10 @@ mod tests {
         assert!(ok(&again), "{again}");
         assert_eq!(doc(), after, "重做要原样放回来（不是第二份近似的东西）");
         assert!(
-            again["summary"].as_str().unwrap_or_default().starts_with("重做："),
+            again["summary"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("重做："),
             "{again}"
         );
     }
@@ -3925,15 +4023,27 @@ mod tests {
         // 手上有位图、也有一份标识 —— 但这一帧**没声明** ⇒ 必须重传。
         assert_eq!(plan_bitmap(true, None, Some("7"), true), BitmapPlan::Reload);
         // 反过来：声明了、且与手上那份一致 ⇒ 复用（**只有**有标识才有的那一档）。
-        assert_eq!(plan_bitmap(true, Some("7"), Some("7"), true), BitmapPlan::Reuse);
+        assert_eq!(
+            plan_bitmap(true, Some("7"), Some("7"), true),
+            BitmapPlan::Reuse
+        );
         // 声明了但手上没有位图 ⇒ 必须重交。
-        assert_eq!(plan_bitmap(true, Some("7"), Some("7"), false), BitmapPlan::Reload);
+        assert_eq!(
+            plan_bitmap(true, Some("7"), Some("7"), false),
+            BitmapPlan::Reload
+        );
         // 没声明标识时"手上没有位图"也一样是重交（两条路殊途同归）。
         assert_eq!(plan_bitmap(true, None, None, false), BitmapPlan::Reload);
         // 标识变了 ⇒ 重交（内容不同，绝不许拿旧的顶）。
-        assert_eq!(plan_bitmap(true, Some("8"), Some("7"), true), BitmapPlan::Reload);
+        assert_eq!(
+            plan_bitmap(true, Some("8"), Some("7"), true),
+            BitmapPlan::Reload
+        );
         // 这一帧不需要它 ⇒ 丢掉（与 `clear_bitmaps` 对这一个源等价）。
-        assert_eq!(plan_bitmap(false, Some("7"), Some("7"), true), BitmapPlan::Drop);
+        assert_eq!(
+            plan_bitmap(false, Some("7"), Some("7"), true),
+            BitmapPlan::Drop
+        );
         assert_eq!(plan_bitmap(false, None, None, false), BitmapPlan::Drop);
     }
 
@@ -3967,7 +4077,8 @@ mod tests {
         assert_eq!(cache.max_mb, 64);
 
         // 一个数只调"多大"，前/后按 3:2 摊（与用户口径一致）。
-        let plan = parse_frame_sources(r#"{"sources":[],"cache":{"seconds":5}}"#).expect("单数窗口");
+        let plan =
+            parse_frame_sources(r#"{"sources":[],"cache":{"seconds":5}}"#).expect("单数窗口");
         let cache = plan.cache.expect("cache");
         assert!((cache.forward_seconds - 3.0).abs() < 1e-6);
         assert!((cache.back_seconds - 2.0).abs() < 1e-6);
@@ -3999,20 +4110,39 @@ mod tests {
     /// 与条目清单 `text_item_json`）—— 它们各自是 JS 的一个输入，缺哪个都不行。
     #[wasm_bindgen_test]
     fn 两份清单都把逐条颜色与缩放带给_js() {
-        let rect = NormalizedRect { x: 0.1, y: 0.2, width: 0.3, height: 0.4 };
+        let rect = NormalizedRect {
+            x: 0.1,
+            y: 0.2,
+            width: 0.3,
+            height: 0.4,
+        };
 
         let line = TextLineSpec {
             text: "一条字幕".to_string(),
             rect,
-            placement: LinePlacement { x: 8, y: 16, bitmap_width: 640, bitmap_height: 36, font_px: 20 },
+            placement: LinePlacement {
+                x: 8,
+                y: 16,
+                bitmap_width: 640,
+                bitmap_height: 36,
+                font_px: 20,
+            },
             color: [1, 2, 3, 4],
             danmaku: None,
             opacity: 0.5,
             scale: 0.75,
         };
         let placed = placement_json(&line);
-        assert_eq!(placed["color"], serde_json::json!([1, 2, 3, 4]), "落点清单缺逐条颜色：{placed}");
-        assert_eq!(placed["scale"], serde_json::json!(0.75), "落点清单缺缩放：{placed}");
+        assert_eq!(
+            placed["color"],
+            serde_json::json!([1, 2, 3, 4]),
+            "落点清单缺逐条颜色：{placed}"
+        );
+        assert_eq!(
+            placed["scale"],
+            serde_json::json!(0.75),
+            "落点清单缺缩放：{placed}"
+        );
 
         let item = dhampir_core::overlay::TextItem {
             text: "一条字幕".to_string(),
@@ -4060,7 +4190,12 @@ mod tests {
         // 「键在、值是 null」与「键根本不在」当同一件事，于是**缺键会被判据放过**。
         // 要让"一端有一端无"能红，两边都必须有这几个键。
         let plain = text_style_json(&dhampir_core::overlay::TextStyle::default());
-        for key in ["shadow_color", "shadow_dx_px", "shadow_dy_px", "shadow_blur_px"] {
+        for key in [
+            "shadow_color",
+            "shadow_dx_px",
+            "shadow_dy_px",
+            "shadow_blur_px",
+        ] {
             assert!(plain.get(key).is_some(), "清单里缺了 {key}：{plain}");
         }
         assert_eq!(plain["shadow_color"], serde_json::Value::Null);
@@ -4072,9 +4207,15 @@ mod tests {
         assert_eq!(view["shadow_color"], serde_json::json!([0, 0, 0, 102]));
         assert_eq!(view["shadow_blur_px"], serde_json::json!(4.0));
         // 而缺省的视图**一个阴影键都不多**（老工程的形状逐字节不变）。
-        let plain = serde_json::to_value(text_style_view(&dhampir_core::overlay::TextStyle::default()))
-            .expect("视图要能序列化");
-        for key in ["shadow_color", "shadow_dx_px", "shadow_dy_px", "shadow_blur_px"] {
+        let plain =
+            serde_json::to_value(text_style_view(&dhampir_core::overlay::TextStyle::default()))
+                .expect("视图要能序列化");
+        for key in [
+            "shadow_color",
+            "shadow_dx_px",
+            "shadow_dy_px",
+            "shadow_blur_px",
+        ] {
             assert!(plain.get(key).is_none(), "缺省时不该出现 {key}：{plain}");
         }
     }

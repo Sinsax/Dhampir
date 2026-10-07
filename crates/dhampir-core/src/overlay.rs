@@ -318,7 +318,7 @@ pub fn evaluate_overlay(
                 style.rise_out_px,
             );
             let laid: dhampir_timeline::text_layout::TextLayout =
-                layout(&cue.text, &style, sequence);
+                layout(&cue.text, style, sequence);
             dropped_lines += laid.dropped_lines;
             // **这一条的颜色**：cue 自己带的覆盖轨道默认。
             let item_color = cue.style.color.unwrap_or(style.color);
@@ -524,7 +524,11 @@ pub fn cue_visible_at(cue: &Cue, frame: Frame, timebase: &TimebaseDto) -> bool {
 pub fn cue_frames(cue: &Cue, timebase: &TimebaseDto) -> Option<(Frame, Frame)> {
     let start = frame_at_ms(cue.start_ms, timebase)?;
     let end = frame_at_ms(cue.end_ms, timebase)?;
-    Some(if end > start { (start, end - 1) } else { (start, start) })
+    Some(if end > start {
+        (start, end - 1)
+    } else {
+        (start, start)
+    })
 }
 
 /// 一条要写进**侧挂字幕文件**的字幕条：文本 + 它在这段出片区间里出现的帧区间。
@@ -657,8 +661,20 @@ mod tests {
 
     fn cues() -> Vec<Cue> {
         vec![
-            Cue { start_ms: 0, end_ms: 2000, text: "第一行中文".to_string(), travel_ms: None, style: Default::default() },
-            Cue { start_ms: 2000, end_ms: 4000, text: "第二句".to_string(), travel_ms: None, style: Default::default() },
+            Cue {
+                start_ms: 0,
+                end_ms: 2000,
+                text: "第一行中文".to_string(),
+                travel_ms: None,
+                style: Default::default(),
+            },
+            Cue {
+                start_ms: 2000,
+                end_ms: 4000,
+                text: "第二句".to_string(),
+                travel_ms: None,
+                style: Default::default(),
+            },
         ]
     }
 
@@ -834,7 +850,10 @@ mod tests {
         // `12/1080 * 360 = 4`，而老行为是 `border_px(20) = 1` —— 描边粗了 4 倍，
         // 既有工程的产物全变。默认值是**契约的一部分**，不是风格偏好。
         let overlay = evaluate_overlay(&subtitle_timeline(), 15, SEQUENCE, Some(&table())).unwrap();
-        assert_eq!(overlay.subtitle_style.stroke_px, 0.0, "默认必须是 0（走字号推的老路径）");
+        assert_eq!(
+            overlay.subtitle_style.stroke_px, 0.0,
+            "默认必须是 0（走字号推的老路径）"
+        );
 
         // 显式写一个比例时才算，且按**目标高**换算。
         let mut styled = subtitle_timeline();
@@ -926,9 +945,18 @@ mod tests {
     fn 字幕与弹幕各有一套颜色() {
         // **这是拆开 `color` 的理由**：参照实现 的字幕是暖色、弹幕是白色，
         // 共用一份时必然有一个错 —— 而"两边的字都看得见"让人以为没问题。
-        let overlay = evaluate_overlay(&both_timeline(), 15, SEQUENCE, Some(&both_table())).unwrap();
-        assert_eq!(overlay.subtitle_style.color, [255, 240, 200, 255], "字幕用字幕的颜色");
-        assert_eq!(overlay.danmaku_style.color, [0, 255, 0, 255], "弹幕用弹幕的颜色");
+        let overlay =
+            evaluate_overlay(&both_timeline(), 15, SEQUENCE, Some(&both_table())).unwrap();
+        assert_eq!(
+            overlay.subtitle_style.color,
+            [255, 240, 200, 255],
+            "字幕用字幕的颜色"
+        );
+        assert_eq!(
+            overlay.danmaku_style.color,
+            [0, 255, 0, 255],
+            "弹幕用弹幕的颜色"
+        );
         assert_ne!(
             overlay.subtitle_style.color, overlay.danmaku_style.color,
             "两者必须能不同 —— 这正是共用一个字段时做不到的事"
@@ -942,7 +970,13 @@ mod tests {
         let mut table = SubtitleTable::new();
         table.insert(
             "sub.srt".to_string(),
-            vec![Cue { start_ms: 20_000, end_ms: 22_000, text: "很久以后".to_string(), travel_ms: None, style: Default::default() }],
+            vec![Cue {
+                start_ms: 20_000,
+                end_ms: 22_000,
+                text: "很久以后".to_string(),
+                travel_ms: None,
+                style: Default::default(),
+            }],
         );
         assert!(evaluate_overlay(&subtitle_timeline(), 15, SEQUENCE, Some(&table)).is_none());
     }
@@ -950,7 +984,13 @@ mod tests {
     #[test]
     fn 字幕区间是闭开的() {
         let timebase = TimebaseDto { num: 30, den: 1 };
-        let cue = Cue { start_ms: 2000, end_ms: 4000, text: "x".to_string(), travel_ms: None, style: Default::default() };
+        let cue = Cue {
+            start_ms: 2000,
+            end_ms: 4000,
+            text: "x".to_string(),
+            travel_ms: None,
+            style: Default::default(),
+        };
         // 30fps：2000ms -> 第 60 帧，4000ms -> 第 120 帧。
         assert!(!cue_visible_at(&cue, 59, &timebase), "还没到");
         assert!(cue_visible_at(&cue, 60, &timebase), "起点包含");
@@ -962,7 +1002,13 @@ mod tests {
     fn 短于一帧的字幕仍然显示一帧() {
         let timebase = TimebaseDto { num: 30, den: 1 };
         // 3ms 的间隔在 30fps 下取整之后是同一帧 —— 不能一条都不显示。
-        let cue = Cue { start_ms: 1000, end_ms: 1003, text: "x".to_string(), travel_ms: None, style: Default::default() };
+        let cue = Cue {
+            start_ms: 1000,
+            end_ms: 1003,
+            text: "x".to_string(),
+            travel_ms: None,
+            style: Default::default(),
+        };
         assert!(cue_visible_at(&cue, 30, &timebase));
     }
 
@@ -1051,7 +1097,13 @@ mod tests {
     // ---- 侧挂导出（T2.7）：两种问法必须说的是同一件事 ----
 
     fn cue(start_ms: u64, end_ms: u64, text: &str) -> Cue {
-        Cue { start_ms, end_ms, text: text.to_string(), travel_ms: None, style: Default::default() }
+        Cue {
+            start_ms,
+            end_ms,
+            text: text.to_string(),
+            travel_ms: None,
+            style: Default::default(),
+        }
     }
 
     /// 一个带样式的字幕轨（两个紧邻、不重叠的元素）、一条**没样式**的轨、
@@ -1120,7 +1172,13 @@ mod tests {
             let overlay = evaluate_overlay(&timeline, frame, SEQUENCE, Some(&table));
             let mut got: Vec<&str> = overlay
                 .as_ref()
-                .map(|overlay| overlay.items.iter().map(|item| item.text.as_str()).collect())
+                .map(|overlay| {
+                    overlay
+                        .items
+                        .iter()
+                        .map(|item| item.text.as_str())
+                        .collect()
+                })
                 .unwrap_or_default();
             got.sort_unstable();
             assert_eq!(want, got, "第 {frame} 帧：侧挂导出与画面必须说的是同一件事");
@@ -1138,12 +1196,21 @@ mod tests {
         // 只出「乙」那一段：侧挂导出里就只该有它。
         let spans = overlay_spans(&timeline, 60, 119, &table);
         assert_eq!(spans.len(), 1, "{spans:?}");
-        assert_eq!((spans[0].text.as_str(), spans[0].first, spans[0].last), ("乙", 60, 119));
+        assert_eq!(
+            (spans[0].text.as_str(), spans[0].first, spans[0].last),
+            ("乙", 60, 119)
+        );
         // 区间把一条从中间切开时，报的是它**在这段区间里**出现的帧，不是整条的帧。
         let spans = overlay_spans(&timeline, 30, 89, &table);
         assert_eq!(spans.len(), 2, "{spans:?}");
-        assert_eq!((spans[0].text.as_str(), spans[0].first, spans[0].last), ("甲", 30, 59));
-        assert_eq!((spans[1].text.as_str(), spans[1].first, spans[1].last), ("乙", 60, 89));
+        assert_eq!(
+            (spans[0].text.as_str(), spans[0].first, spans[0].last),
+            ("甲", 30, 59)
+        );
+        assert_eq!(
+            (spans[1].text.as_str(), spans[1].first, spans[1].last),
+            ("乙", 60, 89)
+        );
     }
 
     #[test]
@@ -1163,7 +1230,10 @@ mod tests {
         let spans = overlay_spans(&timeline, 0, 239, &table);
         // 「甲」到第 59 帧才结束，但元素只覆盖 [0,30) —— 第 30 帧起画面上没有它。
         assert_eq!(spans.len(), 1, "{spans:?}");
-        assert_eq!((spans[0].text.as_str(), spans[0].first, spans[0].last), ("甲", 0, 29));
+        assert_eq!(
+            (spans[0].text.as_str(), spans[0].first, spans[0].last),
+            ("甲", 0, 29)
+        );
         assert!(evaluate_overlay(&timeline, 30, SEQUENCE, Some(&table)).is_none());
     }
 
@@ -1193,7 +1263,10 @@ mod tests {
     #[test]
     fn 帧区间与逐帧判定一致() {
         // 约 29.97fps：两种问法在非整数帧率下最容易分叉。
-        let timebase = TimebaseDto { num: 30000, den: 1001 };
+        let timebase = TimebaseDto {
+            num: 30000,
+            den: 1001,
+        };
         for (start, end) in [(0_u64, 2000_u64), (1000, 1003), (500, 500), (33, 34)] {
             let item = cue(start, end, "x");
             let (first, last) = cue_frames(&item, &timebase).expect("时间基合法");

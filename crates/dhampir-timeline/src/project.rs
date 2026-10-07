@@ -23,12 +23,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::layer::{
-    AssetTimebases, LAYER_SCHEMA_VERSION, LAYER_SCHEMA_VERSION_V2, LAYER_SCHEMA_VERSION_V3, TimelineV2,
-    migrate_v1_to_v2, migrate_v2_to_v3, migrate_v3_to_v4, source_frame_at, validate_timeline_v2,
+    AssetTimebases, LAYER_SCHEMA_VERSION, LAYER_SCHEMA_VERSION_V2, LAYER_SCHEMA_VERSION_V3,
+    TimelineV2, migrate_v1_to_v2, migrate_v2_to_v3, migrate_v3_to_v4, source_frame_at,
+    validate_timeline_v2,
 };
 use crate::schema::{
-    parse_effect_target, EffectSpec, Frame, Issue, Project, TimebaseDto, TrackKind,
-    TRANSFORM_TARGETS,
+    EffectSpec, Frame, Issue, Project, TRANSFORM_TARGETS, TimebaseDto, TrackKind,
+    parse_effect_target,
 };
 
 /// 壳的版本。与契约版本**互相独立**：壳可以到 v3 而契约还在 v2。
@@ -38,9 +39,9 @@ pub const PROJECT_SCHEMA_VERSION: u32 = 1;
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Generator {
-#[serde(default)]
+    #[serde(default)]
     pub app: String,
-#[serde(default)]
+    #[serde(default)]
     pub version: String,
 }
 
@@ -48,12 +49,12 @@ pub struct Generator {
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Meta {
-#[serde(default)]
+    #[serde(default)]
     pub title: String,
     /// ISO-8601 字符串。**时间不进渲染，就不该用强类型把宿主绑死。**
-#[serde(default)]
+    #[serde(default)]
     pub created_at: Option<String>,
-#[serde(default)]
+    #[serde(default)]
     pub modified_at: Option<String>,
 }
 
@@ -102,34 +103,34 @@ pub struct Asset {
     pub id: String,
     pub kind: AssetKind,
     /// 显示名。UI 用它，不再拿 URI 当标题。
-#[serde(default)]
+    #[serde(default)]
     pub name: String,
     /// 位置。**语义由宿主解释**（浏览器是 URL，服务端是路径或对象存储 key）。
-#[serde(default)]
+    #[serde(default)]
     pub uri: String,
     /// 素材总帧数。**有它才谈得上校验素材内越界。**
-#[serde(default)]
+    #[serde(default)]
     pub frame_count: Option<Frame>,
     /// 素材自身帧率。与工程时基不同就要换算。
-#[serde(default)]
+    #[serde(default)]
     pub timebase: Option<TimebaseDto>,
     /// **逐帧延迟表（毫秒）**，GIF 那种非匀速动图才有。
     ///
     /// 有它时帧号按延迟**累加**（`source_frame_at_delays`），不按素材单一时间基匀速换算 ——
     /// 后者等于假设每帧等长，非匀速动图的累计误差会随时间**线性**长出来。
     /// `None` = 匀速，老行为（既有工程逐字节不变）。
-#[serde(default)]
+    #[serde(default)]
     pub frame_delays_ms: Option<Vec<u32>>,
-#[serde(default)]
+    #[serde(default)]
     pub width: Option<u32>,
-#[serde(default)]
+    #[serde(default)]
     pub height: Option<u32>,
     /// 内容指纹。**只记录，不校验** —— 怎么算是宿主的事。
-#[serde(default)]
+    #[serde(default)]
     pub content_hash: Option<String>,
-#[serde(default)]
+    #[serde(default)]
     pub tags: BTreeMap<String, String>,
-#[serde(default)]
+    #[serde(default)]
     pub note: String,
 }
 
@@ -137,19 +138,25 @@ pub struct Asset {
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct View {
-#[serde(default)]
+    #[serde(default)]
     pub playhead: Frame,
-#[serde(default)]
+    #[serde(default)]
     pub selection: Option<String>,
-#[serde(default = "default_zoom")]
+    #[serde(default = "default_zoom")]
     pub zoom: f32,
 }
 
-fn default_zoom() -> f32 { 1.0 }
+fn default_zoom() -> f32 {
+    1.0
+}
 
 impl Default for View {
     fn default() -> Self {
-        Self { playhead: 0, selection: None, zoom: 1.0 }
+        Self {
+            playhead: 0,
+            selection: None,
+            zoom: 1.0,
+        }
     }
 }
 
@@ -157,11 +164,11 @@ impl Default for View {
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RenderHints {
-#[serde(default = "default_width")]
+    #[serde(default = "default_width")]
     pub width: u32,
-#[serde(default = "default_height")]
+    #[serde(default = "default_height")]
     pub height: u32,
-#[serde(default = "default_format")]
+    #[serde(default = "default_format")]
     pub format: String,
     /// **画布底色**：`#rgb` / `#rrggbb` / `#rrggbbaa`。`None` = 透明（宿主/编码器那边就是黑）。
     ///
@@ -192,10 +199,18 @@ impl RenderHints {
 /// 多认几种写法（`rgb()`/颜色名）只会让"两端对同一个字符串的解释"多出分叉的机会。
 pub fn parse_hex_color(s: &str) -> Option<[f64; 4]> {
     let h = s.trim().trim_start_matches('#');
-    let byte = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).ok().map(|v| v as f64 / 255.0);
+    let byte = |i: usize| {
+        u8::from_str_radix(&h[i..i + 2], 16)
+            .ok()
+            .map(|v| v as f64 / 255.0)
+    };
     match h.len() {
         3 => {
-            let one = |i: usize| u8::from_str_radix(&h[i..i + 1], 16).ok().map(|v| v as f64 / 15.0);
+            let one = |i: usize| {
+                u8::from_str_radix(&h[i..i + 1], 16)
+                    .ok()
+                    .map(|v| v as f64 / 15.0)
+            };
             Some([one(0)?, one(1)?, one(2)?, 1.0])
         }
         6 => Some([byte(0)?, byte(2)?, byte(4)?, 1.0]),
@@ -204,13 +219,24 @@ pub fn parse_hex_color(s: &str) -> Option<[f64; 4]> {
     }
 }
 
-fn default_width() -> u32 { 1920 }
-fn default_height() -> u32 { 1080 }
-fn default_format() -> String { "mp4".to_string() }
+fn default_width() -> u32 {
+    1920
+}
+fn default_height() -> u32 {
+    1080
+}
+fn default_format() -> String {
+    "mp4".to_string()
+}
 
 impl Default for RenderHints {
     fn default() -> Self {
-        Self { width: 1920, height: 1080, format: "mp4".to_string(), background: None }
+        Self {
+            width: 1920,
+            height: 1080,
+            format: "mp4".to_string(),
+            background: None,
+        }
     }
 }
 
@@ -219,20 +245,20 @@ impl Default for RenderHints {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectDoc {
     pub project_schema: u32,
-#[serde(default)]
+    #[serde(default)]
     pub generator: Generator,
-#[serde(default)]
+    #[serde(default)]
     pub meta: Meta,
-#[serde(default)]
+    #[serde(default)]
     pub assets: Vec<Asset>,
     /// 渲染契约，**原样内嵌** —— 不拍平，这样 `doc.timeline` 直接可以喂给渲染器。
     pub timeline: TimelineV2,
-#[serde(default)]
+    #[serde(default)]
     pub view: View,
-#[serde(default)]
+    #[serde(default)]
     pub render_hints: RenderHints,
     /// 下游放自己的东西，不污染契约。
-#[serde(default)]
+    #[serde(default)]
     pub extensions: BTreeMap<String, serde_json::Value>,
 
     /// **载入时从哪个契约版本升上来的**（没有升级过就是 None）。
@@ -240,7 +266,7 @@ pub struct ProjectDoc {
     /// 刻意 skip 掉：它描述的是"这份文件是怎么被读进来的"，不是文件的内容 ——
     /// 写回磁盘时出现它就等于把运行时状态污染进契约。
     /// 它存在的唯一目的是让校验能说一句"你是从 v2 升上来的，而 v2 的时间语义不同"。
-#[serde(skip)]
+    #[serde(skip)]
     pub migrated_from: Option<u32>,
 }
 /// 载入结果里的问题清单。
@@ -275,7 +301,9 @@ pub fn shell_from_timeline(timeline: TimelineV2) -> ProjectDoc {
     let mut seen: BTreeSet<String> = BTreeSet::new();
     for track in &timeline.tracks {
         for layer in &track.layers {
-            let Some(source) = &layer.source else { continue };
+            let Some(source) = &layer.source else {
+                continue;
+            };
             if seen.insert(source.asset_id.clone()) {
                 assets.push(Asset {
                     id: source.asset_id.clone(),
@@ -357,7 +385,7 @@ impl ProjectDoc {
             if asset.id.is_empty() {
                 continue;
             }
-            if let Some(timebase) = asset.timebase.clone() {
+            if let Some(timebase) = asset.timebase {
                 // **有逐帧延迟表就一起登记**：帧号要按延迟累加，不按素材单一时间基换算。
                 match asset.frame_delays_ms.clone() {
                     Some(delays) if !delays.is_empty() => {
@@ -384,7 +412,10 @@ impl ProjectDoc {
     /// 尺寸为 0 时兜到 1：调用方拿它做除数，除零会让整帧变成 NaN。**不猜一个「合理」尺寸** ——
     /// 猜错的表现是画面位置对但比例错，属于「看起来完全正常」的那一类错。
     pub fn sequence_size(&self) -> (u32, u32) {
-        (self.render_hints.width.max(1), self.render_hints.height.max(1))
+        (
+            self.render_hints.width.max(1),
+            self.render_hints.height.max(1),
+        )
     }
 }
 
@@ -476,7 +507,11 @@ pub fn validate_project_doc(doc: &ProjectDoc, effects: &[EffectSpec]) -> DocIssu
     for (index, asset) in doc.assets.iter().enumerate() {
         let path = format!("assets[{index}]");
         if asset.id.is_empty() {
-            errors.push(Issue::new("asset_id_empty", &format!("{path}.id"), "资产的 id 不能为空".to_string()));
+            errors.push(Issue::new(
+                "asset_id_empty",
+                &format!("{path}.id"),
+                "资产的 id 不能为空".to_string(),
+            ));
         } else if let Some(first) = index_of.insert(asset.id.as_str(), index) {
             errors.push(Issue::new(
                 "asset_id_duplicate",
@@ -510,7 +545,8 @@ pub fn validate_project_doc(doc: &ProjectDoc, effects: &[EffectSpec]) -> DocIssu
                     (true, true) => errors.push(Issue::new(
                         "mask_source_ambiguous",
                         &format!("{base}.mask"),
-                        "掩码只能二选一：要么给 `asset_id`、要么给 `gradient`，不能两个都给".to_string(),
+                        "掩码只能二选一：要么给 `asset_id`、要么给 `gradient`，不能两个都给"
+                            .to_string(),
                     )),
                     (false, false) => errors.push(Issue::new(
                         "mask_source_missing",
@@ -550,7 +586,10 @@ pub fn validate_project_doc(doc: &ProjectDoc, effects: &[EffectSpec]) -> DocIssu
                             errors.push(Issue::new(
                                 "gradient_stops_not_sorted",
                                 &at,
-                                format!("渐变断点的位置必须非递减，得到 {} 在 {} 之后", stop.at, previous),
+                                format!(
+                                    "渐变断点的位置必须非递减，得到 {} 在 {} 之后",
+                                    stop.at, previous
+                                ),
                             ));
                         }
                         previous = stop.at;
@@ -611,7 +650,9 @@ pub fn validate_project_doc(doc: &ProjectDoc, effects: &[EffectSpec]) -> DocIssu
                         .to_string(),
                 ));
             }
-            let Some(source) = &layer.source else { continue };
+            let Some(source) = &layer.source else {
+                continue;
+            };
             match index_of.get(source.asset_id.as_str()) {
                 None => errors.push(Issue::new(
                     "unknown_asset",
@@ -629,10 +670,7 @@ pub fn validate_project_doc(doc: &ProjectDoc, effects: &[EffectSpec]) -> DocIssu
                         // **先换算再比。** 以前是拿"时间线帧数"直接比"素材帧数" ——
                         // 素材帧率与时间线不一致时两边单位根本不同，这个检查是错的
                         // （60fps 素材放进 30fps 时间线时它会放行两倍的长度）。
-                        let asset_timebase = asset
-                            .timebase
-                            .clone()
-                            .unwrap_or_else(|| doc.timeline.timebase.clone());
+                        let asset_timebase = asset.timebase.unwrap_or(doc.timeline.timebase);
                         let last = source_frame_at(
                             source.source_in,
                             layer.duration().saturating_sub(1),
@@ -698,7 +736,9 @@ pub fn validate_project_doc(doc: &ProjectDoc, effects: &[EffectSpec]) -> DocIssu
     // 变成"按时间换算"，画面节奏会变 —— 那不是 bug，但它**必须是可见的**。
     if matches!(doc.migrated_from, Some(LAYER_SCHEMA_VERSION_V2) | Some(1)) {
         for (index, asset) in doc.assets.iter().enumerate() {
-            let Some(timebase) = asset.timebase.clone() else { continue };
+            let Some(timebase) = asset.timebase else {
+                continue;
+            };
             if timebase == doc.timeline.timebase {
                 continue;
             }
@@ -755,7 +795,10 @@ pub fn validate_project_doc(doc: &ProjectDoc, effects: &[EffectSpec]) -> DocIssu
             errors.push(Issue::new(
                 "image_sequence_bad_frame_count",
                 &format!("assets[{asset_index}].frame_count"),
-                format!("动图素材 {} 的 frame_count 必须是正数，实得 {count}", asset.id),
+                format!(
+                    "动图素材 {} 的 frame_count 必须是正数，实得 {count}",
+                    asset.id
+                ),
             ));
         }
     }
@@ -765,7 +808,9 @@ pub fn validate_project_doc(doc: &ProjectDoc, effects: &[EffectSpec]) -> DocIssu
         match track.kind {
             TrackKind::Subtitle => {
                 for (layer_index, layer) in track.layers.iter().enumerate() {
-                    let Some(source) = &layer.source else { continue };
+                    let Some(source) = &layer.source else {
+                        continue;
+                    };
                     let kind = index_of
                         .get(source.asset_id.as_str())
                         .map(|index| doc.assets[*index].kind);
@@ -893,7 +938,13 @@ mod tests {
     use crate::layer::{BlendMode, LAYER_SCHEMA_VERSION, Layer, Recorded, TrackV2, TransformV2};
     use crate::schema::TrackKind;
 
-    fn layer_with(id: &str, start: Frame, end: Frame, asset: Option<&str>, source_in: Frame) -> Layer {
+    fn layer_with(
+        id: &str,
+        start: Frame,
+        end: Frame,
+        asset: Option<&str>,
+        source_in: Frame,
+    ) -> Layer {
         Layer {
             backdrop_effects: Vec::new(),
             id: id.to_string(),
@@ -1111,7 +1162,11 @@ mod tests {
         still.kind = AssetKind::Image;
         let d = doc(vec![still], vec![layer_with("l1", 0, 30, Some("logo"), 0)]);
         let issues = validate_project_doc(&d, &[]);
-        assert!(issues.is_ok(), "静态图不该被要求给帧数：{:?}", codes(&issues.errors));
+        assert!(
+            issues.is_ok(),
+            "静态图不该被要求给帧数：{:?}",
+            codes(&issues.errors)
+        );
     }
 
     #[test]
@@ -1121,12 +1176,19 @@ mod tests {
         // 12 帧的素材，取 0..12 正好取完（左闭右开）。
         let d = doc(vec![anim], vec![layer_with("l1", 0, 12, Some("anim"), 0)]);
         let issues = validate_project_doc(&d, &[]);
-        assert!(issues.is_ok(), "合法的动图工程不该报错：{:?}", codes(&issues.errors));
+        assert!(
+            issues.is_ok(),
+            "合法的动图工程不该报错：{:?}",
+            codes(&issues.errors)
+        );
     }
 
     #[test]
     fn 合法工程文件没有问题() {
-        let d = doc(vec![asset("a", Some(100))], vec![layer_with("l1", 0, 30, Some("a"), 10)]);
+        let d = doc(
+            vec![asset("a", Some(100))],
+            vec![layer_with("l1", 0, 30, Some("a"), 10)],
+        );
         let issues = validate_project_doc(&d, &[]);
         assert!(issues.is_ok(), "不该有错误：{:?}", codes(&issues.errors));
         assert!(issues.warnings.is_empty());
@@ -1134,23 +1196,39 @@ mod tests {
 
     #[test]
     fn 引用不存在的资产要指出是哪个() {
-        let d = doc(vec![asset("a", None)], vec![layer_with("l1", 0, 30, Some("b"), 0)]);
+        let d = doc(
+            vec![asset("a", None)],
+            vec![layer_with("l1", 0, 30, Some("b"), 0)],
+        );
         let issues = validate_project_doc(&d, &[]);
         assert_eq!(codes(&issues.errors), vec!["unknown_asset"]);
-        assert!(issues.errors[0].path.contains("source.asset_id"), "path 要指到字段：{}", issues.errors[0].path);
+        assert!(
+            issues.errors[0].path.contains("source.asset_id"),
+            "path 要指到字段：{}",
+            issues.errors[0].path
+        );
         assert!(issues.errors[0].message.contains("b"));
     }
 
     #[test]
     fn 素材内越界_这是有了资产表才能验的() {
         // 素材只有 100 帧，而这一层要从第 90 帧取 30 帧 → 越界 20 帧。
-        let d = doc(vec![asset("a", Some(100))], vec![layer_with("l1", 0, 30, Some("a"), 90)]);
+        let d = doc(
+            vec![asset("a", Some(100))],
+            vec![layer_with("l1", 0, 30, Some("a"), 90)],
+        );
         let issues = validate_project_doc(&d, &[]);
         assert_eq!(codes(&issues.errors), vec!["source_range_exceeded"]);
-        assert!(issues.errors[0].message.contains("100"), "提示里要带上素材真实长度");
+        assert!(
+            issues.errors[0].message.contains("100"),
+            "提示里要带上素材真实长度"
+        );
 
         // 正好取到末尾是允许的（左闭右开：从 70 取 30 帧 = 70..100）
-        let ok = doc(vec![asset("a", Some(100))], vec![layer_with("l1", 0, 30, Some("a"), 70)]);
+        let ok = doc(
+            vec![asset("a", Some(100))],
+            vec![layer_with("l1", 0, 30, Some("a"), 70)],
+        );
         assert!(validate_project_doc(&ok, &[]).is_ok());
     }
 
@@ -1158,7 +1236,10 @@ mod tests {
     fn 不知道素材长度就不查越界_而不是默认通过() {
         // frame_count 为空是**信息缺失**，不是「长度为零」。
         // 所以这里不报越界——但要清楚这是"查不了"，不是"查过没问题"。
-        let d = doc(vec![asset("a", None)], vec![layer_with("l1", 0, 30, Some("a"), 999)]);
+        let d = doc(
+            vec![asset("a", None)],
+            vec![layer_with("l1", 0, 30, Some("a"), 999)],
+        );
         assert!(validate_project_doc(&d, &[]).is_ok());
     }
 
@@ -1166,7 +1247,10 @@ mod tests {
     fn 资产_id_重复与空_uri() {
         let mut second = asset("a", None);
         second.uri = String::new();
-        let d = doc(vec![asset("a", None), second], vec![layer_with("l1", 0, 30, Some("a"), 0)]);
+        let d = doc(
+            vec![asset("a", None), second],
+            vec![layer_with("l1", 0, 30, Some("a"), 0)],
+        );
         let issues = validate_project_doc(&d, &[]);
         let got = codes(&issues.errors);
         assert!(got.contains(&"asset_id_duplicate"), "得到 {got:?}");
@@ -1190,7 +1274,11 @@ mod tests {
         d.project_schema = 99;
         d.assets.push(asset("", None)); // 顺带塞一个坏资产
         let issues = validate_project_doc(&d, &[]);
-        assert_eq!(codes(&issues.errors), vec!["unsupported_project_schema"], "不该产生二次错误");
+        assert_eq!(
+            codes(&issues.errors),
+            vec!["unsupported_project_schema"],
+            "不该产生二次错误"
+        );
     }
 
     #[test]
@@ -1217,7 +1305,10 @@ mod tests {
         assert_eq!(d.assets.len(), 1);
         assert_eq!(d.assets[0].id, "a.mp4");
         assert_eq!(d.assets[0].uri, "a.mp4", "位置就用那个字符串，由宿主解释");
-        assert!(d.assets[0].frame_count.is_none(), "裸契约里没有长度信息，不能瞎编");
+        assert!(
+            d.assets[0].frame_count.is_none(),
+            "裸契约里没有长度信息，不能瞎编"
+        );
         assert_eq!(d.timeline.schema, LAYER_SCHEMA_VERSION, "应当已迁移到 v2");
         assert_eq!(d.timeline.tracks[0].layers[0].end, 10);
     }
@@ -1256,16 +1347,27 @@ mod tests {
         a.timebase = Some(TimebaseDto { num: 10, den: 1 });
         a.kind = AssetKind::ImageSequence;
         let table = doc(vec![a], vec![layer_with("l", 0, 10, Some("gif"), 0)]).asset_timebases();
-        assert_eq!(table.get("gif"), Some(&TimebaseDto { num: 10, den: 1 }), "时间基要过去");
-        assert_eq!(table.frame_count("gif"), Some(32), "**帧数也要过去**，否则循环取不了模");
+        assert_eq!(
+            table.get("gif"),
+            Some(&TimebaseDto { num: 10, den: 1 }),
+            "时间基要过去"
+        );
+        assert_eq!(
+            table.frame_count("gif"),
+            Some(32),
+            "**帧数也要过去**，否则循环取不了模"
+        );
     }
 
     #[test]
     fn 没登记时间基的资产仍然不进表() {
         // 老行为不许变：不进表 = 恒等换算（素材帧率按时间线算）。
         // 「不要给它猜一个帧率」是 `asset_timebases` 注释里就写着的纪律。
-        let table = doc(vec![asset("a", Some(50))], vec![layer_with("l", 0, 10, Some("a"), 0)])
-            .asset_timebases();
+        let table = doc(
+            vec![asset("a", Some(50))],
+            vec![layer_with("l", 0, 10, Some("a"), 0)],
+        )
+        .asset_timebases();
         assert!(table.get("a").is_none(), "没有时间基就不该进表");
         assert!(table.frame_count("a").is_none());
     }
@@ -1277,7 +1379,7 @@ mod tests {
         let mut a = asset("gif", None);
         a.timebase = Some(TimebaseDto { num: 10, den: 1 });
         let table = doc(vec![a], vec![layer_with("l", 0, 10, Some("gif"), 0)]).asset_timebases();
-        assert_eq!(table.get("gif").is_some(), true, "有时间基就进表");
+        assert!(table.get("gif").is_some(), "有时间基就进表");
         assert_eq!(table.frame_count("gif"), None, "没登记长度就如实是 None");
     }
 
@@ -1293,18 +1395,37 @@ mod tests {
             format: "mp4".into(),
             background: bg.map(|s| s.to_string()),
         };
-        assert_eq!(hints(None).background_rgba(), None, "没写 = 透明（改造前行为）");
-        assert_eq!(hints(Some("#ffffff")).background_rgba(), Some([1.0, 1.0, 1.0, 1.0]));
-        assert_eq!(hints(Some("#000000")).background_rgba(), Some([0.0, 0.0, 0.0, 1.0]));
-        assert_eq!(hints(Some("#fff")).background_rgba(), Some([1.0, 1.0, 1.0, 1.0]));
         assert_eq!(
-            hints(Some("#33669980")).background_rgba().map(|c| (c[0] > 0.19 && c[0] < 0.21, c[3] > 0.49 && c[3] < 0.51)),
+            hints(None).background_rgba(),
+            None,
+            "没写 = 透明（改造前行为）"
+        );
+        assert_eq!(
+            hints(Some("#ffffff")).background_rgba(),
+            Some([1.0, 1.0, 1.0, 1.0])
+        );
+        assert_eq!(
+            hints(Some("#000000")).background_rgba(),
+            Some([0.0, 0.0, 0.0, 1.0])
+        );
+        assert_eq!(
+            hints(Some("#fff")).background_rgba(),
+            Some([1.0, 1.0, 1.0, 1.0])
+        );
+        assert_eq!(
+            hints(Some("#33669980"))
+                .background_rgba()
+                .map(|c| (c[0] > 0.19 && c[0] < 0.21, c[3] > 0.49 && c[3] < 0.51)),
             Some((true, true)),
             "8 位要认 alpha"
         );
         // **不猜**：颜色名 / rgb() / 位数不对 一律 None
         for bad in ["red", "rgb(1,2,3)", "#12", "#12345", "", "  "] {
-            assert_eq!(hints(Some(bad)).background_rgba(), None, "{bad:?} 不该被认出来");
+            assert_eq!(
+                hints(Some(bad)).background_rgba(),
+                None,
+                "{bad:?} 不该被认出来"
+            );
         }
         // 省略字段时必须能反序列化（老工程 / 老底座都靠它）
         let doc: ProjectDoc = serde_json::from_str(

@@ -38,7 +38,11 @@ impl SourceResolver for OneSource {
 fn blur_effect(radius: f32) -> Effect {
     let mut params = BTreeMap::new();
     params.insert("radius".to_string(), radius);
-    Effect { kind: "gaussian_blur".to_string(), params, ..Default::default() }
+    Effect {
+        kind: "gaussian_blur".to_string(),
+        params,
+        ..Default::default()
+    }
 }
 
 fn layer(clip_id: &str, opacity: f32, scale: f32, effects: Vec<Effect>) -> Layer {
@@ -48,7 +52,12 @@ fn layer(clip_id: &str, opacity: f32, scale: f32, effects: Vec<Effect>) -> Layer
         source: "synthetic".to_string(),
         source_frame: 0,
         opacity,
-        transform: Transform { x: 0.0, y: 0.0, scale, rotation_deg: 0.0 },
+        transform: Transform {
+            x: 0.0,
+            y: 0.0,
+            scale,
+            rotation_deg: 0.0,
+        },
         effects,
         frozen_for_transition: false,
         // 这个 fixture 测的是渲染，不是混合与调整图层 —— 用恒定默认值。
@@ -62,10 +71,18 @@ fn layer(clip_id: &str, opacity: f32, scale: f32, effects: Vec<Effect>) -> Layer
 }
 
 /// 渲染一份 composite 并读回。
-fn render(ctx: &dhampir_core::gpu::GpuContext, source: &wgpu::Texture, composite: &Composite) -> Vec<u8> {
+fn render(
+    ctx: &dhampir_core::gpu::GpuContext,
+    source: &wgpu::Texture,
+    composite: &Composite,
+) -> Vec<u8> {
     let target = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dhampir timeline test target"),
-        size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -79,9 +96,11 @@ fn render(ctx: &dhampir_core::gpu::GpuContext, source: &wgpu::Texture, composite
         size: (SIZE, SIZE),
     };
     let renderer = TimelineRenderer::new(&ctx.device, FORMAT);
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("dhampir timeline test encoder"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dhampir timeline test encoder"),
+        });
     renderer.render_frame(
         &ctx.device,
         &ctx.queue,
@@ -93,8 +112,12 @@ fn render(ctx: &dhampir_core::gpu::GpuContext, source: &wgpu::Texture, composite
         wgpu::Color::TRANSPARENT,
     );
     ctx.queue.submit([encoder.finish()]);
-    let image = pollster::block_on(readback::read_texture_rgba8(&ctx.device, &ctx.queue, &target))
-        .expect("读回失败");
+    let image = pollster::block_on(readback::read_texture_rgba8(
+        &ctx.device,
+        &ctx.queue,
+        &target,
+    ))
+    .expect("读回失败");
     image.pixels
 }
 
@@ -114,7 +137,11 @@ fn make_opaque_source(ctx: &dhampir_core::gpu::GpuContext) -> wgpu::Texture {
     }
     let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dhampir timeline test opaque source"),
-        size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -135,7 +162,11 @@ fn make_opaque_source(ctx: &dhampir_core::gpu::GpuContext) -> wgpu::Texture {
             bytes_per_row: Some(SIZE * 4),
             rows_per_image: Some(SIZE),
         },
-        wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
     );
     texture
 }
@@ -144,7 +175,11 @@ fn make_source(ctx: &dhampir_core::gpu::GpuContext) -> wgpu::Texture {
     let pixels = synthetic_source_rgba8(SIZE, SIZE, 7);
     let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dhampir timeline test source"),
-        size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -165,7 +200,11 @@ fn make_source(ctx: &dhampir_core::gpu::GpuContext) -> wgpu::Texture {
             bytes_per_row: Some(SIZE * 4),
             rows_per_image: Some(SIZE),
         },
-        wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
     );
     texture
 }
@@ -199,7 +238,10 @@ fn 多轨合成加模糊能被调度起来() {
 
     // 1. 确定性：同一份输入与 composite，两次必须逐字节相同。
     //    这是"两端一致"能成立的前提——本端都不自洽就没什么可比。
-    assert_eq!(blurred_pixels, again, "同一帧渲染两次结果不同，渲染不是确定性的");
+    assert_eq!(
+        blurred_pixels, again,
+        "同一帧渲染两次结果不同，渲染不是确定性的"
+    );
 
     // 2. 不退化：画面不能是一片纯色（纯色图什么结论都撑不起来）
     let first = &plain_pixels[..4];
@@ -232,7 +274,11 @@ fn 源解析不出来时跳过该层而不是整帧失败() {
     let (ctx, _init) = open_leg(NATIVE_BACKENDS).expect("拿不到 GPU 上下文");
     let target = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dhampir timeline test nothing"),
-        size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -240,19 +286,28 @@ fn 源解析不出来时跳过该层而不是整帧失败() {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
-    let composite = Composite { frame: 0, layers: vec![layer("a", 1.0, 1.0, Vec::new())] };
+    let composite = Composite {
+        frame: 0,
+        layers: vec![layer("a", 1.0, 1.0, Vec::new())],
+    };
     let renderer = TimelineRenderer::new(&ctx.device, FORMAT);
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
     let drawn = renderer.render_frame(
-        &ctx.device, &ctx.queue, &mut encoder,
+        &ctx.device,
+        &ctx.queue,
+        &mut encoder,
         &target.create_view(&wgpu::TextureViewDescriptor::default()),
-        RenderSpace::square((SIZE, SIZE)), &composite, &mut Nothing, wgpu::Color::TRANSPARENT,
+        RenderSpace::square((SIZE, SIZE)),
+        &composite,
+        &mut Nothing,
+        wgpu::Color::TRANSPARENT,
     );
     assert_eq!(drawn, 0, "解析不出源就不该画任何一层");
     ctx.queue.submit([encoder.finish()]);
     // 不 panic、能提交，就算过：这条钉的是"少一层素材不该让整帧失败"。
 }
-
 
 #[test]
 #[ignore = "需要真 GPU；跑：cargo test -p dhampir-worker --test timeline -- --ignored"]
@@ -281,7 +336,11 @@ fn 遇到调整图层时整帧不画而不是悄悄画错() {
     let (ctx, _init) = open_leg(NATIVE_BACKENDS).expect("拿不到 GPU 上下文");
     let target = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dhampir timeline test adjustment"),
-        size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -295,18 +354,30 @@ fn 遇到调整图层时整帧不画而不是悄悄画错() {
     adjustment.is_adjustment = true;
     adjustment.source = String::new();
 
-    let composite = Composite { frame: 0, layers: vec![adjustment] };
+    let composite = Composite {
+        frame: 0,
+        layers: vec![adjustment],
+    };
     let renderer = TimelineRenderer::new(&ctx.device, FORMAT);
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
     let drawn = renderer.render_frame(
-        &ctx.device, &ctx.queue, &mut encoder,
+        &ctx.device,
+        &ctx.queue,
+        &mut encoder,
         &target.create_view(&wgpu::TextureViewDescriptor::default()),
-        RenderSpace::square((SIZE, SIZE)), &composite, &mut Nothing, wgpu::Color::TRANSPARENT,
+        RenderSpace::square((SIZE, SIZE)),
+        &composite,
+        &mut Nothing,
+        wgpu::Color::TRANSPARENT,
     );
-    assert_eq!(drawn, 0, "分段合成还没实现，就该一帧都不画，而不是画出一张看不出错的图");
+    assert_eq!(
+        drawn, 0,
+        "分段合成还没实现，就该一帧都不画，而不是画出一张看不出错的图"
+    );
     ctx.queue.submit([encoder.finish()]);
 }
-
 
 #[test]
 #[ignore = "需要真 GPU；跑：cargo test -p dhampir-worker --test timeline -- --ignored"]
@@ -346,7 +417,10 @@ fn 调整图层模糊下方而不影响上方() {
             top.clone(),
         ],
     };
-    let only_top = Composite { frame: 0, layers: vec![top.clone()] };
+    let only_top = Composite {
+        frame: 0,
+        layers: vec![top.clone()],
+    };
 
     let plain = render(&ctx, &source, &bottom_only);
     let blurred = render(&ctx, &source, &adjusted);
@@ -354,10 +428,7 @@ fn 调整图层模糊下方而不影响上方() {
     let without_adjustment_above = render(&ctx, &source, &only_top);
 
     // 1. **下方真的被改了。**
-    assert_ne!(
-        plain, blurred,
-        "挂上调整图层后下方没变 —— 分段合成没生效"
-    );
+    assert_ne!(plain, blurred, "挂上调整图层后下方没变 —— 分段合成没生效");
 
     // **1.5 归因**：让「只有上层」也走**同一条分段路径**。
     //
@@ -410,7 +481,11 @@ fn color_mask_effect(kind: &str, params: &[(&str, f32)]) -> Effect {
     for (key, value) in params {
         map.insert((*key).to_string(), *value);
     }
-    Effect { kind: kind.to_string(), params: map, ..Default::default() }
+    Effect {
+        kind: kind.to_string(),
+        params: map,
+        ..Default::default()
+    }
 }
 
 /// 底图像素：与 `make_opaque_source` 用的是同一份序列（alpha 全 255，混合是全覆盖）。
@@ -434,6 +509,11 @@ fn pixel_at(pixels: &[u8], x: u32, y: u32) -> [f32; 3] {
 ///
 /// **分片着色器里 `position.xy` 是像素中心**（`(x+0.5, y+0.5)`），这里必须同口径 ——
 /// 差半个像素会让 45° 那条对角判据刚好落在边界上。
+///
+/// `too_many_arguments`：这是测试里的**参考实现**，8 个参数直接对应着色器 uniform 的
+/// 形态（base / 像素坐标 / shape / angle / amount / 两端颜色）。拆结构体只会让
+/// "照着着色器读一遍"变得更难，而这函数存在的全部意义就是能对着读。
+#[allow(clippy::too_many_arguments)]
 fn overlay_expected(
     base: [f32; 3],
     x: u32,
@@ -449,7 +529,11 @@ fn overlay_expected(
     let v = (y as f32 + 0.5) / size - 0.5;
     // `shape=0`（纯色）⇒ `grad_t = 0` ⇒ 取 `color_a`。**这一项 2026-10-01 修过**：
     // 以前写成 `is_solid + …`，纯色会落到 `color_b`（`r2/g2/b2`），与 `OVERLAY` 的文档矛盾。
-    let is_linear = if (0.5..1.5).contains(&shape) { 1.0 } else { 0.0 };
+    let is_linear = if (0.5..1.5).contains(&shape) {
+        1.0
+    } else {
+        0.0
+    };
     let is_radial = if shape >= 1.5 { 1.0 } else { 0.0 };
     let angle = angle_deg.to_radians();
     let (dx, dy) = (angle.cos(), angle.sin());
@@ -465,11 +549,20 @@ fn overlay_expected(
 }
 
 /// `color_mask.wgsl` 第 2 段（暗角）的数学。
-fn vignette_expected(base: [f32; 3], x: u32, y: u32, amount: f32, radius: f32, softness: f32) -> [f32; 3] {
+fn vignette_expected(
+    base: [f32; 3],
+    x: u32,
+    y: u32,
+    amount: f32,
+    radius: f32,
+    softness: f32,
+) -> [f32; 3] {
     let size = SIZE as f32;
     let u = (x as f32 + 0.5) / size - 0.5;
     let v = (y as f32 + 0.5) / size - 0.5;
-    let dist = (u * u + v * v).sqrt() * 1.414_213_6;
+    // 用真的 √2 常量，而不是手写的 `1.414_213_6`（那是它的近似值，
+    // clippy 的 approx_constant 指出的就是这里）。着色器那边算的是同一件事。
+    let dist = (u * u + v * v).sqrt() * std::f32::consts::SQRT_2;
     let edge = ((dist - radius) / softness.max(1e-4)).clamp(0.0, 1.0);
     let factor = 1.0 - edge * amount;
     [base[0] * factor, base[1] * factor, base[2] * factor]
@@ -480,7 +573,8 @@ fn assert_close(got: [f32; 3], want: [f32; 3], label: &str, tol: f32) {
         assert!(
             (got[c] - want[c]).abs() <= tol,
             "{label}：通道 {c} 实得 {}，期望 {}（容差 {tol}）",
-            got[c], want[c]
+            got[c],
+            want[c]
         );
     }
 }
@@ -498,30 +592,58 @@ fn 调整图层的_overlay_逐像素对上解析渐变() {
     let base = opaque_base_pixels();
 
     let bottom = layer("bottom", 1.0, 1.0, Vec::new());
-    let plain = Composite { frame: 0, layers: vec![bottom.clone()] };
+    let plain = Composite {
+        frame: 0,
+        layers: vec![bottom.clone()],
+    };
     let plain_pixels = render(&ctx, &source, &plain);
 
     for (label, angle) in [("angle=0", 0.0f32), ("angle=45", 45.0f32)] {
-        let mut adjustment = layer("adj", 1.0, 1.0, vec![color_mask_effect("overlay", &[
-            ("amount", AMOUNT),
-            ("r", A[0]), ("g", A[1]), ("b", A[2]),
-            ("r2", B[0]), ("g2", B[1]), ("b2", B[2]),
-            ("shape", 1.0), ("angle", angle),
-        ])]);
+        let mut adjustment = layer(
+            "adj",
+            1.0,
+            1.0,
+            vec![color_mask_effect(
+                "overlay",
+                &[
+                    ("amount", AMOUNT),
+                    ("r", A[0]),
+                    ("g", A[1]),
+                    ("b", A[2]),
+                    ("r2", B[0]),
+                    ("g2", B[1]),
+                    ("b2", B[2]),
+                    ("shape", 1.0),
+                    ("angle", angle),
+                ],
+            )],
+        );
         adjustment.is_adjustment = true;
         adjustment.source = String::new();
 
-        let with = render(&ctx, &source, &Composite {
-            frame: 0,
-            layers: vec![bottom.clone(), adjustment],
-        });
-        assert_ne!(plain_pixels, with, "{label}：挂上 overlay 后画面没变 —— Document space 那一趟没跑到");
+        let with = render(
+            &ctx,
+            &source,
+            &Composite {
+                frame: 0,
+                layers: vec![bottom.clone(), adjustment],
+            },
+        );
+        assert_ne!(
+            plain_pixels, with,
+            "{label}：挂上 overlay 后画面没变 —— Document space 那一趟没跑到"
+        );
 
         // 逐像素对解析值（每 3 个像素采一个，够密也够快）。
         for y in (0..SIZE).step_by(3) {
             for x in (0..SIZE).step_by(3) {
                 let want = overlay_expected(pixel_at(&base, x, y), x, y, 1.0, angle, AMOUNT, A, B);
-                assert_close(pixel_at(&with, x, y), want, &format!("{label} 像素({x},{y})"), 2.0);
+                assert_close(
+                    pixel_at(&with, x, y),
+                    want,
+                    &format!("{label} 像素({x},{y})"),
+                    2.0,
+                );
             }
         }
 
@@ -535,8 +657,14 @@ fn 调整图层的_overlay_逐像素对上解析渐变() {
             for c in 0..3 {
                 let want_l = base_left[c] + (A[c] * 255.0 - base_left[c]) * AMOUNT;
                 let want_r = base_right[c] + (B[c] * 255.0 - base_right[c]) * AMOUNT;
-                assert!((left[c] - want_l).abs() <= 2.0, "angle=0 左端通道 {c} 不是 color_a 那一端");
-                assert!((right[c] - want_r).abs() <= 2.0, "angle=0 右端通道 {c} 不是 color_b 那一端");
+                assert!(
+                    (left[c] - want_l).abs() <= 2.0,
+                    "angle=0 左端通道 {c} 不是 color_a 那一端"
+                );
+                assert!(
+                    (right[c] - want_r).abs() <= 2.0,
+                    "angle=0 右端通道 {c} 不是 color_b 那一端"
+                );
             }
         } else {
             // 45°：按下游 §5.2 的换算，应当是**从左上到右下**。
@@ -547,25 +675,48 @@ fn 调整图层的_overlay_逐像素对上解析渐变() {
             for c in 0..3 {
                 let want_tl = base_tl[c] + (A[c] * 255.0 - base_tl[c]) * AMOUNT;
                 let want_br = base_br[c] + (B[c] * 255.0 - base_br[c]) * AMOUNT;
-                assert!((tl[c] - want_tl).abs() <= 2.0, "angle=45 左上角通道 {c} 不是 color_a 那一端");
-                assert!((br[c] - want_br).abs() <= 2.0, "angle=45 右下角通道 {c} 不是 color_b 那一端");
+                assert!(
+                    (tl[c] - want_tl).abs() <= 2.0,
+                    "angle=45 左上角通道 {c} 不是 color_a 那一端"
+                );
+                assert!(
+                    (br[c] - want_br).abs() <= 2.0,
+                    "angle=45 右下角通道 {c} 不是 color_b 那一端"
+                );
             }
         }
     }
     // D4（2026-10-01 修）：`shape=0`（纯色）取的是 **`color_a`（`r/g/b`）**，不是 `color_b`。
     // 参数**故意让 r2≠r**：`r2` 缺省回落到 `r` 时，两种实现看不出区别 —— 那正是它活了这么久的原因。
-    let mut solid = layer("adj", 1.0, 1.0, vec![color_mask_effect("overlay", &[
-        ("amount", 1.0),
-        ("r", 0.8), ("g", 0.0), ("b", 0.0),
-        ("r2", 0.0), ("g2", 0.0), ("b2", 0.8),
-        ("shape", 0.0), ("angle", 0.0),
-    ])]);
+    let mut solid = layer(
+        "adj",
+        1.0,
+        1.0,
+        vec![color_mask_effect(
+            "overlay",
+            &[
+                ("amount", 1.0),
+                ("r", 0.8),
+                ("g", 0.0),
+                ("b", 0.0),
+                ("r2", 0.0),
+                ("g2", 0.0),
+                ("b2", 0.8),
+                ("shape", 0.0),
+                ("angle", 0.0),
+            ],
+        )],
+    );
     solid.is_adjustment = true;
     solid.source = String::new();
-    let solid_px = render(&ctx, &source, &Composite {
-        frame: 0,
-        layers: vec![bottom.clone(), solid],
-    });
+    let solid_px = render(
+        &ctx,
+        &source,
+        &Composite {
+            frame: 0,
+            layers: vec![bottom.clone(), solid],
+        },
+    );
     // amount = 1 ⇒ 整幅都该是 color_a = (0.8, 0, 0) × 255 = (204, 0, 0)
     let center = pixel_at(&solid_px, SIZE / 2, SIZE / 2);
     assert!(
@@ -589,23 +740,52 @@ fn 调整图层的_vignette_中心不动而角落压暗() {
     let base = opaque_base_pixels();
 
     let bottom = layer("bottom", 1.0, 1.0, Vec::new());
-    let mut adjustment = layer("adj", 1.0, 1.0, vec![color_mask_effect("vignette", &[
-        ("amount", AMOUNT), ("radius", RADIUS), ("softness", SOFTNESS),
-    ])]);
+    let mut adjustment = layer(
+        "adj",
+        1.0,
+        1.0,
+        vec![color_mask_effect(
+            "vignette",
+            &[
+                ("amount", AMOUNT),
+                ("radius", RADIUS),
+                ("softness", SOFTNESS),
+            ],
+        )],
+    );
     adjustment.is_adjustment = true;
     adjustment.source = String::new();
 
-    let plain = render(&ctx, &source, &Composite { frame: 0, layers: vec![bottom.clone()] });
-    let with = render(&ctx, &source, &Composite {
-        frame: 0,
-        layers: vec![bottom, adjustment],
-    });
-    assert_ne!(plain, with, "挂上 vignette 后画面没变 —— Document space 那一趟没跑到");
+    let plain = render(
+        &ctx,
+        &source,
+        &Composite {
+            frame: 0,
+            layers: vec![bottom.clone()],
+        },
+    );
+    let with = render(
+        &ctx,
+        &source,
+        &Composite {
+            frame: 0,
+            layers: vec![bottom, adjustment],
+        },
+    );
+    assert_ne!(
+        plain, with,
+        "挂上 vignette 后画面没变 —— Document space 那一趟没跑到"
+    );
 
     for y in (0..SIZE).step_by(3) {
         for x in (0..SIZE).step_by(3) {
             let want = vignette_expected(pixel_at(&base, x, y), x, y, AMOUNT, RADIUS, SOFTNESS);
-            assert_close(pixel_at(&with, x, y), want, &format!("vignette 像素({x},{y})"), 2.0);
+            assert_close(
+                pixel_at(&with, x, y),
+                want,
+                &format!("vignette 像素({x},{y})"),
+                2.0,
+            );
         }
     }
 
@@ -645,7 +825,11 @@ impl SourceResolver for SourceWithMask {
 fn mask_2x2(ctx: &dhampir_core::gpu::GpuContext, texels: [[u8; 4]; 4]) -> wgpu::Texture {
     let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dhampir timeline test mask"),
-        size: wgpu::Extent3d { width: 2, height: 2, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: 2,
+            height: 2,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -665,8 +849,16 @@ fn mask_2x2(ctx: &dhampir_core::gpu::GpuContext, texels: [[u8; 4]; 4]) -> wgpu::
             aspect: wgpu::TextureAspect::All,
         },
         &pixels,
-        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(8), rows_per_image: Some(2) },
-        wgpu::Extent3d { width: 2, height: 2, depth_or_array_layers: 1 },
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(8),
+            rows_per_image: Some(2),
+        },
+        wgpu::Extent3d {
+            width: 2,
+            height: 2,
+            depth_or_array_layers: 1,
+        },
     );
     texture
 }
@@ -678,7 +870,11 @@ fn mask_2x2(ctx: &dhampir_core::gpu::GpuContext, texels: [[u8; 4]; 4]) -> wgpu::
 fn half_source(ctx: &dhampir_core::gpu::GpuContext) -> wgpu::Texture {
     let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dhampir timeline test half source"),
-        size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -710,16 +906,28 @@ fn half_source(ctx: &dhampir_core::gpu::GpuContext) -> wgpu::Texture {
             bytes_per_row: Some(SIZE * 4),
             rows_per_image: Some(SIZE),
         },
-        wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
     );
     texture
 }
 
 /// 用给定的解析器渲一帧并读回像素。
-fn render_with(ctx: &dhampir_core::gpu::GpuContext, resolver: &mut dyn SourceResolver, composite: &Composite) -> Vec<u8> {
+fn render_with(
+    ctx: &dhampir_core::gpu::GpuContext,
+    resolver: &mut dyn SourceResolver,
+    composite: &Composite,
+) -> Vec<u8> {
     let target = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dhampir timeline test mask target"),
-        size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -729,9 +937,11 @@ fn render_with(ctx: &dhampir_core::gpu::GpuContext, resolver: &mut dyn SourceRes
     });
     let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
     let renderer = TimelineRenderer::new(&ctx.device, FORMAT);
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("dhampir timeline test mask encoder"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dhampir timeline test mask encoder"),
+        });
     renderer.render_frame(
         &ctx.device,
         &ctx.queue,
@@ -743,9 +953,13 @@ fn render_with(ctx: &dhampir_core::gpu::GpuContext, resolver: &mut dyn SourceRes
         wgpu::Color::TRANSPARENT,
     );
     ctx.queue.submit([encoder.finish()]);
-    pollster::block_on(readback::read_texture_rgba8(&ctx.device, &ctx.queue, &target))
-        .expect("读回失败")
-        .pixels
+    pollster::block_on(readback::read_texture_rgba8(
+        &ctx.device,
+        &ctx.queue,
+        &target,
+    ))
+    .expect("读回失败")
+    .pixels
 }
 
 /// **掩码的通路判据（D12 第 3.5 步）**：解析器给不出掩码时必须**拒绝整帧**，不许画成没掩码的样子。
@@ -777,7 +991,11 @@ fn 掩码解析不出来时拒绝整帧而不是画成没掩码() {
     };
 
     // 宿主"还没接掩码通路"：一个像素都不该画。
-    let mut no_mask = SourceWithMask { view: source_view.clone(), size: (SIZE, SIZE), mask: None };
+    let mut no_mask = SourceWithMask {
+        view: source_view.clone(),
+        size: (SIZE, SIZE),
+        mask: None,
+    };
     let refused = render_with(&ctx, &mut no_mask, &masked);
     assert!(
         refused.iter().all(|byte| *byte == 0),
@@ -792,7 +1010,15 @@ fn 掩码从解析器来_渲染路径上四象限与反相都对() {
     let (ctx, _init) = open_leg(NATIVE_BACKENDS).expect("拿不到 GPU 上下文");
     let source = make_opaque_source(&ctx);
     let source_view = source.create_view(&wgpu::TextureViewDescriptor::default());
-    let mask = mask_2x2(&ctx, [[255, 255, 255, 255], [0, 0, 0, 0], [0, 0, 0, 0], [255, 255, 255, 255]]);
+    let mask = mask_2x2(
+        &ctx,
+        [
+            [255, 255, 255, 255],
+            [0, 0, 0, 0],
+            [0, 0, 0, 0],
+            [255, 255, 255, 255],
+        ],
+    );
     let mask_view = mask.create_view(&wgpu::TextureViewDescriptor::default());
 
     let with = |invert: bool| Composite {
@@ -809,15 +1035,31 @@ fn 掩码从解析器来_渲染路径上四象限与反相都对() {
     };
     let alpha_at = |pixels: &[u8], x: u32, y: u32| pixels[((y * SIZE + x) * 4 + 3) as usize];
 
-    let mut resolver = SourceWithMask { view: source_view.clone(), size: (SIZE, SIZE), mask: Some(mask_view.clone()) };
+    let mut resolver = SourceWithMask {
+        view: source_view.clone(),
+        size: (SIZE, SIZE),
+        mask: Some(mask_view.clone()),
+    };
     let normal = render_with(&ctx, &mut resolver, &with(false));
     // 两档而不是精确值：2×2 铺 32 时没有像素中心落在纹素中心上（实测 240 / 15）。
-    assert!(alpha_at(&normal, 8, 8) >= 200, "左上应当留下，得到 {}", alpha_at(&normal, 8, 8));
+    assert!(
+        alpha_at(&normal, 8, 8) >= 200,
+        "左上应当留下，得到 {}",
+        alpha_at(&normal, 8, 8)
+    );
     assert!(alpha_at(&normal, 24, 24) >= 200, "右下应当留下");
-    assert!(alpha_at(&normal, 24, 8) <= 40, "右上应当被切掉，得到 {}", alpha_at(&normal, 24, 8));
+    assert!(
+        alpha_at(&normal, 24, 8) <= 40,
+        "右上应当被切掉，得到 {}",
+        alpha_at(&normal, 24, 8)
+    );
     assert!(alpha_at(&normal, 8, 24) <= 40, "左下应当被切掉");
 
-    let mut inverted = SourceWithMask { view: source_view, size: (SIZE, SIZE), mask: Some(mask_view) };
+    let mut inverted = SourceWithMask {
+        view: source_view,
+        size: (SIZE, SIZE),
+        mask: Some(mask_view),
+    };
     let flipped = render_with(&ctx, &mut inverted, &with(true));
     assert!(alpha_at(&flipped, 8, 8) <= 40, "反相后左上应当被切掉");
     assert!(alpha_at(&flipped, 24, 24) <= 40, "反相后右下应当被切掉");
@@ -844,16 +1086,48 @@ fn 多边形裁剪只留下三角形那一半() {
             ..layer("poly", 1.0, 1.0, Vec::new())
         }],
     };
-    let mut resolver = SourceWithMask { view: source_view, size: (SIZE, SIZE), mask: None };
+    let mut resolver = SourceWithMask {
+        view: source_view,
+        size: (SIZE, SIZE),
+        mask: None,
+    };
     let pixels = render_with(&ctx, &mut resolver, &composite);
     let alpha_at = |x: u32, y: u32| pixels[((y * SIZE + x) * 4 + 3) as usize];
-    assert!(alpha_at(6, 6) >= 200, "左上角在三角形里，得到 {}", alpha_at(6, 6));
-    assert!(alpha_at(26, 2) >= 200, "贴着上边、斜边之内，得到 {}", alpha_at(26, 2));
-    assert!(alpha_at(2, 26) >= 200, "贴着左边、斜边之内，得到 {}", alpha_at(2, 26));
-    assert!(alpha_at(12, 12) >= 200, "斜边内侧，得到 {}", alpha_at(12, 12));
-    assert!(alpha_at(26, 26) <= 40, "右下角在斜边外，得到 {}", alpha_at(26, 26));
-    assert!(alpha_at(26, 16) <= 40, "右中也在斜边外，得到 {}", alpha_at(26, 16));
-    assert!(alpha_at(16, 26) <= 40, "下中也在斜边外，得到 {}", alpha_at(16, 26));
+    assert!(
+        alpha_at(6, 6) >= 200,
+        "左上角在三角形里，得到 {}",
+        alpha_at(6, 6)
+    );
+    assert!(
+        alpha_at(26, 2) >= 200,
+        "贴着上边、斜边之内，得到 {}",
+        alpha_at(26, 2)
+    );
+    assert!(
+        alpha_at(2, 26) >= 200,
+        "贴着左边、斜边之内，得到 {}",
+        alpha_at(2, 26)
+    );
+    assert!(
+        alpha_at(12, 12) >= 200,
+        "斜边内侧，得到 {}",
+        alpha_at(12, 12)
+    );
+    assert!(
+        alpha_at(26, 26) <= 40,
+        "右下角在斜边外，得到 {}",
+        alpha_at(26, 26)
+    );
+    assert!(
+        alpha_at(26, 16) <= 40,
+        "右中也在斜边外，得到 {}",
+        alpha_at(26, 16)
+    );
+    assert!(
+        alpha_at(16, 26) <= 40,
+        "下中也在斜边外，得到 {}",
+        alpha_at(16, 26)
+    );
 }
 
 /// **路径裁剪（D11 第 25 轮）**：`path()` 先细分成折线、按**图层框的文档像素**归一化，再栅格化。
@@ -867,12 +1141,18 @@ fn 路径裁剪的直线与曲线都对() {
     let with_path = |data: &str| Composite {
         frame: 0,
         layers: vec![Layer {
-            clip: Some(dhampir_core::timeline::layer::ClipShape::Path { data: data.to_string() }),
+            clip: Some(dhampir_core::timeline::layer::ClipShape::Path {
+                data: data.to_string(),
+            }),
             ..layer("path", 1.0, 1.0, Vec::new())
         }],
     };
     let render_path = |data: &str| {
-        let mut resolver = SourceWithMask { view: source_view.clone(), size: (SIZE, SIZE), mask: None };
+        let mut resolver = SourceWithMask {
+            view: source_view.clone(),
+            size: (SIZE, SIZE),
+            mask: None,
+        };
         render_with(&ctx, &mut resolver, &with_path(data))
     };
     let alpha_at = |pixels: &[u8], x: u32, y: u32| pixels[((y * SIZE + x) * 4 + 3) as usize];
@@ -888,8 +1168,16 @@ fn 路径裁剪的直线与曲线都对() {
     //    中点 (16,24) 在下边界上，所以 (16,16) 在内、(16,30) 在外。
     //    （这两条是**从曲线方程算出来的**，不是"看着像"。）
     let curved = render_path("M 0 0 C 0 32 32 32 32 0 Z");
-    assert!(alpha_at(&curved, 16, 16) >= 200, "透镜内部应当留下，得到 {}", alpha_at(&curved, 16, 16));
-    assert!(alpha_at(&curved, 16, 30) <= 40, "曲线下方应当被切掉，得到 {}", alpha_at(&curved, 16, 30));
+    assert!(
+        alpha_at(&curved, 16, 16) >= 200,
+        "透镜内部应当留下，得到 {}",
+        alpha_at(&curved, 16, 16)
+    );
+    assert!(
+        alpha_at(&curved, 16, 30) <= 40,
+        "曲线下方应当被切掉，得到 {}",
+        alpha_at(&curved, 16, 30)
+    );
 }
 
 /// **投影（D13 第 28 轮）**：同一层多画一张 —— 偏移、染色、模糊、浓淡，四条都钉。
@@ -902,7 +1190,10 @@ fn 投影在下面_偏移染色模糊浓淡都对() {
     // 层缩到一半：quad 只盖中间 16×16（[8,24)²）；投影再往右下挪 4 ⇒ [12,28)²。
     let with_shadow = |shadow: Option<dhampir_core::timeline::layer::ShadowSpec>| Composite {
         frame: 0,
-        layers: vec![Layer { shadow, ..layer("drop", 1.0, 0.5, Vec::new()) }],
+        layers: vec![Layer {
+            shadow,
+            ..layer("drop", 1.0, 0.5, Vec::new())
+        }],
     };
     let spec = |blur_sigma: f32, opacity: f32| dhampir_core::timeline::layer::ShadowSpec {
         offset_x: 4.0,
@@ -911,12 +1202,21 @@ fn 投影在下面_偏移染色模糊浓淡都对() {
         opacity,
     };
     let render_shadow = |shadow: Option<dhampir_core::timeline::layer::ShadowSpec>| {
-        let mut resolver = SourceWithMask { view: source_view.clone(), size: (SIZE, SIZE), mask: None };
+        let mut resolver = SourceWithMask {
+            view: source_view.clone(),
+            size: (SIZE, SIZE),
+            mask: None,
+        };
         render_with(&ctx, &mut resolver, &with_shadow(shadow))
     };
     let at = |pixels: &[u8], x: u32, y: u32| {
         let index = ((y * SIZE + x) * 4) as usize;
-        [pixels[index], pixels[index + 1], pixels[index + 2], pixels[index + 3]]
+        [
+            pixels[index],
+            pixels[index + 1],
+            pixels[index + 2],
+            pixels[index + 3],
+        ]
     };
 
     let plain = render_shadow(None);
@@ -925,12 +1225,22 @@ fn 投影在下面_偏移染色模糊浓淡都对() {
     // ① 偏移 + 染色：只在投影里、（本层之外）的那个像素应当**是黑的**。
     //    (26,14) 在阴影的 [12,28)² 里，而在本层的 [8,24)² 之外。
     let shadow_only = at(&sharp, 26, 14);
-    assert!(shadow_only[0] <= 8 && shadow_only[1] <= 8 && shadow_only[2] <= 8, "阴影应当是黑的，得到 {shadow_only:?}");
-    assert!(shadow_only[3] >= 200, "阴影应当是实的，得到 {shadow_only:?}");
+    assert!(
+        shadow_only[0] <= 8 && shadow_only[1] <= 8 && shadow_only[2] <= 8,
+        "阴影应当是黑的，得到 {shadow_only:?}"
+    );
+    assert!(
+        shadow_only[3] >= 200,
+        "阴影应当是实的，得到 {shadow_only:?}"
+    );
     assert_eq!(at(&plain, 26, 14)[3], 0, "没有投影时那里应当是空的");
 
     // ② 画在**下面**：本层盖住了的地方，像素与没投影时**逐字节相同**。
-    assert_eq!(at(&sharp, 16, 16), at(&plain, 16, 16), "本层压在阴影上，自己的像素不该变");
+    assert_eq!(
+        at(&sharp, 16, 16),
+        at(&plain, 16, 16),
+        "本层压在阴影上，自己的像素不该变"
+    );
 
     // ③ 模糊**确实跑了**：拿一张「左半不透明、右半透明」的源 —— 模糊会把左半的 alpha
     //    铺进右半的不透明边界之外（换成整体不透明的源就是恒等变换，验不了任何东西）。
@@ -952,12 +1262,19 @@ fn 投影在下面_偏移染色模糊浓淡都对() {
     let half_blurred = render_half(Some(spec(8.0, 1.0)));
     // 不透明边界落在目标 x=20（纹理 x=16，quad 走 [12,28)）。
     assert_eq!(at(&half_sharp, 22, 14)[3], 0, "不模糊时右边应当是空的");
-    assert!(at(&half_blurred, 22, 14)[3] > 10, "模糊之后应当铺到右边，得到 {:?}", at(&half_blurred, 22, 14));
+    assert!(
+        at(&half_blurred, 22, 14)[3] > 10,
+        "模糊之后应当铺到右边，得到 {:?}",
+        at(&half_blurred, 22, 14)
+    );
 
     // ④ 浓淡：0.5 的投影，alpha 应当在一半附近（而不是 0 或满）。
     let faint = render_shadow(Some(spec(0.0, 0.5)));
     let alpha = at(&faint, 26, 14)[3];
-    assert!((100..=160).contains(&alpha), "浓淡 0.5 的阴影 alpha 应当在一半附近，得到 {alpha}");
+    assert!(
+        (100..=160).contains(&alpha),
+        "浓淡 0.5 的阴影 alpha 应当在一半附近，得到 {alpha}"
+    );
 
     // ⑤ **向外扩散**（第 29 轮的正题）：大模糊时阴影要铺到**本层矩形之外**。
     //
@@ -980,7 +1297,11 @@ fn 投影在下面_偏移染色模糊浓淡都对() {
 fn solid_source(ctx: &dhampir_core::gpu::GpuContext, rgba: [u8; 4], label: &str) -> wgpu::Texture {
     let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
-        size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -1005,7 +1326,11 @@ fn solid_source(ctx: &dhampir_core::gpu::GpuContext, rgba: [u8; 4], label: &str)
             bytes_per_row: Some(SIZE * 4),
             rows_per_image: Some(SIZE),
         },
-        wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
     );
     texture
 }
@@ -1027,7 +1352,10 @@ fn 读回型混合的五行公式逐条对得上() {
         let composite = Composite {
             frame: 0,
             layers: vec![
-                Layer { source: "base".to_string(), ..layer("base", 1.0, 1.0, Vec::new()) },
+                Layer {
+                    source: "base".to_string(),
+                    ..layer("base", 1.0, 1.0, Vec::new())
+                },
                 Layer {
                     source: "top".to_string(),
                     blend: mode,
@@ -1036,24 +1364,42 @@ fn 读回型混合的五行公式逐条对得上() {
             ],
         };
         // 两个名字各给一张：用两张纹理的解析器。
-        struct Two<'a> { base: &'a wgpu::TextureView, top: &'a wgpu::TextureView }
+        struct Two<'a> {
+            base: &'a wgpu::TextureView,
+            top: &'a wgpu::TextureView,
+        }
         impl SourceResolver for Two<'_> {
-            fn texture_for(&mut self, source: &str, _frame: i64) -> Option<(wgpu::TextureView, (u32, u32))> {
+            fn texture_for(
+                &mut self,
+                source: &str,
+                _frame: i64,
+            ) -> Option<(wgpu::TextureView, (u32, u32))> {
                 let view = if source == "top" { self.top } else { self.base };
                 Some((view.clone(), (SIZE, SIZE)))
             }
         }
         let base_view = base.create_view(&wgpu::TextureViewDescriptor::default());
         let top_view = top.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut resolver = Two { base: &base_view, top: &top_view };
+        let mut resolver = Two {
+            base: &base_view,
+            top: &top_view,
+        };
         let pixels = render_with(&ctx, &mut resolver, &composite);
         let index = (((SIZE / 2) * SIZE + SIZE / 2) * 4) as usize;
-        [pixels[index], pixels[index + 1], pixels[index + 2], pixels[index + 3]]
+        [
+            pixels[index],
+            pixels[index + 1],
+            pixels[index + 2],
+            pixels[index + 3],
+        ]
     };
     let near = |got: [u8; 4], want: [u8; 3]| {
         for channel in 0..3 {
             let delta = (got[channel] as i32 - want[channel] as i32).abs();
-            assert!(delta <= 3, "通道 {channel}：得到 {got:?}，期望 {want:?}（容差 3）");
+            assert!(
+                delta <= 3,
+                "通道 {channel}：得到 {got:?}，期望 {want:?}（容差 3）"
+            );
         }
         assert_eq!(got[3], 255, "底是不透明的，结果也该是");
     };
@@ -1087,28 +1433,53 @@ fn 固定方程的四条混合值仍是经典公式() {
         let composite = Composite {
             frame: 0,
             layers: vec![
-                Layer { source: "base".to_string(), ..layer("base", 1.0, 1.0, Vec::new()) },
-                Layer { source: "top".to_string(), blend: mode, ..layer("top", 1.0, 1.0, Vec::new()) },
+                Layer {
+                    source: "base".to_string(),
+                    ..layer("base", 1.0, 1.0, Vec::new())
+                },
+                Layer {
+                    source: "top".to_string(),
+                    blend: mode,
+                    ..layer("top", 1.0, 1.0, Vec::new())
+                },
             ],
         };
-        struct Two<'a> { base: &'a wgpu::TextureView, top: &'a wgpu::TextureView }
+        struct Two<'a> {
+            base: &'a wgpu::TextureView,
+            top: &'a wgpu::TextureView,
+        }
         impl SourceResolver for Two<'_> {
-            fn texture_for(&mut self, source: &str, _frame: i64) -> Option<(wgpu::TextureView, (u32, u32))> {
+            fn texture_for(
+                &mut self,
+                source: &str,
+                _frame: i64,
+            ) -> Option<(wgpu::TextureView, (u32, u32))> {
                 let view = if source == "top" { self.top } else { self.base };
                 Some((view.clone(), (SIZE, SIZE)))
             }
         }
         let base_view = base.create_view(&wgpu::TextureViewDescriptor::default());
         let top_view = top.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut resolver = Two { base: &base_view, top: &top_view };
+        let mut resolver = Two {
+            base: &base_view,
+            top: &top_view,
+        };
         let pixels = render_with(&ctx, &mut resolver, &composite);
         let index = (((SIZE / 2) * SIZE + SIZE / 2) * 4) as usize;
-        [pixels[index], pixels[index + 1], pixels[index + 2], pixels[index + 3]]
+        [
+            pixels[index],
+            pixels[index + 1],
+            pixels[index + 2],
+            pixels[index + 3],
+        ]
     };
     let near = |got: [u8; 4], want: [u8; 3], what: &str| {
         for channel in 0..3 {
             let delta = (got[channel] as i32 - want[channel] as i32).abs();
-            assert!(delta <= 3, "{what} 通道 {channel}：得到 {got:?}，期望 {want:?}（容差 3）");
+            assert!(
+                delta <= 3,
+                "{what} 通道 {channel}：得到 {got:?}，期望 {want:?}（容差 3）"
+            );
         }
     };
     // s = [200,50,100]、d = [100,150,200]、顶层不透明 ⇒ 结果就是那条公式本身。
@@ -1124,7 +1495,11 @@ fn 固定方程的四条混合值仍是经典公式() {
 /// 双色源：左半不透明红、右半不透明蓝（用来验「背景被真的取来滤波」）。
 fn two_color_source(ctx: &dhampir_core::gpu::GpuContext) -> wgpu::Texture {
     colored_source(ctx, "dhampir backdrop test source", |x| {
-        if x < SIZE / 2 { [255, 0, 0, 255] } else { [0, 0, 255, 255] }
+        if x < SIZE / 2 {
+            [255, 0, 0, 255]
+        } else {
+            [0, 0, 255, 255]
+        }
     })
 }
 
@@ -1140,7 +1515,11 @@ fn colored_source(
 ) -> wgpu::Texture {
     let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
-        size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -1162,8 +1541,16 @@ fn colored_source(
             aspect: wgpu::TextureAspect::All,
         },
         &pixels,
-        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(SIZE * 4), rows_per_image: Some(SIZE) },
-        wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(SIZE * 4),
+            rows_per_image: Some(SIZE),
+        },
+        wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
     );
     texture
 }
@@ -1180,10 +1567,21 @@ fn 背景滤镜只在层的矩形里生效_而且真的读了身后() {
     let glass_source = clear_source(&ctx);
     let base_view = base.create_view(&wgpu::TextureViewDescriptor::default());
     let glass_view = glass_source.create_view(&wgpu::TextureViewDescriptor::default());
-    struct Two<'a> { base: &'a wgpu::TextureView, glass: &'a wgpu::TextureView }
+    struct Two<'a> {
+        base: &'a wgpu::TextureView,
+        glass: &'a wgpu::TextureView,
+    }
     impl SourceResolver for Two<'_> {
-        fn texture_for(&mut self, source: &str, _frame: i64) -> Option<(wgpu::TextureView, (u32, u32))> {
-            let view = if source == "glass" { self.glass } else { self.base };
+        fn texture_for(
+            &mut self,
+            source: &str,
+            _frame: i64,
+        ) -> Option<(wgpu::TextureView, (u32, u32))> {
+            let view = if source == "glass" {
+                self.glass
+            } else {
+                self.base
+            };
             Some((view.clone(), (SIZE, SIZE)))
         }
     }
@@ -1200,30 +1598,57 @@ fn 背景滤镜只在层的矩形里生效_而且真的读了身后() {
         let composite = Composite {
             frame: 0,
             layers: vec![
-                Layer { source: "base".to_string(), ..layer("base", 1.0, 1.0, Vec::new()) },
+                Layer {
+                    source: "base".to_string(),
+                    ..layer("base", 1.0, 1.0, Vec::new())
+                },
                 glass,
             ],
         };
-        let mut resolver = Two { base: &base_view, glass: &glass_view };
+        let mut resolver = Two {
+            base: &base_view,
+            glass: &glass_view,
+        };
         render_with(&ctx, &mut resolver, &composite)
     };
     let with = render_with_glass(true);
     let without = render_with_glass(false);
     let at = |pixels: &[u8], x: u32, y: u32| {
         let index = ((y * SIZE + x) * 4) as usize;
-        [pixels[index], pixels[index + 1], pixels[index + 2], pixels[index + 3]]
+        [
+            pixels[index],
+            pixels[index + 1],
+            pixels[index + 2],
+            pixels[index + 3],
+        ]
     };
 
     // ① **矩形外逐字节不变**：玻璃层只盖 [8,24)²。
     for (x, y) in [(2u32, 2u32), (30, 30), (2, 30), (30, 2)] {
-        assert_eq!(at(&with, x, y), at(&without, x, y), "({x},{y}) 在玻璃矩形之外，不该被动过");
+        assert_eq!(
+            at(&with, x, y),
+            at(&without, x, y),
+            "({x},{y}) 在玻璃矩形之外，不该被动过"
+        );
     }
 
     // ② 矩形内**真的读了身后**：双色边界在 x=16，模糊把蓝带进左侧、红带进右侧。
-    assert_eq!(at(&without, 12, 16)[2], 0, "没挂背景滤镜时，红半区的蓝分量应当是 0");
-    assert!(at(&with, 12, 16)[2] > 40, "挂了之后应当被蓝半区染上，得到 {:?}", at(&with, 12, 16));
+    assert_eq!(
+        at(&without, 12, 16)[2],
+        0,
+        "没挂背景滤镜时，红半区的蓝分量应当是 0"
+    );
+    assert!(
+        at(&with, 12, 16)[2] > 40,
+        "挂了之后应当被蓝半区染上，得到 {:?}",
+        at(&with, 12, 16)
+    );
     // 阈值只要能"证明混了"就够（`without` 在那里红分量是 0）；具体多少取决于核的形状。
-    assert!(at(&with, 20, 16)[0] > 20, "蓝半区靠近边界处应当被红染上，得到 {:?}", at(&with, 20, 16));
+    assert!(
+        at(&with, 20, 16)[0] > 20,
+        "蓝半区靠近边界处应当被红染上，得到 {:?}",
+        at(&with, 20, 16)
+    );
 }
 
 /// **乘性亮度（第 42 轮）**：CSS `brightness()` 那一种（`c·k`，保黑）。
@@ -1238,12 +1663,23 @@ fn 乘性亮度保黑_与加性那条不是同一个函数() {
     let view = source.create_view(&wgpu::TextureViewDescriptor::default());
     let at = |pixels: &[u8]| {
         let index = (((SIZE / 2) * SIZE + SIZE / 2) * 4) as usize;
-        [pixels[index], pixels[index + 1], pixels[index + 2], pixels[index + 3]]
+        [
+            pixels[index],
+            pixels[index + 1],
+            pixels[index + 2],
+            pixels[index + 3],
+        ]
     };
     let render_effect = |kind: &str, name: &str, value: f32| -> [u8; 4] {
-        struct One<'a> { view: &'a wgpu::TextureView }
+        struct One<'a> {
+            view: &'a wgpu::TextureView,
+        }
         impl SourceResolver for One<'_> {
-            fn texture_for(&mut self, _source: &str, _frame: i64) -> Option<(wgpu::TextureView, (u32, u32))> {
+            fn texture_for(
+                &mut self,
+                _source: &str,
+                _frame: i64,
+            ) -> Option<(wgpu::TextureView, (u32, u32))> {
                 Some((self.view.clone(), (SIZE, SIZE)))
             }
         }
@@ -1252,7 +1688,10 @@ fn 乘性亮度保黑_与加性那条不是同一个函数() {
         let composite = Composite {
             frame: 0,
             layers: vec![
-                Layer { source: "s".to_string(), ..layer("s", 1.0, 1.0, Vec::new()) },
+                Layer {
+                    source: "s".to_string(),
+                    ..layer("s", 1.0, 1.0, Vec::new())
+                },
                 Layer {
                     is_adjustment: true,
                     ..layer(
@@ -1274,12 +1713,18 @@ fn 乘性亮度保黑_与加性那条不是同一个函数() {
     // ×1.5：10→15、100→150、200→255（截断）。
     let up = render_effect("brightness_multiply", "factor", 1.5);
     assert!(up[0].abs_diff(15) <= 2, "10 × 1.5 应当是 15，得到 {up:?}");
-    assert!(up[1].abs_diff(150) <= 2, "100 × 1.5 应当是 150，得到 {up:?}");
+    assert!(
+        up[1].abs_diff(150) <= 2,
+        "100 × 1.5 应当是 150，得到 {up:?}"
+    );
     // ×0.5：10→5 —— 加性那条在这里会**抬亮**（+0.05 ⇒ 10→15），方向相反。
     let down = render_effect("brightness_multiply", "factor", 0.5);
     assert!(down[0].abs_diff(5) <= 2, "10 × 0.5 应当是 5，得到 {down:?}");
     let added = render_effect("brightness", "amount", 0.05);
-    assert!(added[0] > 10, "加性亮度会把 10 抬亮（这正是它与 CSS 不同的地方），得到 {added:?}");
+    assert!(
+        added[0] > 10,
+        "加性亮度会把 10 抬亮（这正是它与 CSS 不同的地方），得到 {added:?}"
+    );
 }
 
 /// **规范色相旋转（第 44 轮）**：CSS/SVG 那套系数与 YIQ 那条不是一回事。
@@ -1294,16 +1739,25 @@ fn 规范色相旋转与_yiq_那条明显不同() {
     let source = solid_source(&ctx, [255, 0, 0, 255], "dhampir hue source");
     let view = source.create_view(&wgpu::TextureViewDescriptor::default());
     let render_effect = |kind: &str, degrees: f32| -> [u8; 4] {
-        struct One<'a> { view: &'a wgpu::TextureView }
+        struct One<'a> {
+            view: &'a wgpu::TextureView,
+        }
         impl SourceResolver for One<'_> {
-            fn texture_for(&mut self, _source: &str, _frame: i64) -> Option<(wgpu::TextureView, (u32, u32))> {
+            fn texture_for(
+                &mut self,
+                _source: &str,
+                _frame: i64,
+            ) -> Option<(wgpu::TextureView, (u32, u32))> {
                 Some((self.view.clone(), (SIZE, SIZE)))
             }
         }
         let composite = Composite {
             frame: 0,
             layers: vec![
-                Layer { source: "s".to_string(), ..layer("s", 1.0, 1.0, Vec::new()) },
+                Layer {
+                    source: "s".to_string(),
+                    ..layer("s", 1.0, 1.0, Vec::new())
+                },
                 Layer {
                     is_adjustment: true,
                     ..layer(
@@ -1312,7 +1766,10 @@ fn 规范色相旋转与_yiq_那条明显不同() {
                         1.0,
                         vec![Effect {
                             kind: kind.to_string(),
-                            params: std::collections::BTreeMap::from([("degrees".to_string(), degrees)]),
+                            params: std::collections::BTreeMap::from([(
+                                "degrees".to_string(),
+                                degrees,
+                            )]),
                             ..Default::default()
                         }],
                     )
@@ -1322,19 +1779,40 @@ fn 规范色相旋转与_yiq_那条明显不同() {
         let mut resolver = One { view: &view };
         let pixels = render_with(&ctx, &mut resolver, &composite);
         let index = (((SIZE / 2) * SIZE + SIZE / 2) * 4) as usize;
-        [pixels[index], pixels[index + 1], pixels[index + 2], pixels[index + 3]]
+        [
+            pixels[index],
+            pixels[index + 1],
+            pixels[index + 2],
+            pixels[index + 3],
+        ]
     };
     // ⓪ 0° 必须**逐位**是原色 —— 这一步同时证明"整步被跳过"没有副作用。
-    assert_eq!(render_effect("hue_rotate_css", 0.0), [255, 0, 0, 255], "0° 应当逐位不变");
+    assert_eq!(
+        render_effect("hue_rotate_css", 0.0),
+        [255, 0, 0, 255],
+        "0° 应当逐位不变"
+    );
     // ① 规范矩阵：约 (0, 91, 0)；② YIQ 那条：约 (119, 234, 0)。
     let spec = render_effect("hue_rotate_css", 90.0);
     let yiq = render_effect("hue", 90.0);
     assert!(spec[0] <= 8, "规范矩阵下红分量应当几乎为零，得到 {spec:?}");
-    assert!(spec[1].abs_diff(91) <= 8, "规范矩阵的绿分量应当约 91，得到 {spec:?}");
+    assert!(
+        spec[1].abs_diff(91) <= 8,
+        "规范矩阵的绿分量应当约 91，得到 {spec:?}"
+    );
     assert!(spec[2] <= 8, "规范矩阵下蓝分量被截断为零，得到 {spec:?}");
-    assert!(yiq[0].abs_diff(119) <= 8, "YIQ 那条的红分量应当约 119，得到 {yiq:?}");
-    assert!(yiq[1].abs_diff(234) <= 8, "YIQ 那条的绿分量应当约 234，得到 {yiq:?}");
-    assert!(spec[1].abs_diff(yiq[1]) > 100, "两条必须在明显不同的地方：spec={spec:?} yiq={yiq:?}");
+    assert!(
+        yiq[0].abs_diff(119) <= 8,
+        "YIQ 那条的红分量应当约 119，得到 {yiq:?}"
+    );
+    assert!(
+        yiq[1].abs_diff(234) <= 8,
+        "YIQ 那条的绿分量应当约 234，得到 {yiq:?}"
+    );
+    assert!(
+        spec[1].abs_diff(yiq[1]) > 100,
+        "两条必须在明显不同的地方：spec={spec:?} yiq={yiq:?}"
+    );
 }
 
 /// **规范权重饱和度（第 45 轮）**：灰度权重用 CSS/SVG 那组取整值（0.213/0.715/0.072）。
@@ -1347,21 +1825,35 @@ fn 规范权重饱和度_与_rec709_那条几乎一样但本源不同() {
     let (ctx, _init) = open_leg(NATIVE_BACKENDS).expect("拿不到 GPU 上下文");
     let at = |pixels: &[u8]| {
         let index = (((SIZE / 2) * SIZE + SIZE / 2) * 4) as usize;
-        [pixels[index], pixels[index + 1], pixels[index + 2], pixels[index + 3]]
+        [
+            pixels[index],
+            pixels[index + 1],
+            pixels[index + 2],
+            pixels[index + 3],
+        ]
     };
     let render = |rgba: [u8; 4], kind: &str, amount: f32| -> [u8; 4] {
         let source = solid_source(&ctx, rgba, "dhampir saturation source");
         let view = source.create_view(&wgpu::TextureViewDescriptor::default());
-        struct One<'a> { view: &'a wgpu::TextureView }
+        struct One<'a> {
+            view: &'a wgpu::TextureView,
+        }
         impl SourceResolver for One<'_> {
-            fn texture_for(&mut self, _source: &str, _frame: i64) -> Option<(wgpu::TextureView, (u32, u32))> {
+            fn texture_for(
+                &mut self,
+                _source: &str,
+                _frame: i64,
+            ) -> Option<(wgpu::TextureView, (u32, u32))> {
                 Some((self.view.clone(), (SIZE, SIZE)))
             }
         }
         let composite = Composite {
             frame: 0,
             layers: vec![
-                Layer { source: "s".to_string(), ..layer("s", 1.0, 1.0, Vec::new()) },
+                Layer {
+                    source: "s".to_string(),
+                    ..layer("s", 1.0, 1.0, Vec::new())
+                },
                 Layer {
                     is_adjustment: true,
                     ..layer(
@@ -1370,7 +1862,10 @@ fn 规范权重饱和度_与_rec709_那条几乎一样但本源不同() {
                         1.0,
                         vec![Effect {
                             kind: kind.to_string(),
-                            params: std::collections::BTreeMap::from([("amount".to_string(), amount)]),
+                            params: std::collections::BTreeMap::from([(
+                                "amount".to_string(),
+                                amount,
+                            )]),
                             ..Default::default()
                         }],
                     )
@@ -1381,7 +1876,10 @@ fn 规范权重饱和度_与_rec709_那条几乎一样但本源不同() {
         at(&render_with(&ctx, &mut resolver, &composite))
     };
     // ⓪ amount = 1.0 必须**逐位**是原色（整步 skipped）。
-    assert_eq!(render([255, 128, 0, 255], "saturation_css", 1.0), [255, 128, 0, 255]);
+    assert_eq!(
+        render([255, 128, 0, 255], "saturation_css", 1.0),
+        [255, 128, 0, 255]
+    );
     // ① 规范权重：手算 (200, 137, 73)。
     let spec = render([255, 128, 0, 255], "saturation_css", 0.5);
     for (channel, want) in [200u8, 137, 73].iter().enumerate() {
@@ -1418,9 +1916,15 @@ fn 渐变遮罩按层自己的尺寸铺开_左右与反相都对() {
     let (ctx, _init) = open_leg(NATIVE_BACKENDS).expect("拿不到 GPU 上下文");
     let source = solid_source(&ctx, [255, 0, 0, 255], "dhampir gradient mask source");
     let view = source.create_view(&wgpu::TextureViewDescriptor::default());
-    struct One<'a> { view: &'a wgpu::TextureView }
+    struct One<'a> {
+        view: &'a wgpu::TextureView,
+    }
     impl SourceResolver for One<'_> {
-        fn texture_for(&mut self, _source: &str, _frame: i64) -> Option<(wgpu::TextureView, (u32, u32))> {
+        fn texture_for(
+            &mut self,
+            _source: &str,
+            _frame: i64,
+        ) -> Option<(wgpu::TextureView, (u32, u32))> {
             Some((self.view.clone(), (SIZE, SIZE)))
         }
     }
@@ -1432,14 +1936,23 @@ fn 渐变遮罩按层自己的尺寸铺开_左右与反相都对() {
             gradient: Some(LinearGradient {
                 angle_deg: 90.0,
                 stops: vec![
-                    GradientStop { at: 0.0, coverage: 0.0 },
-                    GradientStop { at: 1.0, coverage: 1.0 },
+                    GradientStop {
+                        at: 0.0,
+                        coverage: 0.0,
+                    },
+                    GradientStop {
+                        at: 1.0,
+                        coverage: 1.0,
+                    },
                 ],
             }),
             channel: MaskChannel::Alpha,
             invert,
         });
-        let composite = Composite { frame: 0, layers: vec![masked] };
+        let composite = Composite {
+            frame: 0,
+            layers: vec![masked],
+        };
         let mut resolver = One { view: &view };
         render_with(&ctx, &mut resolver, &composite)
     };
@@ -1448,16 +1961,35 @@ fn 渐变遮罩按层自己的尺寸铺开_左右与反相都对() {
         pixels[index + 3]
     };
     let masked = render_masked(false);
-    assert!(at(&masked, 10, 16) <= 50, "左边缘覆盖度≈0，alpha 应当很小，得到 {}", at(&masked, 10, 16));
-    assert!(at(&masked, 22, 16) >= 200, "右边缘覆盖度≈1，alpha 应当很大，得到 {}", at(&masked, 22, 16));
+    assert!(
+        at(&masked, 10, 16) <= 50,
+        "左边缘覆盖度≈0，alpha 应当很小，得到 {}",
+        at(&masked, 10, 16)
+    );
+    assert!(
+        at(&masked, 22, 16) >= 200,
+        "右边缘覆盖度≈1，alpha 应当很大，得到 {}",
+        at(&masked, 22, 16)
+    );
     let middle = at(&masked, 16, 16) as i32;
-    assert!((middle - 127).abs() <= 30, "正中间应当是半透明，得到 {middle}");
+    assert!(
+        (middle - 127).abs() <= 30,
+        "正中间应当是半透明，得到 {middle}"
+    );
     // 层框之外完全不该有东西。
     assert_eq!(at(&masked, 2, 16), 0, "层框之外不该有像素");
     // 反相：左右对调。
     let inverted = render_masked(true);
-    assert!(at(&inverted, 10, 16) >= 200, "反相后左边缘应当几乎全见，得到 {}", at(&inverted, 10, 16));
-    assert!(at(&inverted, 22, 16) <= 50, "反相后右边缘应当几乎不可见，得到 {}", at(&inverted, 22, 16));
+    assert!(
+        at(&inverted, 10, 16) >= 200,
+        "反相后左边缘应当几乎全见，得到 {}",
+        at(&inverted, 10, 16)
+    );
+    assert!(
+        at(&inverted, 22, 16) <= 50,
+        "反相后右边缘应当几乎不可见，得到 {}",
+        at(&inverted, 22, 16)
+    );
 }
 
 /// **引擎侧的抗锯齿斜坡：量出来，而不是断言**（第 52 轮）。
@@ -1477,9 +2009,15 @@ fn 圆角层的边缘是窄抗锯齿_不是硬边也不是模糊() {
     println!("GPU 适配器：{:?}", ctx.adapter_info);
     let source = solid_source(&ctx, [255, 255, 255, 255], "dhampir aa source");
     let view = source.create_view(&wgpu::TextureViewDescriptor::default());
-    struct One<'a> { view: &'a wgpu::TextureView }
+    struct One<'a> {
+        view: &'a wgpu::TextureView,
+    }
     impl SourceResolver for One<'_> {
-        fn texture_for(&mut self, _source: &str, _frame: i64) -> Option<(wgpu::TextureView, (u32, u32))> {
+        fn texture_for(
+            &mut self,
+            _source: &str,
+            _frame: i64,
+        ) -> Option<(wgpu::TextureView, (u32, u32))> {
             Some((self.view.clone(), (SIZE, SIZE)))
         }
     }
@@ -1488,7 +2026,10 @@ fn 圆角层的边缘是窄抗锯齿_不是硬边也不是模糊() {
     rotated.corner_radius = 6.0;
     // 转 30°：边缘不再与像素网格对齐，抗锯齿必须自己发生。
     rotated.transform.rotation_deg = 30.0;
-    let composite = Composite { frame: 0, layers: vec![rotated] };
+    let composite = Composite {
+        frame: 0,
+        layers: vec![rotated],
+    };
     let mut resolver = One { view: &view };
     let pixels = render_with(&ctx, &mut resolver, &composite);
     // **不能只看一行**：中间那行整行都在形状内部（α 全是 255）—— 第 52 轮第一版就栽在这。
@@ -1512,8 +2053,13 @@ fn 圆角层的边缘是窄抗锯齿_不是硬边也不是模糊() {
     }
     let perimeter = 4.0 * SIZE as f32;
     let ramp = intermediate as f32 / perimeter;
-    println!("AA 实测：半透明像素 {intermediate} 个，边缘总长 {perimeter}，斜坡 ≈ {ramp:.3} 像素宽（α 区间 {min_alpha}..{max_alpha}）");
-    assert!(intermediate > 0, "转 30° 的边缘必须有抗锯齿（一个半透明像素都没有 ⇒ 硬边）");
+    println!(
+        "AA 实测：半透明像素 {intermediate} 个，边缘总长 {perimeter}，斜坡 ≈ {ramp:.3} 像素宽（α 区间 {min_alpha}..{max_alpha}）"
+    );
+    assert!(
+        intermediate > 0,
+        "转 30° 的边缘必须有抗锯齿（一个半透明像素都没有 ⇒ 硬边）"
+    );
     // 下界取 0.05 而不是"约 1"：第 52 轮实测是 **0.22 像素宽** ——
     // 台账原先那句"1 目标像素宽的线性斜坡"是**论断**，实测把它推翻了（斜坡更窄）。
     // 下界只用来抓"几乎没有抗锯齿"，不把当初的猜测写死。
@@ -1542,9 +2088,16 @@ fn 加法混合_rgb_不看源_alpha_而_css_会看() {
     let top = solid_source(&ctx, [100, 20, 10, 255], "dhampir add top");
     let base_view = base.create_view(&wgpu::TextureViewDescriptor::default());
     let top_view = top.create_view(&wgpu::TextureViewDescriptor::default());
-    struct Two<'a> { base: &'a wgpu::TextureView, top: &'a wgpu::TextureView }
+    struct Two<'a> {
+        base: &'a wgpu::TextureView,
+        top: &'a wgpu::TextureView,
+    }
     impl SourceResolver for Two<'_> {
-        fn texture_for(&mut self, source: &str, _frame: i64) -> Option<(wgpu::TextureView, (u32, u32))> {
+        fn texture_for(
+            &mut self,
+            source: &str,
+            _frame: i64,
+        ) -> Option<(wgpu::TextureView, (u32, u32))> {
             let view = if source == "top" { self.top } else { self.base };
             Some((view.clone(), (SIZE, SIZE)))
         }
@@ -1553,7 +2106,10 @@ fn 加法混合_rgb_不看源_alpha_而_css_会看() {
         let composite = Composite {
             frame: 0,
             layers: vec![
-                Layer { source: "base".to_string(), ..layer("base", 1.0, 1.0, Vec::new()) },
+                Layer {
+                    source: "base".to_string(),
+                    ..layer("base", 1.0, 1.0, Vec::new())
+                },
                 Layer {
                     source: "top".to_string(),
                     blend: BlendMode::Add,
@@ -1561,16 +2117,27 @@ fn 加法混合_rgb_不看源_alpha_而_css_会看() {
                 },
             ],
         };
-        let mut resolver = Two { base: &base_view, top: &top_view };
+        let mut resolver = Two {
+            base: &base_view,
+            top: &top_view,
+        };
         let pixels = render_with(&ctx, &mut resolver, &composite);
         let index = (((SIZE / 2) * SIZE + SIZE / 2) * 4) as usize;
-        [pixels[index], pixels[index + 1], pixels[index + 2], pixels[index + 3]]
+        [
+            pixels[index],
+            pixels[index + 1],
+            pixels[index + 2],
+            pixels[index + 3],
+        ]
     };
     let opaque = render(1.0);
     let half = render(0.5);
     // ① αs = 1：两边**相同**（都是 Cs + Cb = (150, 70, 60)）。
     for (channel, want) in [150u8, 70, 60].iter().enumerate() {
-        assert!(opaque[channel].abs_diff(*want) <= 2, "αs=1 时应当是 {want}，得到 {opaque:?}");
+        assert!(
+            opaque[channel].abs_diff(*want) <= 2,
+            "αs=1 时应当是 {want}，得到 {opaque:?}"
+        );
     }
     // ② αs = 0.5：本仓**一字不变**（rgb 不看 αs）—— CSS 那边会是 0.5·Cs + Cb = (100, 60, 55)。
     assert_eq!(
@@ -1611,7 +2178,15 @@ fn 掩码采样是自己写的双线性_斜坡线性且五十点在半亮() {
     let mask = if all_bright {
         mask_2x2(&ctx, [[255, 255, 255, 255]; 4])
     } else {
-        mask_2x2(&ctx, [[255, 255, 255, 255], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]])
+        mask_2x2(
+            &ctx,
+            [
+                [255, 255, 255, 255],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+            ],
+        )
     };
     let view = source.create_view(&wgpu::TextureViewDescriptor::default());
     let mask_view = mask.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1623,15 +2198,24 @@ fn 掩码采样是自己写的双线性_斜坡线性且五十点在半亮() {
         channel: MaskChannel::Alpha,
         invert: false,
     });
-    let composite = Composite { frame: 0, layers: vec![masked] };
-    let mut resolver = SourceWithMask { view: view.clone(), size: (SIZE, SIZE), mask: Some(mask_view) };
+    let composite = Composite {
+        frame: 0,
+        layers: vec![masked],
+    };
+    let mut resolver = SourceWithMask {
+        view: view.clone(),
+        size: (SIZE, SIZE),
+        mask: Some(mask_view),
+    };
     let pixels = render_with(&ctx, &mut resolver, &composite);
     // **行要选在纹素中心上，不能选在纹素分界上**：2×2 掩码铺到 32×32，
     // 两行纹素的分界正好在 y=16 —— 第 55 轮我读了那一行，得到 120，
     // 于是误报了一条缺陷（D17）。真相是：**那一行本来就该是亮暗各半**，
     // 我们自己的双线性是对的。现在读 y=4（第 0 行纹素的中心）。
     let row = SIZE / 8;
-    let profile: Vec<u8> = (0..SIZE).map(|x| pixels[((row * SIZE + x) * 4 + 3) as usize]).collect();
+    let profile: Vec<u8> = (0..SIZE)
+        .map(|x| pixels[((row * SIZE + x) * 4 + 3) as usize])
+        .collect();
     println!("掩码剖面（行 {row}）：{profile:?}");
     // 1. 单调不增
     for window in profile.windows(2) {
@@ -1651,7 +2235,11 @@ fn 掩码采样是自己写的双线性_斜坡线性且五十点在半亮() {
         .map(|v| *v as i32)
         .filter(|v| *v > 5 && *v < 250)
         .collect();
-    assert!(ramp.len() >= 12, "斜坡应当有足够多的取样点，得到 {} 个：{profile:?}", ramp.len());
+    assert!(
+        ramp.len() >= 12,
+        "斜坡应当有足够多的取样点，得到 {} 个：{profile:?}",
+        ramp.len()
+    );
     let deltas: Vec<i32> = ramp.windows(2).map(|w| w[0] - w[1]).collect();
     let spread = deltas.iter().max().unwrap() - deltas.iter().min().unwrap();
     assert!(

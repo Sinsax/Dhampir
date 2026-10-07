@@ -18,7 +18,11 @@ fn texture(
 ) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
-        size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -28,7 +32,13 @@ fn texture(
     })
 }
 
-fn write(device: &wgpu::Device, queue: &wgpu::Queue, size: u32, pixels: &[u8], label: &str) -> wgpu::Texture {
+fn write(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    size: u32,
+    pixels: &[u8],
+    label: &str,
+) -> wgpu::Texture {
     let tex = texture(
         device,
         size,
@@ -48,14 +58,23 @@ fn write(device: &wgpu::Device, queue: &wgpu::Queue, size: u32, pixels: &[u8], l
             bytes_per_row: Some(size * 4),
             rows_per_image: Some(size),
         },
-        wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
     );
     tex
 }
 
 fn pixel(image: &dhampir_core::readback::Rgba8Image, size: u32, x: u32, y: u32) -> [u8; 4] {
     let at = ((y * size + x) * 4) as usize;
-    [image.pixels[at], image.pixels[at + 1], image.pixels[at + 2], image.pixels[at + 3]]
+    [
+        image.pixels[at],
+        image.pixels[at + 1],
+        image.pixels[at + 2],
+        image.pixels[at + 3],
+    ]
 }
 
 /// 跑一遍两趟模糊并读回。
@@ -78,9 +97,11 @@ fn blur_once(
         "dhampir blur test out",
     );
     let renderer = BlurRenderer::new(&ctx.device, FORMAT);
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("dhampir blur test encoder"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dhampir blur test encoder"),
+        });
     renderer.blur_separable(
         &ctx.device,
         &ctx.queue,
@@ -92,7 +113,8 @@ fn blur_once(
         radius,
     );
     ctx.queue.submit([encoder.finish()]);
-    pollster::block_on(readback::read_texture_rgba8(&ctx.device, &ctx.queue, &out)).expect("读回失败")
+    pollster::block_on(readback::read_texture_rgba8(&ctx.device, &ctx.queue, &out))
+        .expect("读回失败")
 }
 
 #[test]
@@ -108,7 +130,13 @@ fn 纯白图模糊后仍然是纯白() {
     for _ in 0..(SIZE * SIZE) {
         white.extend_from_slice(&[255, 255, 255, 255]);
     }
-    let source = write(&ctx.device, &ctx.queue, SIZE, &white, "dhampir blur test white");
+    let source = write(
+        &ctx.device,
+        &ctx.queue,
+        SIZE,
+        &white,
+        "dhampir blur test white",
+    );
 
     for radius in [1_u32, 3, 8] {
         let image = blur_once(&ctx, SIZE, &source, radius);
@@ -138,7 +166,13 @@ fn 孤立亮点会被摊开到邻域() {
     pixels[at + 1] = 255;
     pixels[at + 2] = 255;
     pixels[at + 3] = 255;
-    let source = write(&ctx.device, &ctx.queue, SIZE, &pixels, "dhampir blur test dot");
+    let source = write(
+        &ctx.device,
+        &ctx.queue,
+        SIZE,
+        &pixels,
+        "dhampir blur test dot",
+    );
 
     let image = blur_once(&ctx, SIZE, &source, 2);
 
@@ -147,7 +181,19 @@ fn 孤立亮点会被摊开到邻域() {
     let corner = pixel(&image, SIZE, 0, 0);
 
     assert!(neighbour[0] > 0, "紧邻的像素应当被摊到，得到 {neighbour:?}");
-    assert!(middle[0] >= neighbour[0], "中心 ({}) 不该比邻域 ({}) 还暗", middle[0], neighbour[0]);
-    assert!(middle[0] < 255, "中心应当被摊薄，仍然是 {} 说明根本没模糊", middle[0]);
-    assert_eq!(corner[0], 0, "半径 2 够不到角落，角落应当还是 0，得到 {corner:?}");
+    assert!(
+        middle[0] >= neighbour[0],
+        "中心 ({}) 不该比邻域 ({}) 还暗",
+        middle[0],
+        neighbour[0]
+    );
+    assert!(
+        middle[0] < 255,
+        "中心应当被摊薄，仍然是 {} 说明根本没模糊",
+        middle[0]
+    );
+    assert_eq!(
+        corner[0], 0,
+        "半径 2 够不到角落，角落应当还是 0，得到 {corner:?}"
+    );
 }

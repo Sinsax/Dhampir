@@ -21,10 +21,10 @@
 //! 帧数太大会很慢，而那与「管道通不通」无关）。
 
 use dhampir_core::compose::{self, Composite, Layer};
-use dhampir_core::timeline::schema::Project;
 use dhampir_core::gpu::NATIVE_BACKENDS;
 use dhampir_core::readback;
 use dhampir_core::render::{RenderSpace, SourceResolver, TimelineRenderer};
+use dhampir_core::timeline::schema::Project;
 use dhampir_worker::baseline::open_leg;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
@@ -68,9 +68,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let probe = Command::new("ffprobe")
         .args([
-            "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "stream=width,height,nb_frames",
-            "-of", "csv=p=0", &media,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height,nb_frames",
+            "-of",
+            "csv=p=0",
+            &media,
         ])
         .output()?;
     if !probe.status.success() {
@@ -90,14 +96,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 时长就错了，而帧数还是对的，所以只看帧数不会发现。
     // 单独再问一次：单字段的 csv 没有「列序」问题（我在帧数上已经栽过一次）。
     let fps_probe = Command::new("ffprobe")
-        .args(["-v", "error", "-select_streams", "v:0",
-               "-show_entries", "stream=avg_frame_rate", "-of", "csv=p=0", &media])
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=avg_frame_rate",
+            "-of",
+            "csv=p=0",
+            &media,
+        ])
         .output()?;
     let fps_text = String::from_utf8(fps_probe.stdout)?;
     let fps_fields: Vec<&str> = fps_text.trim().split('/').collect();
-    let fps_num: f64 = fps_fields.first().and_then(|v| v.parse().ok()).unwrap_or(0.0);
-    let fps_den: f64 = fps_fields.get(1).and_then(|v| v.parse().ok()).unwrap_or(1.0);
-    let source_fps = if fps_den > 0.0 { fps_num / fps_den } else { 30.0 };
+    let fps_num: f64 = fps_fields
+        .first()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.0);
+    let fps_den: f64 = fps_fields
+        .get(1)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1.0);
+    let source_fps = if fps_den > 0.0 {
+        fps_num / fps_den
+    } else {
+        30.0
+    };
+    // 与 pipeline.rs 的 encoder_fps 同一形状：`!(x > 0.0)` 连 NaN 一起挡
+    // （`NaN <= 0.0` 是 false，写成那样会让 NaN 溜过去）。见那里的说明。
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
     if !(source_fps > 0.0) {
         return Err("ffprobe 没给出帧率".into());
     }
@@ -130,7 +158,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // **一张上传纹理 + 一个渲染目标，全程复用。**
     let upload_target = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dhampir pipeline upload"),
-        size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: size.0,
+            height: size.1,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -140,7 +172,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let render_target = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("dhampir pipeline render target"),
-        size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: size.0,
+            height: size.1,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -160,7 +196,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             source_frame: 0,
             opacity: 1.0,
             transform: dhampir_core::timeline::schema::Transform {
-                x: 0.0, y: 0.0, scale: 1.0, rotation_deg: 0.0,
+                x: 0.0,
+                y: 0.0,
+                scale: 1.0,
+                rotation_deg: 0.0,
             },
             effects: Vec::new(),
             frozen_for_transition: false,
@@ -176,17 +215,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 解码器：吐裸 RGBA。
     let mut decoder = Command::new("ffmpeg")
         .args([
-            "-v", "error",
-            "-i", &media,
+            "-v",
+            "error",
+            "-i",
+            &media,
             // **显式声明色彩矩阵。**
             //
             // 不写的话 FFmpeg 从容器元数据里「猜」，而浏览器（WebCodecs）也有一套自己的猜法 ——
             // 两边的默认值不一定相同（BT.601 vs 709），于是同一帧看起来偏色，
             // 而那不是渲染 bug。P5.3 的口径要求「同矩阵、同上采样」，
             // 所以这里把它**写死**，并由 check-sequential-decode 守卫确保它一直显式。
-            "-vf", "scale=out_color_matrix=bt709",
-            "-f", "rawvideo",
-            "-pix_fmt", "rgba",
+            "-vf",
+            "scale=out_color_matrix=bt709",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgba",
             "-",
         ])
         .stdout(Stdio::piped())
@@ -198,12 +242,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out_path = "target/decode-pipeline-out.mp4";
     let mut encoder = Command::new("ffmpeg")
         .args([
-            "-v", "error",
-            "-f", "rawvideo", "-pix_fmt", "rgba",
-            "-s", &format!("{width}x{height}"), "-r", &format!("{encoder_fps}"),
-            "-i", "-",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
-            "-y", out_path,
+            "-v",
+            "error",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgba",
+            "-s",
+            &format!("{width}x{height}"),
+            "-r",
+            &format!("{encoder_fps}"),
+            "-i",
+            "-",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-pix_fmt",
+            "yuv420p",
+            "-y",
+            out_path,
         ])
         .stdin(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -236,7 +296,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 bytes_per_row: Some((width * 4) as u32),
                 rows_per_image: Some(height as u32),
             },
-            wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
         );
 
         // 2) 渲染（走 core 的同一个入口，与两个宿主一致）
@@ -251,12 +315,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             view: upload_target.create_view(&wgpu::TextureViewDescriptor::default()),
             size,
         };
-        let mut command = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("dhampir pipeline encoder"),
-        });
+        let mut command = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("dhampir pipeline encoder"),
+            });
         let drawn = renderer.render_frame(
-            &ctx.device, &ctx.queue, &mut command, &render_view,
-            RenderSpace::square(size), &composite, &mut resolver, wgpu::Color::TRANSPARENT,
+            &ctx.device,
+            &ctx.queue,
+            &mut command,
+            &render_view,
+            RenderSpace::square(size),
+            &composite,
+            &mut resolver,
+            wgpu::Color::TRANSPARENT,
         );
         ctx.queue.submit([command.finish()]);
         if drawn == 0 {
@@ -265,7 +337,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // 3) 读回（这一步贵，但它是「渲染结果真的出来了」的唯一证据）
         let image = pollster::block_on(readback::read_texture_rgba8(
-            &ctx.device, &ctx.queue, &render_target,
+            &ctx.device,
+            &ctx.queue,
+            &render_target,
         ))?;
 
         // 4) 写进编码器
@@ -284,25 +358,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 核对产物
     let check = Command::new("ffprobe")
         .args([
-            "-v", "error", "-select_streams", "v:0",
-            "-count_frames", "-show_entries", "stream=nb_read_frames,width,height",
-            "-of", "csv=p=0", out_path,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-count_frames",
+            "-show_entries",
+            "stream=nb_read_frames,width,height",
+            "-of",
+            "csv=p=0",
+            out_path,
         ])
         .output()?;
     let summary = String::from_utf8(check.stdout)?;
     let parts: Vec<&str> = summary.trim().split(',').collect();
     if parts.len() != 3 {
-        return Err(format!("ffprobe 字段数不是 3，而是 {} —— 解析前提不成立", parts.len()).into());
+        return Err(format!(
+            "ffprobe 字段数不是 3，而是 {} —— 解析前提不成立",
+            parts.len()
+        )
+        .into());
     }
     // **同样是 width,height,nb_read_frames 的列序**：帧数在第三列。
     let encoded: usize = parts[2].parse()?;
 
     println!("媒体：{media}  {width}x{height} @{source_fps}fps");
-    println!("输出帧率 {encoder_fps}（来源：{}）",
-        if project.is_some() { "工程 timebase" } else { "源视频" });
-    println!("处理 {frames} 帧，耗时 {:.0} ms -> 每帧 {:.2} ms（解码+上传+渲染+读回+编码）",
-        elapsed.as_millis() as f64, elapsed.as_secs_f64() * 1000.0 / frames.max(1) as f64);
-    println!("产物：{out_path}  编码帧数 {encoded}  尺寸 {}x{}", parts[0], parts[1]);
+    println!(
+        "输出帧率 {encoder_fps}（来源：{}）",
+        if project.is_some() {
+            "工程 timebase"
+        } else {
+            "源视频"
+        }
+    );
+    println!(
+        "处理 {frames} 帧，耗时 {:.0} ms -> 每帧 {:.2} ms（解码+上传+渲染+读回+编码）",
+        elapsed.as_millis() as f64,
+        elapsed.as_secs_f64() * 1000.0 / frames.max(1) as f64
+    );
+    println!(
+        "产物：{out_path}  编码帧数 {encoded}  尺寸 {}x{}",
+        parts[0], parts[1]
+    );
 
     if frames == 0 {
         return Err("一帧都没处理".into());

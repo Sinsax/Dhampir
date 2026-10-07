@@ -46,9 +46,7 @@ use std::cell::RefCell;
 
 use dhampir_core::gpu::{self, GpuContext};
 use dhampir_core::render::corpus;
-use dhampir_core::render::{
-    SELECTABLE_SCENES, SceneRun, SceneSpec, scene_by_name, scene_names,
-};
+use dhampir_core::render::{SELECTABLE_SCENES, SceneRun, SceneSpec, scene_by_name, scene_names};
 use dhampir_core::wgpu;
 use serde_json::{Value, json};
 use wasm_bindgen::prelude::*;
@@ -192,7 +190,11 @@ pub fn parse_in_page(text: &str) -> Result<Value, String> {
     let description = string_key("description")?;
     let is_fallback_adapter = match object.get("is_fallback_adapter") {
         Some(Value::Bool(value)) => *value,
-        Some(other) => return Err(format!("in_page.is_fallback_adapter 应是布尔值，收到 {other}")),
+        Some(other) => {
+            return Err(format!(
+                "in_page.is_fallback_adapter 应是布尔值，收到 {other}"
+            ));
+        }
         None => return Err("in_page 里没有 is_fallback_adapter".to_string()),
     };
     // 这两个是 Chrome 的扩展字段（WGSL 的 subgroup 下限），缺了不影响身份，如实给 null。
@@ -468,11 +470,9 @@ pub async fn dhampir_corpus_open(
     // 先解析页面给的那份：形状不对时**连 GPU 都不用起**，错误里直接说清缺了什么。
     let in_page = parse_in_page(&in_page_json).map_err(web::js_err)?;
 
-    if let Some(text) = CORPUS_HOST.with(|host| {
-        host.borrow()
-            .as_ref()
-            .map(|host| host.adapter_json.clone())
-    }) {
+    if let Some(text) =
+        CORPUS_HOST.with(|host| host.borrow().as_ref().map(|host| host.adapter_json.clone()))
+    {
         return Ok(text);
     }
 
@@ -692,7 +692,10 @@ mod tests {
         );
         // 时间戳：给了就两个键都给，`epoch_seconds` 由 core 截断（与 native 同一份）。
         assert_eq!(record["unix_epoch_millis"], 1_790_000_000_123_u64);
-        assert_eq!(record["unix_epoch_seconds"], corpus::epoch_seconds(1_790_000_000_123));
+        assert_eq!(
+            record["unix_epoch_seconds"],
+            corpus::epoch_seconds(1_790_000_000_123)
+        );
     }
 
     /// Chrome 上 `adapter.name` 是空串（见 [`IN_PAGE_NOTE`]）：这份记录必须**自己说清**
@@ -750,15 +753,51 @@ mod tests {
     #[wasm_bindgen_test]
     fn a_broken_in_page_is_rejected_not_defaulted() {
         for (label, text, keyword) in [
-            ("空 vendor", r#"{"vendor":"","architecture":"a","device":"","description":"","is_fallback_adapter":false}"#, "vendor"),
-            ("少 vendor", r#"{"architecture":"a","device":"","description":"","is_fallback_adapter":false}"#, "vendor"),
-            ("vendor 不是字符串", r#"{"vendor":1,"architecture":"a","device":"","description":"","is_fallback_adapter":false}"#, "vendor"),
-            ("少 is_fallback_adapter", r#"{"vendor":"nvidia","architecture":"a","device":"","description":""}"#, "is_fallback_adapter"),
-            ("is_fallback_adapter 不是布尔", r#"{"vendor":"nvidia","architecture":"a","device":"","description":"","is_fallback_adapter":"no"}"#, "is_fallback_adapter"),
-            ("少 architecture", r#"{"vendor":"nvidia","device":"","description":"","is_fallback_adapter":false}"#, "architecture"),
-            ("少 device", r#"{"vendor":"nvidia","architecture":"a","description":"","is_fallback_adapter":false}"#, "device"),
-            ("少 description", r#"{"vendor":"nvidia","architecture":"a","device":"","is_fallback_adapter":false}"#, "description"),
-            ("subgroup 不是整数", r#"{"vendor":"nvidia","architecture":"a","device":"","description":"","is_fallback_adapter":false,"subgroup_min_size":1.5}"#, "subgroup_min_size"),
+            (
+                "空 vendor",
+                r#"{"vendor":"","architecture":"a","device":"","description":"","is_fallback_adapter":false}"#,
+                "vendor",
+            ),
+            (
+                "少 vendor",
+                r#"{"architecture":"a","device":"","description":"","is_fallback_adapter":false}"#,
+                "vendor",
+            ),
+            (
+                "vendor 不是字符串",
+                r#"{"vendor":1,"architecture":"a","device":"","description":"","is_fallback_adapter":false}"#,
+                "vendor",
+            ),
+            (
+                "少 is_fallback_adapter",
+                r#"{"vendor":"nvidia","architecture":"a","device":"","description":""}"#,
+                "is_fallback_adapter",
+            ),
+            (
+                "is_fallback_adapter 不是布尔",
+                r#"{"vendor":"nvidia","architecture":"a","device":"","description":"","is_fallback_adapter":"no"}"#,
+                "is_fallback_adapter",
+            ),
+            (
+                "少 architecture",
+                r#"{"vendor":"nvidia","device":"","description":"","is_fallback_adapter":false}"#,
+                "architecture",
+            ),
+            (
+                "少 device",
+                r#"{"vendor":"nvidia","architecture":"a","description":"","is_fallback_adapter":false}"#,
+                "device",
+            ),
+            (
+                "少 description",
+                r#"{"vendor":"nvidia","architecture":"a","device":"","is_fallback_adapter":false}"#,
+                "description",
+            ),
+            (
+                "subgroup 不是整数",
+                r#"{"vendor":"nvidia","architecture":"a","device":"","description":"","is_fallback_adapter":false,"subgroup_min_size":1.5}"#,
+                "subgroup_min_size",
+            ),
             ("不是 JSON", "nvidia", "不是 JSON"),
             ("不是对象", "[]", "不是对象"),
         ] {
@@ -817,7 +856,9 @@ mod tests {
             &readings,
         );
 
-        let from_record = leg["backends"][0]["frames"].as_array().expect("记录里该有帧表");
+        let from_record = leg["backends"][0]["frames"]
+            .as_array()
+            .expect("记录里该有帧表");
         let from_summary = summary["frames"].as_array().expect("摘要里该有帧表");
         assert_eq!(from_summary.len(), from_record.len());
         assert_eq!(from_summary.len(), 1, "这一条只搭了一帧");
@@ -829,7 +870,10 @@ mod tests {
                 );
             }
         }
-        assert_eq!(summary["frames_digest"], leg["backends"][0]["frames_digest"]);
+        assert_eq!(
+            summary["frames_digest"],
+            leg["backends"][0]["frames_digest"]
+        );
         assert_eq!(summary["frames_per_scene"], leg["frames_per_scene"]);
         assert_eq!(summary["frame_range"], leg["frame_range"]);
         assert_eq!(summary["frames_per_scene"], 1);

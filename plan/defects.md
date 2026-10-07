@@ -19,9 +19,9 @@
 - 根因是一串**空格分隔的记号**，每个记号要么是仓库内真实存在的路径（可带 :行号 或 :起-止），
   要么是另一个条目 id。至少一个。
 - 证据是 - 或一串同样形式的真实路径；**status=done 时必须给出至少一个存在的文件**。
-- 计数声明行 <!-- ledger: D=16 A=10 --> 必须与实际条数一致。
+- 计数声明行 <!-- ledger: D=23 A=10 --> 必须与实际条数一致。
 
-<!-- ledger: D=16 A=10 -->
+<!-- ledger: D=23 A=10 -->
 
 ## 缺陷（D）
 
@@ -120,6 +120,53 @@
   根因: scripts/check-text-hygiene.mjs:1
   验收: 新增检查覆盖写死 Windows 语义的做法（路径分隔符、行尾、大小写假设）；若本机装有 x86_64-unknown-linux-gnu target 就补一次 cargo check，装不上则如实记为不可测
   证据: plan/t7-evidence.md
+
+- [D17] status=done phase=-
+  症状: 发布流程在 Linux 上**出不了产物** —— `scripts/package.mjs` 的压包只认 PowerShell（Linux 上通常没有，实测 ENOENT），流程走到压包就断；而 README 的命题是「同一个底座编译到两个宿主」，服务端出片的目标环境正是 Linux
+  根因: scripts/package.mjs:272
+  验收: 按平台分叉：Windows 仍走 .NET `ZipFile`（原样不动），Linux / macOS 走纯 Node（只依赖 `node:zlib`，不引 `zip` 命令行依赖）；两条路共用 `verifyZip` 的结果判据。实测产出 `dhampir-0.1.0-linux-x64.zip`（3.68 MB）+ `.sha256.txt`，`bsdtar` 解开后 `bin/dhampir --help` / `probe` / `frame` 全绿
+  证据: scripts/package.mjs:371 scripts/package.mjs:464
+
+- [D18] status=done phase=-
+  症状: 打包出的 zip **不写 Unix 权限位**，解压后 `bin/dhampir` 是 `-rw-r--r--`，**跑不起来**。而"zip 打得开、文件都在"这类自检发现不了它（是 D17 顺带挖出来的：第一版 Node 压包只写了条目名与内容）
+  根因: scripts/package.mjs:407
+  验收: 中央目录写 `external_attr` 高 16 位（`create_system = 3` = Unix，mode 取低 12 位）；`verifyZip` 增加"非 Windows 上 `bin/dhampir` 必须带可执行位"的判据。**反向验过**：拿未修的那份 zip 跑，判据退出码 1；修后 `bsdtar` 解开是 `-rwxr-xr-x`。注意 `python -m zipfile` / `ZipFile.extractall` **不还原权限位**，验这条要用 `bsdtar` 或直接读中央目录
+  证据: scripts/package.mjs:435
+
+- [D19] status=done phase=-
+  症状: `cargo fmt --all --check` 是红的（848 处 / 65 文件）——**代码从未按 `rustfmt.toml` 排过**。而 CI 的 `check-native` 跑这条，且工作流明写"不忽略任何退出码"，所以推上去必拦
+  根因: crates/dhampir-timeline/src/danmaku.rs:266
+  验收: `cargo fmt --all` 后 `--check` 退出码 0。**先排除过工具链漂移**：系统 rustfmt 与钉住的 1.97.0 都是 1.9.0-stable、给出**同一份 diff**，所以不是版本问题。行为未变的证据：生成文档 md5 前后一致、`records/m1` 整表摘要 `71ecc80cade3d73d` 复现、双端 SSIM 1.000000、705 passed / 0 failed
+  证据: crates/dhampir-timeline/src/danmaku.rs
+
+- [D20] status=done phase=-
+  症状: `cargo clippy --workspace --all-targets -- -D warnings` 报 23 条（原先判成"只在 1.98 上出现"，**实测在钉住的 1.97.0 上同样红，先前判断是错的**）
+  根因: crates/dhampir-timeline/src/edit.rs:144
+  验收: 逐条处理后 `-D warnings` 退出码 0。其中**三类是 lint 误报，必须保留原判据**：(1) `neg_cmp_op_on_partial_ord` 四处 —— `!(x > 0.0)` 与 `x <= 0.0` **在 NaN 上不等价**，而挡 NaN 正是本仓意图（`text_layout.rs:450` / `:611`、`pipeline.rs:451`、`decode_sequence.rs:126`），有测试 `NaN 也要挡住` 盯着，故 `#[allow]` + 理由，**没有**按 lint 改判据；(2) `too_many_arguments` 三处（`compose` / `paint_one` / `overlay_expected`）—— 参数是 wgpu 或着色器 uniform 的天然形状，拆结构体只是把 lint 关掉而让热路径更难读；(3) `assertions_on_constants` 改为 `const _: () = assert!(...)`，是编译期断言，语义等价。其余是机械修正（`clone_on_copy` 13 处、`bool_assert_comparison` 4 处、`field_reassign_with_default` 6 处，以及 `useless_conversion` / `needless_range_loop` / `derivable_impls` / `useless_vec` / `needless_borrows_for_generic_args` 各 1）。另修掉一处**早就存在**、只因编译中断而没被报出的重复 `#[allow(too_many_arguments)]`（`text_overlay.rs`）
+  证据: crates/dhampir-timeline/src/text_layout.rs:450
+
+- [D21] status=todo phase=-
+  症状: `scripts/check-m2-record.mjs` 的自检与正跑都红，红在 `diff-images` 一项：归档的 9 张差异图**重编码后与盘上不是同一份字节**（如 `gradient-f000.png` 盘上 2706 vs 重编码 2674）。而守卫自己的规矩是「自检先过才谈结论」，所以**它现在给出的任何结论都不可信**
+  根因: scripts/check-m2-record.mjs:3388
+  验收: 查清这 9 张图**归档时**用的编码器/参数与现在 `encodePng` 的差异（最可能是 zlib 版本或滤波选择不同），据此二选一：或让判据只比**解码后的像素**而不比容器字节（差异图的价值在像素，不在压缩参数），或按当前编码器**重新归档**这 9 张。判定标准：自检转绿，且换一份已知不同的差异图仍然红
+  证据: records/m2/
+  备注: **与本次改动无关**。已用 `git stash` 把 `crates/` 全部改动临时撤下复跑，报错**逐字相同**；`records/` 自 2026-10-01 起未动（`git log -1 -- records/` = 7907c22）。属历史归档的取证问题，不影响 0.1.0 产物
+
+- [D22] status=wontfix phase=-
+  症状: `check-web-invariants` 在**守卫套件里偶发转红**（单独跑次次绿），红在「wasm pkg 比源码旧」。一度被当成 flake
+  根因: scripts/stale-pkg.mjs:45
+  验收: 记为**非缺陷**：那是**真阳性**。套件里别的守卫会跑 `cargo` / `wasm-pack`，而 `WASM_SOURCE_PATHS` 里的源目录会被 cargo 写入 —— pkg 与源的 mtime 是**亚秒级**比较，谁新谁旧取决于最后写的是哪边。已确证：手工 `touch` 一个源文件（`dhampir-core/src/lib.rs`）后该守卫**稳定转红**并打印正确的重建命令；`wasm-pack build --dev --target web --out-dir www/pkg` 重建后稳定转绿。即判据本身是对的，只是它把「pkg 与源同步」这件事**如实地**暴露在了套件中途
+  证据: scripts/check-web-invariants.mjs:178
+  备注: 若要消掉套件内的偶发红，正确做法是**让驱动在跑守卫前统一重建一次 pkg**，而不是放宽判据。这次没做（不在 0.1.0 产物范围内）；单独跑整套守卫时几乎不会遇到。**已实测该处置有效**：先跑一次 `wasm-pack build --dev --target web --out-dir www/pkg`，再跑整套守卫得到稳定 **19/20**（唯一红的仍是 D21）
+
+- [D23] status=done phase=-
+  症状: **Windows 上素材 uri 的「绝对」判定与「挂根」都是错的**，两处独立缺陷：(1) `is_absolute_uri` 的第 1 条用 `Path::is_absolute()` 实现，而 Windows 要求"盘符+根"，`Path::new("/abs/a.mp4").is_absolute()` 是 **false** → POSIX 绝对被误判成相对、挂到 `--asset-root` 下；(2) `build_sources` / `load_asset_map` 用 `asset_root.join(raw)` 挂根，而 Windows 的 `join` 规则是"若 path 有前缀但没有根则忽略 self"，`C:rel.mp4` 正是这种形状 → 得到 `C:rel.mp4` 而不是 `target/s3/C:rel.mp4`
+  根因: crates/dhampir-worker/src/bin/dhampir.rs:993 scripts/dhampir-local.mjs:123
+  验收: 第 1 条改为**只看文本**（以 `/` 开头即绝对），不再调 `is_absolute()`；第 2 条新增 `join_under_root`。**注意第 2 条踩了两次**：第一版写成"按文本拆成组件逐个 `PathBuf::push`"，看着比 `join` 安全，其实中同一条规则（`push` 与 `join` 语义一致，`join` 的文档明写 "See `PathBuf::push`"）—— `C:rel.mp4` 按 `/` 拆出来只有**一个**组件，整块 push 照样丢掉 `asset_root`，CI 第二次仍报 `left: "C:rel.mp4"`。最终改为**先把完整路径拼成一个字符串，再一次性 `PathBuf::from`**（`From` 不做前缀解析）。两处调用点（`build_sources` / `load_asset_map`）都改过去。JS 侧 `isAbsoluteUri` 同步改成 `startsWith('/')` 并去掉多余的 `isAbsolute` 导入（Node 的 `win32.join` 实测没有 Rust 那个丢 self 的问题，故那边只需改判定）。新增反向可控守卫 `挂根不用_path_join_也不用_push_以免在_windows_上丢掉_asset_root`（含 `./a.mp4` 前导点号用例，实测退回 `join` 后在 **Linux 上也红**，证明它不是恒真）
+  证据: crates/dhampir-worker/src/bin/dhampir.rs:1024
+  备注: **这个缺陷在 Linux 上一条测试也测不出来**，两处都是 CI 的 `windows-latest` 腿抓到的（同一批测试在 ubuntu 上全绿）。这正是"两端矩阵"的价值：Linux 单腿会给出假绿。原先的 `绝对_uri_按书写形态判而不按平台判` 测试意图是对的，但它在 Linux 上恰好恒过 —— 是**测试在目标平台缺失**，不是判据写错。
+  另记一条**方法教训**：中途我给守卫写过两条平台相关的反向对照 —— (a) 断言 `C:rel.mp4` 的 `components().count() == 1`，Windows 上其实是 **2**（Prefix + Normal），于是**在 Windows 上自己红了**（那是反向对照写错，不是被测代码错）；(b) 改成 `#[cfg(windows)]` 断言 ==2，但本机无 Windows target，那段代码**编译不到也跑不到**，等于往仓里塞未验证的代码。最终退回平台无关判据（结果必须以 asset_root 开头）。**别拿一个平台的形状去断言另一个平台**，也别引入自己验证不了的分支。
+  终局: CI 四个 job 全绿（`ubuntu-latest` 与 `windows-latest` 的 check-native、check-wasm、guard），`dhampir-0.1.0-linux-x64.zip` 基于该 commit（`git=4f8d06d`）重打并上传到 v0.1.0 Release
 
 ## 架构缺失（A）
 

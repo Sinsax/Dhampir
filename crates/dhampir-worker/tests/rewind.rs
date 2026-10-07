@@ -42,7 +42,7 @@ use std::path::{Path, PathBuf};
 
 use dhampir_core::compose;
 use dhampir_core::overlay::SubtitleTable;
-use dhampir_core::timeline::project::{load_doc, ProjectDoc};
+use dhampir_core::timeline::project::{ProjectDoc, load_doc};
 use dhampir_worker::pipeline::{
     AudioMode, FramePng, PoolStats, RenderPlan, SourceTable, render_frames_png_run,
 };

@@ -103,7 +103,10 @@ mod tests {
             );
         }
         // 两条腿的目录名必须真的不同，否则"一条腿一个目录"这句话是假的。
-        assert_ne!(backend_slug(wgpu::Backends::DX12), backend_slug(BROWSER_BACKENDS));
+        assert_ne!(
+            backend_slug(wgpu::Backends::DX12),
+            backend_slug(BROWSER_BACKENDS)
+        );
     }
 }
 
