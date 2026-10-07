@@ -980,14 +980,29 @@ fn load_project_or_usage(path: &str) -> Result<ProjectDoc, ExitCode> {
 /// 变成 `target/s3/C:/abs/b.mp4`：不是报错，是**换了个地方去找**。
 ///
 /// 规则（与 `scripts/dhampir-local.mjs` 的 `isAbsoluteUri` 逐条对应，不许只改一边）：
-/// 1. 当前平台的绝对路径（`Path::is_absolute`，覆盖 POSIX 的 `/…`）；
-/// 2. 盘符绝对：字母 + `':` + 紧跟 `'/'` 或 `'\\'`（`C:foo` 是**盘符相对**，Windows 也不认它绝对）；
-/// 3. UNC：以两个反斜杠开头（在 Linux 上它只是**一个**普通组件，只能看文本）。
+/// 1. 平台绝对路径，但**按书写形态判**（见下）；
+/// 2. POSIX 根：以 `/` 开头；
+/// 3. 盘符绝对：字母 + `':` + 紧跟 `'/'` 或 `'\\'`（`C:foo` 是**盘符相对**，Windows 也不认它绝对）；
+/// 4. UNC：以两个反斜杠开头（在 Linux 上它只是**一个**普通组件，只能看文本）。
+///
+/// ## 第 1 条为什么不能只写 `raw.is_absolute()`（2026-10 修）
+///
+/// `Path::is_absolute()` 在 Windows 上对 `/abs/a.mp4` 返回 **false** —— 它的口径是
+/// "有没有盘符或 UNC 前缀"，`/x` 被当成"当前盘符下的相对路径"。这与本函数的承诺
+/// （按书写形态判、两端给同一个答案）矛盾：同一份工程里的 `/abs/a.mp4`
+/// 在 Windows 出片时会被挂到 `--asset-root` 下面，在 Linux 上却按绝对处理。
+///
+/// 而 `node:path` 的 `isAbsolute()` 在 Windows 上**认** `/abs/a.mp4`（返回 true）。
+/// 两端因此对同一格给出不同答案 —— 这正是"不许只改一边"要拦的东西。
+/// 所以第 1、2 条拆开：`is_absolute()` 保留（吃掉 UNC 与盘符），`/` 开头单独判。
 pub fn is_absolute_uri(raw: &Path) -> bool {
     if raw.is_absolute() {
         return true;
     }
     let text = raw.to_string_lossy();
+    if text.starts_with('/') {
+        return true;
+    }
     let bytes = text.as_bytes();
     if bytes.len() >= 3
         && bytes[0].is_ascii_alphabetic()
@@ -1025,11 +1040,57 @@ pub fn load_asset_map(path: &str, asset_root: &Path) -> Result<Vec<(String, Path
             if is_absolute_uri(raw) {
                 raw.to_path_buf()
             } else {
-                asset_root.join(raw)
+                join_asset_root(asset_root, raw)
             },
         ));
     }
     Ok(rows)
+}
+
+/// 把**相对** uri 挂到 `--asset-root` 上，且不让 Windows 的盘符语法把根吃掉。
+///
+/// ## 为什么不能直接用 `asset_root.join(raw)`（2026-10 修）
+///
+/// `Path::join` 在 Windows 上遇到 `C:rel.mp4`（**盘符相对**，没有分隔符）
+/// 会返回 `C:rel.mp4` —— **整根被丢掉**，而这与 `join` 遇到绝对路径时的替换语义
+/// 看起来一样，所以不会报错。实测：`join("target/s3", "C:rel.mp4") == "C:rel.mp4"`。
+///
+/// 后果与 `is_absolute_uri` 那条同类但方向相反：工程里写 `C:rel.mp4` 的素材
+/// 本该在 `target/s3/C:rel.mp4` 找到，却变成去当前盘符的当前目录找。
+/// 判定既然说它是**相对**（两端一致），解释位置时就必须真的按相对拼。
+///
+/// ## 怎么拼：**原样当一个普通组件**，不是把盘符剥掉
+///
+/// 口径来自跨仓的那条对应实现 `scripts/dhampir-local.mjs` 的自检：
+/// `'盘符相对仍挂根（C:foo 不是绝对）'` 断言的答案是 **`x/C:rel.mp4`** ——
+/// `C:rel.mp4` 整个串（含 `C:`）作为**一个**普通目录名挂在根下面。
+/// 剥掉盘符会得到 `x/rel.mp4`，那是**另一个地方**，两端就不一致了。
+///
+/// ## 为什么只能用文本拼接（三种"看起来更正规"的写法都错）
+///
+/// Windows 上 `C:rel.mp4` 被判定为"有根"（盘符前缀），于是**所有**走
+/// `Path` 语义的拼接都会把它当绝对路径替换掉整根。实测：
+///
+/// | 写法 | 结果 |
+/// |---|---|
+/// | `asset_root.join(raw)` | `C:rel.mp4` ❌ |
+/// | `buf.push(raw)` | `C:rel.mp4` ❌ |
+/// | `for c in raw.components() { buf.push(c) }` | `C:rel.mp4` ❌ |
+/// | 文本拼接（本实现） | `target/s3/C:rel.mp4` ✅ |
+///
+/// 实测脚本见开发记录；这里用文本拼接是**唯一**能满足口径的做法。
+/// 代价是分隔符要自己管：用 `/`（本仓全仓 LF/前斜杠口径，`shown()` 也按它比），
+/// 且只在两边都非空时插一个 —— 根为空串时不产生开头的 `/`。
+fn join_asset_root(asset_root: &Path, raw: &Path) -> PathBuf {
+    let root = asset_root.to_string_lossy();
+    let tail = raw.to_string_lossy();
+    if root.is_empty() {
+        return PathBuf::from(tail.as_ref());
+    }
+    if tail.is_empty() {
+        return PathBuf::from(root.as_ref());
+    }
+    PathBuf::from(format!("{}/{}", root, tail))
 }
 
 /// 素材表：id -> 文件。**位置由宿主解释**，所以相对 uri 要挂到 --asset-root 上。
@@ -1054,7 +1115,7 @@ fn build_sources(
         let file = if is_absolute_uri(raw) {
             raw.to_path_buf()
         } else {
-            asset_root.join(raw)
+            join_asset_root(asset_root, raw)
         };
         table.insert(asset.id.clone(), file);
     }
