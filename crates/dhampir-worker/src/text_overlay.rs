@@ -339,6 +339,8 @@ impl OverlayPainter {
         paint_lines(
             &mut |key| rasterizer.rasterize(key),
             &font_for,
+            // **字体目录**带下去：libass 靠它找字体与回退字体。
+            font_dir,
             image,
             overlay,
             target,
@@ -475,6 +477,8 @@ enum Painted {
 fn paint_parts(
     rasterize: &mut impl FnMut(&TextRasterKey) -> Result<Rc<TextBitmap>, String>,
     font_file: Option<PathBuf>,
+    // **字体目录**：libass 找字体与回退字体的入口（CLI 的 --font-dir）。
+    font_dir: Option<PathBuf>,
     image: &mut Rgba8Image,
     target: (u32, u32),
     parts: &[dhampir_core::overlay::TextRun],
@@ -532,6 +536,10 @@ fn paint_parts(
             shadow_dy_px: 0,
             shadow_pad: 0,
             font_file: font_file.clone(),
+            // **契约里的家族名**带下去：libass 按名字找字体，而名字从文件名推
+            // 不可靠（实测会静默回退到 ArialMT，见 `TextRasterKey::font_family`）。
+            font_family: style.family.clone(),
+            font_dir: font_dir.clone(),
             width: placement.bitmap_width,
             height: placement.bitmap_height,
         };
@@ -669,6 +677,8 @@ fn paint_shadow(
 fn paint_one(
     rasterize: &mut impl FnMut(&TextRasterKey) -> Result<Rc<TextBitmap>, String>,
     font_file: Option<PathBuf>,
+    // 同 `paint_parts`：字体目录。
+    font_dir: Option<PathBuf>,
     image: &mut Rgba8Image,
     target: (u32, u32),
     text: &str,
@@ -739,6 +749,7 @@ fn paint_one(
             rasterize,
             // `paint_one` 上面已经确认过字体给没给，这里带下去就行。
             Some(font_file),
+            font_dir.clone(),
             image,
             target,
             parts,
@@ -777,6 +788,9 @@ fn paint_one(
         shadow_dy_px: 0,
         shadow_pad: 0,
         font_file: font_file.to_path_buf(),
+        // 同上：家族名从契约带下来。
+        font_family: style.family.clone(),
+        font_dir: font_dir.clone(),
         width: placement.bitmap_width,
         height: placement.bitmap_height,
     };
@@ -846,6 +860,8 @@ fn paint_lines(
     // 按样式解析出字体文件的闭包（`OverlayPainter::font_for` 的借用版）——
     // 字体不是"整份一个"，字重/族名都可能不同。
     font_for: &dyn Fn(&dhampir_core::overlay::TextStyle) -> Option<PathBuf>,
+    // **字体目录**（CLI 的 --font-dir）：libass 找字体与回退字体的入口。
+    font_dir: &Option<PathBuf>,
     image: &mut Rgba8Image,
     overlay: &TextOverlay,
     target: (u32, u32),
@@ -859,6 +875,7 @@ fn paint_lines(
         match paint_one(
             &mut *rasterize,
             font_for(&overlay.subtitle_style),
+            font_dir.clone(),
             image,
             target,
             &item.text,
@@ -891,6 +908,7 @@ fn paint_lines(
         match paint_one(
             &mut *rasterize,
             font_for(&overlay.danmaku_style),
+            font_dir.clone(),
             image,
             target,
             &item.text,
@@ -1309,6 +1327,8 @@ mod tests {
                     rasterize(key)
                 },
                 &|_: &dhampir_core::overlay::TextStyle| painter.font_file.clone(),
+                // 测试里不给字体目录（走 `--font-file` 的父目录兜底）。
+                &None,
                 &mut image,
                 &lines,
                 (640, 360),
@@ -1335,6 +1355,8 @@ mod tests {
         paint_lines(
             &mut |key| fake_rasterizer(&mut calls)(key),
             &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            // 测试里不给字体目录（走 `--font-file` 的父目录兜底）。
+            &None,
             &mut image,
             &lines,
             (640, 360),
@@ -1365,6 +1387,8 @@ mod tests {
         paint_lines(
             &mut |_key| Err("ffmpeg 画不出这一行（退出码 1）：字体不认得".to_string()),
             &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            // 测试里不给字体目录（走 `--font-file` 的父目录兜底）。
+            &None,
             &mut image,
             &lines,
             (64, 64),
@@ -1387,6 +1411,8 @@ mod tests {
         paint_lines(
             &mut |key| fake_rasterizer(&mut calls)(key),
             &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            // 测试里不给字体目录（走 `--font-file` 的父目录兜底）。
+            &None,
             &mut image,
             &lines,
             (64, 64),
@@ -1417,6 +1443,7 @@ mod tests {
         paint_lines(
             &mut |key| fake_rasterizer(&mut calls)(key),
             &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            &None,
             &mut baseline,
             &lines,
             target,
@@ -1434,6 +1461,7 @@ mod tests {
         paint_lines(
             &mut |key| fake_rasterizer(&mut calls)(key),
             &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            &None,
             &mut transparent,
             &lines,
             target,
@@ -1482,6 +1510,8 @@ mod tests {
                 Ok(Rc::new(ink_bitmap_of(key.width, key.height, color)))
             },
             &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            // 测试里不给字体目录（走 `--font-file` 的父目录兜底）。
+            &None,
             &mut image,
             &lines,
             target,
@@ -1534,6 +1564,8 @@ mod tests {
                 Ok(Rc::new(ink_bitmap(key.width, key.height)))
             },
             &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            // 测试里不给字体目录（走 `--font-file` 的父目录兜底）。
+            &None,
             &mut image,
             &lines,
             target,
@@ -1582,6 +1614,8 @@ mod tests {
         paint_lines(
             &mut |key| fake_rasterizer(&mut calls)(key),
             &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            // 测试里不给字体目录（走 `--font-file` 的父目录兜底）。
+            &None,
             &mut image,
             &items,
             (640, 360),
@@ -1614,6 +1648,8 @@ mod tests {
         paint_lines(
             &mut |_key| unreachable!("没有字体时不该走到栅格化"),
             &|_: &dhampir_core::overlay::TextStyle| None,
+            // 测试里不给字体目录（走 `--font-file` 的父目录兜底）。
+            &None,
             &mut image,
             &items,
             (640, 360),
@@ -1653,6 +1689,8 @@ mod tests {
         paint_lines(
             &mut |key| fake_rasterizer(&mut calls)(key),
             &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            // 测试里不给字体目录（走 `--font-file` 的父目录兜底）。
+            &None,
             &mut image,
             &items,
             (640, 360),

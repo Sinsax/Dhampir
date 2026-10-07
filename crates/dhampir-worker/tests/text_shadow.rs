@@ -321,6 +321,8 @@ fn text_key(font: &Path, font_px: u32, text: &str) -> TextRasterKey {
         shadow_dy_px: 0,
         shadow_pad: 0,
         font_file: font.to_path_buf(),
+        font_family: None,
+        font_dir: None,
         width,
         height,
     }

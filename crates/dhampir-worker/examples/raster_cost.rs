@@ -59,6 +59,10 @@ const DEFAULT_TARGETS: &[(u32, u32)] = &[(1920, 1080), (640, 360)];
 
 struct Args {
     font_file: PathBuf,
+    /// 字体家族名（可选）：libass 按名字找字体。`None` = 退回文件名主干。
+    font_family: Option<String>,
+    /// 字体目录（可选）：libass 找字体与回退字体的入口。
+    font_dir: Option<PathBuf>,
     targets: Vec<(u32, u32)>,
     /// 冷路径取几次样（每次都真起一次进程）。
     cold: usize,
@@ -75,6 +79,8 @@ fn usage() -> String {
 
 fn parse_args(argv: Vec<String>) -> Result<Args, String> {
     let mut font_file: Option<PathBuf> = None;
+    let mut font_family: Option<String> = None;
+    let mut font_dir: Option<PathBuf> = None;
     let mut targets: Vec<(u32, u32)> = Vec::new();
     let mut cold = 8usize;
     let mut warm = 20_000usize;
@@ -91,6 +97,8 @@ fn parse_args(argv: Vec<String>) -> Result<Args, String> {
         };
         match flag {
             "--font-file" => font_file = Some(PathBuf::from(next("--font-file")?)),
+            "--font-family" => font_family = Some(next("--font-family")?),
+            "--font-dir" => font_dir = Some(PathBuf::from(next("--font-dir")?)),
             "--target" => {
                 let raw = next("--target")?;
                 targets.push(parse_target(&raw)?);
@@ -128,6 +136,10 @@ fn parse_args(argv: Vec<String>) -> Result<Args, String> {
     }
     Ok(Args {
         font_file,
+        // 家族名与字体目录都跟着命令行走：libass 按**名字**找字体，
+        // 名字推错会静默回退（成本测量会因此量到另一份字体）。
+        font_family,
+        font_dir,
         targets,
         cold,
         warm,
@@ -223,6 +235,8 @@ fn run(args: Result<Args, String>) -> Result<(), String> {
                 shadow_dy_px: 0,
                 shadow_pad: 0,
                 font_file: args.font_file.clone(),
+                font_family: args.font_family.clone(),
+                font_dir: args.font_dir.clone(),
                 width: bitmap_w,
                 height: bitmap_h,
             };
@@ -264,6 +278,8 @@ fn run(args: Result<Args, String>) -> Result<(), String> {
             shadow_dy_px: 0,
             shadow_pad: 0,
             font_file: args.font_file.clone(),
+            font_family: args.font_family.clone(),
+            font_dir: args.font_dir.clone(),
             width: bitmap_w,
             height: bitmap_h,
         };

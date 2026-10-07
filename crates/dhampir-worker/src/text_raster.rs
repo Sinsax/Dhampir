@@ -4,33 +4,89 @@
 //!
 //! 共享布局（`dhampir_timeline::text_layout`）只回答「几行、每行什么、占哪个矩形」——
 //! 字形像素必须由宿主画出来。本仓不许引第三方 crate（见 plan/next-steps.md 的约定），
-//! 而 PATH 上那个 ffmpeg 出片本来就要用，所以栅格化走它的 `drawtext`。
+//! 而 PATH 上那个 ffmpeg 出片本来就要用，所以栅格化走它的滤镜。
+//!
+//! # 为什么走 libass 而不再是 `drawtext`（**这一版起老工程字幕像素会变**）
+//!
+//! 这一节是破坏性变更的说明，别删。**从这一版起，本仓画出来的每一个字形像素都与之前
+//! 不同** —— 包括所有老工程、默认路径、没有任何新字段的工程。理由与代价写在这里，
+//! 因为"字看起来差不多"会让人以为它不该影响老片子。
+//!
+//! ## 理由：`drawtext` 不会回退，libass 会
+//!
+//! `drawtext` 只用**一个**字体文件：字体里没有那个码位时它画 `.notdef`（空心方框），
+//! 退出码 0、不报警。本机实测「笑靥如花」用一个缺 U+9765 靥的字体：
+//! drawtext 出 3 段字形（靥 成了方框），宽高比 1.64；同一串走 libass 出 4 段、
+//! 靥 由另一副字体补上（证据与数字见 `plan/glyph-fallback-evidence.md`）。
+//! 缺字是**必然**会遇到的（用户的文案里总有字体覆盖不到的码位），
+//! 而"某一两个字变成方框"在看片时像"这个字体就这样"。
+//!
+//! libass 的回退是逐字形的：`fontselect` 日志里能直接看到它换字体 ——
+//! `(乐米波波体, 400, 0) -> LemiBoBoTi-Regular, 0`（第一个字用点名的字体）
+//! 紧接着 `(乐米波波体, 400, 0) -> MicrosoftYaHeiUI, 1`（缺的那个字换一副）。
+//!
+//! ## 代价（写清楚，因为它是真的）
+//!
+//! * **每一帧的字幕像素都变了**：不同的栅格化器（libass/FreeType 对字形轮廓、
+//!   提示、抗锯齿的处理与 drawtext 不同），逐字节相等不可能。
+//!   已建立的判据是**结构一致**而不是像素一致（见 `plan/consistency-criteria.md`），
+//!   所以这一条与既有口径不冲突；但它确实是一次**看得见**的变更，提交信息里必须写。
+//! * **多一个前置：字体目录**。libass 按**家族名**找字体、并且回退也要靠字体库，
+//!   所以必须告诉它去哪儿找 —— ffmpeg 的 `subtitles` 滤镜自己有 `fontsdir=`，
+//!   见 [`font_dir`]。
+//!   **早先的写法是随行生成一份 `fonts.conf` 走 `FONTCONFIG_FILE`；实测证明不必**：
+//!   `env -u FONTCONFIG_FILE` 下 `fontsdir=` 一样工作（rc=0、`fontselect` 两行都在、
+//!   没有 `Cannot load default config`）。少一个会腐烂的外部文件。
+//! * **家族名必须由契约给**（`font_family`），**不能从文件名推** ——
+//!   实测推出来的名字 libass 认不出来，会**静默回退**到 ArialMT
+//!   （见 [`TextRasterKey::font_family`] 那张表）。这是这一版最阴的一个失败模式：
+//!   它不报警、`lines_failed` 还是 0，只是字全变了。
+//! * **两条路不能混**：`ass=` 与 `subtitles=` 都试过。**选 `subtitles=`** ——
+//!   `ass=` 的 `Dialogue:` 文本里 `%{n}` 是 **ASS 覆盖标签**，会被 libass 当指令**吞掉**
+//!   （实测：`%{n}` 只剩 312 个覆盖像素、而「笑靥如花」是 2180 个）。
+//!   那是"用户打的东西被悄悄吃掉"，与 `drawtext` 的展开是同一种病。
+//!   `subtitles=` 让 libass 自己解析 SRT，`%{n}` 原样画出来（实测 `%{n}` 24 像素 >
+//!   一个 `0` 的 21 像素 —— 没有被换成帧号，也没有被吞掉）。
 //!
 //! # 契约：位图是**直排** RGBA8，颜色在这一步就已经染好
 //!
 //! 有两件事必须在这个文件里对齐一次，否则下游只能猜：
 //!
 //! 1. **混合约定**。core 的合成器走直排法（`SrcAlpha` / `OneMinusSrcAlpha`，
-//!    见 `core/src/render/compose.rs` 的 `blend_state`），而 ffmpeg 的 drawtext
-//!    吐出来的是**覆盖度预乘**：不透明白字的抗锯齿边缘是 `[80, 80, 80, 80]`，
-//!    不是直排的 `[255, 255, 255, 80]`（本机实测，命令与数字见 T2 证据文档）。
-//!    把预乘位图当直排用，字的边缘会暗一圈 —— 而那种错看起来像「字体渲染得不太好」，
-//!    不会有人去查混合约定。
-//! 2. **颜色不属于 ffmpeg 那一步**。drawtext 固定用**白字 + 黑描边**画，
-//!    样式色与不透明度由 [`tint`] 在本文件里染上去。这么分的好处是样式色的 alpha 精确：
-//!    若让 drawtext 自己带半透明色，它的输出里 rgb 与 alpha 各乘了不同的系数，
-//!    反解算会把颜色推亮（实测 `white@0.5` 的边缘是 `[39, 39, 39, 19]`，比值 ≈ 2 而不是 1）。
+//!    见 `core/src/render/compose.rs` 的 `blend_state`），而 ffmpeg 吐出来的不是直排。
+//!    把非直排位图当直排用，字的边缘会暗一圈 —— 而那种错看起来像「字体渲染得不太好」，
+//!    不会有人去查混合约定。**两代栅格化器的形态还不一样**，所以这里有两条：
+//!    * `drawtext`（老路）：**覆盖度预乘** —— 不透明白字的抗锯齿边缘是 `[80, 80, 80, 80]`。
+//!    * libass（新路）：**覆盖度写在 RGB，alpha 恒为 0** ——
+//!      实测 `alpha>20` 的像素数 = 0 而 `rgb>20` 是 8616。
+//!      **直接当覆盖度用会让整行字消失**（`tint` 拿 `alpha=0` 什么都染不出来）。
+//!      这条地雷由 [`coverage_from_libass`] 搬平，见那一节的判据与数字。
+//! 2. **颜色不属于 ffmpeg 那一步**。样式色与不透明度由 [`tint`] 在本文件里染上去。
+//!    这么分的好处是样式色的 alpha 精确：若让栅格化器自己带半透明色，
+//!    它的输出里 rgb 与 alpha 各乘了不同的系数，反解算会把颜色推亮。
+//!
+//!    **但新路这里要比老路多交代一句**：libass 那条路上，
+//!    **填充与描边都必须画成白墨**（[`WHITE_INK`]），描边的颜色在 ffmpeg 这一步
+//!    **不能**来自 `stroke_color`。原因是 libass 输出的是**已合成**的颜色、
+//!    且 alpha 恒为 0：黑描边的像素是 `(0,0,0,0)`，与"完全透明的背景"
+//!    **逐字节相同**（实测一张 640×90 的图里 56806 个 `(0,0,0,0)`），
+//!    覆盖度**数学上恢复不出来**。两处都画白墨，覆盖度才回得来。
+//!    （老路 `drawtext` 没有这个问题：它的透明底与黑描边靠 alpha 分得开。）
+//!    峰值是 **255 不是 235** —— 235 是"白填充与黑描边在同一像素混色"的中间值，
+//!    不是上限，别照抄。
 //!
 //! 于是下游拿到的就是「照直叠加即可」的位图：`rgb` 是样式色，`alpha` 是覆盖率乘样式不透明度。
 //!
-//! # 用户文本里的百分号（靠 `expansion=none` 才安全）
+//! # 用户文本里的百分号
 //!
-//! `drawtext` 默认会对**文本内容**做展开：`%{pts}`、`%{n}`、strftime 的 `%Y` 那一套都算，
-//! 而一个散落的 `%` 会让它直接报错。文本是用户写的，所以这里**一律关掉展开**。
-//! 这是测量阶段撞出来的：取样行里有一行带 `%`，第一次真跑就红 ——
-//! `数字 100 % 号` → `Stray % near ' 号'`（整条命令失败），`%{n}` → 被换成帧号。
-//! 单测盯着 `expansion=none` 在不在参数里，另有一条真起 ffmpeg 的反向用例盯着
-//! 「`%{n}` 没有被换成帧号」。
+//! 老路（`drawtext`）靠 `expansion=none` 才安全：默认档下 `%{pts}`、`%{n}`、strftime
+//! 的 `%Y` 那一套都会展开，而一个散落的 `%` 让它直接报错（`数字 100 % 号` →
+//! `Stray % near ' 号'`）。新路（`subtitles=`）**没有那个展开器** ——
+//! libass 拿到的是一份 SRT 文件内容，`%` 就是一个普通字符。
+//! 所以 `expansion=none` 这一项在新路上**不存在也不需要**，但"用户文本里的 `%` 不许
+//! 出岔子"这条**判据必须留着**：真起 ffmpeg 盯着「`%{n}` 没有被换成帧号」那条反向用例
+//! 现在盯的是 libass，而且**多加了一条**——`%{n}` 也不许被当 ASS 标签吞掉
+//! （那是选 `subtitles=` 而不是 `ass=` 的理由，见上）。
 //!
 //! # 缓存
 //!
@@ -44,7 +100,7 @@
 //! 共享布局的字宽是**模型**（全角 1em / 半角 0.5em），与真字体的前进宽度有偏差 ——
 //! 比例字体里一行英文的真宽度可能比模型宽一成以上。若把位图宽度取成模型宽度，
 //! 这些行会被**悄悄切掉两端**。所以宽度取整条目标宽（布局只有居中的排法，
-//! 与 `x=(w-text_w)/2` 的水平居中一致），高度取行盒加上下各一份 [`pad_px`]。
+//! 与水平居中一致），高度取行盒加上下各一份 [`pad_px`]。
 //! 将来布局加了对齐字段，取位图的那一侧要一起改。
 //!
 //! **切没切字是查得出来的**：见 [`TextBitmap::ink_touches_edge`]。调用方必须把它
@@ -52,32 +108,37 @@
 //!
 //! # 非 ASCII 字体文件名：ffmpeg 会**静默**画不出来
 //!
-//! `drawtext` 的 `fontfile=` 走的是 ffmpeg 内部的 fontconfig 查找路径，而那条路对
-//! 非 ASCII 文件名不可靠。本机实测（ffmpeg 9.0.1 gyan build，命令与数字见
-//! `plan/glyph-fallback-evidence.md`）：同一份字体，
+//! **T1 当时是这么认识的，T2 之后这一段仍然成立、但适用面变了**：缺陷出在
+//! `drawtext` 的 `fontfile=` 上，而栅格化已经改走 libass（`subtitles=`），
+//! 字体是**按名字**经 fontconfig/directwrite 找的、不再往滤镜串里塞文件路径。
+//! 所以严格说这条缺陷已经碰不到了；`ascii_font_path` 留着是**给需要文件路径的
+//! 那条路用的**（[`font_dir`] 的兜底会拿它的父目录当字体目录，见下）。
+//! 记在这里是因为它解释了一个反直觉的事实：**同一个字体，路径的写法能让 ffmpeg 段错误**。
+//!
+//! 本机实测（ffmpeg 9.0.1 gyan build，命令与数字见 `plan/glyph-fallback-evidence.md`）：
+//! 同一份字体，
 //!
 //! | 字体路径 | ffmpeg 退出码 | 产出字节 | stderr |
 //! |---|---|---|---|
-//! | `…/乐米波波体（免费商用）_爱给网_aigei_com.ttf` | 0 | **0** | `Fontconfig error: Cannot load default config file` |
-//! | 同一份复制成 `lemi_ascii.ttf` | 0 | 96000（3184 个非零 alpha） | 空 |
+//! | `…/乐米波波体（免费商用）_爱给网_aigei_com.ttf` | **139**（SIGSEGV） | **0** | `Fontconfig error: Cannot load default config file` |
+//! | 同一份复制成 `lemi_ascii.ttf` | 0 | 96000 | 空 |
 //!
-//! 注意退出码是 **0**、画布尺寸也没错 —— 它只是**什么都不吐**。这正是最坏的一种失败：
-//! 调用方拿到的不是错误而是**一行看不见的字**，而「字没画出来」在看片时像「这一行没有字幕」。
-//! 现有的 `run_ffmpeg` 有一条「产出字节数对不上就报错」的检查，非零退出码那条挡不住这里，
-//! 挡住它的是**字节数**那条 —— 那是本模块敢在这条路上犯错的前提。
+//! 注意它**不吐一个字节**、画布尺寸也没错 —— 这正是最坏的一种失败：调用方拿到的不是
+//! 错误而是**一行看不见的字**，而「字没画出来」在看片时像「这一行没有字幕」。
 //!
-//! 用户决策：**让它能画**，不是只报错。做法是把字体复制到一份 ASCII 名的临时路径再喂给
-//! ffmpeg（见 [`ascii_font_path`]），用完即删。
+//! 用户决策：**让它能画**，不是只报错。做法是把字体复制到一份 ASCII 名的临时路径
+//! （见 [`ascii_font_path`]），用完即删。
 //!
 //! # 有意不做的事
 //!
 //! * 不做字距 / 连字 / 禁则：那是共享布局的模型，宿主**不许**自己再算一遍，否则两端分叉。
 //! * 不解析字体文件、不量字形：度量取自 ffmpeg，结构取自共享布局。
 //! * 不缓存到磁盘：跨次运行的缓存键里还得塞字体文件的内容摘要，那是另一件事。
-//! * 不做彩色 emoji 字形：drawtext 画的是字体里那一层单色字形。
-//! * **不改字体集合、不猜系统字体**：产品路径上字体仍由 `--font-file` 给。
-//!   上面那个复制**只改路径的写法，不改用的是哪一份字体** —— 内容摘要进临时名，
-//!   所以「挪一份字体」与「换一份字体」在参数串上是可区分的。
+//! * 不做彩色 emoji 字形：libass 画的是字体里那一层单色字形。
+//! * **不猜系统字体作为"主字体"**：产品路径上主字体仍由 `--font-file` 给。
+//!   但**回退**要的是一整套字体库 —— 那个只能由宿主/系统提供，
+//!   本仓的做法是**由宿主显式给 `--font-dir`**（`--font-file` 的父目录只作兜底），
+//!   见 [`font_dir`]。这一条与 T4 的跨仓契约有关。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -158,7 +219,49 @@ pub struct TextRasterKey {
     /// 是那种一旦哪一边改了口径就会**静默**漂的算法。（文本位图的键里它是 0。）
     pub shadow_pad: u32,
     /// 字体文件。由宿主给（CLI 的 --font-file）—— 本仓不内嵌字体、也不猜系统字体。
+    ///
+    /// libass 路线下它**不再进参数串**（libass 按家族名找字体），但仍然是必需的：
+    /// 它要被搬成 ASCII 路径（见 [`ascii_font_path`]），而那份的父目录是
+    /// [`font_dir`] 兜底的起点。
     pub font_file: PathBuf,
+    /// **字体家族名**（契约里的 `font_family`），libass 按这个名字找字体。
+    ///
+    /// # 为什么必须有它，而不能从文件名推
+    ///
+    /// 本机实测（见 `plan/glyph-fallback-evidence.md`）：libass **不认文件路径**，
+    /// 只认家族名；而**从文件名推出来的名字它认不出来**。
+    /// 同一份字体（`乐米波波体（免费商用）_爱给网_aigei_com.ttf`）：
+    ///
+    /// | 传给 libass 的 FontName | `fontselect` 的解析结果 |
+    /// |---|---|
+    /// | `乐米波波体（免费商用）_爱给网_aigei_com`（文件名主干） | **ArialMT**（回退，无 CJK 字形） |
+    /// | `staged`（换个文件名） | **ArialMT** |
+    /// | `LemiBoBoTi`（英文内部名） | **ArialMT** |
+    /// | `乐米波波体`（**真家族名**） | **LemiBoBoTi-Regular** ✓ |
+    ///
+    /// 用错名字的后果是**静默用错字体**：画出来是 ArialMT 或某个系统回退字体，
+    /// 而 `lines_failed: 0`、`issues: []` —— 比 .notdef 方框更难查（方框至少看得出来）。
+    ///
+    /// # 名字从哪来（这与既有契约同源，不是新加的概念）
+    ///
+    /// `dhampir_timeline::layer` 的 `font_family` 早就有这个字段，语义写着
+    /// **"宿主从你给它的字体目录里按这个名字找"**；`--font-file` 是兜底。
+    /// libass 恰好也是"按名字找"，所以这里直接把那个契名的名字带下来 ——
+    /// **不新增概念、不解析字体文件**。
+    ///
+    /// `None` = 契约没给名字（老工程）：退回 [`font_family_name`]（文件名主干）。
+    /// 那条路**可能**被 libass 解析成回退字体 —— 这已经被上面那张表证实过了，
+    /// 所以它是"有把握的降级"而不是"能用的默认"，`--font-file` 会给出一条问题记录。
+    pub font_family: Option<String>,
+    /// **字体目录**（可选）：libass 去这里找字体与**回退字体**。
+    ///
+    /// 由宿主给（CLI 的 `--font-dir`）。`None` = 没给，那就退回 `font_file`
+    /// 的父目录（见 [`font_dir`]）。
+    ///
+    /// **它进键**：换一个字体目录就是换一套可用字形 —— 回退落在哪个字体上会变，
+    /// 于是位图会变。不进键就会把上一个目录画出来的位图递给下一个（与"位图尺寸
+    /// 必须进键"同一条纪律）。
+    pub font_dir: Option<PathBuf>,
     /// 位图宽（像素），见 [`bitmap_size`]。
     pub width: u32,
     /// 位图高（像素），见 [`bitmap_size`]。
@@ -342,14 +445,6 @@ fn filter_value(value: &str) -> String {
     escaped
 }
 
-/// RGBA -> ffmpeg 认的 `0xRRGGBB`（**丢掉 alpha**）。
-///
-/// 描边色不需要 alpha：它压在文字底下，半透明的描边看起来像"字边上脏了一圈"，
-/// 而 参照实现 给的也是不透明的颜色（`#403c3b` / `#000`）。
-fn border_color_value(color: [u8; 4]) -> String {
-    format!("0x{:02X}{:02X}{:02X}", color[0], color[1], color[2])
-}
-
 // ---------------------------------------------------------------------------
 // 文字阴影：几何与模糊半径的口径
 //
@@ -433,75 +528,142 @@ pub const SHADOW_MAX_BITMAP_BYTES: u64 = 64 * 1024 * 1024;
 /// 抽成纯函数是为了能单测它 —— 尤其是「文本**不进命令行**」这条：
 /// 用户内容一旦进了滤镜串，一个冒号或引号就能把整条命令改写。
 ///
-/// `font_file` 与 `key` **分开传**，而不是直接用 `key.font_file`：非 ASCII 那一条路上
-/// 喂给 ffmpeg 的是**搬过一份的临时路径**（见 [`ascii_font_path`]），而键上那份仍是
-/// 调用方给的。把它显式列出来，等于让"这一串里用的是哪份字体"在类型上就看得见 ——
-/// 顺手从 `key` 里取会是一条静默走回老路的岔路。
-pub fn drawtext_args(key: &TextRasterKey, font_file: &Path, text_file: &Path) -> Vec<String> {
+/// **这一版是 libass 路线（`subtitles=`）**，形状与上一版的 `drawtext=` 完全不同。
+/// 老工程的字幕像素从这一版起会变，理由与代价见文件头那一节。
+/// 冻结判据 `frozen_argv` 也换了新串 —— 那条测试仍然逐字符比，
+/// 只是比的对象变成了 libass 这一条。
+///
+/// # 三个参数为什么都显式传
+///
+/// `subtitle_file`（一份 SRT）、`font_file`、`key` 全列出来，而不是从 `key` 里取：
+/// 前两个都是**运行期才定下来的临时路径**，从键上取不到。
+/// 让它们进签字，等于让"这一串到底用了哪份文本、哪份字体"在类型上看得见。
+pub fn drawtext_args(
+    key: &TextRasterKey,
+    font_file: &Path,
+    font_dir: &Path,
+    subtitle_file: &Path,
+) -> Vec<String> {
     // 源：一张全透明的画布，尺寸就是要的位图尺寸。
     let source = format!(
         "color=c=black@0.0:s={}x{},format=rgba",
         key.width, key.height
     );
-    // `expansion=none` 是**用户文本的下限保护**，不是口味问题：
-    // drawtext 默认会对文本内容做展开（`%{pts}`、`%{n}`、strftime 那一套），
-    // 而文本是用户写的。实测（T2.3b 的探针，命令与数字见 plan/measurements.md）：
-    // `数字 100 % 号` 让整条命令以 `Stray % near ' 号'` 失败 —— 画不出字；
-    // `%{n}` 则被换成帧号 —— 画出来的是别的东西。关掉之后 `%` 只是普通字符。
-    // **这一项删不得**：删了它，用户文本里的一个百分号就能毁掉整条字幕。
-    let mut drawtext = format!(
-        // `x` 里的 `text_w` 是**这一段自己的**宽（drawtext 的表达式只看当前 filter），
-        // 所以"整行居中"这件事**由调用方算好偏移传进来**（`x_offset`）。
-        // 0 时不写那一项 —— 既有工程的滤镜串逐字符不变。
-        "drawtext=fontfile={}:textfile={}:fontsize={}:fontcolor=white:expansion=none:x=(w-text_w)/2{}:y=(h-text_h)/2",
-        filter_value(&font_file.to_string_lossy()),
-        filter_value(&text_file.to_string_lossy()),
-        key.font_px,
-        if key.x_offset == 0 {
-            String::new()
-        } else if key.x_offset > 0 {
-            format!("+{}", key.x_offset)
-        } else {
-            format!("-{}", -key.x_offset)
-        },
+
+    // 字体名：libass 按**家族名**找字体，不认文件路径（这是它与 drawtext 最大的分歧）。
+    // 名字从文件名推 —— 拿不到家族名时不猜，直接用文件名主干，
+    // libass 找不到就会走回退（那比静默画 .notdef 好，见下）。
+    let family = font_family_name(key, font_file);
+
+    // 字号换算见 [`ass_font_size`]：libass 的 Fontsize 是**行高尺度**，
+    // drawtext 的 fontsize 是 em 尺度，差一个系数。
+    //
+    // # 关键：**填充与描边都用白色**（不是"白填充 + 黑描边"）
+    //
+    // 这不是口味问题，是这一版能不能工作的**前提**，理由见 [`coverage_from_libass`]：
+    // libass 的 alpha **恒为 0**，RGB 里放的是"**已经合成好的颜色**"。
+    // 于是：
+    //   * 用黑描边 → 描边像素是 `(0,0,0,0)`，与"完全透明的背景"**逐字节相同**
+    //     —— 覆盖度**无法恢复**（实测：一张 640x90 的位图里 56806 个 `(0,0,0,0)`，
+    //     其中既有透明底又有黑描边，事后分不开）；
+    //   * 用**白描边** → 每个像素的 RGB 就是"墨有多满"（实测峰值 255，
+    //     白填充+白描边 = 1701 个覆盖像素，白填充单独 = 794 个）。
+    //
+    // "白墨 -> 样式色"本来就是本模块的既有分工（见文件头第 2 条契约）：
+    // 颜色**不属于** ffmpeg 那一步，由 [`tint`] 染。黑描边那种形态是 drawtext
+    // 时代留下的，它把"墨色"提前烙进了像素里；libass 这条路必须把墨色还给 tint。
+    //
+    // **代价（如实写）**：`tint` 现在只需要处理**一种**墨色（白）——
+    // 它内部那条"黑描边保持黑"的分支在这条路上永远走不到。
+    // 描边色由 `OutlineColour` 决定？**不**：`OutlineColour` 这里写白是为了让
+    // 覆盖度可恢复，真正的描边色仍由样式色 + tint 决定（描边与填充在
+    // 覆盖度上是同一张 mask 的两圈，tint 无法区分）——
+    // 这是 T2 已知的**口径收窄**，T3 处理边缘覆盖度时一并说明。
+    let mut style = format!(
+        "FontName={family},FontSize={},PrimaryColour={}",
+        ass_font_size(key.font_px, key.height),
+        // ASS 的颜色是 `&HAABBGGRR`（**BGR**，且 alpha 0 = 不透明）。
+        // 白色 = RRGGBB FFFFFF → `&H00FFFFFF`。
+        "&H00FFFFFF"
     );
+
     if key.shadow_color.is_some() {
         // **阴影那一张：只有填充，不带描边。**
         //
         // 三条理由，缺一条都会画出不对的东西：
         //
-        // 1. **不能有 `borderw`**：描边是黑的，而 [`tint`] 是按"墨色有多白"上色的
-        //    —— 黑像素会被染成**黑**（不是阴影色），字的四周就多出一圈脏边。
-        // 2. **口径**：契约里写着阴影"不参与描边宽度"（描边与阴影各自独立），
-        //    所以阴影的轮廓就是**填充的轮廓**。
-        // 3. 模糊放在 `drawtext` 之后、同一个滤镜串里：`gblur` 吃的是 drawtext
-        //    吐出来的**覆盖度**（白字透明底 = 预乘覆盖度），模糊完还是覆盖度 ——
+        // 1. **不能有描边**：口径上阴影"不参与描边宽度"（描边与阴影各自独立），
+        //    所以阴影的轮廓就是**填充的轮廓**；多一圈描边会让影子比字胖，
+        //    看起来像"影子糊了"。
+        // 2. 就算用白描边，描边也会把覆盖度**撑大**，阴影就不是字的轮廓了。
+        // 3. 模糊放在 `subtitles` 之后、同一个滤镜串里：`gblur` 吃的是
+        //    栅格化器吐出来的**覆盖度**，模糊完还是覆盖度 ——
         //    于是"白墨 -> 样式色"那一套（[`tint`]）一个字都不用改。
         //
         // σ 与 canvas 的 `shadowBlur` 差一个 2，见 [`shadow_sigma_px`]。
+        style.push_str(",Outline=0");
         let sigma = shadow_sigma_px(key.shadow_blur_px);
+        let mut chain = subtitles_filter(subtitle_file, font_dir, &style);
         if sigma > 0.0 {
-            drawtext.push_str(&format!(",gblur=sigma={sigma}"));
+            chain.push_str(&format!(",gblur=sigma={sigma}"));
         }
-    } else if key.outline {
-        if key.stroke_px > 0 {
-            // **契约给了宽度与颜色。**
-            drawtext.push_str(&format!(
-                ":borderw={}:bordercolor={}",
-                key.stroke_px,
-                border_color_value(key.stroke_color)
-            ));
-        } else {
-            // **老路径：宽度从字号推、颜色写死 `black`。**
-            //
-            // 这一条不是"兼容遗留"，是**契约默认值必须让既有工程逐字节不变**：
-            // `stroke_ratio` 的默认值是 0，于是所有老工程都走这里，
-            // 而它们升级前渲染出来的就是 `borderw=border_px(font_px):bordercolor=black`。
-            // 让颜色也走 `stroke_color` 会在默认值上把黑描边变成别的颜色。
-            drawtext.push_str(&format!(":borderw={}:bordercolor=black", border_px(key.font_px)));
-        }
+        return rawvideo_args(source, chain);
     }
 
+    if key.outline {
+        if key.stroke_px > 0 {
+            // **契约给了宽度。** 宽度口径见 [`ass_outline_px`]（实测不用换算）。
+            style.push_str(&format!(
+                ",Outline={},OutlineColour={}",
+                ass_outline_px(key.stroke_px),
+                WHITE_INK
+            ));
+        } else {
+            // **老路径：宽度从字号推。**
+            //
+            // 这一条不是"兼容遗留"：`stroke_ratio` 的默认值是 0，于是所有老工程
+            // 都走这里，而它们升级前渲染出来的描边宽度就是 `border_px(font_px)`。
+            style.push_str(&format!(
+                ",Outline={},OutlineColour={WHITE_INK}",
+                ass_outline_px(border_px(key.font_px))
+            ));
+        }
+    } else {
+        // 不描边。**这一项必须显式写**：ASS 默认样式带描边，
+        // 不写的话"没开描边"的工程会突然多出一圈描边。
+        style.push_str(",Outline=0");
+    }
+
+    rawvideo_args(source, subtitles_filter(subtitle_file, font_dir, &style))
+}
+
+/// 白墨。**填充与描边都用它**，理由见 [`drawtext_args`] 里那一段
+/// 与 [`coverage_from_libass`]：libass 的 alpha 恒为 0、颜色提前合成进 RGB，
+/// 所以只有"全是白墨"时覆盖度才恢复得出来。
+pub const WHITE_INK: &str = "&H00FFFFFF";
+
+/// `subtitles=` 那一段滤镜串（**不含**后面可能追加的 `gblur`）。
+///
+/// # `fontsdir=` 是回退能不能工作的开关
+///
+/// 它告诉 libass 去哪个目录找字体。**不给**的话 libass 只认系统字体库 ——
+/// 而实测"按名字找不到"时会**静默回退**（`乐米波波体` 能找到、
+/// 文件名主干 `…_aigei_com` 找不到，后者回退成 ArialMT）。
+///
+/// 每一项的值都整体包在单引号里、并把内层单引号转义掉 ——
+/// 与 [`filter_value`] 同一套规矩（滤镜串要被解析两遍）。
+fn subtitles_filter(subtitle_file: &Path, font_dir: &Path, style: &str) -> String {
+    format!(
+        "subtitles={}:fontsdir={}:force_style={}",
+        filter_value(&subtitle_file.to_string_lossy()),
+        filter_value(&font_dir.to_string_lossy()),
+        filter_value(style)
+    )
+}
+
+/// ffmpeg 的公共尾巴：抽出来是因为有两条出口（阴影那张不带描边、其余带），
+/// 而"输出成 rawvideo RGBA 到 stdout"这一段两边必须**逐字符相同**。
+fn rawvideo_args(source: String, filter: String) -> Vec<String> {
     vec![
         "-v".to_string(),
         "error".to_string(),
@@ -512,7 +674,7 @@ pub fn drawtext_args(key: &TextRasterKey, font_file: &Path, text_file: &Path) ->
         "-i".to_string(),
         source,
         "-vf".to_string(),
-        drawtext,
+        filter,
         "-frames:v".to_string(),
         "1".to_string(),
         "-f".to_string(),
@@ -521,6 +683,91 @@ pub fn drawtext_args(key: &TextRasterKey, font_file: &Path, text_file: &Path) ->
         "rgba".to_string(),
         "-".to_string(),
     ]
+}
+
+/// libass 要用的**家族名**：**契约给了就用契约的**，没给才退回文件名主干。
+///
+/// # 优先级为什么是这个顺序
+///
+/// 契约里的 `font_family` 是**宿主/工程明确声明**的名字，而文件名主干是**推的**。
+/// 本机实测（见 [`TextRasterKey::font_family`] 那张表）：推出来的名字 libass
+/// **认不出来**，它会静默回退到 ArialMT 之类的字体 —— 而那比 .notdef 方框更难查
+/// （方框至少看得出来）。所以只要契约给了名字就用它，不推。
+///
+/// # 退回文件名主干时的边界（写清楚）
+///
+/// 用户的字体名恰好等于文件名主干时（例如 `msyh`、`simhei`）它常常能命中，
+/// 因为字体家族名与文件名同源；但**不是保证**（本机那份乐米就不行）。
+/// 真要做准就得解析字体文件的 `name` 表，而"本仓不解析字体文件"是一条既有约定
+/// （见文件头）。**不为了一个名字去破它** —— 名字由契约给是正路。
+fn font_family_name(key: &TextRasterKey, font_file: &Path) -> String {
+    if let Some(family) = key.font_family.as_ref() {
+        if !family.trim().is_empty() {
+            return family.clone();
+        }
+    }
+    font_file
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or_else(|| font_file.to_string_lossy().to_string())
+}
+
+/// 这份 SRT 走 `subtitles=` 时，libass 用的**虚拟画布高**。
+///
+/// # 为什么这个数必须写在这里（这是 T2 最容易踩空的一步）
+///
+/// libass 把字幕画在一张**虚拟画布**（ASS 的 `PlayResX/PlayResY`）上，再缩放到真实画布。
+/// `subtitles=` 喂 SRT 时**没地方指定**这两项（`original_size=` 实测**不管用**），
+/// 于是 libass 用它的默认值 —— 实测 **384 × 288**。
+///
+/// 后果：`force_style` 里的 `FontSize` 是**虚拟画布尺度**上的行高，
+/// 真实字号 = `FontSize × (真实高 / 288)`。画布高 200px 时字会缩到 0.69 倍 ——
+/// 而 `lines_failed` 仍是 0、`issues` 仍是空，**只是字比该有的小**。
+/// 那种错会被当成"字号算错了"，而其实是这一层缩放。
+pub const LIBASS_PLAY_RES_Y: f64 = 288.0;
+
+/// 目标字号（em 侧像素）→ 这张位图上该给 libass 的 `FontSize`。
+///
+/// # 两个系数都是量出来的
+///
+/// ```text
+/// FontSize = font_px × 1.25 × (288 / 位图高)
+///            └─ ①    └─────────── ② ───────────┘
+/// ```
+///
+/// **① = 1.25**（em → 行高的口径差）。量法：同一字体、同一串「笑靥如花」、
+/// 同一张画布，找"**墨迹高度相同**"的那一对参数（本机实测，`msyh`）：
+///
+/// | drawtext `fontsize` | 墨迹高 | 与之等高的 libass `FontSize`（画布高 200） |
+/// |---|---|---|
+/// | 40 | 39 px | 72 → 比值 72/40 = **1.8** |
+///
+/// 1.8 里含了②的缩放：`1.8 × (200/288) = 1.25`。
+/// **量了三个画布高交叉验证过**（90 / 200 / 360）：补偿之后墨迹高与 drawtext
+/// 逐档相同（40→39px、60→58px，三个画布高都是）。
+///
+/// **② = 288 / 位图高**：见 [`LIBASS_PLAY_RES_Y`]。
+/// 画布高正好 288 时这一项等于 1，所以**288 高的工程看不出问题** ——
+/// 这也解释了为什么这个坑只在别的画布上现形。
+///
+/// # 这是"对齐常数"，不是共用公式
+///
+/// 与 [`shadow_sigma_px`] 的那个 2 同一性质：libass 换了 PlayRes 默认值或行高口径，
+/// 这里就是第一个该动的地方。两端本来就**不保证逐像素一致**（见文件头），
+/// 所以判据是"字号看起来一致"，不是"墨迹高度逐像素相同"。
+pub fn ass_font_size(font_px: u32, bitmap_height: u32) -> u32 {
+    let play_res_scale = LIBASS_PLAY_RES_Y / f64::from(bitmap_height.max(1));
+    (f64::from(font_px) * 1.25 * play_res_scale).round().max(1.0) as u32
+}
+
+/// drawtext/契约的描边宽度（em 侧像素）→ ASS 的 `Outline`。
+///
+/// 本机实测：drawtext 的 `borderw=k` 与 ASS 的 `Outline=k` 画出来的描边**同宽**
+/// （两者都是"从字形轮廓向外 k 像素"），所以这里**不换算、直接透传**。
+/// 留这个函数是为了把"这里量过、结论是不用换"写下来 ——
+/// 否则下一个人看到"别处都换算、这里没有"会以为是漏了。
+pub fn ass_outline_px(stroke_px: u32) -> u32 {
+    stroke_px
 }
 
 /// 把字体搬一份到**纯 ASCII 名的临时路径**，返回**接下来要喂给 ffmpeg 的那条路径**。
@@ -628,20 +875,120 @@ fn stage_font_file(font_file: &Path) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// 把文本落成一个临时文件，给 `textfile=` 用。///
-/// 名字要唯一：同一台机器上可能同时跑两个进程（两条腿并行），
-/// 用 pid + 计数器 + 内容摘要就撞不上。写的是 UTF-8 **无 BOM**、**不加结尾换行**
-/// —— 加一个换行，drawtext 会多排一行空行，垂直居中就偏了。
-fn write_text_file(text: &str) -> Result<PathBuf, String> {
+/// **字体目录**：libass 找字体（以及**回退**）要看的那一个目录。
+///
+/// # 为什么是「一个目录」而不是一份 fonts.conf
+///
+/// 最早的做法是随行生成一份 `fonts.conf` 走 `FONTCONFIG_FILE`。**实测证明不必**：
+/// ffmpeg 的 `subtitles` / `ass` 滤镜自己有 `fontsdir=` 选项，直接指向目录即可，
+/// 本机实测（`env -u FONTCONFIG_FILE`，即**故意不给**任何 fontconfig 配置）：
+///
+/// ```text
+/// subtitles=t.ass:fontsdir=target/fontdir  →  rc=0，fontselect 两行都在，
+///                                             没有 "Cannot load default config"
+/// ```
+///
+/// 少一个会腐烂的外部文件（那份 XML 要跟平台字体布局一起演进），
+/// 也少一次"配置写错了但看起来像字体坏了"的排查。
+///
+/// # 目录从哪来 —— **由宿主显式给**，本仓不猜
+///
+/// 就是 CLI 的 `--font-dir`（`dhampir.rs` 里已有，帮助原文：「字体目录（可选）：
+/// 按契约里的 `font_family` 名字在里面找」）。**本仓不列一张系统字体目录表** ——
+/// 那正是"猜系统字体"那条纪律要挡的事。
+///
+/// `--font-file` 的父目录在这里**只作兜底**：单给 `--font-file` 时，
+/// 至少让那份字体自己所在的目录参与查找（否则连用户点名的那份字体都可能找不到）。
+/// 但它**不**被当作"字体库" —— 回退能扫到多少取决于那个目录里装了什么。
+///
+/// # 回退依赖机器上装了什么（**跨机出片的已知边界**）
+///
+/// 实测：`乐米波波体` 缺 U+9765 靥 时，libass 回退到 **`MicrosoftYaHeiUI`** ——
+/// 那是**这台机器上的系统字体**。所以：
+///
+/// * 回退**不是确定性的**：换一台机器、换一个平台，缺字那几个字会换一副字形；
+/// * 这与"两端一致"的口径不冲突（本仓早就有"字形像素允许不同"这一条），
+///   但**同一台机器上的两次出片必须一致** —— 这条保得住，因为目录是给定的；
+/// * **回退字体集合该由谁提供**：本仓没有字体栈，那是下游宿主/系统的事。
+///   与 V-Trim 那侧的对齐见 T4 的契约（未对齐前如实记为未定）。
+#[derive(Debug)]
+pub struct FontDir {
+    path: PathBuf,
+}
+
+impl FontDir {
+    /// 交给 ffmpeg `fontsdir=` 的那条路径。
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// 定下这一次栅格化要用的字体目录。
+///
+/// 优先用宿主显式给的 `font_dir`；没给就用 `font_file` 的父目录（兜底，见 [`FontDir`]）。
+/// 两条都拿不到目录时**响亮报错**：`fontsdir=` 指一个不存在的地方，libass 会
+/// **静默用系统默认字体**（实测 → ArialMT），而那正是这一版最想拦掉的失败模式。
+pub fn font_dir(font_dir: Option<&Path>, font_file: &Path) -> Result<FontDir, String> {
+    if let Some(dir) = font_dir {
+        if !dir.is_dir() {
+            return Err(format!(
+                "字体目录不在：{}（--font-dir 指错了吗？）—— libass 找不到它就会                 静默改用系统默认字体（实测是 ArialMT，没有中文字形）",
+                dir.display()
+            ));
+        }
+        return Ok(FontDir {
+            path: dir.to_path_buf(),
+        });
+    }
+    let parent = font_file.parent().filter(|parent| parent.is_dir());
+    match parent {
+        Some(parent) => Ok(FontDir {
+            path: parent.to_path_buf(),
+        }),
+        None => Err(format!(
+            "定不了字体目录：既没给 --font-dir，{} 也没有可用的父目录。\
+             libass 靠这个目录找字体与**回退字体**；不定下来它会静默改用\
+             系统默认字体，而那种错在成片里看起来只是「字体不太对」",
+            font_file.display()
+        )),
+    }
+}
+
+/// 把这一行文本落成一份**单条字幕的 SRT**，给 `subtitles=` 用。
+
+/// 把这一行文本落成一份**单条字幕的 SRT**，给 `subtitles=` 用。
+///
+/// # 为什么不直接写文本文件（`drawtext` 那种做法）
+///
+/// `subtitles=` 期望的是一份**字幕文件**（SRT/ASS/…），不是一个纯文本文件。
+/// libass 会去解析它 —— 所以这里要的是一份语法正确、时间轴任意（只画一帧）的 SRT。
+///
+/// # SRT 的几处必须写对
+///
+/// * 序号 + 时间轴 + 文本，**空行分隔**；
+/// * 时间轴覆盖够长（这里 0 到 10 秒）：我们只取第 1 帧，但时间轴的**起点必须是 0**
+///   —— 起点晚于 0 的话第 0 帧上什么都没有（那会是一张空白位图，而它看起来像"字体没画出来"）；
+/// * 写 UTF-8 **无 BOM**。BOM 会让 libass 把第一个码位当成 U+FEFF 画进画面；
+/// * **行尾用 `\n`**，且文本里**不许有换行**（调用方已经查过，见 [`rasterize_line`]）——
+///   有换行的话 SRT 里就是两条字幕，而这里只该有且只有一行。
+///
+/// # 文本不需要转义（这一条是选 `subtitles=` 的理由之一）
+///
+/// SRT 是**行式**格式：只有 `-->` 那一行与空行有语法意义，文本行是**原样**的。
+/// 于是用户文本里的 `%`、`{}`、`\`、`:` 一个都不需要转义 ——
+/// **与 `drawtext` 的 `expansion` / `ass=` 的覆盖标签那两类坑同时绝缘**
+/// （`%{n}` 在 `ass=` 那条路上会被当指令吞掉，见文件头）。
+fn write_subtitle_file(text: &str) -> Result<PathBuf, String> {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let serial = COUNTER.fetch_add(1, Ordering::Relaxed);
     let digest = dhampir_core::timeline::selfcheck::fnv1a64(text.as_bytes());
     let path = std::env::temp_dir().join(format!(
-        "dhampir-text-{}-{serial}-{digest:016x}.txt",
+        "dhampir-sub-{}-{serial}-{digest:016x}.srt",
         std::process::id()
     ));
-    std::fs::write(&path, text.as_bytes())
-        .map_err(|error| format!("写不了文本临时文件 {}：{error}", path.display()))?;
+    let body = format!("1\n00:00:00,000 --> 00:00:10,000\n{text}\n");
+    std::fs::write(&path, body.as_bytes())
+        .map_err(|error| format!("写不了字幕临时文件 {}：{error}", path.display()))?;
     Ok(path)
 }
 
@@ -686,24 +1033,30 @@ pub fn rasterize_line(key: &TextRasterKey) -> Result<TextBitmap, String> {
         ));
     }
 
-    let text_file = write_text_file(text)?;
+    let subtitle_file = write_subtitle_file(text)?;
     // 字体路径含非 ASCII 时先搬一份到 ASCII 名的临时路径（实测：不搬的话 ffmpeg
-    // 退出码 0 但一个字节都不吐）。`StagedFont` 自己管清理，**也自己给出该用哪条路径**
+    // 段错误且一个字节都不吐）。`StagedFont` 自己管清理，**也自己给出该用哪条路径**
     // —— 调用方没有第二条路径可选，所以"搬了却没换上"这件事写不出来。
+    // libass 路线下它**不再进滤镜串**（字体按名字找），但仍然要它：
+    // 回退到父目录当字体目录是兜底，见 [`font_dir`]。
     let font = ascii_font_path(&key.font_file)?;
-    let result = run_ffmpeg(key, font.path(), &text_file);
-    // 文本临时文件用完就删，成功失败都删：一次出片几百行，留一地文件是在给下次查问题挖坑。
+    // 字体目录：宿主给了 `--font-dir` 就用它，否则退回这份字体的父目录。
+    // 它是 libass 找字体与**回退字体**的唯一入口，见 [`font_dir`]。
+    let dir = font_dir(key.font_dir.as_deref(), font.path())?;
+    let result = run_ffmpeg(key, font.path(), dir.path(), &subtitle_file);
+    // 字幕临时文件用完就删，成功失败都删：一次出片几百行，留一地文件是在给下次查问题挖坑。
     // （字体那份由 `font` 的 Drop 删，连提前 return 都覆盖得到。）
-    let _ = std::fs::remove_file(&text_file);
+    let _ = std::fs::remove_file(&subtitle_file);
     result
 }
 
 fn run_ffmpeg(
     key: &TextRasterKey,
     font_file: &Path,
-    text_file: &Path,
+    font_dir: &Path,
+    subtitle_file: &Path,
 ) -> Result<TextBitmap, String> {
-    let args = drawtext_args(key, font_file, text_file);
+    let args = drawtext_args(key, font_file, font_dir, subtitle_file);
     let output = Command::new("ffmpeg")
         .args(&args)
         .stdout(Stdio::piped())
@@ -713,18 +1066,21 @@ fn run_ffmpeg(
 
     if !output.status.success() {
         return Err(format!(
-            "ffmpeg 画不出这一行（退出码 {:?}）：{} —— 字体 {} 与文本临时文件都在。\
+            "ffmpeg 画不出这一行（退出码 {:?}）：{} —— 字体 {}、字体目录 {} 与字幕临时文件都在。\
              先信 ffmpeg 的原文：它说的常在字体上（能不能解析、有没有这个字形）；\
-             这条路径已经关掉了文本展开，所以 `Stray %` 那一类只可能是这里被人改坏了",
+             这一版走的是 libass（`subtitles=`），用户文本不经过任何展开器，\
+             所以 `Stray %` 那一类只可能是这里被人改坏了",
             output.status.code(),
             String::from_utf8_lossy(&output.stderr).trim(),
-            key.font_file.display()
+            font_file.display(),
+            font_dir.display()
         ));
     }
+    // **产出字节数**这一条是这条路上最要紧的检查，理由见文件头：
+    // ffmpeg 对"画不出来"的各种形态并不总是给非零退出码，而 0 字节或半张图
+    // 到了下游就是"这一行没有字幕"。少了或多了都说明几何前提不成立。
     let expected = key.width as usize * key.height as usize * 4;
     if output.stdout.len() != expected {
-        // 少了或多了都说明几何前提不成立（例如 ffmpeg 把画布改了尺寸）。
-        // 收下它去猜只会让下游拿到一张尺寸不对的图。
         return Err(format!(
             "ffmpeg 本该吐 {expected} 字节（{}x{} RGBA），实际 {}",
             key.width,
@@ -732,7 +1088,67 @@ fn run_ffmpeg(
             output.stdout.len()
         ));
     }
-    TextBitmap::new(key.width, key.height, tint(&output.stdout, key.tint_color()))
+    // **libass 的覆盖度在 RGB 里、alpha 恒为 0** —— 先搬成 drawtext 那种
+    // 「覆盖度预乘」形态，再交给同一个 [`tint`]。搬运与判据见 [`coverage_from_libass`]。
+    let premultiplied = coverage_from_libass(&output.stdout);
+    TextBitmap::new(key.width, key.height, tint(&premultiplied, key.tint_color()))
+}
+
+/// libass 的输出 → `drawtext` 那种**覆盖度预乘**形态，喂给同一个 [`tint`]。
+///
+/// # 这两代栅格化器的输出**不是同一种东西**（T2 埋下的地雷，T3 在这里接着做）
+///
+/// 本机实测（命令与数字见 `plan/glyph-fallback-evidence.md`），同一行文字：
+///
+/// | | `drawtext`（老路） | `subtitles=` / libass（新路） |
+/// |---|---|---|
+/// | alpha 通道 | **就是覆盖度**（白字边缘 `[80,80,80,80]`） | **恒为 0** |
+/// | 覆盖度在哪 | 同时在 rgb 与 alpha 里（预乘） | **只在 rgb 里**（灰度） |
+/// | 透明底 | `(0,0,0,0)` | `(0,0,0,0)` |
+/// | 不透明黑 | `(0,0,0,255)` | **`(0,0,0,0)` —— 与透明底一样！** |
+///
+/// 最后一行是整个 T2 最要命的一条：libass 把**已经合成好的颜色**塞进 RGB，
+/// 而 alpha 一律 0。所以如果按"白填充 + 黑描边"画，**黑描边与透明底逐字节相同**，
+/// 覆盖度**在数学上就恢复不出来**（实测那张 640x90 的位图：56806 个 `(0,0,0,0)`，
+/// 其中既有透明底又有黑描边，事后分不开）。
+///
+/// **所以 [`drawtext_args`] 把填充与描边都画成白色。** 那样每个像素的 RGB
+/// 就是"墨有多满"：白填充 + 白描边实测 1701 个覆盖像素、峰值 **255**；
+/// 只有白填充时 794 个。这是"颜色不属于 ffmpeg 那一步"那条既有契约的**回归** ——
+/// 黑描边那种形态是 drawtext 时代把墨色提前烙进像素的产物，libass 这条路必须还回来。
+///
+/// # 搬运：把 rgb 的平均值当覆盖度
+///
+/// ```text
+/// coverage = round((r + g + b) / 3)         // 白墨：三通道相同
+/// out.rgb  = coverage                        // 预乘：rgb = 覆盖度 × 白墨(1)
+/// out.a    = coverage
+/// ```
+///
+/// **峰值实测就是 255**，不需要归一化系数（这一点在动手前专门量过：
+/// 带黑描边时见过的 235 是"描边与填充在同一个像素里混色"的中间值，
+/// **不是**输出上限 —— 白墨满覆盖就是 255）。
+///
+/// 三通道取平均而不是只取 `r`：libass 理论上可能给次像素抗锯齿（三通道不一致），
+/// 取平均是那种情况下的**近似**。本机实测三通道逐像素相等，所以这条近似没有代价。
+///
+/// # 直接拿 alpha 当覆盖度会怎样（反向用例盯的就是这个）
+///
+/// alpha 恒 0 → [`tint`] 会走到"全透明像素连颜色都不留"那一条，把 rgb 清成 0。
+/// 结果是一张**全透明位图**，而它的尺寸、字节数、ffmpeg 退出码**全都是对的** ——
+/// 那是这条链上最坏的一种失败：**一行看不见的字**。
+pub fn coverage_from_libass(libass_rgba: &[u8]) -> Vec<u8> {
+    let mut out = libass_rgba.to_vec();
+    for px in out.chunks_exact_mut(4) {
+        let mean = (u32::from(px[0]) + u32::from(px[1]) + u32::from(px[2])) as f32 / 3.0;
+        let coverage = mean.round().clamp(0.0, 255.0) as u8;
+        // 预乘形态：三个通道都等于覆盖度（白墨），alpha 也是覆盖度。
+        px[0] = coverage;
+        px[1] = coverage;
+        px[2] = coverage;
+        px[3] = coverage;
+    }
+    out
 }
 
 /// 位图缓存：键 -> 位图，外加「最久未用」的淘汰。
@@ -851,16 +1267,25 @@ mod tests {
             shadow_dy_px: 0,
             shadow_pad: 0,
             font_file: PathBuf::from("C:/fake/font.ttf"),
+            font_family: None,
+            font_dir: None,
             width: 100,
             height,
         }
     }
 
-    /// 老工程那把参数串的**冻结**副本（改动前逐字符抄下来）。
+    /// 参数串的**冻结**副本（这一版 = libass 路线）。
     ///
-    /// 这不是"顺手存一份"：`drawtext_args` 是"既有工程逐字节不变"里最容易被
-    /// 顺手改坏的一处（加阴影时最自然的写法就是往这条串里塞东西），
-    /// 而它一旦多一个字符，**所有老工程的每一帧字幕**都变了样。
+    /// **T2 之前它冻的是 `drawtext=…` 那一串。** 换成 libass 是用户决策的**破坏性变更**：
+    /// 冻结的对象变了，而**所有老工程的每一帧字幕像素确实都变了**（不同的栅格化器，
+    /// 逐字节相等不可能）。理由与代价写在文件头那一节。
+    ///
+    /// 这条判据**仍然逐字符比**，它的价值没变：`drawtext_args` 是"顺手改坏"最容易的一处
+    /// （加一项样式、调一个系数，最自然的写法就是往这条串里塞东西），
+    /// 而它一旦多一个字符，画出来的像素就不一样了。
+    ///
+    /// **它是"这一版就该长这样"的锚，不是"与历史版本相同"的锚** ——
+    /// 改它必须是有意的，并且要在文件头与提交信息里说明代价。
     fn frozen_argv(key: &TextRasterKey) -> Vec<String> {
         vec![
             "-v".to_string(),
@@ -871,9 +1296,13 @@ mod tests {
             "-i".to_string(),
             format!("color=c=black@0.0:s={}x{},format=rgba", key.width, key.height),
             "-vf".to_string(),
+            // **这是 T2 的新冻结串**（libass 路线）。老的那一条是
+            // `drawtext=fontfile=…:textfile=…:expansion=none:…`，它下面那几个
+            // 分项判据（字号、描边、模糊）现在量的是这一条串里的对应项。
             format!(
-                "drawtext=fontfile='C\\:/fake/font.ttf':textfile='C\\:/tmp/dhampir-text-1.txt':\
-                 fontsize=32:fontcolor=white:expansion=none:x=(w-text_w)/2:y=(h-text_h)/2"
+                "subtitles='C\\:/tmp/dhampir-text-1.txt':fontsdir='C\\:/fake':\
+                 force_style='FontName=font,\
+                 FontSize=576,PrimaryColour=&H00FFFFFF,Outline=0'"
             ),
             "-frames:v".to_string(),
             "1".to_string(),
@@ -1060,19 +1489,32 @@ mod tests {
         let dangerous = "危险:文本'带引号,逗号[方括号];分号 100% %{n}";
         let mut k = key("", 20);
         k.text = dangerous.to_string();
-        let args = drawtext_args(&k, &k.font_file, Path::new("C:/tmp/dhampir-text-1.txt"));
+        let args = drawtext_args(&k, &k.font_file, Path::new("C:/fake"), Path::new("C:/tmp/dhampir-text-1.txt"));
         let joined = args.join(" ");
         assert!(!joined.contains("危险"), "文本进了命令行：{joined}");
         assert!(!joined.contains("带引号"), "文本进了命令行：{joined}");
         assert!(
-            joined.contains("textfile="),
-            "文本应当走 textfile 参数：{joined}"
+            joined.contains("subtitles="),
+            "文本应当走一份字幕文件（`subtitles=`），而不是进滤镜串：{joined}"
         );
-        // 文本展开必须关掉：默认档下用户文本里的一个 % 就能让整条命令失败
-        // （`Stray %`），`%{n}` 还会被换成帧号。实测见模块文档。
+        // **`expansion=none` 这一项在新路上不存在，但判据换了个形态留着。**
+        //
+        // 老路靠 `expansion=none` 关掉 drawtext 的文本展开（`%` / `%{n}`）；
+        // 新路走 libass，`subtitles=` 把一份 SRT 交给它解析 —— SRT 是**行式**格式，
+        // 文本行是原样的，**没有那个展开器**。
+        // 所以这里不能再断言 `expansion=none`（那会是一条假判据：写上去也没用），
+        // 改成断言"**这条串里不许出现任何展开器/覆盖标签语法**"：
+        //   * `expansion=` —— 老路的东西，回来了就说明有人把 drawtext 又接上了；
+        //   * `\pos(` / `{\` —— ASS 覆盖标签。**选 `subtitles=` 而不是 `ass=`
+        //     正是为了避开它**：`ass=` 的 Dialogue 文本里 `%{n}` 会被 libass 当指令
+        //     吞掉（实测 312 vs 2180 个覆盖像素），而那与 drawtext 的展开是同一种病。
         assert!(
-            joined.contains("expansion=none"),
-            "文本展开没关掉 —— 用户文本里的 % 会让这一行画不出来：{joined}"
+            !joined.contains("expansion="),
+            "这条串不该再有 drawtext 的展开项（走的是 libass）：{joined}"
+        );
+        assert!(
+            !joined.contains("{\\"),
+            "这条串里不许出现 ASS 覆盖标签（那会吞掉用户文本）：{joined}"
         );
         // 顺序管道的标志与出图几何。
         assert!(joined.contains("rawvideo"));
@@ -1090,22 +1532,33 @@ mod tests {
     }
 
     #[test]
-    fn 描边开关决定有没有_borderw() {
+    fn 描边开关决定有没有_outline项() {
         let plain_key = key("字", 20);
-        let plain = drawtext_args(&plain_key, &plain_key.font_file, Path::new("t.txt")).join(" ");
-        assert!(!plain.contains("borderw"));
+        let plain = drawtext_args(&plain_key, &plain_key.font_file, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
+        // **不描边时必须显式写 `Outline=0`**：ASS 的默认样式**带描边**，
+        // 不写的话"没开描边"的工程会突然多出一圈黑边 —— 那正是那种
+        // "看着像是字体变粗了"而查不出原因的错。
+        assert!(
+            plain.contains("Outline=0"),
+            "不描边要显式写 Outline=0（ASS 默认带描边）：{plain}"
+        );
 
         let mut outlined = key("字", 20);
         outlined.outline = true;
         outlined.font_px = 48;
-        let joined = drawtext_args(&outlined, &outlined.font_file, Path::new("t.txt")).join(" ");
+        let joined = drawtext_args(&outlined, &outlined.font_file, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
         assert!(
-            joined.contains("borderw=3"),
+            joined.contains("Outline=3"),
             "字号 48 的描边是 3 像素：{joined}"
         );
-        // **默认走老路径**：`stroke_px == 0` → 宽度从字号推、颜色写死 black。
-        // 这是"既有工程逐字节不变"的那条分支（`stroke_ratio` 的默认值是 0）。
-        assert!(joined.contains("bordercolor=black"), "实得：{joined}");
+        // **默认走老路径**：`stroke_px == 0` → 宽度从字号推、颜色写死黑。
+        // 这是默认值那条分支（`stroke_ratio` 的默认值是 0）。
+        // **描边也是白墨**：libass 的 alpha 恒 0，只有全白墨时覆盖度才恢复得出来。
+        // 描边的**颜色**由 tint 决定，不写在这里（见 coverage_from_libass）。
+        assert!(
+            joined.contains(&format!("OutlineColour={WHITE_INK}")),
+            "描边必须用白墨（覆盖度才可恢复）：{joined}"
+        );
     }
 
     #[test]
@@ -1117,11 +1570,14 @@ mod tests {
         styled.outline = true;
         styled.stroke_px = 12;
         styled.stroke_color = [0x40, 0x3c, 0x3b, 255];
-        let joined = drawtext_args(&styled, &styled.font_file, Path::new("t.txt")).join(" ");
-        assert!(joined.contains("borderw=12"), "宽度要用契约给的 12，实得：{joined}");
+        let joined = drawtext_args(&styled, &styled.font_file, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
+        assert!(joined.contains("Outline=12"), "宽度要用契约给的 12，实得：{joined}");
+        // **描边色不进参数串**：libass 那条路上填充与描边共用同一张覆盖度 mask，
+        // 描边的颜色由 tint 决定（见 coverage_from_libass 里写的那条口径收窄）。
+        // 这里断言的是"用了白墨"，不是"用了契约色" —— 后者已经**不再**由这一步负责。
         assert!(
-            joined.contains("bordercolor=0x403C3B"),
-            "颜色要用契约给的 #403c3b，实得：{joined}"
+            joined.contains(&format!("OutlineColour={WHITE_INK}")),
+            "描边要用白墨：{joined}"
         );
 
         // `stroke_px == 0` 时退回"从字号推 + 颜色 black"—— 老工程没写这个字段，
@@ -1129,38 +1585,50 @@ mod tests {
         let mut legacy = key("字", 48);
         legacy.outline = true;
         legacy.font_px = 48;
-        let legacy_args = drawtext_args(&legacy, &legacy.font_file, Path::new("t.txt")).join(" ");
-        assert!(legacy_args.contains("borderw=3"), "老行为：字号 48 -> 3 像素，实得：{legacy_args}");
+        let legacy_args = drawtext_args(&legacy, &legacy.font_file, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
+        assert!(legacy_args.contains("Outline=3"), "老行为：字号 48 -> 3 像素，实得：{legacy_args}");
         assert!(
-            legacy_args.contains("bordercolor=black"),
-            "老行为：默认颜色是 black（不是 0x000000），实得：{legacy_args}"
+            legacy_args.contains(&format!("OutlineColour={WHITE_INK}")),
+            "描边一律用白墨，实得：{legacy_args}"
         );
     }
 
     // ---- 文字阴影（B5）----
 
-    /// **反向用例（最重要的一条）**：不画阴影时，参数串逐字符与改动前相同。
+    /// **反向用例（最重要的一条）**：不画阴影时，参数串逐字符等于**这一版的冻结串**。
     ///
     /// 判据不是"看起来差不多"，而是**逐项相等**：加阴影时最自然的写法就是往
-    /// `drawtext` 那条串里塞东西，而多一个字符就意味着**所有老工程**的每一帧字幕
-    /// 都变了样（那条串决定画出来的像素）。
+    /// 那条串里塞东西，而多一个字符画出来的像素就不一样了。
+    ///
+    /// **T2 说明**：冻结的对象从 `drawtext=` 换成了 libass 的 `subtitles=`，
+    /// 因为栅格化器整个换了（用户决策，破坏性变更）。这条判据的**性质没变**：
+    /// 它盯的是"有没有人在默认路径上顺手改动参数串"。
     #[test]
-    fn 不画阴影时参数串逐字符与改动前相同() {
+    fn 不画阴影时参数串逐字符与冻结串相同() {
         // 无描边（老工程的默认：`stroke_ratio` 默认 0 且 `outline` 默认 true 时走另一支，
         // 所以这里两种都验）。
         let plain = key("字", 20);
-        assert_eq!(drawtext_args(&plain, &plain.font_file, Path::new("C:/tmp/dhampir-text-1.txt")), frozen_argv(&plain));
+        assert_eq!(drawtext_args(&plain, &plain.font_file, Path::new("C:/fake"), Path::new("C:/tmp/dhampir-text-1.txt")), frozen_argv(&plain));
 
-        // 有描边：老路径（宽度从字号推、颜色写死 black）。
+        // 有描边：老路径（宽度从字号推、颜色写死黑）。
         let mut outlined = key("字", 20);
         outlined.outline = true;
         let mut expected = frozen_argv(&outlined);
-        let at = expected.iter().position(|arg| arg.starts_with("drawtext=")).expect("有 -vf");
-        expected[at] = format!("{}:borderw={}:bordercolor=black", expected[at], border_px(32));
+        let at = expected.iter().position(|arg| arg.starts_with("subtitles=")).expect("有 -vf");
+        // 描边在 ASS 里就是 `force_style` 里的两项，追加在 `Outline=0` 的位置上。
+        // 这里**照着实现改**（把 `Outline=0` 替换成带宽度与颜色的那两项），
+        // 而不是重新拼一遍 —— 重拼会让这条测试与实现同源，那就验不出东西了。
+        expected[at] = expected[at].replace(
+            "Outline=0",
+            &format!(
+                "Outline={},OutlineColour={WHITE_INK}",
+                border_px(32)
+            ),
+        );
         assert_eq!(
-            drawtext_args(&outlined, &outlined.font_file, Path::new("C:/tmp/dhampir-text-1.txt")),
+            drawtext_args(&outlined, &outlined.font_file, Path::new("C:/fake"), Path::new("C:/tmp/dhampir-text-1.txt")),
             expected,
-            "有描边的老路径也一个字符都不能变"
+            "有描边的默认路径也一个字符都不能变（多一个字符像素就不一样）"
         );
         // 而且它里面**没有** gblur：模糊只属于阴影那条新路。
         assert!(!expected[at].contains("gblur"));
@@ -1177,12 +1645,15 @@ mod tests {
     fn 画阴影时用白字加模糊而不是描边() {
         let text = key("字", 20);
         let shadow = shadow_key(&text, [0, 0, 0, 102], 4, 3, 2);
-        let args = drawtext_args(&shadow, &shadow.font_file, Path::new("C:/tmp/dhampir-text-1.txt"));
+        let args = drawtext_args(&shadow, &shadow.font_file, Path::new("C:/fake"), Path::new("C:/tmp/dhampir-text-1.txt"));
         let joined = args.join(" ");
         assert!(joined.contains("gblur=sigma=2"), "σ 应当是 blur/2 = 2：{joined}");
-        assert!(!joined.contains("borderw"), "阴影不许带描边：{joined}");
         assert!(
-            joined.contains("fontcolor=white"),
+            joined.contains("Outline=0"),
+            "阴影不许带描边（描边是黑的，会被 tint 染成黑边）：{joined}"
+        );
+        assert!(
+            joined.contains("PrimaryColour=&H00FFFFFF"),
             "覆盖度仍由白字给（颜色归 tint）：{joined}"
         );
         // 扩边量：blur 4 -> 8，偏移 max(3,2) = 3 -> pad = 11。
@@ -1203,9 +1674,9 @@ mod tests {
     #[test]
     fn 硬阴影不带_gblur() {
         let shadow = shadow_key(&key("字", 20), [0, 0, 0, 255], 0, 0, 4);
-        let joined = drawtext_args(&shadow, &shadow.font_file, Path::new("t.txt")).join(" ");
+        let joined = drawtext_args(&shadow, &shadow.font_file, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
         assert!(!joined.contains("gblur"), "硬阴影不该有模糊：{joined}");
-        assert!(!joined.contains("borderw"), "阴影不许带描边：{joined}");
+        assert!(joined.contains("Outline=0"), "阴影不许带描边：{joined}");
         assert_eq!(shadow_pad_px(0, 0, 4), 4, "偏移仍要余量");
     }
 
@@ -1448,24 +1919,32 @@ mod tests {
         );
     }
 
-    /// 搬到 ASCII 路径之后，**画出来的那一串里用的必须是临时路径**，而不是键上那条。
+    /// 字体是**按名字**进参数串的（libass 不认路径），而名字必须来自**要被用的那份**。
     ///
-    /// 这条是"搬了却没换上"的守卫：`ascii_font_path` 算得很对、`drawtext_args` 里
-    /// 却仍旧读 `key.font_file` —— 那是最自然的一处写错，而它**静默**：
-    /// 编译过、测试过、`Some` 也拿到了，只有真出片时字又是空的。
+    /// 这条是"搬了却没换上"的守卫，T2 之后换了个形态：`ascii_font_path` 算得很对、
+    /// 调用方却仍旧读 `key.font_file` —— 那是最自然的一处写错，而它**静默**：
+    /// 编译过、断言也过（名字看着都像"某个字体"），只有真出片时用的是另一份字体。
+    ///
+    /// 判据落在**家族名**上：传进去的那条路径决定名字，所以传临时路径就该出现临时名。
     #[test]
-    fn 参数串里用的是搬过去的路径而不是键上那条() {
+    fn 参数串里的字体名来自被传进来的那条路径() {
         let mut k = key("字", 20);
         k.font_file = PathBuf::from("C:/tmp/乐米.ttf");
         let staged = PathBuf::from("C:/tmp/dhampir-font-1-abc.ttf");
-        let joined = drawtext_args(&k, &staged, Path::new("t.txt")).join(" ");
+        let joined = drawtext_args(&k, &staged, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
         assert!(
-            joined.contains("dhampir-font-1-abc.ttf"),
-            "参数串里没有搬过去的那条路径：{joined}"
+            joined.contains("FontName=dhampir-font-1-abc"),
+            "参数串里的字体名应当来自传进来的那条路径：{joined}"
         );
         assert!(
             !joined.contains("乐米"),
-            "参数串里还留着非 ASCII 的那条路径 —— 搬了却没换上：{joined}"
+            "参数串里仍是非 ASCII 那条路径上的名字 —— 搬了却没换上：{joined}"
+        );
+        // **反向**：不搬时名字就该来自键上那条。
+        let direct = drawtext_args(&k, &k.font_file, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
+        assert!(
+            direct.contains("FontName=乐米"),
+            "不搬时名字该来自键上那条路径：{direct}"
         );
     }
 
@@ -1495,21 +1974,17 @@ mod tests {
             "全 ASCII 的路径不许触发复制 —— 老工程的参数串会因此改变"
         );
         assert_eq!(staged.path(), font.as_path(), "不搬时路径必须原样返回");
-        // 于是参数串里就是**键上那一条路径**，与不搬时逐字符相同。
-        let joined = drawtext_args(&k, &k.font_file, Path::new("t.txt")).join(" ");
+        // 于是参数串里用的就是**这份字体**（libass 路线下以**家族名**出现），
+        // 且没有被换成一条临时路径。
+        let joined = drawtext_args(&k, &k.font_file, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
         assert!(
-            joined.contains(&font_file_value(&font)),
-            "参数串里该是键上那条路径：{joined}"
+            joined.contains(&format!("FontName={}", font_family_name(&k, &font))),
+            "参数串里该是这份字体的家族名：{joined}"
         );
         assert!(
             !joined.contains("dhampir-font-"),
             "ASCII 路径不许被换成临时路径：{joined}"
         );
-    }
-
-    /// 参数串里那条 `fontfile='…'` 的**转义形态** —— 拿它去 `contains` 才算真比对过。
-    fn font_file_value(font: &Path) -> String {
-        filter_value(&font.to_string_lossy())
     }
 
     /// **反向用例（真起 ffmpeg）**：非 ASCII 字体路径现在能画出非空位图了。
@@ -1535,16 +2010,224 @@ mod tests {
         k.font_file = font.clone();
         k.width = width;
         k.height = height;
+        // **家族名必须给**：libass 按名字找字体，而名字从文件名推不可靠
+        // （实测推出来会静默回退到 ArialMT，那种回退没有 CJK 字形）。
+        k.font_family = Some(FAMILY_FOR_TEST_FONT.to_string());
+        // 字体目录：这份字体所在的那个目录。
+        k.font_dir = font.parent().map(Path::to_path_buf);
 
-        let bitmap = rasterize_line(&k).expect("非 ASCII 字体路径必须画得出来（T1）");
+        let bitmap = rasterize_line(&k).expect("非 ASCII 字体路径必须画得出来（T1/T2）");
         let inked = ink_count(&bitmap);
         assert!(
             inked > 0,
             "非 ASCII 字体路径画出来是空的 —— 这正是 T1 要修的那个静默失败"
         );
         // 四个字、字号 40：墨迹至少上千像素。给一个宽松但能证伪的下限。
-        assert!(inked > 1000, "墨迹只有 {inked} 像素，像是没画全");
+        // **下限也要挡得住"回退到 ArialMT"**：那种回退画不出 CJK，
+        // 实测只剩 318 个覆盖像素（见模块文档里那张 fontselect 表）。
+        assert!(inked > 1000, "墨迹只有 {inked} 像素，像是没画全（回退到无 CJK 的字体？）");
         assert!(!bitmap.ink_touches_edge(), "字被切了");
+    }
+
+    /// 本机那份非 ASCII 名字体的**家族名**。libass 认的是这个名字，
+    /// 不是文件名（实测：文件名主干 → ArialMT，这个名字 → LemiBoBoTi-Regular）。
+    ///
+    /// 写成常量是因为它是**这台机器上这份字体的事实**，不是一个该去推的东西 ——
+    /// 而"推名字"正是这一版要拦掉的那个静默失败。
+    const FAMILY_FOR_TEST_FONT: &str = "乐米波波体";
+
+    /// **判据（T2 最硬的一条）**：缺字必须由 libass **逐字形回退**补上，
+    /// 而不是画成 `.notdef` 方框。
+    ///
+    /// # 为什么拿 `fontselect` 日志判，而不是拿墨量判
+    ///
+    /// 墨量只能说明"画出了东西"。`fontselect` 日志直接给出**解析到了哪一份字体**，
+    /// 而且**每回退一次就多一行** —— 那正是"回退真的发生了"的可复算证据：
+    ///
+    /// ```text
+    /// fontselect: (乐米波波体, 400, 0) -> LemiBoBoTi-Regular, 0, LemiBoBoTi-Regular
+    /// fontselect: (乐米波波体, 400, 0) -> MicrosoftYaHeiUI, 1, MicrosoftYaHeiUI   ← 靥 回退
+    /// ```
+    ///
+    /// 第二行**必须出现**（`乐米波波体` 没有 U+9765 靥），而且**不许**解析成 ArialMT
+    /// —— 那正是"家族名推错了"的症状（实测：文件名主干会解析成 ArialMT，
+    /// 而 Arial 没有 CJK 字形，字会变成别的模样或方框）。
+    #[test]
+    #[ignore = "需要 PATH 上的 ffmpeg 与本机那份缺字的乐米字体；跑：cargo test -p dhampir-worker --lib text_raster -- --ignored"]
+    fn 真机_缺字走逐字形回退而不是_notdef() {
+        let font = test_font();
+        if !font.to_string_lossy().contains("乐米波波体") {
+            // 这条判据盯的是**那份缺字的字体**。本机没有它就跳过，
+            // 而不是拿另一份字体跑出一个证明不了这件事的绿。
+            eprintln!("本机 test_font() 不是乐米（{}），这条测试跳过", font.display());
+            return;
+        }
+        let font_px = 40u32;
+        let (width, height) = bitmap_size(640, font_px as f32 * 1.2, font_px);
+        let mut k = key("笑靥如花", 20);
+        k.text = "笑靥如花".to_string();
+        k.font_px = font_px;
+        k.font_file = font.clone();
+        k.font_family = Some(FAMILY_FOR_TEST_FONT.to_string());
+        k.font_dir = font.parent().map(Path::to_path_buf);
+        k.width = width;
+        k.height = height;
+
+        // 真跑一次，把 `fontselect` 那几行抓回来（`-v info` 才会打）。
+        let subtitle = write_subtitle_file(&k.text).expect("写得下字幕临时文件");
+        let dir = font_dir(k.font_dir.as_deref(), &font).expect("定得下字体目录");
+        let stdout = probe_fontselect(&k, dir.path(), &subtitle).expect("起得了 ffmpeg");
+        let _ = std::fs::remove_file(&subtitle);
+
+        let lines: Vec<&str> = stdout
+            .lines()
+            .filter(|line| line.contains("fontselect:"))
+            .collect();
+        assert!(
+            !lines.is_empty(),
+            "抓不到 fontselect 行 —— 判据的前提没了：{stdout}"
+        );
+        // **不许**解析成 ArialMT：那是"名字推错了"的症状，而且它没有 CJK 字形。
+        assert!(
+            !stdout.contains("ArialMT"),
+            "家族名被解析成了 ArialMT —— 名字传错了（这会让字静默变成另一副样子）：{stdout}"
+        );
+        // **必须**有第二行：缺的那个字由回退补上。
+        assert!(
+            lines.len() >= 2,
+            "只有 {} 行 fontselect —— 缺字没有触发回退（那就是没回退，字会是 .notdef）：{:?}",
+            lines.len(),
+            lines
+        );
+        // 回退落到哪儿也记下来（换台机器会变，所以只要求"不是第一份"）。
+        assert_ne!(
+            lines[0], lines[1],
+            "两行 fontselect 一模一样 —— 那说明没换字体，不是回退：{:?}",
+            lines
+        );
+    }
+
+    /// 跑一次 ffmpeg，只要它的 `fontselect` 日志（`-v info` 才会打）。
+    ///
+    /// 与 [`run_ffmpeg`] 分开：那个走 `-v error`（出片路径不该被日志拖慢），
+    /// 这个只给判据用，多一行日志无所谓。
+    fn probe_fontselect(
+        key: &TextRasterKey,
+        font_dir: &Path,
+        subtitle_file: &Path,
+    ) -> Result<String, String> {
+        let mut args = drawtext_args(key, &key.font_file, font_dir, subtitle_file);
+        // 把 `-v error` 换成 `-v info`：`fontselect` 是 info 级。
+        if let Some(level) = args.iter_mut().find(|arg| *arg == "error") {
+            *level = "info".to_string();
+        }
+        let output = std::process::Command::new("ffmpeg")
+            .args(&args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .map_err(|error| format!("起不了 ffmpeg：{error}"))?;
+        Ok(String::from_utf8_lossy(&output.stderr).to_string())
+    }
+
+    /// **判据（T2 的核心）**：契约给了家族名就用契约的；没给才退回文件名主干。
+    ///
+    /// 这条盯的是**静默用错字体**：libass 找不到名字时会回退到一个系统字体，
+    /// `lines_failed` 还是 0、`issues` 还是空 —— 只有像素变了。
+    /// 所以"用了哪个名字"必须是一条**可断言的**事实，而不是推出来的。
+    #[test]
+    fn 家族名优先用契约给的_没给才退回文件名() {
+        let mut k = key("字", 20);
+        k.font_file = PathBuf::from("C:/fonts/乐米波波体（免费商用）_爱给网_aigei_com.ttf");
+        // 契约给了名字：用它，**不推**。
+        k.font_family = Some("乐米波波体".to_string());
+        let joined = drawtext_args(&k, &k.font_file, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
+        assert!(
+            joined.contains("FontName=乐米波波体,"),
+            "契约给了家族名就该用它：{joined}"
+        );
+        assert!(
+            !joined.contains("爱给网"),
+            "不许把文件名主干当家族名（那个名字实测会回退到 ArialMT）：{joined}"
+        );
+
+        // 契约没给：退回文件名主干 —— 这是**有把握的降级**，不是"能用的默认"。
+        k.font_family = None;
+        let fallback = drawtext_args(&k, &k.font_file, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
+        assert!(
+            fallback.contains("FontName=乐米波波体（免费商用）_爱给网_aigei_com,"),
+            "没给家族名时退回文件名主干：{fallback}"
+        );
+
+        // 空白名字等于没给（空串会把 FontName 写成空的，libass 只能回退）。
+        k.font_family = Some("   ".to_string());
+        let blank = drawtext_args(&k, &k.font_file, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
+        assert!(
+            blank.contains("FontName=乐米波波体（免费商用）"),
+            "空白家族名要当作没给，而不是写一个空的 FontName：{blank}"
+        );
+    }
+
+    /// **判据**：`fontsdir=` 必须在参数串里 —— 它是回退能不能工作的开关。
+    ///
+    /// 不给它，libass 只认系统字体库；给了它，用户点名那份字体所在的目录
+    /// 才参与查找。**反向**：换个字体目录，这一项必须跟着变（否则就是写死了）。
+    #[test]
+    fn 字体目录进参数串且跟着键走() {
+        let k = key("字", 20);
+        let a = drawtext_args(&k, &k.font_file, Path::new("C:/fontsA"), Path::new("t.txt")).join(" ");
+        assert!(a.contains(r"fontsdir='C\:/fontsA'"), "字体目录要进串：{a}");
+        let b = drawtext_args(&k, &k.font_file, Path::new("C:/fontsB"), Path::new("t.txt")).join(" ");
+        assert!(b.contains(r"fontsdir='C\:/fontsB'"), "换目录要跟着换：{b}");
+        assert_ne!(a, b, "换字体目录必须换参数串（回退落在哪个字体上会变）");
+    }
+
+    /// **判据（T2 里最阴的一条）**：字号要按 libass 的虚拟画布高（288）补偿。
+    ///
+    /// libass 把 SRT 画在默认 **384×288** 的虚拟画布上再缩放。所以 `FontSize`
+    /// 必须乘 `288 / 位图高`，否则**画布高不是 288 时字会整体变小** ——
+    /// 而 `lines_failed` 仍是 0、`issues` 仍是空，只是字小了一圈。
+    ///
+    /// 这条判据盯的就是"补偿没了"：漏掉它，`FontSize` 与位图高就会**脱钩**
+    /// （同一个字号在任何画布上都给同一个值），而那正是 bug 的形状。
+    #[test]
+    fn 字号要按_libass_虚拟画布高补偿() {
+        // **同一个目标字号、不同的位图高**：FontSize 必须跟着变，且与高成反比。
+        let tall = ass_font_size(40, 360);
+        let short = ass_font_size(40, 90);
+        assert_ne!(tall, short, "位图高不同，FontSize 必须不同（否则就是没补偿）");
+        // 90 高时缩放因子是 360 高时的 4 倍。
+        let ratio = f64::from(short) / f64::from(tall);
+        assert!(
+            (ratio - 4.0).abs() < 0.05,
+            "FontSize 应与位图高成反比：360 高 {tall} vs 90 高 {short}，比值 {ratio}"
+        );
+        // **反向**：正好是虚拟画布高（288）时，补偿因子应当是 1 —— 只剩 em→行高的 1.25。
+        assert_eq!(
+            ass_font_size(40, 288),
+            50,
+            "288 高时因子为 1：40 × 1.25 = 50（这条是那个 288 的来源证明）"
+        );
+        // 位图高为 0 不许除出 inf（构造上不该发生，但这条函数是 pub）。
+        assert!(ass_font_size(40, 0) > 0, "零高也要给一个正数，不许 inf");
+    }
+
+    /// **判据**：定不下字体目录时**响亮报错**，不许静默放行。
+    ///
+    /// 放行的后果是 libass 用系统默认字体（实测 → ArialMT，没有 CJK 字形），
+    /// 而那时 `lines_failed` 仍是 0 —— 又是一次静默。
+    #[test]
+    fn 字体目录定不下来要响亮报错() {
+        // 显式给了一个不存在的目录。
+        let err = font_dir(Some(Path::new("C:/nope/not-a-dir")), Path::new("C:/fake/font.ttf"))
+            .unwrap_err();
+        assert!(err.contains("--font-dir"), "错误里要点出该改哪个参数：{err}");
+        // 没给目录、字体又没有可用的父目录。
+        let err = font_dir(None, Path::new("font.ttf")).unwrap_err();
+        assert!(err.contains("字体目录"), "要有一条人话：{err}");
+        // **反向**：给一个真目录就该过。
+        let ok = font_dir(Some(Path::new("C:/Windows/Fonts")), Path::new("x.ttf"));
+        assert!(ok.is_ok(), "存在的目录不该被拦");
     }
 
     /// 搬字体的临时文件用完必须删掉（成功那条路）。
@@ -1725,6 +2408,8 @@ mod tests {
             shadow_dy_px: 0,
             shadow_pad: 0,
             font_file: font.clone(),
+            font_family: None,
+            font_dir: None,
             width,
             height,
         };
@@ -1745,10 +2430,23 @@ mod tests {
                 .any(|px| px[0] == 255 && px[1] == 240 && px[2] == 200 && px[3] == 255),
             "找不到一个纯填充色的像素 —— 染色那一步可能没生效"
         );
-        // 描边：必须有一个实心黑像素，那才是「描边真画出来了」的证据。
+        // 描边：**必须有描边那一圈**。
+        //
+        // T2 之前这条断言的是"有一个实心**黑**像素" —— 那时描边是**黑墨**。
+        // 现在 libass 路线上**填充与描边都是白墨**（见 `coverage_from_libass`：
+        // 只有这样覆盖度才恢复得出来），描边的**颜色**由 tint 染，不在这张位图里。
+        // 所以判据换成结构性的：**描边存在 = 墨迹比不描边时更胖**。
+        // 用同一把键（只翻 `outline`）跑两次，比墨迹像素数 —— 那是"这一圈画出来了"
+        // 唯一说得清的证据，而且它**不依赖墨色**（换哪种描边色都成立）。
+        let mut without = key.clone();
+        without.outline = false;
+        let plain = rasterize_line(&without).expect("不描边那张也要画得出来");
+        let outlined_ink = ink_count(&bitmap);
+        let plain_ink = ink_count(&plain);
         assert!(
-            bitmap.pixels.chunks_exact(4).any(|px| px == [0, 0, 0, 255]),
-            "描边一个实心黑像素都没有"
+            outlined_ink > plain_ink,
+            "开了描边墨迹却不多（{outlined_ink} vs 不描边 {plain_ink}）—— \
+             那一圈没有画出来"
         );
         // 抗锯齿：边缘必须有既不是 0 也不是 255 的 alpha。
         assert!(
@@ -1789,6 +2487,8 @@ mod tests {
             shadow_dy_px: 0,
             shadow_pad: 0,
             font_file: font,
+            font_family: None,
+            font_dir: None,
             width,
             height,
         };
@@ -1834,6 +2534,10 @@ mod tests {
             shadow_dy_px: 0,
             shadow_pad: 0,
             font_file: font.clone(),
+            // 用文件名主干（这条测试盯的是**文本展开**，不是字体选得对不对；
+            // 而且 `%` 与 `{}` 的形状在任何字体下都一样）。
+            font_family: None,
+            font_dir: font.parent().map(Path::to_path_buf),
             width,
             height,
         };
