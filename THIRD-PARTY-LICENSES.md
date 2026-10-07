@@ -203,4 +203,4 @@ node scripts/licenses.mjs --bundle <目录>  # 抽取每个依赖自带的 LICEN
 | `zlib-rs` | 0.6.8 | `Zlib` |
 | `zmij` | 1.0.23 | `MIT` |
 
-<!-- 生成时 HEAD：7907c22 -->
+<!-- 生成时 HEAD：a03327c -->

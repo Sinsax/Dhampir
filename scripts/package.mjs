@@ -21,7 +21,7 @@
 //
 // # 两个"版本"是两回事（2026-10-03 拆开）
 //
-//     version         产品版本（0.1.0）  ← 根 Cargo.toml [workspace.package]
+//     version         产品版本（如 0.2.0）← 根 Cargo.toml [workspace.package]
 //     project_schema  工程文件契约（1）   ← dhampir-timeline/src/project.rs
 //     host_api        wasm 导出面契约（6）← dhampir-timeline/src/host_api.rs
 //
@@ -186,7 +186,7 @@ if (has('--bundle-licenses')) run('node', ['scripts/licenses.mjs', '--bundle', o
 
 writeFileSync(join(out, 'VERSION'), [
   // `version` 与 `project_schema` **必须都在、且是两回事**：
-  //   version        产品版本（0.1.0）—— 人读、"这一版是哪一版"、Release 资产名
+  //   version        产品版本（如 0.2.0）—— 人读、"这一版是哪一版"、Release 资产名
   //   project_schema 工程文件契约（1）—— 底座拿它拒错版工程
   // 合成一条会让"兼容变更"（schema 不动、产品动了）表达不出来。
   'version=' + release,
