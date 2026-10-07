@@ -127,18 +127,26 @@ const USAGE: &str = "\
   --width <像素>        输出宽度（默认取工程文件里的 render_hints.width）
   --height <像素>       输出高度（默认取工程文件里的 render_hints.height）
   --font-file <文件>    frame / render 画字幕用的字体文件（ttf/ttc/otf）。
-                        工程里有字幕轨时**必须给**：本仓不内嵌字体、也不猜系统字体，
-                        画不出来就判失败（问题码 subtitle_font_missing），
-                        而不是静默出一份没有字幕的片子
+                        字体来源之一（兜底那份）。本仓不内嵌字体、
+                        也不猜系统字体，画不出来就判失败
+                        （问题码 subtitle_font_missing），而不是静默出一份
+                        没有字幕的片子
+  --font-dir <目录>     字体来源之一（**优先**那份）：按工程里的 font_family
+                        族名在这个目录里找字体。libass 按名字找字体，
+                        而「名字」只能由契约给 —— 从文件名推出来的名字
+                        它认不出来，会静默换成系统默认字体
   -h, --help            显示本帮助
 
   字幕有**两种口径**，可以只要一种，也可以都要 —— 它们是两条独立的路：
-    * 烧进画面：--font-file（工程里有字幕轨时少给就判失败，见上）。
+    * 烧进画面：字体来自**两条来源**，按优先级取：
+        ① --font-dir + 工程里的 `font_family`（按族名找，**优先**）
+        ② --font-file（点名一份，兜底）
+      两条都没给、工程却有字幕轨 -> **判失败**（而且是**出片前**就出声）。
       它要 GPU 栅格化，所以只有 frame / render 走得到；
     * 侧挂文件：--subtitle-out（**只有 render 认**）。它不要字体也不要 GPU，
       搬的是「这一段里说过什么」：条目的时间是**相对这一趟的产物**从 0 起算的毫秒，
       内容只有文本与时间（源里的加粗/斜体/颜色不进侧挂）。
-      没给 --font-file 时画面上的字一个都不会有，侧挂文件照写。
+      没给字体时画面上的字一个都不会有，侧挂文件照写。
 
   subtitle 子命令不需要 GPU，也不需要 ffmpeg —— 它只出结构，不画图。
 
@@ -1507,12 +1515,19 @@ fn cmd_render(args: &Args) -> Result<ExitCode, CommandError> {
         Err(code) => return Ok(code),
     };
     let subtitles = load_subtitles(&doc, &sources)?;
-    if !subtitles.is_empty() && font_file.is_none() {
+    // **字体来源有两条**：`--font-file` 点名一份，或者 `--font-dir` + 契约里的
+    // `font_family` 按名字找。**两条都没给**才是画不出来。
+    //
+    // 这条判断曾经只看 `--font-file`，于是"只给 `--font-dir`"那种（契约本来就
+    // 支持的）用法会被误报成缺字体 —— 而 `pick_font` 明明能从目录里解析出来。
+    if !subtitles.is_empty() && font_file.is_none() && font_dir.is_none() {
         // 提前出声：这个组合的结果是**整趟出片判失败**（每一帧都记 subtitle_font_missing），
         // 而等待一趟分钟级的出片之后再看到失败，是最没有用的失败方式。
         eprintln!(
-            "工程里有 {} 份字幕素材，却没给 --font-file —— 这一趟会判失败。\
-             本仓不内嵌字体、也不猜系统字体。",
+            "工程里有 {} 份字幕素材，却没给 --font-file 也没给 --font-dir —— \
+             这一趟会判失败。本仓不内嵌字体、也不猜系统字体：\
+             用 --font-file 点名一份，或在工程里写 `font_family` 并用 --font-dir \
+             指向装字体的目录。",
             subtitles.len()
         );
     }
@@ -1926,6 +1941,45 @@ fn load_subtitles(doc: &ProjectDoc, sources: &SourceTable) -> Result<SubtitleTab
 /// 给了但指不到文件就报**用法错**（退出码 2）：把路径打错字的人应该马上看到这句话，
 /// 而不是等着看「每一行字幕都画不出来」的清单 —— 那是同一个错，但难查得多。
 fn resolve_font(args: &Args) -> Result<Option<&Path>, ExitCode> {
+    // **字体目录先查**：它给了而目录不在，是一条**响亮**的错误。
+    //
+    // 为什么不静默放过：libass 找不到 `fontsdir=` 指的地方时会**静默改用
+    // 系统默认字体**（本机实测解析成 `ArialMT`，没有中文字形），
+    // 而那时 `lines_failed` 仍是 0、`issues` 仍是空 —— 只是一幅"字体不太对"的
+    // 成片。那比 `.notdef` 方框更难查（方框至少看得出来）。
+    if let Some(text) = args.font_dir.as_deref() {
+        let dir = Path::new(text);
+        if !dir.is_dir() {
+            eprintln!("--font-dir 指不到一个目录：{text}");
+            eprintln!(
+                "  它必须是一个**装字体文件**的目录。找不到的话 libass 会静默改用                 系统默认字体，而成片里看不出来 —— 所以这里直接拦下。"
+            );
+            return Err(ExitCode::from(2));
+        }
+    }
+    // `--font-dir` 给了、工程里也有 `font_family`，但**一个字体文件都没找到**：
+    // 同样是"按名字找、找不到"那条静默路。这一步只能查目录**空不空** ——
+    // 具体哪个族名缺，要等求值层把样式拿上来（见 `pick_font` 的说明）。
+    if let (Some(text), None) = (args.font_dir.as_deref(), args.font_file.as_deref()) {
+        let dir = Path::new(text);
+        let has_any_font = std::fs::read_dir(dir)
+            .map(|entries| {
+                entries.flatten().any(|entry| {
+                    let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                    [".ttf", ".ttc", ".otf", ".otc"]
+                        .iter()
+                        .any(|ext| name.ends_with(ext))
+                })
+            })
+            .unwrap_or(false);
+        if !has_any_font {
+            eprintln!("--font-dir 里一个字体文件都没有：{text}");
+            eprintln!(
+                "  没有 `--font-file` 兜底，又在这个目录里找不到字体 ——                  那这条字幕会由 libass 静默换成系统默认字体。先放一份字体进去，                 或者用 `--font-file` 点名一份。"
+            );
+            return Err(ExitCode::from(2));
+        }
+    }
     let Some(text) = args.font_file.as_deref() else {
         return Ok(None);
     };
@@ -2550,6 +2604,131 @@ mod tests {
 
     fn argv(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| item.to_string()).collect()
+    }
+
+    /// **判据（T4）**：`--font-dir` **指不到目录**时要响亮报错（退出码 2）。
+    ///
+    /// # 为什么这个用例必须让"另一条路走不通"（这条判据差点是假的）
+    ///
+    /// `resolve_font` 里有**两条**能返回 `Err` 的路：目录不**存在**、和目录里
+    /// 一个字体文件都没有。我第一版只断言"返回了 Err"——于是把"存在性检查"
+    /// 整条删掉，它也照样红（因为不存在目录反正也读不出字体文件，第二条路接住了）。
+    /// **那条判据测的是"有错"，不是"这个错"** —— 删掉真代码它不红。
+    ///
+    /// 所以这里给 `--font-file` 一个**真实存在的**兜底：那样第二条路
+    /// （"没兜底才拦"）就**不会**触发，能触发 `Err` 的只剩"目录不存在"这一条。
+    /// 这样删掉存在性检查，这条判据**必然**变红。
+    #[test]
+    fn 字体目录不在要响亮报错() {
+        let Some(fallback) = test_font_path() else {
+            eprintln!("本机找不到一份测试字体，这条跳过");
+            return;
+        };
+        let mut args = parse(&argv(&["frame", "--project", "p.json", "--out", "o"])).unwrap();
+        // **关键是这一行**：有兜底 ⇒ 第二条 Err 路不会触发 ⇒ 只剩存在性检查。
+        args.font_file = Some(fallback.to_string_lossy().to_string());
+        args.font_dir = Some("C:/definitely/not/here".to_string());
+        let code = resolve_font(&args).expect_err("不存在的目录必须拦下，哪怕有 --font-file 兜底");
+        assert_eq!(code, ExitCode::from(2), "这是用法错，退出码该是 2");
+
+        // **反向**：真目录必须放行（否则这条判据会把正常用法也拦掉）。
+        args.font_dir = Some("C:/Windows/Fonts".to_string());
+        assert!(
+            resolve_font(&args).is_ok(),
+            "存在的目录不该被拦 —— 那样这条判据就成了恒红的假严"
+        );
+    }
+
+    /// **判据（T4）**：`--font-dir` **存在但里面一个字体文件都没有**、
+    /// 又没给 `--font-file` 时响亮报错；给了 `--font-file` 兜底就该放行。
+    ///
+    /// 与上一条互补：上一条把兜底**给上**以隔离出"存在性检查"，
+    /// 这一条把兜底**拿掉**以隔离出"空目录检查"。两条合起来，
+    /// 删掉任意一半检查都会有判据变红。
+    #[test]
+    fn 字体目录空且没兜底要响亮报错() {
+        // **不自己造目录**：这个沙箱里"工作区内的可执行文件写不了临时目录"
+        // （`拒绝访问 os error 5`），自己造目录会让这条测试**静默跳过** ——
+        // 而跳过就等于没有判据（实测：跳过时把检查整条删掉，测试照样绿）。
+        //
+        // 改成找一个**已经存在、且确实没有字体文件**的目录：
+        // 用 crate 自己的源码目录（`crates/dhampir-worker/src`，只有 .rs 文件）。
+        // **不能用 `target/`**：`CARGO_MANIFEST_DIR` 是 `crates/dhampir-worker`，
+        // 那个 `target/` 子目录并不存在 —— 这条测试会因此静默跳过
+        // （踩过一次：跳过时把检查删掉它照样绿）。
+        let empty = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        if !empty.is_dir() {
+            eprintln!("{} 不在，这条跳过", empty.display());
+            return;
+        }
+        // 前提自检：这个目录里**真的**没有字体文件，否则这条判据什么也没测。
+        let has_font = std::fs::read_dir(&empty)
+            .map(|entries| {
+                entries.flatten().any(|entry| {
+                    let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                    [".ttf", ".ttc", ".otf", ".otc"]
+                        .iter()
+                        .any(|ext| name.ends_with(ext))
+                })
+            })
+            .unwrap_or(false);
+        assert!(
+            !has_font,
+            "{} 里有字体文件，这条判据的前提不成立",
+            empty.display()
+        );
+
+        let text = empty.to_string_lossy().to_string();
+        let mut args = parse(&argv(&["frame", "--project", "p.json", "--out", "o"])).unwrap();
+        args.font_dir = Some(text.clone());
+        let code = resolve_font(&args).expect_err("空目录 + 没兜底必须拦下");
+        assert_eq!(code, ExitCode::from(2), "这是用法错，退出码该是 2");
+
+        // **反向**：给了 `--font-file` 兜底，空目录就不该再拦。
+        let Some(font) = test_font_path() else {
+            eprintln!("本机找不到一份测试字体，这条的后半段跳过");
+            return;
+        };
+        args.font_file = Some(font.to_string_lossy().to_string());
+        assert!(
+            resolve_font(&args).is_ok(),
+            "有 --font-file 兜底时空目录不该拦 —— 否则这条判据把正常用法也拦了"
+        );
+    }
+
+    /// **判据（T4）**：字体**来源有两条** —— 只给 `--font-dir`（不给 `--font-file`）
+    /// 时必须有字体返回，而不是 `None`。
+    ///
+    /// 这条盯的是一个真出现过的缺口：判断曾只看 `--font-file`，
+    /// 于是"只给目录"那种（契约本就支持的）用法被判成缺字体。
+    #[test]
+    fn 只给字体目录也算给了字体() {
+        let mut args = parse(&argv(&["frame", "--project", "p.json", "--out", "o"])).unwrap();
+        args.font_file = None;
+        args.font_dir = Some("C:/Windows/Fonts".to_string());
+        // `resolve_font` 回的是 `--font-file` 那一份（`Option<&Path>`）；
+        // "只给目录"时它回 `None` **是**对的 —— 目录那份由求值层按族名解析。
+        // 所以这里判的是**它不报错**（不把这条路误判成缺字体）。
+        assert!(
+            resolve_font(&args).is_ok(),
+            "只给 --font-dir 是一条合法用法，不该在这里被拦"
+        );
+        // **反向**：两条都没给才是"没给字体"，但那时也不该在**这里**报错
+        // （提前出声那一段在出片路径上，见 `run_frame`）。
+        args.font_dir = None;
+        assert!(resolve_font(&args).is_ok(), "两条都没给时这里是 Ok(None)");
+        assert!(resolve_font(&args).unwrap().is_none());
+    }
+
+    /// 本机一份够用的测试字体（ASCII 路径优先，免掉 T1 那条非 ASCII 的坑）。
+    fn test_font_path() -> Option<PathBuf> {
+        for candidate in ["C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/simhei.ttf"] {
+            let path = PathBuf::from(candidate);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+        None
     }
 
     #[test]

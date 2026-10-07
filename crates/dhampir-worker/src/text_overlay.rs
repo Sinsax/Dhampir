@@ -359,6 +359,39 @@ impl OverlayPainter {
     }
 }
 
+/// **字体为什么没有** —— 一句话说清，供 `subtitle_font_missing` 那条消息用。
+///
+/// # 为什么值得单独造一个解释函数（T4）
+///
+/// 这条消息原来只有一句「宿主没有给字体（--font-file）」。但**"没给"与
+/// "给了目录、里面没有点名的那份字体"是两件事**，而且后者的后果**更隐蔽**：
+///
+/// * libass 按**家族名**找字体。目录里没有那个名字时，`resolve_family` 找不到
+///   文件 → 走到 `font_file` 兜底（`None`）→ 画不出来。
+/// * 但如果那一层兜底被改成"随便给一份"，libass 就会**静默解析成系统默认字体**
+///   （本机实测 `ArialMT`，没有中文字形）—— 那时 `lines_failed` 还是 0，
+///   成片里只是"字体不太对"。
+///
+/// 所以这条消息要**点出真正的原因**，否则用户会去查 `--font-file`（他没写错的那个）。
+fn font_missing_reason(
+    font_file: &Option<PathBuf>,
+    font_dir: &Option<PathBuf>,
+    style: &dhampir_core::overlay::TextStyle,
+) -> String {
+    match (font_dir, style.family.as_deref(), font_file) {
+        (None, _, _) => "宿主没有给字体（--font-file 没给，--font-dir 也没给）。本仓不内嵌字体、也不猜系统字体"
+            .to_string(),
+        (Some(dir), Some(family), _) => format!(
+            "工程里点名了 `font_family: {family}`，但 --font-dir {} 里找不到这份字体。按名字找不着就画不出来（**不会**静默换一个相似字体 —— 换了之后「字长得不对」看起来像「字号配错了」）",
+            dir.display()
+        ),
+        (Some(dir), None, _) => format!(
+            "给了 --font-dir {}，但工程里没写 `font_family`，也没有 --font-file 兜底 —— 没名字可找",
+            dir.display()
+        ),
+    }
+}
+
 /// 这一套样式该用哪个字体文件。
 ///
 /// 顺序：**字体目录里按 `font_family` 找** → 字重 >= 600 时的粗体文件 →
@@ -497,7 +530,10 @@ fn paint_parts(
         log.record(
             "subtitle_font_missing",
             &path,
-            format!("这一帧要画带 `.hl` 的「{whole}」，而宿主没有给字体（--font-file）"),
+            format!(
+                "这一帧要画带 `.hl` 的「{whole}」，却画不出来：{}。不给字体就不出一份「看起来成功、其实没有字幕」的片子",
+                font_missing_reason(&font_file, &font_dir, style)
+            ),
         );
         return Painted::Failed;
     };
@@ -712,9 +748,9 @@ fn paint_one(
             "subtitle_font_missing",
             &path,
             format!(
-                "这一帧要画「{text}」，而宿主没有给字体（--font-file）。\
-                 本仓不内嵌字体、也不猜系统字体，所以这里画不出来 —— \
-                 不给字体就不出一份「看起来成功、其实没有字幕」的片子"
+                "这一帧要画「{text}」，却画不出来：{}。\
+                 不给字体就不出一份「看起来成功、其实没有字幕」的片子",
+                font_missing_reason(&font_file, &font_dir, style)
             ),
         );
         return Painted::Failed;
@@ -988,6 +1024,60 @@ fn clip_message(
         target.1,
         reasons.join("；")
     ))
+}
+
+#[cfg(test)]
+mod font_reason_tests {
+    use super::*;
+    use dhampir_core::overlay::TextStyle;
+
+    fn style_with(family: Option<&str>) -> TextStyle {
+        let mut style = TextStyle::default();
+        style.family = family.map(str::to_string);
+        style
+    }
+
+    /// **判据（T4）**：`subtitle_font_missing` 那条消息要**点出真正的原因**。
+    ///
+    /// # 为什么这条值得有判据
+    ///
+    /// 这条消息原来只有一句「宿主没有给字体（--font-file）」。但
+    /// **「没给」与「给了目录、里面没有点名的那份字体」是两件事**，
+    /// 而且后者的后果更隐蔽。消息指错方向，用户会去查他**没写错**的那个参数。
+    #[test]
+    fn 缺字体的三种原因各有各的说法() {
+        let dir = PathBuf::from("C:/fonts");
+        let file = Some(PathBuf::from("C:/fonts/a.ttf"));
+
+        // ① 两条都没给：说的是"没给"。
+        let none = font_missing_reason(&None, &None, &style_with(Some("乐米")));
+        assert!(none.contains("--font-file"), "要点出可以给哪个参数：{none}");
+        assert!(none.contains("--font-dir"), "另一条来源也要提：{none}");
+
+        // ② 给了目录、工程也点名了，但找不到：说的是"点名了哪个名字、在哪个目录"。
+        let named = font_missing_reason(&None, &Some(dir.clone()), &style_with(Some("乐米波波体")));
+        assert!(
+            named.contains("乐米波波体"),
+            "要点出**是哪个名字**找不到：{named}"
+        );
+        assert!(named.contains("C:/fonts"), "要点出**是哪个目录**：{named}");
+        assert!(
+            !named.contains("没有给字体（--font-file 没给"),
+            "这不是「没给」那种，别把用户往错的方向指：{named}"
+        );
+
+        // ③ 给了目录、工程没写名字：说的是"没名字可找"。
+        let unnamed = font_missing_reason(&None, &Some(dir.clone()), &style_with(None));
+        assert!(unnamed.contains("font_family"), "要点出缺的是名字：{unnamed}");
+
+        // **反向**：三种说法的确互不相同 —— 否则"各有各的说法"就是空话。
+        assert_ne!(none, named);
+        assert_ne!(named, unnamed);
+        assert_ne!(none, unnamed);
+
+        // `--font-file` 给了不影响①②③（那两路本来就不看它）。
+        let _ = file;
+    }
 }
 
 #[cfg(test)]
