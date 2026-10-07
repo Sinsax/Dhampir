@@ -268,9 +268,15 @@ platform=win32-x64
 > 而手写进文档的数字**必然漂** —— 这份文档第一版就写错过一次（记的是上一轮构建的 sha，
 > 下游拿去校验会"校验失败"，然后先怀疑自己下错了）。
 >
-> **校验用这两处**（都是产物自带的、不会漂）：
-> - 与 zip 同目录的 `dhampir-0.2.0-win32-x64.zip.sha256.txt`
-> - 打包脚本 stdout 末尾打印的 `sha256: <hex>`
+> **校验用产物自带的三处**（都不会漂，且互相一致 —— 打包时会一起写出来）：
+>
+> | 文件 | 内容 |
+> |---|---|
+> | `dhampir-0.2.0-win32-x64.zip.manifest.json` | **机器可读**：version / schema / host_api / git / built_at / zip_sha256 |
+> | `dhampir-0.2.0-win32-x64.zip.sha256.txt` | 与 zip 同目录的侧车，惯例同 V-Trim |
+> | 产物内 `VERSION` | 同一批数（`git` / `built_at`） |
+>
+> 建议直接在钉固流程里读 `*.manifest.json`，**别再抄文档**。
 >
 > ⚠️ **「无字幕帧整轮未变」是记录下来的读数，不是被钉住的断言。**
 > 我全仓 grep 过：那个 hash `91ac70187a5d3fdd7…` 在 `.rs` / `.mjs` 里**一处都没有**，
