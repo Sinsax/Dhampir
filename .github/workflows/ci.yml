@@ -12,7 +12,7 @@
 #     "守卫永远绿"是这套东西最危险的失效模式，而它通常就是这样开始的。
 #  2. **每个守卫先跑 `--self-test` 再跑正式扫描**。自检证明守卫自己没坏；
 #     正式扫描证明仓库没坏。两件事分开报，才知道是哪一边出了问题。
-#  3. **只跑不依赖本机资产的那 3 个守卫**。另外 16 个要 ffmpeg、GPU、真实浏览器或
+#  3. **只跑不依赖本机资产的那 3 个守卫**。其余守卫要 ffmpeg、GPU、真实浏览器或
 #     records/ 里的取证存档（名单以 `node scripts/run-guards.mjs --list` 为准）—— 放在这里跑只会变成
 #     "装了才绿、没装就红"，那是把环境问题伪装成回归。它们仍在开发机上跑，
 #     判据一条不少，只是不在这台 runner 上。
@@ -119,13 +119,13 @@ jobs:
           if-no-files-found: error
 
   guard:
-    name: guard（守卫脚本 3 / 19）
+    name: guard（守卫脚本 4 / 26）
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # 19 个守卫里只有这 3 个能在这台 runner 上跑：另外 16 个要 ffmpeg、真 GPU、
-      # 真实浏览器或 records/ 里的取证存档。**这不是"少验一点"** —— 那 16 条在
+      # 26 个守卫里只有这 4 个能在这台 runner 上跑：其余的要 ffmpeg、真 GPU、
+      # 真实浏览器或 records/ 里的取证存档。**这不是"少验一点"** —— 那些在
       # 开发机上跑，判据一条不少；放进 CI 只会让"环境没装好"长得像"代码回归"。
       # 名单以 `node scripts/run-guards.mjs --list` 为准，不从文档抄（抄一定会漂）。
 
@@ -148,3 +148,16 @@ jobs:
           set -euo pipefail
           node scripts/check-text-hygiene.mjs --self-test
           node scripts/check-text-hygiene.mjs
+
+      - name: 第三方许可清单与 crate 里的 LICENSE
+        # **2026-10-08 才加进来** —— 此前它不在 CI 里，于是从发布 tag 起就是红的没人知道：
+        # 清单里嵌了"生成时 HEAD"，而提交本身会改 HEAD ⇒ 在已提交的树上**永远不可能相等**。
+        # 实测 `v0.1.0` 那个 tag 上：文件记 7907c22、tag 是 a953fb4。
+        # 现在判据只比清单本体（溯源注释不入比较），并补了 6 条反向自检。
+        #
+        # 它只需要 `cargo metadata`（不要 ffmpeg / GPU / 浏览器），所以能在这台 runner 上跑。
+        # 这是 Apache-2.0 §4 的分发件，发布前必须一致 —— 不该靠人记得跑。
+        run: |
+          set -euo pipefail
+          node scripts/licenses.mjs --self-test
+          node scripts/licenses.mjs --check
