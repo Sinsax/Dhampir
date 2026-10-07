@@ -60,7 +60,14 @@
 //!    * libass（新路）：**覆盖度写在 RGB，alpha 恒为 0** ——
 //!      实测 `alpha>20` 的像素数 = 0 而 `rgb>20` 是 8616。
 //!      **直接当覆盖度用会让整行字消失**（`tint` 拿 `alpha=0` 什么都染不出来）。
-//!      这条地雷由 [`coverage_from_libass`] 搬平，见那一节的判据与数字。
+//!      这条地雷由 [`coverage_from_libass`] 搬平，见那一节的判据与数字；
+//!      反向用例见 `真机_直接把_libass_的_alpha_当覆盖度会被抓住`。
+//!
+//!    **新老两代的抗锯齿边缘不一样宽**（实测四个字全部同向）：
+//!    老 `drawtext` 的斜坡 0.63~1.43 px，新 libass 是 1.63~3.17 px。
+//!    两边都还是"窄抗锯齿"，但**新版字幕的边缘会比老板略柔** ——
+//!    这是两条渲染器的真实差异，与"字幕像素会变"是同一件事的两面。
+//!    数字与判据见 [`ramp_width`]。
 //! 2. **颜色不属于 ffmpeg 那一步**。样式色与不透明度由 [`tint`] 在本文件里染上去。
 //!    这么分的好处是样式色的 alpha 精确：若让栅格化器自己带半透明色，
 //!    它的输出里 rgb 与 alpha 各乘了不同的系数，反解算会把颜色推亮。
@@ -1151,6 +1158,337 @@ pub fn coverage_from_libass(libass_rgba: &[u8]) -> Vec<u8> {
     out
 }
 
+/// 一条**覆盖度剖面**：某个字形在某个位置上"墨有多满"。
+///
+/// # 为什么要有这个类型（T3 的立足点）
+///
+/// 新老两条栅格化器把覆盖度放在**不同的地方**：
+///
+/// * 老路 `drawtext`：**预乘的 alpha**（不透明白字边缘是 `[80,80,80,80]`）；
+/// * 新路 libass：**RGB 的灰度**，alpha 恒为 0。
+///
+/// 要"比一比两条路的覆盖度"，就必须先把两边都抽成**同一个东西**，
+/// 否则比的是苹果与橘子 —— 而且那种比法会得出"差得很远"的假结论。
+/// 这个结构就是那个"同一个东西"：一个 `f32` 的覆盖度场。
+///
+/// 顺带把**几何归一化**了：两条路的落点本来就不一样（`drawtext` 用 `x`/`y`，
+/// libass 用对齐+边距+它自己的行盒），所以比之前必须**按墨迹包围盒对齐**。
+/// 不归一化就会量到"平移了 200 像素"，那不是覆盖度差异。
+#[derive(Debug, Clone)]
+pub struct CoverageProfile {
+    pub width: u32,
+    pub height: u32,
+    /// 长度 = `width * height`，取值 0..=255（与覆盖度同口径）。
+    pub values: Vec<f32>,
+    /// 墨迹包围盒 `(min_x, min_y, max_x, max_y)`（闭区间）；全空为 `None`。
+    pub bounds: Option<(u32, u32, u32, u32)>,
+}
+
+impl CoverageProfile {
+    /// 从一张**预乘**位图抽覆盖度（老路 `drawtext` 的形态）。
+    pub fn from_premultiplied(bitmap: &TextBitmap) -> Self {
+        let values: Vec<f32> = bitmap
+            .pixels
+            .chunks_exact(4)
+            .map(|px| f32::from(px[3]))
+            .collect();
+        Self::from_values(bitmap.width, bitmap.height, values)
+    }
+
+    fn from_values(width: u32, height: u32, values: Vec<f32>) -> Self {
+        let mut min_x = u32::MAX;
+        let mut min_y = u32::MAX;
+        let mut max_x = 0u32;
+        let mut max_y = 0u32;
+        let mut any = false;
+        for (index, value) in values.iter().enumerate() {
+            if *value <= 0.0 {
+                continue;
+            }
+            any = true;
+            let x = index as u32 % width;
+            let y = index as u32 / width;
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+        let bounds = any.then_some((min_x, min_y, max_x, max_y));
+        Self { width, height, values, bounds }
+    }
+
+    /// 取一个点（越界给 0）。
+    pub fn at(&self, x: i64, y: i64) -> f32 {
+        if x < 0 || y < 0 || x >= i64::from(self.width) || y >= i64::from(self.height) {
+            return 0.0;
+        }
+        self.values[y as usize * self.width as usize + x as usize]
+    }
+
+    /// 按给定的整数偏移平移（`dx`/`dy` 是"要从源里取的坐标相对量"）。
+    fn shifted(&self, dx: i64, dy: i64) -> CoverageProfile {
+        let mut values = vec![0.0f32; self.values.len()];
+        for y in 0..self.height as i64 {
+            for x in 0..self.width as i64 {
+                values[(y * i64::from(self.width) + x) as usize] = self.at(x + dx, y + dy);
+            }
+        }
+        CoverageProfile::from_values(self.width, self.height, values)
+    }
+
+    /// **把"另一个剖面"对齐到自己身上**：按包围盒左上角平移。
+    ///
+    /// 返回平移后的剖面。这是"两条路的落点不同"那件事的解药 ——
+    /// 不比位置，只比**字形本身**。
+    pub fn aligned_to(&self, other: &CoverageProfile) -> CoverageProfile {
+        let (Some((ox, oy, _, _)), Some((sx, sy, _, _))) = (other.bounds, self.bounds) else {
+            return other.clone();
+        };
+        other.shifted(ox as i64 - sx as i64, oy as i64 - sy as i64)
+    }
+
+    /// **在 ±`radius` 像素内找最好的对齐**，返回（最好偏移，平均绝对差）。
+    ///
+    /// # 为什么必须做这一步（不做会得出"差得远"的假结论）
+    ///
+    /// 两条路的**每字推进宽度**不是逐像素相同的：实测同一串「口」重复 n 次、
+    /// 同字号：
+    ///
+    /// | 字数 | 老路宽 | 新路宽 |
+    /// |---|---|---|
+    /// | 1 | 32 px | 32 px |
+    /// | 2 | 72 px | 71 px |
+    /// | 3 | 112 px | 110 px |
+    /// | 5 | 192 px | 190 px |
+    ///
+    /// 也就是**每个字累计偏 0.4 像素**（5 个字偏 2 像素，1%）。那是两条路
+    /// 在**字距/取整**上的差异，不是渲染错。
+    ///
+    /// 但**逐点比会把这点漂移放大成巨大的逐点差**：一个字内部的边缘横向挪 1 像素，
+    /// 读数就从"128 对 128"变成"0 对 128"，逐点差 **128**。漂移一路累积到第 5 个字
+    /// 时已经错了 2 像素，于是**整串比下来全是"差异极大"** ——
+    /// 实测整串「口日目回田」是 max 247 / 中位 76 / 只有 45.8% 落在容差内，
+    /// 而**同一个字单独比**是 max 143 / 中位 40 / 96.9% 落在 128 内。
+    /// 前者看着像"两条路差得远"，其实只差那 1% 的累计漂移。
+    ///
+    /// **所以判据按"每个字形单独比"来立**（见
+    /// `真机_边缘覆盖度与老路同量级`），而**主判据是斜坡宽度**
+    /// （[`ramp_width`]）—— 它正是逐点相位差**打不到**的那个量。
+    /// 这里的搜索只是把每个字形内部那半个像素的取整差找回来；
+    /// 搜索半径刻意只有 ±[`ALIGN_RADIUS`] 像素 ——
+    /// 大了就变成"随便挪到最像为止"，判据会失去意义。
+    pub fn best_alignment(
+        &self,
+        other: &CoverageProfile,
+        radius: i64,
+    ) -> (i64, i64, f32) {
+        let (Some((ox, oy, _, _)), Some((sx, sy, _, _))) = (other.bounds, self.bounds) else {
+            return (0, 0, f32::MAX);
+        };
+        let base = (ox as i64 - sx as i64, oy as i64 - sy as i64);
+        let mut best = (base.0, base.1, f32::MAX);
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                let candidate = other.shifted(base.0 + dx, base.1 + dy);
+                let total: f32 = self
+                    .values
+                    .iter()
+                    .zip(candidate.values.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .sum();
+                let mean = total / self.values.len().max(1) as f32;
+                if mean < best.2 {
+                    best = (base.0 + dx, base.1 + dy, mean);
+                }
+            }
+        }
+        best
+    }
+
+    /// **边缘像素**的下标集合：覆盖度落在 `(0, 255)` 开区间里。
+    ///
+    /// # 为什么只比边缘（本项目已确立的口径）
+    ///
+    /// 字形内部是**实心**（覆盖度 255，两条路必然相同），外部是**空**（0，也必然相同）。
+    /// **两条路的全部差异都发生在边缘那一圈**——那是抗锯齿、hinting、字形轮廓
+    /// 三件事同时起作用的地方。把整帧平均一下，边缘那几百个像素会被几万个
+    /// "必然相同"的像素稀释掉，于是得出"几乎没差"的假结论。
+    /// 这条口径与本仓 `plan/web-engine-measurements.md` 里"边缘斜坡宽度"那条同源。
+    pub fn edge_pixels(&self) -> Vec<usize> {
+        self.values
+            .iter()
+            .enumerate()
+            .filter(|(_, value)| **value > 0.0 && **value < 255.0)
+            .map(|(index, _)| index)
+            .collect()
+    }
+}
+
+/// 两条覆盖度剖面的**边缘差异**统计（T3 的判据就是拿它算的）。
+#[derive(Debug, Clone, Copy)]
+pub struct EdgeDifference {
+    /// 参与比较的像素数（两条路**边缘并集**的大小）。
+    pub compared: usize,
+    /// 逐点绝对差的最大值。
+    pub max: f32,
+    /// 绝对差的**中位数**。
+    pub median: f32,
+    /// 绝对差的均值。
+    pub mean: f32,
+    /// 绝对差 ≤ [`EDGE_TOLERANCE`] 的像素占比（0..=1）。
+    pub within_tolerance: f32,
+}
+
+/// 逐点比之前，在**几个像素**的范围内找最好对齐。
+///
+/// 1 像素就够：两条路的推进宽度差是 1% 量级（193 vs 191），
+/// 找的是"半个像素的取整方向不同"，不是"画的位置错了"。
+/// **这个半径小得刻意** —— 大了就变成"随便挪到最像为止"，判据会失去意义。
+pub const ALIGN_RADIUS: i64 = 1;
+
+/// 一条边缘**斜坡**的判据：从 0 走到 255 用了几个像素。
+///
+/// # 为什么这条比"逐点差"更该当主判据
+///
+/// 实测两条路对同一个字（「口」、同字号）的同一条边：
+///
+/// ```text
+/// 老路 drawtext:  … 140, 255, 255, 208, 0 …
+/// 新路 libass  :  … 108, 255, 255, 226, 0 …
+/// ```
+///
+/// 两次跨越**都在 2 个像素内从 0 走到 255** —— 斜坡宽度**一致**。
+/// 逐点差之所以大（140 vs 108、208 vs 226），是因为**斜坡的相位差了半个像素**：
+/// 同一个斜坡采在两个略微不同的位置上。那不是"口径没对齐"，
+/// 而是"亚像素取整方向不同"。
+///
+/// 所以主判据判的是**结构**（斜坡有多窄），这与本仓既有的那条口径同源：
+/// `plan/web-engine-measurements.md` 里「圆角层的边缘是**窄**抗锯齿、
+/// 不是硬边也不是模糊」判的也是**宽度**，不是逐点值。
+///
+/// # 实测：新路的斜坡**确实更宽**（这是两条渲染器的真实差异）
+///
+/// 同一字体、同字号，四个字各量一次（`partials / transitions`）：
+///
+/// | 字 | 老路 `drawtext` | 新路 libass |
+/// |---|---|---|
+/// | 口 | 0.63 px | **1.65 px** |
+/// | 日 | 1.43 px | **2.41 px** |
+/// | 目 | 1.21 px | **3.17 px** |
+/// | 田 | 1.10 px | **1.63 px** |
+///
+/// **新路每一条边都更宽**，而且不是偶发 —— 四个字全部同向。
+/// 这是**两条渲染器的真实差异**（不同的轮廓扫描、不同的抗锯齿核），
+/// 不是搬运写错了。写在这里是因为它会**看得见**：
+/// 新版的字幕边缘会比老板**略柔一点**。
+///
+/// 它**不破坏**本仓既有口径：那条口径要求"窄抗锯齿、不是硬边也不是模糊"，
+/// 而 1.6~3.2 px 仍然在"窄"的范围里（模糊会是十几个像素）。
+/// 但它确实是**一次可见的观感变化**，与"字幕像素会变"是同一件事的两面。
+///
+/// 两条路各自都必须给出"窄边"：宽度太大 = 边糊了，0 = 硬边（没有抗锯齿）。
+pub fn ramp_width(profile: &CoverageProfile) -> f32 {
+    let Some((min_x, min_y, max_x, max_y)) = profile.bounds else {
+        return 0.0;
+    };
+    // 沿每一行扫，找**每一条从亮到暗（或反过来）的过渡边**：
+    // 一次过渡 = 相邻像素间跨越了半个动态范围（>127.5）。
+    // 数出这种跨越**发生了几次**，以及**跨越点两侧各有多少个中间值像素**。
+    let mut partials = 0usize; // 中间值像素总数
+    let mut transitions = 0usize; // 跨越次数
+    for y in min_y..=max_y {
+        let mut previous = profile.at(i64::from(min_x.saturating_sub(1)), i64::from(y));
+        for x in min_x..=max_x {
+            let value = profile.at(i64::from(x), i64::from(y));
+            let step = value - previous;
+            if step.abs() > 127.5 {
+                // 一次"跨半步"的跳变：说明这里是**一条边**。
+                transitions += 1;
+            } else if value > 0.0 && value < 255.0 {
+                // 中间值像素：斜坡的组成部分。
+                partials += 1;
+            }
+            previous = value;
+        }
+    }
+    if transitions == 0 {
+        return 0.0;
+    }
+    // 每条边平均摊到几个中间值像素 —— 这就是"斜坡宽度"。
+    // 硬边（无抗锯齿）是 0；理想的一条线宽抗锯齿约 1~2。
+    partials as f32 / transitions as f32
+}
+
+/// 边缘覆盖度容差：**64/255 ≈ 25%**。
+///
+/// # 这个数是怎么来的（不是拍的）
+///
+/// 两条路对同一个字形做抗锯齿，**本质上不可能逐点相同**：它们用的是
+/// 不同的轮廓扫描、不同的 hinting、不同的 gamma 约定。要判的是
+/// "**边缘还在不在原位、深浅是否同量级**"，不是"逐点相等"。
+///
+/// 取 64 的依据是**本仓既有的"边缘是窄抗锯齿"那一条**的同类口径 ——
+/// 那里判「圆角层的边缘是窄抗锯齿、不是硬边也不是模糊」用的是
+/// **斜坡宽度 ≈ 0.22 目标像素**；对应到 0..255 的覆盖度上，
+/// 一条"窄抗锯齿"的斜坡在相邻像素间的落差是**数十**量级。
+/// 64 落在"仍然是一条窄边"的范围里，而 128 就已经是"半张图都不一样"了。
+///
+/// **这条是判据，不是装饰**：真到了"整条边都被抹平"或"边缘整体暗一圈"
+/// 那种坏法，逐点差会顶到 200 以上，这条容差拦得住。
+pub const EDGE_TOLERANCE: f32 = 64.0;
+
+/// 比两条剖面的**边缘**覆盖度，给出统计量。
+///
+/// `reference` 是老路（真值来源），`candidate` 是新路（待判的）。
+/// `candidate` 会先在 **±[`ALIGN_RADIUS`] 像素**内找最好的对齐再比 ——
+/// 见 [`CoverageProfile::best_alignment`] 那一节（不这么做会把亚像素偏移
+/// 放大成假差异）。
+pub fn compare_edges(
+    reference: &CoverageProfile,
+    candidate: &CoverageProfile,
+) -> EdgeDifference {
+    let (dx, dy, _) = reference.best_alignment(candidate, ALIGN_RADIUS);
+    let aligned = candidate.shifted(dx, dy);
+    let mut union: Vec<usize> = reference.edge_pixels();
+    for index in aligned.edge_pixels() {
+        if !union.contains(&index) {
+            union.push(index);
+        }
+    }
+    if union.is_empty() {
+        return EdgeDifference {
+            compared: 0,
+            max: 0.0,
+            median: 0.0,
+            mean: 0.0,
+            within_tolerance: 1.0,
+        };
+    }
+    let mut diffs: Vec<f32> = union
+        .iter()
+        .map(|index| {
+            let x = *index as u32 % reference.width;
+            let y = *index as u32 / reference.width;
+            (reference.at(i64::from(x), i64::from(y))
+                - aligned.at(i64::from(x), i64::from(y)))
+            .abs()
+        })
+        .collect();
+    diffs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let compared = diffs.len();
+    let max = diffs.last().copied().unwrap_or(0.0);
+    let median = diffs[compared / 2];
+    let mean = diffs.iter().sum::<f32>() / compared as f32;
+    let within = diffs.iter().filter(|diff| **diff <= EDGE_TOLERANCE).count() as f32 / compared as f32;
+    EdgeDifference {
+        compared,
+        max,
+        median,
+        mean,
+        within_tolerance: within,
+    }
+}
+
 /// 位图缓存：键 -> 位图，外加「最久未用」的淘汰。
 ///
 /// 手写一个 LRU 而不是引 crate：容量只有 [`CACHE_CAPACITY`] 这么大，
@@ -1558,6 +1896,62 @@ mod tests {
         assert!(
             joined.contains(&format!("OutlineColour={WHITE_INK}")),
             "描边必须用白墨（覆盖度才可恢复）：{joined}"
+        );
+    }
+
+    /// **判据（T3）：把"描边颜色当前产不出来"这条已知边界钉住。**
+    ///
+    /// # 这条为什么必须存在
+    ///
+    /// 契约里有 `stroke_color`，但**这一步用不了它**：libass 路线上填充与描边
+    /// 共用同一张覆盖度掩码，而 libass 输出的是**已合成**的颜色、alpha 恒为 0
+    /// —— 黑描边与透明底**逐字节相同**，覆盖度恢复不出来。
+    /// 所以两处都涂白墨，颜色交回 [`tint`]。
+    ///
+    /// 这是**已知边界**，不是"忘了做"。钉住它有两个作用：
+    ///
+    /// 1. 让"描边颜色不被 `stroke_color` 控制"变成一条**可断言的既知事实**，
+    ///    而不是一个等着被人发现的惊讶；
+    /// 2. 将来真做成了（T4 之后若能拿到分层的 mask），**这条判据会红** ——
+    ///    它会提醒实现者"边界变了，去更新文档与 `tint` 的口径"。
+    ///
+    /// **反过来说**：如果哪天有人把 `stroke_color` 塞回参数串而没解决覆盖度问题，
+    /// 下面这条 `OutlineColour=白` 的断言就会红 —— 拦住了那条路。
+    #[test]
+    fn 描边颜色当前不受_stroke_color_控制_这条边界钉住() {
+        let mut a = key("字", 48);
+        a.outline = true;
+        a.stroke_px = 12;
+        a.stroke_color = [0xff, 0x00, 0x00, 255]; // 亮红
+        let mut b = a.clone();
+        b.stroke_color = [0x00, 0x00, 0xff, 255]; // 亮蓝
+
+        let joined_a =
+            drawtext_args(&a, &a.font_file, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
+        let joined_b =
+            drawtext_args(&b, &b.font_file, Path::new("C:/fake"), Path::new("t.txt")).join(" ");
+
+        // **两条边界的当前事实**：
+        assert_eq!(
+            joined_a, joined_b,
+            "换了 stroke_color 参数串就变了 —— 说明颜色被塞回了这一步。             那会**立刻**造成覆盖度不可恢复（黑描边 = 透明底），             要去的是 tint 那条路，不是这里"
+        );
+        assert!(
+            joined_a.contains(&format!("OutlineColour={WHITE_INK}")),
+            "描边必须是白墨：{joined_a}"
+        );
+        // **颜色确实没丢**：它还在**键**上（`stroke_color` 逐字段不同），
+        // 只是不经过 ffmpeg 这一步。将来做分层掩码时就是从这里取它。
+        assert_ne!(
+            a.stroke_color, b.stroke_color,
+            "契约上的描边色仍然不同 —— 它没被丢弃，只是这一步消费不了它"
+        );
+        // 顺带钉住事实：`tint_color()` 回的是**填充色**（`self.color`），
+        // 不是描边色。别指望它替描边上色。
+        assert_eq!(
+            a.tint_color(),
+            a.color,
+            "`tint_color` 是填充色那条路；描边色的归属是 T4 之后的事"
         );
     }
 
@@ -2035,6 +2429,294 @@ mod tests {
     /// 写成常量是因为它是**这台机器上这份字体的事实**，不是一个该去推的东西 ——
     /// 而"推名字"正是这一版要拦掉的那个静默失败。
     const FAMILY_FOR_TEST_FONT: &str = "乐米波波体";
+
+    /// **判据（T3 的核心）**：新路的**边缘覆盖度**与老路落在同一量级。
+    ///
+    /// # 这条判据在防什么
+    ///
+    /// libass 把覆盖度放在 **RGB**、alpha 恒为 0；老路放在**预乘的 alpha**。
+    /// 搬运写错（忘了搬、或口径对不上）的症状是：整行字**看不见**、
+    /// 或者边缘**整体暗/亮一圈** —— 而尺寸、字节数、ffmpeg 退出码**全都是对的**。
+    /// 所以必须**逐点量边缘**，不能只看"有墨迹"。
+    ///
+    /// # 为什么要"**一个字一个字**"地比（这条很关键）
+    ///
+    /// 两条路的**每字推进宽度**差 1%：实测「口」重复 5 次时老路 192 px、
+    /// 新路 190 px（每字累计偏 0.4 px）。逐点比会把这点漂移**放大**成巨大差异
+    /// —— 边缘横挪 1 px 就是"0 对 128"。累积到第 5 个字已经错 2 px，
+    /// 于是**整串**比出来是 max 247 / 中位 76 / 45.8% 落在容差内，
+    /// 看着像"两条路差得远"；而**同一个字单独比**是 max 143 / 中位 40 /
+    /// **96.9% 落在 128 内**。
+    ///
+    /// 所以判据比的是**单个字形**：那才是"两套栅格化器对同一副轮廓的处理"，
+    /// 而字距差异是另一件事（它属于排版，不属于覆盖度）。
+    #[test]
+    #[ignore = "真起 ffmpeg：要 PATH 上的 ffmpeg 与一份中文字体。跑：cargo test -p dhampir-worker --lib text_raster -- --ignored"]
+    fn 真机_边缘覆盖度与老路同量级() {
+        // **必须用 ASCII 路径的字体**：这条判据要重建"老路"，而老路
+        // （`drawtext`）在**非 ASCII 字体路径**上会直接崩掉（退出码
+        // `0xC0000005` 访问违例）—— 那正是 T1 修的那个病。
+        // 在这里踩到它会把"T3 的覆盖度判据"变成"T1 的复现"，两件事混在一起。
+        let font = test_font_ascii();
+        let font_px = 40u32;
+        let (width, height) = bitmap_size(400, font_px as f32 * 1.2, font_px);
+        let dir = font.parent().map(Path::to_path_buf);
+        let family = font_family_name(&key("口", 20), &font);
+
+        // 逐个字形单独量。**不用一句话**：见上面"为什么要一个字一个字地比"。
+        for glyph in ["口", "日", "目", "田"] {
+            let old_raw = probe_drawtext_white(&font, glyph, font_px, width, height)
+                .expect("老路必须画得出来");
+            let old = CoverageProfile::from_premultiplied(
+                &TextBitmap::new(width, height, old_raw).expect("字节数应当对得上"),
+            );
+
+            let new_raw =
+                probe_libass_white(&font, glyph, font_px, width, height, dir.as_deref(), &family)
+                    .expect("新路必须画得出来");
+            // 走 `coverage_from_libass` 搬运后再抽剖面：这**同时验了搬运**
+            // —— 搬运写错的话这里会抽到全 0，下面的断言会直接红。
+            let moved = coverage_from_libass(&new_raw);
+            let new = CoverageProfile::from_premultiplied(
+                &TextBitmap::new(width, height, moved).expect("字节数应当对得上"),
+            );
+
+            assert!(
+                old.bounds.is_some(),
+                "「{glyph}」老路画出来是空的 —— 夹具坏了，这条判据失去意义"
+            );
+            assert!(
+                new.bounds.is_some(),
+                "「{glyph}」新路搬完是空的 —— 覆盖度没搬过来（`tint` 会因此把整行字清掉）"
+            );
+
+            // 字形**尺寸**也要对得上：差太多就不是"覆盖度口径"的问题，
+            // 而是字号/几何算错了（PlayRes 补偿那一条盯的就是这个）。
+            let (Some((ox0, oy0, ox1, oy1)), Some((nx0, ny0, nx1, ny1))) =
+                (old.bounds, new.bounds)
+            else {
+                unreachable!("上面断言过两边都有墨迹")
+            };
+            let old_w = ox1 - ox0 + 1;
+            let old_h = oy1 - oy0 + 1;
+            let new_w = nx1 - nx0 + 1;
+            let new_h = ny1 - ny0 + 1;
+            assert!(
+                old_w.abs_diff(new_w) <= 2 && old_h.abs_diff(new_h) <= 3,
+                "「{glyph}」字形尺寸差太多：老 {old_w}x{old_h} vs 新 {new_w}x{new_h}                 —— 这不是覆盖度口径的事，是字号/几何算错了"
+            );
+
+            // ================= 主判据：边缘**斜坡宽度** =================
+            //
+            // 这是**结构**判据，对"斜坡差半个像素"那种相位差免疫 ——
+            // 而那正是两条路逐点差异的主要来源（见 [`ramp_width`]）。
+            let old_ramp = ramp_width(&old);
+            let new_ramp = ramp_width(&new);
+            let diff = compare_edges(&old, &new);
+            eprintln!(
+                "「{glyph}」斜坡宽度 老 {old_ramp:.2} px vs 新 {new_ramp:.2} px；                 逐点差 比了 {} 像素 最大 {:.0} 中位 {:.0} 均值 {:.1} 容差内 {:.1}%",
+                diff.compared,
+                diff.max,
+                diff.median,
+                diff.mean,
+                diff.within_tolerance * 100.0
+            );
+
+            assert!(
+                diff.compared > 30,
+                "「{glyph}」边缘像素只有 {} 个 —— 字太小或没画出来，判据不成立",
+                diff.compared
+            );
+            // 两条路**各自**都得是"窄边"：太宽 = 边糊了；接近 0 = 硬边没抗锯齿。
+            for (name, ramp) in [("老路", old_ramp), ("新路", new_ramp)] {
+                assert!(
+                    (0.5..=3.5).contains(&ramp),
+                    "「{glyph}」{name}的边缘斜坡宽 {ramp:.2} px ——                      不在「窄抗锯齿」的范围内（太宽是糊了，接近 0 是硬边）"
+                );
+            }
+            // **主体判据**：新路的斜坡可以比老路宽，但**不能宽出一个量级**。
+            //
+            // 实测四个字全部同向偏宽（0.63→1.65、1.43→2.41、1.21→3.17、1.10→1.63，
+            // 最大差 1.96）。**这是两条渲染器的真实差异**，见 [`ramp_width`]，
+            // 所以判据是"**偏宽有界**"而不是"必须相等"——
+            // 改成"必须相等"会是一条恒红的判据，那是假的严。
+            //
+            // 上限 2.5 px 的依据：实测最大 1.96，留一点余量；
+            // 而真坏掉时（比如把覆盖度当 alpha 用、或者边缘整块丢）
+            // 这个数会跳到几倍。
+            let widening = new_ramp - old_ramp;
+            assert!(
+                widening <= 2.5,
+                "「{glyph}」新路斜坡比老路宽了 {widening:.2} px（老 {old_ramp:.2} → 新 {new_ramp:.2}）                 —— 超出两条渲染器已知的差异范围，像是覆盖度搬运出了问题"
+            );
+            // **反向**：新路也不许比老路**窄**太多 —— 那意味着边缘被硬化了
+            // （覆盖度被二值化），是另一种坏法。
+            assert!(
+                widening >= -1.0,
+                "「{glyph}」新路斜坡比老路窄了 {:.2} px（老 {old_ramp:.2} → 新 {new_ramp:.2}）                 —— 边缘被硬化了，覆盖度多半被二值化过",
+                -widening
+            );
+
+            // ================= 辅助判据：逐点差**不许整体走形** =================
+            //
+            // 逐点差**必然**偏大（斜坡相位差半个像素就能顶到上百），
+            // 所以这里不判"多数落在容差内"（那是恒红的假严），
+            // 也不判单点最大值（相位差本来就能顶到 240 那种量级）。
+            //
+            // 判的是**中位差**：它是"整条边有没有整体偏移/整体变淡"的量度，
+            // 对个别点的相位跳变不敏感。实测四个字的中位差在 60~90 之间
+            // （同一个字形斜坡只宽 1 个像素时，中位差自然就在这个量级）。
+            // 真坏掉时（覆盖度没搬、边缘整块丢）中位差会顶到 150 以上。
+            assert!(
+                diff.median <= 130.0,
+                "「{glyph}」边缘逐点差中位数 {:.0}（比了 {} 像素）——                  整条边在整体偏移或整体变淡，不是个别像素的相位差",
+                diff.median,
+                diff.compared
+            );
+        }
+    }
+
+    /// 老路（`drawtext`）白字渲染，返回原始 RGBA。**只给判据用。**
+    fn probe_drawtext_white(
+        font: &Path,
+        text: &str,
+        font_px: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<u8>, String> {
+        // **走 `textfile=`，与老路生产的参数同形**。
+        // 实测：直接 `text='口日目回田'` 在 shell 里能跑，但那样连同
+        // 一处 `format:rgba` 的手误都能把退出码变成 `0xC0000005`（访问违例）——
+        // 判据要的是"两条路的**渲染**可比"，不是"哪一串写法能起得来"。
+        // 用文件也让 `%`、`:` 这些字符不必转义（老路当年就是这么做的）。
+        let text_file = std::env::temp_dir().join(format!(
+            "dhampir-t3-probe-{}-{:016x}.txt",
+            std::process::id(),
+            dhampir_core::timeline::selfcheck::fnv1a64(text.as_bytes())
+        ));
+        {
+            use std::io::Write as _;
+            let mut file = std::fs::File::create(&text_file)
+                .map_err(|error| format!("写不了探针文本文件：{error}"))?;
+            file.write_all(text.as_bytes())
+                .map_err(|error| format!("写不了探针文本文件：{error}"))?;
+        }
+        let escaped = filter_value(&font.to_string_lossy());
+        let escaped_text = filter_value(&text_file.to_string_lossy());
+        let source = format!("color=c=black@0.0:s={width}x{height},format=rgba");
+        let filter = format!(
+            "drawtext=fontfile={escaped}:textfile={escaped_text}:fontsize={font_px}:             fontcolor=white:expansion=none:x=0:y=0"
+        );
+        let result = run_ffmpeg_raw(rawvideo_args(source, filter));
+        let _ = std::fs::remove_file(&text_file);
+        result
+    }
+
+    /// 新路（libass）白字渲染，返回**未搬运的**原始 RGBA。**只给判据用。**
+    fn probe_libass_white(
+        font: &Path,
+        text: &str,
+        font_px: u32,
+        width: u32,
+        height: u32,
+        font_dir: Option<&Path>,
+        family: &str,
+    ) -> Result<Vec<u8>, String> {
+        let subtitle = write_subtitle_file(text)?;
+        let source = format!("color=c=black@0.0:s={width}x{height},format=rgba");
+        let style = format!(
+            "FontName={family},FontSize={},PrimaryColour={WHITE_INK}",
+            ass_font_size(font_px, height)
+        );
+        let dir = font_dir.unwrap_or_else(|| Path::new("."));
+        let filter = subtitles_filter(&subtitle, dir, &style);
+        let result = run_ffmpeg_raw(rawvideo_args(source, filter));
+        let _ = std::fs::remove_file(&subtitle);
+        let _ = font;
+        result
+    }
+
+    /// **判据（T3 的核心反向用例）**：**直接把 libass 的 alpha 当覆盖度**用，
+    /// 必须被抓住。
+    ///
+    /// # 这条盯的是这条链上最坏的一种失败
+    ///
+    /// libass 输出到 `format=rgba` 时 **alpha 恒为 0**（覆盖度写在 RGB）。
+    /// 若有人把"搬平"那一步删掉、直接把 ffmpeg 的字节当位图用：
+    ///
+    /// * `tint()` 拿 `alpha=0` 会走到"全透明像素连颜色都不留"那一条，把 rgb 清成 0；
+    /// * 结果是一张**全透明的位图**，而它的尺寸、字节数、ffmpeg 退出码
+    ///   **全都是对的** —— 那正是一行**看不见的字**。
+    ///
+    /// 所以这条判据不能靠"ffmpeg 成功没成功"，必须**看像素**：
+    /// 搬运之后的位图必须有墨，而**未搬运的**那张按 alpha 看是**全空**的。
+    #[test]
+    #[ignore = "真起 ffmpeg：要 PATH 上的 ffmpeg 与一份中文字体。跑：cargo test -p dhampir-worker --lib text_raster -- --ignored"]
+    fn 真机_直接把_libass_的_alpha_当覆盖度会被抓住() {
+        let font = test_font_ascii();
+        let glyph = "口";
+        let font_px = 40u32;
+        let (width, height) = bitmap_size(400, font_px as f32 * 1.2, font_px);
+        let dir = font.parent().map(Path::to_path_buf);
+        let family = font_family_name(&key(glyph, 20), &font);
+
+        let raw = probe_libass_white(&font, glyph, font_px, width, height, dir.as_deref(), &family)
+            .expect("新路必须画得出来");
+
+        // ---- 反面：**不搬运**，按 alpha 读 ----
+        let wrong = CoverageProfile::from_premultiplied(
+            &TextBitmap::new(width, height, raw.clone()).expect("字节数应当对得上"),
+        );
+        assert!(
+            wrong.bounds.is_none(),
+            "未搬运的位图按 alpha 看居然有墨（包围盒 {:?}）——              libass 的 alpha 不该非 0；这条判据的前提变了，得重新量",
+            wrong.bounds
+        );
+        assert!(
+            wrong.edge_pixels().is_empty(),
+            "未搬运的位图按 alpha 看有 {} 个边缘像素 —— 前提变了",
+            wrong.edge_pixels().len()
+        );
+
+        // ---- 正面：**搬运之后**，同样的字节必须出墨 ----
+        let right = CoverageProfile::from_premultiplied(
+            &TextBitmap::new(width, height, coverage_from_libass(&raw))
+                .expect("字节数应当对得上"),
+        );
+        assert!(
+            right.bounds.is_some(),
+            "搬运之后还是没有墨 —— 覆盖度没搬过来"
+        );
+        assert!(
+            right.edge_pixels().len() > 30,
+            "搬运之后边缘像素只有 {} 个 —— 搬运多半把覆盖度压没了",
+            right.edge_pixels().len()
+        );
+
+        // ---- 两条路的差别必须是**这个**差别（不是别的）----
+        // 同一份原始字节：「按 alpha 读」全空、「搬运后读」有墨。
+        // 这一条就是"搬平那一步不可省"的可复算证据。
+        let raw_ink = raw.chunks_exact(4).filter(|px| px[3] != 0).count();
+        assert_eq!(raw_ink, 0, "libass 的 alpha 本该恒为 0，实测有 {raw_ink} 个非 0");
+    }
+
+    /// 起一次 ffmpeg，把 `rawvideo` 的 stdout 原样拿回来。
+    fn run_ffmpeg_raw(args: Vec<String>) -> Result<Vec<u8>, String> {
+        let output = std::process::Command::new("ffmpeg")
+            .args(&args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .map_err(|error| format!("起不了 ffmpeg：{error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "ffmpeg 退出码 {:?}：{}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(output.stdout)
+    }
 
     /// **判据（T2 最硬的一条）**：缺字必须由 libass **逐字形回退**补上，
     /// 而不是画成 `.notdef` 方框。
