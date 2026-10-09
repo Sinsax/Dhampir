@@ -19,9 +19,9 @@
 - 根因是一串**空格分隔的记号**，每个记号要么是仓库内真实存在的路径（可带 :行号 或 :起-止），
   要么是另一个条目 id。至少一个。
 - 证据是 - 或一串同样形式的真实路径；**status=done 时必须给出至少一个存在的文件**。
-- 计数声明行 <!-- ledger: D=23 A=10 --> 必须与实际条数一致。
+- 计数声明行 <!-- ledger: D=24 A=10 --> 必须与实际条数一致。
 
-<!-- ledger: D=23 A=10 -->
+<!-- ledger: D=24 A=10 -->
 
 ## 缺陷（D）
 
@@ -229,3 +229,9 @@
   根因: crates/dhampir-worker/src/pipeline.rs:649 plan/measurements.md:1
   验收: 给出并发数并说明代价；没有数字就不许写进结论
   证据: plan/t5-evidence.md
+
+- [D24] status=todo phase=-
+  症状: 画面**无法变速**（契约里没有任何速率字段），而**已有的 1:1 取帧路径本身还在漂** —— 请求第 i 帧拿到的可能不是源第 i 帧。下游要做亮度斜坡变速，×2.0 表达不出来；更要紧的是连 1:1 都不准
+  根因: crates/dhampir-timeline/src/layer.rs:147 crates/dhampir-worker/src/pipeline.rs:173
+  验收: 先修 1:1 投递漂移（实测偏移阶梯 −2..+2 且末帧钳位），再拍速率接口（候选 source_rate / source_out / 层 time_scale）。判据与全部读数见 plan/d5-frame-rate-handoff.md；注意 `source_frame_at` 的契约数学**已验过是 1:1 准确的**，缺陷不在那一层
+  证据: plan/d5-frame-rate-handoff.md

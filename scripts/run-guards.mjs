@@ -124,6 +124,15 @@ export const GUARDS = [
   { script: 'check-dom-differences.mjs', args: [] },
   { script: 'check-backend-seam.mjs', args: [] },
   { script: 'check-defects.mjs', args: [] },
+  // 取帧节奏（D24）：亮度斜坡量出"请求第 i 帧实际拿到源的哪一帧"。
+  //
+  // 它**需要构建产物 + ffmpeg**，比别的静态检查重。放这里是因为它盯的东西没有别处能盯：
+  // 契约函数 `source_frame_at` 的数学**是对的**，漂在**投递路径**上 ——
+  // 而那条路径此前一条判据都没有。
+  //
+  // 注意它的**退出码约定**（D24 未修期间）：漂移形状与台账一致 ⇒ exit 0，但明确说清
+  // "这仍是缺陷，不是通过"；形状**变了**（好了或坏了）⇒ exit 1。详见文件头。
+  { script: 'check-frame-pacing.mjs', args: [] },
   { script: 'check-preview-parity.mjs', args: [] },
   { script: 'check-overlay-plumbing.mjs', args: [] },
   { script: 'check-m1-record.mjs', args: ['--record', 'records/m1'] },
