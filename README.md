@@ -74,7 +74,7 @@ git tag -a v0.2.0 -m 'dhampir v0.2.0' && git push origin main --tags
 | **调用面**（承诺等级、CLI、wasm、HTTP） | **[docs/api.md](docs/api.md)** |
 | wasm 导出全名单（**生成的**） | [docs/api-surface.md](docs/api-surface.md) |
 | **宿主返回体的形状与版本** | [docs/host-api.md](docs/host-api.md) |
-| **从上一版升上来要改什么**（下游宿主看这份） | **[docs/upgrade-0.1.0-to-0.2.0.md](docs/upgrade-0.1.0-to-0.2.0.md)** |
+| **从上一版升上来要改什么**（下游宿主看这份） | **[docs/upgrade-0.2.0-to-0.3.0.md](docs/upgrade-0.2.0-to-0.3.0.md)**（0.2.0 那份在 [这里](docs/upgrade-0.1.0-to-0.2.0.md)） |
 | 现在做到哪了、还剩什么 | [plan/next-steps.md](plan/next-steps.md) |
 | 缺陷与架构缺失的台账 | [plan/defects.md](plan/defects.md) |
 | 阶段计划与依赖顺序 | [plan/roadmap.md](plan/roadmap.md) |

@@ -24,7 +24,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.87" # = wgpu 30.0.1 的 MSRV
 # 许可证**唯一真相**：Apache-2.0（单许可）。
@@ -37,9 +37,9 @@ authors = ["dhampir contributors"]
 repository = "https://github.com/Sinsax/Dhampir"  # 五个 crate 各自 `repository.workspace = true` 继承这里
 
 [workspace.dependencies]
-dhampir-timeline = { version = "0.2.0", path = "crates/dhampir-timeline" }
-dhampir-media = { version = "0.2.0", path = "crates/dhampir-media" }
-dhampir-core = { version = "0.2.0", path = "crates/dhampir-core" }
+dhampir-timeline = { version = "0.3.0", path = "crates/dhampir-timeline" }
+dhampir-media = { version = "0.3.0", path = "crates/dhampir-media" }
+dhampir-core = { version = "0.3.0", path = "crates/dhampir-core" }
 
 # wgpu：**不在这里开任何后端**。
 #   core   → 只要 std + wgsl（API 层与 WGSL 前端），后端由宿主自己加

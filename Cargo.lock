@@ -291,7 +291,7 @@ dependencies = [
 
 [[package]]
 name = "dhampir-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytemuck",
  "dhampir-timeline",
@@ -305,14 +305,14 @@ dependencies = [
 
 [[package]]
 name = "dhampir-media"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "dhampir-timeline",
 ]
 
 [[package]]
 name = "dhampir-timeline"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "schemars",
  "serde",
@@ -321,7 +321,7 @@ dependencies = [
 
 [[package]]
 name = "dhampir-wasm"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "console_error_panic_hook",
  "dhampir-core",
@@ -337,7 +337,7 @@ dependencies = [
 
 [[package]]
 name = "dhampir-worker"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "dhampir-core",
  "dhampir-media",
