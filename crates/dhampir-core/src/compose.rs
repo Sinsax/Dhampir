@@ -24,8 +24,8 @@
 //! 那是 v2 的事。冻帧至少是**两端都能一模一样算出来**的。
 
 use dhampir_timeline::layer::{
-    AssetTimebases, BlendMode, Layer as LayerV2, TimelineV2, source_frame_at_delays,
-    source_frame_looped,
+    AssetTimebases, BlendMode, Layer as LayerV2, TimelineV2, source_frame_at_delays_rate,
+    source_frame_looped_rate,
 };
 use dhampir_timeline::schema::{
     Clip, Effect, Frame, Project, TimebaseDto, TrackKind, Transform, TransitionSpec,
@@ -230,17 +230,19 @@ impl EvalContext<'_> {
                 .assets
                 .and_then(|table| table.frame_delays(&source.asset_id))
             {
-                Some(delays) => source_frame_at_delays(
+                Some(delays) => source_frame_at_delays_rate(
                     source.source_in,
                     local_frame,
+                    source.source_rate,
                     self.timeline,
                     delays,
                     element.loop_source,
                 )
                 .unwrap_or(identity),
-                None => source_frame_looped(
+                None => source_frame_looped_rate(
                     source.source_in,
                     local_frame,
+                    source.source_rate,
                     self.timeline,
                     asset,
                     self.assets
@@ -670,6 +672,7 @@ mod tests {
             Some(SourceRef {
                 asset_id: "anim.gif".to_string(),
                 source_in: 0,
+                source_rate: 1.0,
             }),
         ));
 
@@ -715,6 +718,7 @@ mod tests {
             Some(SourceRef {
                 asset_id: "anim.gif".to_string(),
                 source_in: 5,
+                source_rate: 1.0,
             }),
         ));
 
@@ -1219,6 +1223,7 @@ mod tests {
             source: Some(SourceRef {
                 asset_id: "a.mp4".to_string(),
                 source_in: 0,
+                source_rate: 1.0,
             }),
             effects: vec![Effect {
                 kind: "gaussian_blur".to_string(),

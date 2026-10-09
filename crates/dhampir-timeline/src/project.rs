@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::layer::{
     AssetTimebases, LAYER_SCHEMA_VERSION, LAYER_SCHEMA_VERSION_V2, LAYER_SCHEMA_VERSION_V3,
-    TimelineV2, migrate_v1_to_v2, migrate_v2_to_v3, migrate_v3_to_v4, source_frame_at,
+    TimelineV2, migrate_v1_to_v2, migrate_v2_to_v3, migrate_v3_to_v4, source_frame_at_rate,
     validate_timeline_v2,
 };
 use crate::schema::{
@@ -661,6 +661,20 @@ pub fn validate_project_doc(doc: &ProjectDoc, effects: &[EffectSpec]) -> DocIssu
                 )),
                 Some(&asset_index) => {
                     let asset = &doc.assets[asset_index];
+                    // **速率本身先查**（D24）：`0` 会让整段定格在 source_in、
+                    // 负数会倒放，都不是"快慢"能表达的语义；`NaN`/`inf` 直接把换算弄坏。
+                    // 放在越界检查**之前** —— 速率不合法时算出的 `last` 没有意义，
+                    // 拿它去报"越界"只会给出一个误导人的第二现场。
+                    if !source.source_rate.is_finite() || source.source_rate <= 0.0 {
+                        errors.push(Issue::new(
+                            "source_rate_invalid",
+                            &format!("{base}.source.source_rate"),
+                            format!(
+                                "播放速率必须是大于 0 的有限值，得到 {}（1.0 = 原速；0 与负数不是「快慢」能表达的语义）",
+                                source.source_rate
+                            ),
+                        ));
+                    }
                     // 只有**知道素材有多长**时才谈得上越界。
                     //
                     // **`loop_source` 为真时根本不越界** —— 那正是这个开关的用途：
@@ -671,9 +685,13 @@ pub fn validate_project_doc(doc: &ProjectDoc, effects: &[EffectSpec]) -> DocIssu
                         // 素材帧率与时间线不一致时两边单位根本不同，这个检查是错的
                         // （60fps 素材放进 30fps 时间线时它会放行两倍的长度）。
                         let asset_timebase = asset.timebase.unwrap_or(doc.timeline.timebase);
-                        let last = source_frame_at(
+                        // **必须带上 rate**（D24）：变速片段消耗的源帧是 `帧数 × rate`。
+                        // 用原速那条算，`rate = 2.0` 的片段会被**放行两倍长度** ——
+                        // 校验说没问题，渲染时却已经读到素材末尾之后去了。
+                        let last = source_frame_at_rate(
                             source.source_in,
                             layer.duration().saturating_sub(1),
+                            source.source_rate,
                             &doc.timeline.timebase,
                             &asset_timebase,
                         );
@@ -687,8 +705,11 @@ pub fn validate_project_doc(doc: &ProjectDoc, effects: &[EffectSpec]) -> DocIssu
                                 "source_range_exceeded",
                                 &format!("{base}.source.source_in"),
                                 format!(
-                                    "素材 {} 只有 {frame_count} 帧，而这一层要从第 {} 帧起取 {} 个时间线帧（换算后越界）",
-                                    source.asset_id, source.source_in, layer.duration()
+                                    "素材 {} 只有 {frame_count} 帧，而这一层要从第 {} 帧起按 {} 倍速取 {} 个时间线帧（换算后越界）",
+                                    source.asset_id,
+                                    source.source_in,
+                                    source.source_rate,
+                                    layer.duration()
                                 ),
                             ));
                         }
@@ -963,6 +984,7 @@ mod tests {
             source: asset.map(|a| crate::layer::SourceRef {
                 asset_id: a.to_string(),
                 source_in,
+                source_rate: 1.0,
             }),
             loop_source: false,
             effects: Vec::new(),

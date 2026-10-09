@@ -566,6 +566,7 @@ fn sfx_doc() -> ProjectDoc {
         source: Some(SourceRef {
             asset_id: "tone.m4a".to_string(),
             source_in: 0,
+            source_rate: 1.0,
         }),
         loop_source: false,
         effects: Vec::new(),

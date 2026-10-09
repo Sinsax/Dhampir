@@ -19,9 +19,9 @@
 - 根因是一串**空格分隔的记号**，每个记号要么是仓库内真实存在的路径（可带 :行号 或 :起-止），
   要么是另一个条目 id。至少一个。
 - 证据是 - 或一串同样形式的真实路径；**status=done 时必须给出至少一个存在的文件**。
-- 计数声明行 <!-- ledger: D=24 A=10 --> 必须与实际条数一致。
+- 计数声明行 <!-- ledger: D=25 A=10 --> 必须与实际条数一致。
 
-<!-- ledger: D=24 A=10 -->
+<!-- ledger: D=25 A=10 -->
 
 ## 缺陷（D）
 
@@ -231,7 +231,15 @@
   证据: plan/t5-evidence.md
 
 - [D24] status=todo phase=-
-  症状: 画面**无法变速**（契约里没有任何速率字段），而**已有的 1:1 取帧路径本身还在漂** —— 请求第 i 帧拿到的可能不是源第 i 帧。下游要做亮度斜坡变速，×2.0 表达不出来；更要紧的是连 1:1 都不准
-  根因: crates/dhampir-timeline/src/layer.rs:147 crates/dhampir-worker/src/pipeline.rs:173
-  验收: 先修 1:1 投递漂移（实测偏移阶梯 −2..+2 且末帧钳位），再拍速率接口（候选 source_rate / source_out / 层 time_scale）。判据与全部读数见 plan/d5-frame-rate-handoff.md；注意 `source_frame_at` 的契约数学**已验过是 1:1 准确的**，缺陷不在那一层
+  症状: **取帧投递在漂**（契约层是对的）。请求第 i 帧拿到的**不是**源第 i 帧：原速实测偏移是 `[0,-1,-2,-2,-1,-1,-1,-1,-1,-1,-1,0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,1,0]` 的阶梯，末 3 帧钳在源末帧。**误差随倍率放大**：`rate=2.0` 时起点 −2、中段到 +6
+  根因: crates/dhampir-worker/src/pipeline.rs:173 crates/dhampir-worker/src/pipeline.rs:719
+  验收: 修投递路径，使原速下偏移**全为 0**（`node scripts/check-frame-pacing.mjs` 的 `KNOWN_OFFSETS` 换成"必须全 0"）。**注意**：`source_frame_at` / `source_frame_at_rate` 的契约数学**已单测精确**（`at(1)=102` 等），缺陷**不在契约层**，别去改那里；`plan_fetch` 那条链有**硬约束"只许顺序、不许 seek"**（`pipeline.rs:15`），修法不能改成逐帧 seek。已排除：素材帧率/帧数不一致、有损编码噪声、非确定性、`frame_count` 配置；**未定论**：试过"帧号→秒→帧号"的取整/精度/重采样假设，**没有一种能解释实测序列**（最好 10/30 命中），所以不写"根因是 X"
+  备注: 速率字段那半**已完成**（方案 A `source.source_rate`，含音轨 `atempo`），见 plan/d5-frame-rate-handoff.md §9。两条**必须分开验收**：这次只加速率、不动投递，否则两件事混在一起没法归因。下游期望的 `100 → 198` 要**两条一起**才能拿到
   证据: plan/d5-frame-rate-handoff.md
+
+- [D25] status=todo phase=-
+  症状: `cargo test -p dhampir-worker --lib` **偶发转红**（约 1/5~1/20 次），红在 `text_raster::tests::非_ascii_字体路径会被搬到临时_ascii_路径`：`造一份源文件: Os { code: 3, kind: NotFound }`。单独跑该测试次次绿，所以一度像 flake
+  根因: crates/dhampir-worker/src/text_raster.rs:2251 crates/dhampir-worker/src/text_raster.rs:2326
+  验收: 各测试用**各自的** scratch 子目录（现在共用 `temp_dir/dhampir-t1-{pid}`，而同一测试二进制里的测试是**并行线程**，所以两条测试的 `remove_dir_all` 会删掉别人正在写的目录）。判定标准：连跑 30 次 `-p dhampir-worker --lib` 全绿，且把 `remove_dir_all` 去掉后仍有测试能证明确实清理过
+  备注: **与本轮 D24 无关**，已用 `git stash` 把 `crates/` 全部改动撤下复跑，**基线第 5 次就红在同一行**（同一条测试、同一处 panic）。属既有的测试串扰，不影响产物
+  证据: crates/dhampir-worker/src/text_raster.rs

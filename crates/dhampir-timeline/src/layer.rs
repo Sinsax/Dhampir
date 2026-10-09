@@ -150,6 +150,45 @@ pub struct SourceRef {
     pub asset_id: String,
     /// 素材内起点（帧）。
     pub source_in: Frame,
+    /// **播放速率**。`1.0` = 原速；`2.0` = 两倍速（同样的输出时长吃掉两倍的源帧）。
+    ///
+    /// # 为什么要有它（D24）
+    ///
+    /// 在这之前，`end - start` **同时表示两件事**：占多长输出时间、要读多少源帧。
+    /// 两者被绑死，于是**没有任何旋钮能表达"这段放两倍速"** ——
+    /// 想快播只能把 `end` 减半，结果是**时长对了、内容被截断一半**。
+    ///
+    /// # 语义（三个量各管一件事，不许混）
+    ///
+    /// * `end - start` = **输出帧数**（这一层在时间线上占多久）；
+    /// * `source_rate` = 每输出 1 帧消耗**几个**源帧；
+    /// * 消耗的源帧数 = `(end - start) × source_rate`（从 `source_in` 起算）。
+    ///
+    /// 所以 `rate=2.0` 时，30 个输出帧吃掉 60 个源帧 —— **时长不变、内容不截断**，
+    /// 只是放快了。与 `-filter:v setpts=PTS/2` 同义。
+    ///
+    /// # 缺省 `1.0` 而不是 `Option`
+    ///
+    /// 缺省必须让**所有老工程逐字节不变**（本仓一贯口径）。用 `f64` + `serde(default)`
+    /// 比 `Option<f64>` 好：下游不必区分"没有这个键"和"写了 1.0"，
+    /// 少一种状态就少一类分支。
+    ///
+    /// # 边界（**故意不做静默钳位**）
+    ///
+    /// * `rate <= 0` 或非有限值 ⇒ **契约校验报错**。`0` 会让"消耗多少源帧"恒为 0
+    ///   （整段定格在 `source_in`），负数会倒放 —— 两者都不是"快慢"能覆盖的语义，
+    ///   真要做应该各有专门的字段，**不能靠一个 0 或负数偷偷生效**。
+    /// * 源帧不够（`source_in + 消耗帧数` 超出素材）⇒ 钳在末帧，与既有非循环路径一致
+    ///   （`source_frame_at_delays` 的"不外推"同一条规矩）。
+    #[serde(default = "default_source_rate")]
+    pub source_rate: f64,
+}
+
+/// [`SourceRef::source_rate`] 的缺省值：原速。
+///
+/// 抽成函数是因为 `serde(default = "...")` 要一个**路径**，不能直接写 `default = "1.0"`。
+fn default_source_rate() -> f64 {
+    1.0
 }
 
 /// 挂在元素上的标记。
@@ -958,6 +997,9 @@ pub fn migrate_v1_to_v2(project: &Project) -> Result<TimelineV2, MigrateError> {
                 source: Some(SourceRef {
                     asset_id: clip.source.clone(),
                     source_in: clip.source_in,
+                    // v1 没有速率这个概念。**迁移必须给 1.0**（原速）——
+                    // 这是"迁移不改观感"那一条：v1 工程迁上来，画面必须逐字节一样。
+                    source_rate: 1.0,
                 }),
                 // v1 没有循环这个概念，迁移后就是**不循环**。
                 loop_source: false,
@@ -1065,6 +1107,72 @@ pub fn source_frame_at(
     Ok(source_in.saturating_add(clamped))
 }
 
+/// 带**播放速率**的取帧：`local_frame` 这一输出帧应当取素材的哪一帧。
+///
+/// # 与 [`source_frame_at`] 的关系
+///
+/// [`source_frame_at`] 是 `rate = 1.0` 的特例。这里没有把它删掉换成"传 1.0"，
+/// 因为那条路径被**逐字节不变**钉着（老工程不许动），多绕一层浮点就多一分
+/// 改变既有输出的风险。于是：**`rate == 1.0` 时走原来那条整数路径，逐字节等价**；
+/// 只有真给了非 1.0 才进浮点分支。
+///
+/// # 为什么用 `f64` 而整数那一层用 i128
+///
+/// `rate` 本身就是小数（`0.5`、`2.0`、`1.25`），没法用整数表达。
+/// 但**换算回帧号之后要向下取整**，与 [`source_frame_at`] 同一个方向
+/// （理由见那里的"取整方向"一节）。
+///
+/// 这里**不做累积**：每一帧都从 `local_frame` 独立算起
+/// （`source_in + floor(local_frame × rate × 时间基换算)`），
+/// 而不是"上一帧 + rate"。累积会把浮点误差一帧一帧攒起来 ——
+/// 30 帧的 1.25 倍速能攒出可见的偏移，而独立换算不会。
+///
+/// # 错误
+///
+/// `rate <= 0`、`NaN`、`inf` 都报错（见 [`SourceRef::source_rate`] 的边界一节）。
+pub fn source_frame_at_rate(
+    source_in: Frame,
+    local_frame: Frame,
+    rate: f64,
+    timeline: &TimebaseDto,
+    asset: &TimebaseDto,
+) -> Result<Frame, String> {
+    if !rate.is_finite() || rate <= 0.0 {
+        return Err(format!(
+            "播放速率必须是大于 0 的有限值，实得 {rate}（1.0 = 原速；0 与负数不是「快慢」能表达的语义）"
+        ));
+    }
+    // 原速走原路：**逐字节等价**，也避免给老工程引入浮点。
+    if rate == 1.0 {
+        return source_frame_at(source_in, local_frame, timeline, asset);
+    }
+    if timeline.num == 0 || timeline.den == 0 {
+        return Err(format!(
+            "时间线的时间基不合法：{}/{}",
+            timeline.num, timeline.den
+        ));
+    }
+    if asset.num == 0 || asset.den == 0 {
+        return Err(format!("素材的时间基不合法：{}/{}", asset.num, asset.den));
+    }
+    // local_frame 是时间线上的帧数；先按速率放大，再换成素材帧数。
+    //
+    // 顺序要紧：**先乘 rate 再换时间基**，与"先换算再乘"在数学上等价，
+    // 但前者只做一次除法/取整，少一次舍入。
+    let scaled = (local_frame as f64) * rate * (f64::from(timeline.den) * f64::from(asset.num))
+        / (f64::from(timeline.num) * f64::from(asset.den));
+    if !scaled.is_finite() {
+        return Err(format!(
+            "取帧换算溢出：local_frame={local_frame} rate={rate} 时间基={}/{} 素材基={}/{}",
+            timeline.num, timeline.den, asset.num, asset.den
+        ));
+    }
+    // 向下取整（与整数路径同方向）。clamp 到 i64 是为了极端输入不 UB。
+    let floor = scaled.floor();
+    let clamped = floor.clamp(i64::MIN as f64, i64::MAX as f64) as i64;
+    Ok(source_in.saturating_add(clamped))
+}
+
 /// 按**逐帧延迟表**把时间换成素材帧号 —— GIF 那种"每帧停留时长不一样"的素材。
 ///
 /// # 为什么需要它（`source_frame_at` 在这里是错的）
@@ -1096,6 +1204,36 @@ pub fn source_frame_at_delays(
     delays_ms: &[u32],
     loop_source: bool,
 ) -> Result<Frame, String> {
+    source_frame_at_delays_rate(
+        source_in,
+        local_frame,
+        1.0,
+        timeline,
+        delays_ms,
+        loop_source,
+    )
+}
+
+/// [`source_frame_at_delays`] 的**带速率**版本（D24）。
+///
+/// 这条路径是**按毫秒**查表的，所以速率落在一个很自然的地方：把"这一帧在时间线上的
+/// 时刻"乘上 `rate`（`rate=2.0` ⇒ 同样的输出帧对应时间轴上一倍远的时刻，
+/// 于是走表走得快一倍）。表本身与循环那一段逐字不变。
+///
+/// `rate == 1.0` 时与 [`source_frame_at_delays`] **逐字节等价**。
+pub fn source_frame_at_delays_rate(
+    source_in: Frame,
+    local_frame: Frame,
+    rate: f64,
+    timeline: &TimebaseDto,
+    delays_ms: &[u32],
+    loop_source: bool,
+) -> Result<Frame, String> {
+    if !rate.is_finite() || rate <= 0.0 {
+        return Err(format!(
+            "播放速率必须是大于 0 的有限值，实得 {rate}（1.0 = 原速）"
+        ));
+    }
     if timeline.num == 0 || timeline.den == 0 {
         return Err(format!(
             "时间线的时间基不合法：{}/{}",
@@ -1111,8 +1249,23 @@ pub fn source_frame_at_delays(
     if total <= 0 {
         return Err("延迟表的总时长是 0 —— 那样任何时刻都落在第 0 帧，等于不动".to_string());
     }
-    // 这一帧在时间线上的时刻（毫秒）。纯整数：中间量 i128。
-    let ms = i128::from(local_frame) * 1000 * i128::from(timeline.den) / i128::from(timeline.num);
+    // 这一帧在时间线上的时刻（毫秒），再按速率放大。
+    //
+    // **先乘 rate 再取整**：`local * 1000 * den / num` 这一步本来就是整除，
+    // 若先整除再乘 rate，`rate` 为小数时会先丢掉零头。
+    // 这里用一个整数分数近似 rate（千分之一精度）来保住"全程整数"这条既有性质 ——
+    // 延迟表路径本来就是整数运算，不想为了速率把它变成浮点。
+    let ms = if rate == 1.0 {
+        i128::from(local_frame) * 1000 * i128::from(timeline.den) / i128::from(timeline.num)
+    } else {
+        let per_mille = (rate * 1000.0).round() as i128;
+        if per_mille <= 0 {
+            return Err(format!("播放速率太小，量化到千分之一后为 0：{rate}"));
+        }
+        // 乘完再除，顺序与上面那条一致。
+        i128::from(local_frame) * 1000 * i128::from(timeline.den) * per_mille
+            / (i128::from(timeline.num) * 1000)
+    };
     let ms = if loop_source {
         ms.rem_euclid(total)
     } else {
@@ -1178,6 +1331,34 @@ pub fn source_frame_looped(
         return Ok(raw);
     };
     // `rem_euclid` 而不是 `%`：负数取模在 Rust 里是负数，而我们要的是"回到圈里"。
+    Ok(raw.rem_euclid(count))
+}
+
+/// [`source_frame_looped`] 的**带速率**版本（D24）。
+///
+/// 只把"换算出 `raw`"那一步换成 [`source_frame_at_rate`]，循环那一段逐字不变 ——
+/// 于是 `rate == 1.0` 时与 [`source_frame_looped`] **逐字节等价**
+/// （`source_frame_at_rate` 内部就走原路）。
+///
+/// **循环与速率可以叠**：`rate=2.0` + `loop_source=true` = "两倍速放这张动图，
+/// 放到结尾回开头"。取模发生在速率换算**之后**，所以循环周期按素材帧数算 ——
+/// 与"素材是个圈"的语义一致（速率只改变走圈多快）。
+pub fn source_frame_looped_rate(
+    source_in: Frame,
+    local_frame: Frame,
+    rate: f64,
+    timeline: &TimebaseDto,
+    asset: &TimebaseDto,
+    frame_count: Option<Frame>,
+    loop_source: bool,
+) -> Result<Frame, String> {
+    let raw = source_frame_at_rate(source_in, local_frame, rate, timeline, asset)?;
+    if !loop_source {
+        return Ok(raw);
+    }
+    let Some(count) = frame_count.filter(|count| *count > 0) else {
+        return Ok(raw);
+    };
     Ok(raw.rem_euclid(count))
 }
 
@@ -1550,6 +1731,195 @@ mod tests {
         );
     }
 
+    // ---- D24：播放速率 ----
+
+    /// `rate = 1.0` 必须与不带速率那条**逐字节等价**。
+    ///
+    /// 这是全仓最贵的不变量（老工程不许动），所以它是这一组的**第一条**。
+    #[test]
+    fn 速率_1_0_与不带速率逐字节一致() {
+        let tl = tb(30, 1);
+        let asset = tb(30, 1);
+        for local in 0..60 {
+            assert_eq!(
+                source_frame_at(7, local, &tl, &asset).unwrap(),
+                source_frame_at_rate(7, local, 1.0, &tl, &asset).unwrap(),
+                "rate=1.0 在 local={local} 处应当与 source_frame_at 相同"
+            );
+        }
+        // 循环那条同理。
+        for local in 0..60 {
+            assert_eq!(
+                source_frame_looped(3, local, &tl, &asset, Some(10), true).unwrap(),
+                source_frame_looped_rate(3, local, 1.0, &tl, &asset, Some(10), true).unwrap(),
+                "rate=1.0 的循环在 local={local} 处应当相同"
+            );
+        }
+        // 延迟表那条同理。
+        let delays = [40u32, 60, 100];
+        for local in 0..40 {
+            assert_eq!(
+                source_frame_at_delays(0, local, &tl, &delays, true).unwrap(),
+                source_frame_at_delays_rate(0, local, 1.0, &tl, &delays, true).unwrap(),
+                "rate=1.0 的延迟表在 local={local} 处应当相同"
+            );
+        }
+    }
+
+    /// 两倍速：30 个输出帧应当吃掉 60 个源帧。
+    ///
+    /// 这是 D24 的核心判据 —— 改之前"要读多少源帧"被 `end - start` 绑死，
+    /// 现在由 `rate` 单独决定。
+    #[test]
+    fn 速率_2_0_吃两倍源帧() {
+        let tl = tb(30, 1);
+        let asset = tb(30, 1);
+        let at = |local: i64| source_frame_at_rate(100, local, 2.0, &tl, &asset).unwrap();
+
+        assert_eq!(at(0), 100, "第 0 帧取 source_in");
+        assert_eq!(at(1), 102, "每前进 1 个输出帧，素材前进 2 帧");
+        assert_eq!(at(15), 130);
+        assert_eq!(at(29), 158, "第 29 帧应当在 source_in + 58 处");
+
+        // **反向**：原速必须只前进 1 帧 —— 否则上面那条可能只是"到处都 ×2"。
+        let plain = |local: i64| source_frame_at(100, local, &tl, &asset).unwrap();
+        assert_eq!(plain(29), 129, "原速第 29 帧应当只到 +29");
+        assert_ne!(at(29), plain(29), "两倍速与原速必须真的不同");
+    }
+
+    /// 半速：30 个输出帧只吃掉 15 个源帧。
+    #[test]
+    fn 速率_0_5_吃一半源帧() {
+        let tl = tb(30, 1);
+        let asset = tb(30, 1);
+        let at = |local: i64| source_frame_at_rate(0, local, 0.5, &tl, &asset).unwrap();
+        assert_eq!(at(0), 0);
+        assert_eq!(at(1), 0, "半速时每两帧才走一格");
+        assert_eq!(at(2), 1);
+        assert_eq!(at(3), 1);
+        assert_eq!(at(29), 14, "第 29 帧 → floor(29 × 0.5) = 14");
+    }
+
+    /// **不累积**：每一帧都从 `local` 独立算起，而不是"上一帧 + rate"。
+    ///
+    /// 累积会把浮点误差一帧帧攒起来。这里用 1.25 倍速（二进制不可精确表示的小数）
+    /// 走 400 帧，若实现是累积的，误差会明显偏离"独立换算"的结果。
+    #[test]
+    fn 速率_不累积浮点误差() {
+        let tl = tb(30, 1);
+        let asset = tb(30, 1);
+        for local in [1i64, 37, 100, 243, 400] {
+            let got = source_frame_at_rate(0, local, 1.25, &tl, &asset).unwrap();
+            let want = (local as f64 * 1.25).floor() as i64;
+            assert_eq!(
+                got, want,
+                "local={local}：应当是独立换算 {want}，而不是累积出来的 {got}"
+            );
+        }
+    }
+
+    /// 循环与速率可以叠：速率改变走圈快慢，周期仍是素材帧数。
+    #[test]
+    fn 速率与循环可以叠() {
+        let tl = tb(30, 1);
+        let asset = tb(30, 1);
+        // 素材 10 帧、两倍速、从 0 进圈。
+        let at = |local: i64| {
+            source_frame_looped_rate(0, local, 2.0, &tl, &asset, Some(10), true).unwrap()
+        };
+        assert_eq!(at(0), 0);
+        assert_eq!(at(1), 2);
+        assert_eq!(at(4), 8);
+        assert_eq!(at(5), 0, "第 5 帧走到 10，绕回 0");
+        assert_eq!(at(6), 2, "绕回后继续按两倍速走");
+        // 10 帧素材、两倍速 ⇒ 5 个输出帧一圈。
+        assert_eq!(at(10), 0, "第 10 帧应当在第 2 圈的起点");
+    }
+
+    /// 延迟表（动图）上的速率：按毫秒查表，速率把时刻放大。
+    #[test]
+    fn 速率对延迟表生效() {
+        let tl = tb(30, 1);
+        // 三帧、每帧 100ms ⇒ 一圈 300ms。
+        let delays = [100u32, 100, 100];
+        // 原速：local=0 → 0ms → 第 0 帧；local=3 → 100ms → 第 1 帧。
+        assert_eq!(
+            source_frame_at_delays_rate(0, 0, 1.0, &tl, &delays, true).unwrap(),
+            0
+        );
+        assert_eq!(
+            source_frame_at_delays_rate(0, 3, 1.0, &tl, &delays, true).unwrap(),
+            1
+        );
+        // 两倍速：local=3 的时刻被放大到 200ms → 第 2 帧。
+        assert_eq!(
+            source_frame_at_delays_rate(0, 3, 2.0, &tl, &delays, true).unwrap(),
+            2,
+            "两倍速下第 3 帧应当走到表里的第 2 格"
+        );
+        // 反向：同一个 local，两倍速与半速必须不同。
+        assert_ne!(
+            source_frame_at_delays_rate(0, 3, 2.0, &tl, &delays, true).unwrap(),
+            source_frame_at_delays_rate(0, 3, 0.5, &tl, &delays, true).unwrap()
+        );
+    }
+
+    /// 坏速率要**报错**，不是悄悄当成 1.0。
+    ///
+    /// 静默兜底比报错危险得多：用户设了 `rate = 0` 期望"定格"，
+    /// 若被当成原速，画面会照常播 —— 而没有任何一处会说"你要的那个没生效"。
+    #[test]
+    fn 坏速率要报错() {
+        let tl = tb(30, 1);
+        let asset = tb(30, 1);
+        for bad in [0.0, -1.0, -0.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                source_frame_at_rate(0, 0, bad, &tl, &asset).is_err(),
+                "速率 {bad} 应当报错"
+            );
+            assert!(
+                source_frame_at_delays_rate(0, 0, bad, &tl, &[100], true).is_err(),
+                "延迟表路径上速率 {bad} 也应当报错"
+            );
+        }
+        // 合法边界：极小正数仍然算合法（不是 0）。
+        assert!(source_frame_at_rate(0, 0, 0.001, &tl, &asset).is_ok());
+    }
+
+    /// 缺省的 `source_rate` 是 1.0，且**老工程 JSON 里没有这个键也能解析**。
+    #[test]
+    fn 缺省速率是原速() {
+        let json = r#"{"asset_id":"a","source_in":5}"#;
+        let parsed: SourceRef = serde_json::from_str(json).expect("老 JSON 应当能解析");
+        assert_eq!(parsed.source_rate, 1.0, "缺省必须是原速");
+        assert_eq!(parsed.source_in, 5);
+
+        // **反向**：写了 2.0 就得是 2.0 —— 否则上面那条可能只是"永远给 1.0"。
+        let json = r#"{"asset_id":"a","source_in":5,"source_rate":2.0}"#;
+        let parsed: SourceRef = serde_json::from_str(json).expect("带速率的 JSON 应当能解析");
+        assert_eq!(parsed.source_rate, 2.0);
+    }
+
+    /// 原速序列化时**不该写出多余字段**……但它会写。
+    ///
+    /// 这一条**记录现状**而不是表达期望：`source_rate` 没有 `skip_serializing_if`，
+    /// 所以往返一次会把 `"source_rate":1.0` 加进 JSON。老工程**读**没问题
+    /// （缺省 1.0），但"写回去多一个键"会让字节级比对失败。
+    /// 若将来要求"重新保存的老工程逐字节不变"，就得加 `skip_serializing_if`。
+    #[test]
+    fn 原速会写出_source_rate_键_记录现状() {
+        let value = SourceRef {
+            asset_id: "a".to_string(),
+            source_in: 0,
+            source_rate: 1.0,
+        };
+        let json = serde_json::to_string(&value).unwrap();
+        assert!(
+            json.contains("source_rate"),
+            "现状是会写出来的（{json}）—— 若改成不写，请同步改这条测试与 CHANGELOG"
+        );
+    }
+
     #[test]
     fn 迁移梯子的末端是当前版本() {
         // 梯子现在是三级：v1 -> v2 -> v3 -> v4。
@@ -1750,6 +2120,7 @@ mod tests {
         with_source.source = Some(SourceRef {
             asset_id: "a".to_string(),
             source_in: 0,
+            source_rate: 1.0,
         });
         assert!(!with_source.is_adjustment(), "有素材 → 实拍片段");
 
@@ -2170,6 +2541,7 @@ mod v2_tests {
         value.source = asset.map(|asset_id| SourceRef {
             asset_id: asset_id.to_string(),
             source_in: 0,
+            source_rate: 1.0,
         });
         value
     }

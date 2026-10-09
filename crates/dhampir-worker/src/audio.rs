@@ -101,6 +101,28 @@ pub fn samples_in_range(
     Ok(end.saturating_sub(start))
 }
 
+/// 把"时间线上的帧数"按播放速率放大成"素材上的帧数"（D24）。
+///
+/// **向下取整**，与契约里 [`source_frame_at_rate`] 同一个方向 ——
+/// 两处必须同方向，否则音频与视频在边界帧上会差一帧。
+///
+/// `rate == 1.0` 时**原样返回**：既保证老工程逐字节不变，
+/// 也避免给最常见的那条路引入浮点。
+///
+/// 非有限或非正的 rate 在这里**退回原速**而不是报错：校验归契约层
+/// （`SourceRef::source_rate` 的边界那一条），计划层已经在别处拦过一道；
+/// 在这里再 panic 一次只会把"一个坏字段"升级成"整个出片崩掉"。
+fn rate_scaled_frames(frames: Frame, rate: f64) -> Frame {
+    if rate == 1.0 || !rate.is_finite() || rate <= 0.0 {
+        return frames;
+    }
+    let scaled = (frames as f64) * rate;
+    if !scaled.is_finite() {
+        return frames;
+    }
+    scaled.floor().clamp(i64::MIN as f64, i64::MAX as f64) as i64
+}
+
 /// 时间线上的一段音频：**在输出轨上占哪一段、从素材的哪个采样点开始读**。
 ///
 /// 两套坐标都在这里，因为"同源求值"这句话要能核对：
@@ -131,6 +153,24 @@ pub struct AudioSegment {
     ///
     /// **是"起始点"，不是"起点"** —— 这个采集点之前的声音不会被这一趟用到。
     pub source_start_sample: i64,
+    /// 这一段的**播放速率**（D24）。`1.0` = 原速。
+    ///
+    /// # 它决定"要读多少素材"
+    ///
+    /// 这一段在输出轨上占 `output_samples` 个采样点，而从素材要读的是
+    /// **`output_samples × source_rate`** 个采样点 —— 与画面同一个口径
+    /// （画面是"输出帧数 × rate 个源帧"）。
+    ///
+    /// 所以变速必须**两边同时做**：只改画面不改声音，就是"画面快进了、声音还在原速"，
+    /// 而两者**各自的时长都对**，于是没有任何一处报错 —— 下游报的"声画分家"正是这个。
+    ///
+    /// # 音调怎么办
+    ///
+    /// `rate != 1.0` 时**音调会跟着变**（那正是"快放"的听感，与录像带快进一致）。
+    /// 要"变速不变调"得再上一层 `atempo` 类的处理 —— 那是**另一个特性**，
+    /// 不在 D24 里；D24 只保证"画面与声音取自同一段时间"，
+    /// 也就是**不静默地分家**。
+    pub source_rate: f64,
     /// 这一段的增益（线性倍数，1.0 = 原样）。
     ///
     /// # 为什么带增益而不是"混音时再乘"
@@ -300,10 +340,19 @@ pub fn plan_audio(
 
             // 「同源求值」的落点：起点 = source_in 的**时间** + 片段内偏移的**时间**。
             // 视频那边取的是同一个时间点、再量化到素材的帧；音频不量化。
+            // 「同源求值」的落点：起点 = source_in 的**时间** + 片段内偏移的**时间**。
+            // 视频那边取的是同一个时间点、再量化到素材的帧；音频不量化。
+            //
+            // **片段内偏移要乘 rate**（D24）：变速片段上，"时间线上过了 n 帧"
+            // 对应"素材里过了 n × rate 帧"。漏掉这一项，声音会从素材的**原速位置**
+            // 开始读，而画面已经跑到前面去了 —— 就是下游说的"声画分家"，
+            // 且两边时长都对，所以没有一处会报错。
+            let in_clip = low.saturating_sub(layer.start);
+            let in_clip_scaled = rate_scaled_frames(in_clip, source.source_rate);
             let source_start_sample =
                 sample_at_frame(source.source_in, asset_timebase, AUDIO_SAMPLE_RATE)?
                     .saturating_add(sample_at_frame(
-                        low.saturating_sub(layer.start),
+                        in_clip_scaled,
                         timebase,
                         AUDIO_SAMPLE_RATE,
                     )?);
@@ -322,6 +371,7 @@ pub fn plan_audio(
                 output_start_sample,
                 output_samples,
                 source_start_sample,
+                source_rate: source.source_rate,
                 // 契约里每层增益在 `Layer.gain`（默认 1.0），再乘**轨道的母线增益**
                 // （`TrackV2.gain`，默认也是 1.0）。两者相乘 —— 图层是"这一段多响"，
                 // 轨道是"这一整条一起调"。
@@ -389,7 +439,16 @@ pub fn video_source_frame_at(
         return Err("这一层没有素材".to_string());
     };
     let local = frame.saturating_sub(layer.start);
-    dhampir_core::timeline::layer::source_frame_at(source.source_in, local, timeline, asset)
+    // **带上 rate**（D24）：这个函数是"音视频取自同一时间点"的判据，
+    // 而变速片段上画面取的是 `local × rate`。这里漏掉的话，
+    // 判据会在画面已经变速时**仍然全绿** —— 那正是"判据没盯住它该盯的东西"。
+    dhampir_core::timeline::layer::source_frame_at_rate(
+        source.source_in,
+        local,
+        source.source_rate,
+        timeline,
+        asset,
+    )
 }
 
 #[cfg(test)]
@@ -437,6 +496,7 @@ mod tests {
             source: Some(SourceRef {
                 asset_id: asset_id.to_string(),
                 source_in,
+                source_rate: 1.0,
             }),
             loop_source: false,
             effects: Vec::new(),

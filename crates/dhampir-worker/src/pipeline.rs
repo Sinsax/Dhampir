@@ -1411,6 +1411,79 @@ fn audio_bytes_per_sample(channels: u16) -> usize {
     4 * usize::from(channels.max(1))
 }
 
+/// 这一段的速率是不是"真的在变速"（D24）。
+///
+/// **原速返回 false 是有意义的**：调用方据此走"与改动前一模一样"的那条路
+/// （不加 `atempo`），于是老工程的音频 argv 不变、输出逐字节不变。
+fn uses_rate(rate: f64) -> bool {
+    rate != 1.0 && rate.is_finite() && rate > 0.0
+}
+
+/// 按速率把"输出采样点数"换成"要从素材读的采样点数"（D24）。
+///
+/// 与画面同一个口径：画面是 `输出帧数 × rate` 个源帧，这里是
+/// `输出采样点数 × rate` 个源采样点。**两边必须用同一个 rate**，否则就是声画分家。
+///
+/// 非有限或非正的 rate 原样返回：校验归契约层，这里再炸一次只会把
+/// "一个坏字段"升级成"整趟出片崩掉"。
+fn rate_scaled_samples(samples: i64, rate: f64) -> i64 {
+    if !uses_rate(rate) {
+        return samples;
+    }
+    let scaled = (samples as f64) * rate;
+    if !scaled.is_finite() {
+        return samples;
+    }
+    scaled.round().clamp(i64::MIN as f64, i64::MAX as f64) as i64
+}
+
+/// 把任意速率拆成 ffmpeg `atempo` 能接受的一串（每级限 [0.5, 100]）。
+///
+/// # 为什么必须拆
+///
+/// `atempo` 单级的取值范围是 **[0.5, 100]**，超出会直接报错。
+/// 而"0.25 倍速"（慢放四倍）是**完全正常的用户意图**，不能因此失败。
+/// 拆法就是把它分解成若干个落在区间里的因子相乘，
+/// 例：`0.25 = 0.5 × 0.5`。
+///
+/// # 超出上界怎么办
+///
+/// 上界 100 已经远超人能用的范围，所以**大于 100 直接报错**，
+/// 不静默钳位 —— 静默钳位会让"设了 200 倍速"悄悄变成"100 倍速"，
+/// 而画面按 200 走、声音按 100 走，正是这一条要消灭的那种静默不一致。
+///
+/// 音调：`atempo` 变速**不变调**（它做的是时间伸缩）。
+/// 这与画面快进是配套的 —— 用户要的是"这一段放快些"，不是"磁带快进的怪声"。
+fn atempo_chain(rate: f64) -> Result<String, String> {
+    if !rate.is_finite() || rate <= 0.0 {
+        return Err(format!("播放速率必须是大于 0 的有限值，实得 {rate}"));
+    }
+    if rate == 1.0 {
+        // 不该走到这里（调用方用 `uses_rate` 拦了），但真走到也不该产出 `atempo=1.0`。
+        return Ok(String::new());
+    }
+    if rate > 100.0 {
+        return Err(format!(
+            "播放速率 {rate} 超出 atempo 单级上界 100；\
+             真要支持这么大的倍速得另想办法，不能静默钳位（画面会按 {rate} 走）"
+        ));
+    }
+    // 慢放：不断乘 0.5 直到落进 [0.5, 100]。
+    let mut left = rate;
+    let mut factors: Vec<f64> = Vec::new();
+    while left < 0.5 {
+        factors.push(0.5);
+        left /= 0.5;
+    }
+    // 剩下的部分必然落在 [0.5, 100] 里（上界前面已经拦过）。
+    factors.push(left);
+    Ok(factors
+        .iter()
+        .map(|f| format!("atempo={f}"))
+        .collect::<Vec<_>>()
+        .join(","))
+}
+
 fn write_silence(
     out: &mut impl Write,
     samples: i64,
@@ -1465,7 +1538,21 @@ fn extract_segment_samples(
 ) -> Result<i64, String> {
     let bytes_per_sample = audio_bytes_per_sample(AUDIO_CHANNELS);
     let start = segment.source_start_sample.max(0);
-    let end = start.saturating_add(segment.output_samples);
+    // **读多少素材**：原速时就是 `output_samples`；变速时要读
+    // `output_samples × rate` 个采样点，再用 `atempo` 压回 `output_samples` 个 ——
+    // 两头一凑，输出轨上占的长度不变，与画面同一个口径（D24）。
+    let source_span = rate_scaled_samples(segment.output_samples, segment.source_rate);
+    let end = start.saturating_add(source_span);
+    // 滤镜链。**原速时逐字不变** —— 走 else 那一支，与改动前完全一样，
+    // 所以老工程的音频 argv 不变（`atempo=1.0` 会白绕一层，还可能动浮点结果）。
+    let filter = if uses_rate(segment.source_rate) {
+        format!(
+            "atrim=start_sample={start}:end_sample={end},asetpts=PTS-STARTPTS,{}",
+            atempo_chain(segment.source_rate)?
+        )
+    } else {
+        format!("atrim=start_sample={start}:end_sample={end},asetpts=PTS-STARTPTS")
+    };
     let mut child = Command::new("ffmpeg")
         .args(["-v", "error"])
         .arg("-i")
@@ -1474,7 +1561,7 @@ fn extract_segment_samples(
             // 只要声音。**不加 -ss**（守卫不许 seek）。
             "-vn",
             "-filter_complex",
-            &format!("atrim=start_sample={start}:end_sample={end},asetpts=PTS-STARTPTS"),
+            &filter,
             "-f",
             AUDIO_PCM_FORMAT,
             "-ac",

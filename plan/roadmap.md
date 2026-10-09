@@ -430,6 +430,23 @@ pkg**，而不是放宽判据 —— 这次没做（不在 0.1.0 产物范围内
 全部实测读数、最小复现工程与命令，见 **`plan/d5-frame-rate-handoff.md`**。
 登记为 **D24**（todo）。
 
+---
+
+## D25：`dhampir-worker` 单测的 scratch 目录串扰（2026-10-09）
+
+**不在任何阶段里**（phase=-）。
+
+`cargo test -p dhampir-worker --lib` **偶发转红**（约 1/5~1/20），红在
+`text_raster::tests::非_ascii_字体路径会被搬到临时_ascii_路径`：
+`造一份源文件: Os { code: 3, kind: NotFound }`。单独跑**次次绿**，所以一度像 flake。
+
+**是真阳性**：`writable_scratch_dir()` 按**进程 id** 生成目录
+（`temp_dir/dhampir-t1-{pid}`），而同一个测试二进制里的测试是**并行线程** ——
+于是两条测试的 `remove_dir_all` 会删掉别的测试正在写的目录。
+
+**与本轮 D24 无关**：用 `git stash` 撤下 `crates/` 全部改动复跑，
+**基线第 5 次就红在同一行**（同一条测试、同一处 panic）。登记为 **D25**（todo）。
+
 ### 推上去之后：Windows 腿抓出两个真缺陷（D23，2026-10-04）
 
 本机是 Linux，所以"CI 12 步全绿"是我**在单平台上**得出的。真推上去跑，`ubuntu-latest`

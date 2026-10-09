@@ -184,6 +184,8 @@ export interface SourceRef {
   asset_id: string;
   /** 素材内起点（帧）。 */
   source_in: number;
+  /** **播放速率**。`1.0` = 原速；`2.0` = 两倍速（同样的输出时长吃掉两倍的源帧）。 */
+  source_rate?: number;
 }
 
 export interface SubtitleStyle {
