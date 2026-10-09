@@ -19,9 +19,9 @@
 - 根因是一串**空格分隔的记号**，每个记号要么是仓库内真实存在的路径（可带 :行号 或 :起-止），
   要么是另一个条目 id。至少一个。
 - 证据是 - 或一串同样形式的真实路径；**status=done 时必须给出至少一个存在的文件**。
-- 计数声明行 <!-- ledger: D=25 A=10 --> 必须与实际条数一致。
+- 计数声明行 <!-- ledger: D=26 A=10 --> 必须与实际条数一致。
 
-<!-- ledger: D=25 A=10 -->
+<!-- ledger: D=26 A=10 -->
 
 ## 缺陷（D）
 
@@ -243,3 +243,13 @@
   验收: 各测试用**各自的** scratch 子目录（现在共用 `temp_dir/dhampir-t1-{pid}`，而同一测试二进制里的测试是**并行线程**，所以两条测试的 `remove_dir_all` 会删掉别人正在写的目录）。判定标准：连跑 30 次 `-p dhampir-worker --lib` 全绿，且把 `remove_dir_all` 去掉后仍有测试能证明确实清理过
   备注: **与本轮 D24 无关**，已用 `git stash` 把 `crates/` 全部改动撤下复跑，**基线第 5 次就红在同一行**（同一条测试、同一处 panic）。属既有的测试串扰，不影响产物
   证据: crates/dhampir-worker/src/text_raster.rs
+
+- [D26] status=done phase=-
+  症状: **CI 从 0.2.0 那条合并提交（`37678202811`）起连续 5 次失败，跨了两天没人看**。最后绿的还是 `37224657376`（`be97c2f`）。两层的失败叠在一起：① 5 处 clippy 报错（`-D warnings` 下全是 error）；② 修完 ① 又露出 Linux 腿上的测试红（Windows 绿、Linux 红）
+  根因: crates/dhampir-worker/src/bin/dhampir.rs:2646
+  验收: `gh run list` 要**全绿且无 deprecation 注解**。两平台四条腿（check-native 的 ubuntu/windows、check-wasm、guard）都过
+  备注: **两条教训，都不是"哪个 lint 该改"那个层次**：
+    (1) **验证命令必须与 CI 的同一条**。我先前用 `cargo check --workspace --all-targets`（0 warning）以为绿了，而 CI 跑的是 `cargo clippy ... -- -D warnings` —— **`cargo check` 不跑 clippy 的 lint**，所以那 5 条一条都不会现形。"我本地是绿的"在不说明**跑的是哪条命令**时是一句没有内容的话。现在一律**按 CI 的顺序整段复跑**。
+    (2) **测试夹具不能写死平台专属路径**。三条测试的反向用例用了 `C:/Windows/Fonts`，在 ubuntu 腿上是必然不存在的路径 ⇒ 判据成了"Windows 绿、Linux 红"的**假回归**。改用当前平台一定存在的目录、或自建夹具。注意这与"平台差异"不同：被测逻辑两平台一致，**只有夹具**挑了 Windows。
+    (3) 附带：`upload-artifact@v5` **仍然是 `node20`**（v6 才是 node24）—— **大版本号 ≠ Node 版本**，要读 `action.yml` 的 `runs.using`。
+  证据: .github/workflows/ci.yml

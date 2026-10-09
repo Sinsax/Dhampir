@@ -456,6 +456,31 @@ pkg**，而不是放宽判据 —— 这次没做（不在 0.1.0 产物范围内
 **与本轮 D24 无关**：用 `git stash` 撤下 `crates/` 全部改动复跑，
 **基线第 5 次就红在同一行**（同一条测试、同一处 panic）。登记为 **D25**（todo）。
 
+## D26：CI 红了两天没人看（2026-10-09，已修）
+
+**不在任何阶段里**（phase=-）。登记为 **D26**（done）。
+
+`gh run list` 看出来 CI **从 0.2.0 那条合并提交起连续 5 次失败**，
+最后绿的还是两天前的 `be97c2f`。两层的失败叠着：
+
+1. **5 处 clippy 报错**（`-D warnings` 下全是 error）；
+2. 修完 ①，又露出**Linux 腿**上的测试红（Windows 绿、Linux 红）。
+
+**这一条的价值不在"改哪个 lint"，而在两条方法教训：**
+
+- **(1) 验证命令必须与 CI 的同一条。** 我先前用 `cargo check --workspace --all-targets`
+  （0 warning）就以为绿了，而 CI 跑的是 `cargo clippy … -- -D warnings` ——
+  **`cargo check` 不跑 clippy 的 lint**，那 5 条一条都不会现形。
+  **"我本地是绿的"在不说明跑的是哪条命令时，是一句没有内容的话。**
+  现在一律**按 CI 的顺序整段复跑**。
+- **(2) 测试夹具不能写死平台专属路径。** 三条测试的反向用例用了 `C:/Windows/Fonts`，
+  在 ubuntu 腿上是**必然不存在**的路径 ⇒ 判据成了"Windows 绿、Linux 红"的**假回归**。
+  注意这与"平台差异"不是一回事：**被测逻辑两平台一致，只有夹具**挑了 Windows。
+- **(3) 附带**：`upload-artifact@v5` **仍然是 `node20`**（v6 才是 node24）——
+  **大版本号 ≠ Node 版本**，要读 `action.yml` 的 `runs.using`。
+
+修法与复核见 `.github/workflows/ci.yml` 的文件头注释。
+
 ### 推上去之后：Windows 腿抓出两个真缺陷（D23，2026-10-04）
 
 本机是 Linux，所以"CI 12 步全绿"是我**在单平台上**得出的。真推上去跑，`ubuntu-latest`
