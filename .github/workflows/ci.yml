@@ -26,6 +26,13 @@
 
 name: CI
 
+# ⚠️ actions 的**大版本要跟得上 runner 的 Node**（2026-10-09 更新）。
+# `actions/checkout@v4` 与 `actions/upload-artifact@v4` 跑在 Node 20 上，
+# 而 runner 已把它强制升到 Node 24 —— 于是每次 CI 都挂一条 deprecation 注解。
+# **注解不是失败**（那两个 job 当时是绿的），但一条常驻的噪音会让人连真的
+# 注解一起忽略掉，所以顺手升到 v5（Node 24）。升的时候核对过
+# `upload-artifact` 的入参在 v5 没变（name / path / if-no-files-found）。
+
 on:
   push:
     branches: [main]
@@ -51,7 +58,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -79,7 +86,7 @@ jobs:
     name: check-wasm + 跨运行时等值
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -112,7 +119,7 @@ jobs:
 
       - name: 上传本次记录
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: records-m0-wasm
           path: records/m0/wasm-tests.json
@@ -122,7 +129,7 @@ jobs:
     name: guard（守卫脚本 4 / 26）
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # 26 个守卫里只有这 4 个能在这台 runner 上跑：其余的要 ffmpeg、真 GPU、
       # 真实浏览器或 records/ 里的取证存档。**这不是"少验一点"** —— 那些在
