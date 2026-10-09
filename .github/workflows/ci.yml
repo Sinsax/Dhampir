@@ -30,8 +30,16 @@ name: CI
 # `actions/checkout@v4` 与 `actions/upload-artifact@v4` 跑在 Node 20 上，
 # 而 runner 已把它强制升到 Node 24 —— 于是每次 CI 都挂一条 deprecation 注解。
 # **注解不是失败**（那两个 job 当时是绿的），但一条常驻的噪音会让人连真的
-# 注解一起忽略掉，所以顺手升到 v5（Node 24）。升的时候核对过
-# `upload-artifact` 的入参在 v5 没变（name / path / if-no-files-found）。
+# 注解一起忽略掉，所以顺手升上去。
+#
+# **别只看大版本号，要去读 `action.yml` 里的 `runs.using`** —— 这里踩了一下：
+# 先升到 `upload-artifact@v5`，注解**照旧**，因为 v5 仍然是 `node20`：
+#
+#     upload-artifact  v5 → node20      v6 → node24      v7 → node24
+#     checkout         v5 → node24      v6 → node24      v7 → node24
+#
+# 所以 checkout v5（已经够）、upload-artifact **v6**（v5 不够）。
+# 两个的入参在各自版本里都核对过（`name` / `path` / `if-no-files-found` 都在）。
 
 on:
   push:
@@ -119,7 +127,7 @@ jobs:
 
       - name: 上传本次记录
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: records-m0-wasm
           path: records/m0/wasm-tests.json
