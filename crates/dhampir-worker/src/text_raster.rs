@@ -3036,8 +3036,19 @@ mod tests {
         let err = font_dir(None, Path::new("font.ttf")).unwrap_err();
         assert!(err.contains("字体目录"), "要有一条人话：{err}");
         // **反向**：给一个真目录就该过。
-        let ok = font_dir(Some(Path::new("C:/Windows/Fonts")), Path::new("x.ttf"));
-        assert!(ok.is_ok(), "存在的目录不该被拦");
+        //
+        // ⚠️ 这里**不能写死 `C:/Windows/Fonts`** —— CI 有一条 ubuntu 腿，
+        // 那种路径在 Linux 上必然不存在，于是这条会变成"在 Windows 上绿、
+        // 在 Linux 上红"的假回归（真踩过：CI 连红两天就是它）。
+        // 用**当前平台**一定存在的目录：临时目录本身。
+        let real_dir = std::env::temp_dir();
+        assert!(
+            real_dir.is_dir(),
+            "前提不成立：临时目录竟然不存在（{}）",
+            real_dir.display()
+        );
+        let ok = font_dir(Some(&real_dir), Path::new("x.ttf"));
+        assert!(ok.is_ok(), "存在的目录不该被拦：{}", real_dir.display());
     }
 
     /// 搬字体的临时文件用完必须删掉（成功那条路）。

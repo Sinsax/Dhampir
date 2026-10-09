@@ -2643,7 +2643,13 @@ mod tests {
         assert_eq!(code, ExitCode::from(2), "这是用法错，退出码该是 2");
 
         // **反向**：真目录必须放行（否则这条判据会把正常用法也拦掉）。
-        args.font_dir = Some("C:/Windows/Fonts".to_string());
+        //
+        // ⚠️ 用**当前平台**一定存在的目录，**不要写死 `C:/Windows/Fonts`** ——
+        // CI 有一条 ubuntu 腿，那种路径在 Linux 上必然不存在，这条就会变成
+        // "Windows 绿、Linux 红"的假回归。
+        let real_dir = std::env::temp_dir();
+        assert!(real_dir.is_dir(), "前提不成立：临时目录竟然不存在");
+        args.font_dir = Some(real_dir.to_string_lossy().to_string());
         assert!(
             resolve_font(&args).is_ok(),
             "存在的目录不该被拦 —— 那样这条判据就成了恒红的假严"
@@ -2716,7 +2722,18 @@ mod tests {
     fn 只给字体目录也算给了字体() {
         let mut args = parse(&argv(&["frame", "--project", "p.json", "--out", "o"])).unwrap();
         args.font_file = None;
-        args.font_dir = Some("C:/Windows/Fonts".to_string());
+        // ⚠️ 这个目录里**必须真有一个字体文件** —— `resolve_font` 除了查目录在不在，
+        // 还查它**空不空**（空目录同样是"按名字找不到"那条静默路）。
+        // 所以**不能拿临时目录顶替**：它是真实存在的空目录，会正确地被判成不合格。
+        //
+        // 也**不能写死 `C:/Windows/Fonts`**：CI 有一条 ubuntu 腿，那条路径在 Linux 上
+        // 不存在，判据就会变成"Windows 绿、Linux 红"的假回归。
+        // 做法：造一个本测试专用的目录，往里放一个**名字像字体**的文件。
+        // 这里只验 CLI 的**参数判定**、不真解析字体，所以空壳文件就够。
+        let scratch = std::env::temp_dir().join(format!("dhampir-fontdir-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).expect("建临时字体目录");
+        std::fs::write(scratch.join("probe.ttf"), b"not a real font").expect("放一个占位字体");
+        args.font_dir = Some(scratch.to_string_lossy().to_string());
         // `resolve_font` 回的是 `--font-file` 那一份（`Option<&Path>`）；
         // "只给目录"时它回 `None` **是**对的 —— 目录那份由求值层按族名解析。
         // 所以这里判的是**它不报错**（不把这条路误判成缺字体）。
@@ -2724,6 +2741,7 @@ mod tests {
             resolve_font(&args).is_ok(),
             "只给 --font-dir 是一条合法用法，不该在这里被拦"
         );
+        let _ = std::fs::remove_dir_all(&scratch);
         // **反向**：两条都没给才是"没给字体"，但那时也不该在**这里**报错
         // （提前出声那一段在出片路径上，见 `run_frame`）。
         args.font_dir = None;
