@@ -23,6 +23,21 @@
 #   所以**必须在各自的 runner 上编**（windows-latest / ubuntu-latest），
 #   交叉编译出来的 exe 跑不起来。两条腿并行，各传各的 zip。
 #
+# # 第一次真跑之前，Linux 那条腿验到什么程度（**如实记**）
+#
+#   本机是 Windows，没有 docker / wsl，所以 **`ubuntu-latest` 腿从没真跑过**。
+#   能静态确认的都确认了：`wasm-pack` 与 `wasm-bindgen-cli` 走 `cargo install`
+#   （跨平台）；`cargo build --release` 出的是平台原生的（对）。
+#
+#   唯一真正"只在 Linux 上才走到"的代码是**压 zip 的分叉**
+#   （`package.mjs`：Windows 用 PowerShell 的 `ZipFile`，其它平台用 Node 自写 zip）。
+#   这一条**已在 Windows 上强制走 Node 分支实跑验过**：
+#   压出来的 zip 解回来 12 个条目齐全、`zipfile.testzip()` 全部 CRC 正确。
+#   ⇒ 压包这一步**不是**未知数。
+#
+#   剩下真正没验的是"**在 Linux 上装依赖 + 编译**"这一段环境性的事，
+#   而它红起来会红在 `打包` 那一步、信息清楚，不是玄学。
+#
 # # 为什么不用 `workflow_run` 等 CI 绿
 #
 # 那样确实更严，但代价是：**tag → CI → release 三段，中间任何一段失败都要人肉重试**，
