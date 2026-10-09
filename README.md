@@ -45,21 +45,43 @@
 所以**老工程的字幕像素会变**。下游若做过视觉基线/截图回归，**必须重拍基线**（口径不用改）。
 完整清单见 [CHANGELOG.md](CHANGELOG.md) 的 0.2.0 段。
 
-发布流程：
+发布流程（**2026-10-09 起自动化**）：
 
 ```bash
-# 1. 改 [workspace.package] version → 2. 打包（产出稳定名 + sha256 侧车 + manifest）
-node scripts/package.mjs
-# 3. 打 tag（tag 名与产品版本对齐）
-git tag -a v0.2.0 -m 'dhampir v0.2.0' && git push origin main --tags
-# 4. 挂 Release：两个平台的稳定名各一份 + 各自的 .sha256.txt + .manifest.json
-#    dist/dhampir-0.2.0-win32-x64.zip   ← 在 Windows 上打包得到
-#    dist/dhampir-0.2.0-linux-x64.zip   ← 在 Linux 上打包得到（2026-10-04 起）
+# 1. 改 [workspace.package] version，并在 CHANGELOG.md 里写上 `## [<新版本>] …` 一段
+# 2. 推一个 tag —— 其余全部由 .github/workflows/release.yml 做掉：
+git tag -a v0.3.0 -m 'dhampir v0.3.0' && git push origin v0.3.0
+#    门控（fmt / clippy / test / 守卫 / tag↔Cargo.toml 版本一致）
+#      → 两条腿各自原生构建 + 打包（win32-x64 / linux-x64）
+#      → 建 Release，正文取自 CHANGELOG 那一段，附 zip + .sha256.txt + .manifest.json
 ```
 
-⚠️ **产物是各平台在各自机器上构建的，不是交叉编译**：`node scripts/package.mjs`
-按 `process.platform` 决定产物名，且它要真跑 `cargo build --release` 与 `wasm-pack`。
-所以**两个 zip 得在两台机器上各打一次** —— 别指望一条命令出两份。
+**手工打包仍然可用**（离线、调试用）：`node scripts/package.mjs`，
+产出稳定名 + sha256 侧车 + manifest。
+
+### 为什么发布在 CI 里做
+
+手工那条路上有四个真问题，自动化把每一个都从**机制上**堵掉了：
+
+| 手工打包 | CI 打包 |
+|---|---|
+| 产物取决于**开发机的临时状态**（PATH 上的 ffmpeg/wasm-pack、残留 `dist/`、系统字体） | runner 每次干净 |
+| `VERSION` 里的 `git=` 是**打包那一刻的 HEAD**，不保证等于 tag | 就是 tag 指向的提交 |
+| 「忘了先跑测试就打包」没有机制拦得住 | `needs: gate`，测试红就不发布 |
+| 只有一台机器、一个人能发 | 谁都能点 |
+
+⚠️ **产物是各平台在各自 runner 上原生构建的，不是交叉编译**：产物里的
+`bin/dhampir(.exe)` 是**目标平台的原生可执行**（Windows 是 PE32+，Linux 是 ELF），
+交叉编译出来的 exe 在 Windows 上跑不起来。
+
+所以发布矩阵是 **[windows-latest, ubuntu-latest] 两条腿，各自产出各自的 zip**
+（`dhampir-<版本>-win32-x64.zip` / `dhampir-<版本>-linux-x64.zip`）——
+`package.mjs` 按 `process.platform` 决定名字，两个名字天然不撞，可以挂在同一个 Release 上。
+
+**注意 `check-native` 的 Linux 腿不是"多余的步骤"**：它跑的是
+`fmt / clippy / check / test`，判据是「代码在 Linux 上也对」——
+与发布产物无关，删了它会丢判据（2026-10-09 那次 CI 连红两天，
+第二层就是**只有 Linux 腿**能抓到的"测试写死了 `C:/Windows/Fonts`"）。
 
 ---
 

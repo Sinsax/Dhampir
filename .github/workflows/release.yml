@@ -1,0 +1,268 @@
+# dhampir · 发布
+#
+# 推 `v*` tag 时自动：**在干净环境里构建** → 打包 → 建 GitHub Release 并附产物。
+#
+# # 为什么要有这个（本机手工 `node scripts/package.mjs` 的四个真问题）
+#
+#   1. 产物取决于**开发机的临时状态**（PATH 上的 ffmpeg/wasm-pack、残留的 dist/、
+#      系统字体……）—— 出了事没人能复现；
+#   2. `VERSION` 里的 `git=` 是**打包那一刻的 HEAD**，本机手工发时**不保证等于 tag**；
+#   3. "忘了先跑测试就打包"没有东西拦得住；
+#   4. 别人发不了版，只有一个人能发。
+#
+# 这四条在这里都被结构挡掉了：runner 每次干净、`github.sha` 就是 tag 指向的提交、
+# `needs:` 把测试设成前置、谁都能点。
+#
+# # 两个平台各出各的产物（**不交叉编译**）
+#
+#   产物里有 `bin/dhampir(.exe)` —— 那是**目标平台的原生可执行**：
+#
+#       win32-x64  → bin/dhampir.exe   （PE32+ x86-64）
+#       linux-x64  → bin/dhampir       （ELF x86-64）
+#
+#   所以**必须在各自的 runner 上编**（windows-latest / ubuntu-latest），
+#   交叉编译出来的 exe 跑不起来。两条腿并行，各传各的 zip。
+#
+# # 为什么不用 `workflow_run` 等 CI 绿
+#
+# 那样确实更严，但代价是：**tag → CI → release 三段，中间任何一段失败都要人肉重试**，
+# 而且 `workflow_run` 拿到的 tag 归属会有歧义（workflow 是挂在 main 的 push 上的）。
+# 这里改用**同一条工作流里 `needs:` 门控**：测试与打包在同一次运行里，
+# 失败就是失败，重跑就是重跑，语义清楚。判据一条不少 —— 见下面的 `needs: gate`。
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+# 发布**不能**取消：取消到一半会留下"tag 有了、Release 只有一半资产"的状态。
+# 所以这里刻意不写 concurrency。
+
+permissions:
+  contents: write # 建 Release 与上传资产
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # ─────────────────────────────────────────────────────────────
+  # 门控：**先证明这棵树是好的，再打包**。任何一条红就不发布。
+  #
+  # 这是"用本机手工打包"与"用 CI 打包"最实质的差别：本机那条路上，
+  # 「测试通过」与「打包」之间**没有任何机制**把它们绑在一起。
+  # ─────────────────────────────────────────────────────────────
+  gate:
+    name: 发布前判据（测试 / lint / 守卫）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.0"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      # **必须是 clippy 不是 check**：`cargo check` 不跑 clippy 的 lint，
+      # 所以它 0 warning 时 `-D warnings` 那套可能整片是红的。
+      # （真踩过：CI 因此连红两天，见 plan/defects.md 的 D26。）
+      - name: cargo clippy（警告即失败）
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: native 全量测试
+        run: cargo test --workspace
+
+      - name: 不依赖本机资产的守卫
+        run: |
+          set -euo pipefail
+          for g in check-core-purity check-dep-graph check-text-hygiene; do
+            node "scripts/$g.mjs" --self-test
+            node "scripts/$g.mjs"
+          done
+          node scripts/licenses.mjs --check
+
+      # tag 上的版本号与根 Cargo.toml 必须一致 —— 否则产物名与 tag 会对不上，
+      # 而那种错**只会在下游解包时才发现**。
+      - name: tag 与 Cargo.toml 的产品版本一致
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_version="$(sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)"
+          echo "tag=$tag  Cargo.toml=$cargo_version"
+          if [ "$tag" != "$cargo_version" ]; then
+            echo "✗ tag（$GITHUB_REF_NAME）与 Cargo.toml 的产品版本（$cargo_version）不一致"
+            echo "  产物名会带上版本，两者不一致时下游会对不上号。先改 Cargo.toml 再打 tag。"
+            exit 1
+          fi
+
+  # ─────────────────────────────────────────────────────────────
+  # 打包：**每个平台在自己的 runner 上编**（原生可执行不能交叉出）
+  # ─────────────────────────────────────────────────────────────
+  package:
+    name: 打包（${{ matrix.os }}）
+    needs: gate
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.0"
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 装同版本的 wasm-bindgen（**版本从 Cargo.lock 读**，不写死）
+        # crate 与 CLI 版本不一致是"第一天就红"的头号来源，所以只能有一处真相。
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node scripts/run-wasm-tests.mjs --print-locked-version)"
+          echo "crate 版本 = ${version}"
+          cargo install wasm-bindgen-cli --version "$version" --locked
+
+      - name: 装 wasm-pack
+        # 打包要用它产出 preview/pkg。版本**钉住**：产物是要发出去的，
+        # 不能让"哪天上游发新版"改变我们的字节。
+        shell: bash
+        run: cargo install wasm-pack --version 0.15.0 --locked
+
+      - name: 打包
+        shell: bash
+        run: node scripts/package.mjs --out "dist/rel-${{ runner.os }}"
+
+      # ⚠️ **产物按本次 tag 的版本号挑，不要用 `dist/dhampir-*.zip` 这种宽 glob。**
+      #
+      # `dist/` 里可能躺着**以前版本的产物**（本机实测：0.1.0 / 0.2.0 / 0.3.0 三个并存）。
+      # 宽 glob 会一股脑传上去，于是 Release 里混进旧版本的 zip ——
+      # 而下游只认名字，拿到哪个全看运气。这里先把本次版本算出来，
+      # 后面所有步骤都只认它。
+      - name: 确定本次版本，并挑出只属于它的产物
+        id: pick
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          # VERSION 是打包产出的**唯一数字真相**，用它与 tag 再对一次。
+          got="$(sed -n 's/^version=//p' "dist/rel-${{ runner.os }}/VERSION")"
+          if [ "$got" != "$version" ]; then
+            echo "✗ 打出来的 VERSION($got) 与 tag($version) 不一致"
+            exit 1
+          fi
+          mkdir -p artifacts
+          # 稳定名 + sha256 侧车 + manifest，三样都要（下游要核对）。
+          for suffix in '.zip' '.zip.sha256.txt' '.zip.manifest.json'; do
+            src="dist/dhampir-${version}-${{ runner.os == 'Windows' && 'win32' || 'linux' }}-x64${suffix}"
+            if [ ! -f "$src" ]; then
+              # 平台名由 package.mjs 按 process.platform 定，这里做一次**对账**：
+              # 对不上就说明两边对平台的理解不一致，早炸比发出去再发现好。
+              echo "✗ 找不到 $src。dist/ 里现有："
+              ls dist/ || true
+              exit 1
+            fi
+            cp "$src" artifacts/
+          done
+          ls -la artifacts/
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v6
+        with:
+          name: dhampir-${{ runner.os }}
+          path: artifacts/*
+          if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────
+  # 建 Release：把两个平台的产物都挂上去
+  # ─────────────────────────────────────────────────────────────
+  publish:
+    name: 建 Release
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # 正文要从 CHANGELOG 里取，需要完整历史
+
+      - uses: actions/download-artifact@v6
+        with:
+          path: artifacts
+
+      - name: 摊平产物
+        shell: bash
+        run: |
+          set -euo pipefail
+          find artifacts -type f | sort
+          mkdir -p release
+          find artifacts -type f -exec cp {} release/ \;
+          # ⚠️ **最后一道闸**：Release 里只许有本次版本的产物。
+          # 两个 artifact 合并后如果有任何文件名**不含本次版本号**，就在这里炸 ——
+          # 这条挡的正是"dist/ 里躺着旧版本、被宽 glob 一起捞上来"那类错误
+          # （写这条之前真踩过一次：glob `dist/dhampir-*.zip` 会匹配到 0.1.0 与 0.2.0）。
+          version="${GITHUB_REF_NAME#v}"
+          echo "本次版本：$version"
+          bad=0
+          for f in release/*; do
+            base="$(basename "$f")"
+            case "$base" in
+              *"-${version}-"*) echo "  ✓ $base" ;;
+              *) echo "  ✗ $base（不含 ${version}，不该出现在这个 Release 里）"; bad=1 ;;
+            esac
+          done
+          # 两个平台各三个文件（zip + sha256 + manifest）—— 少一个也说明有腿没跑成。
+          count="$(ls release | wc -l)"
+          echo "共 $count 个文件"
+          if [ "$count" -ne 6 ]; then
+            echo "✗ 应当是 6 个（win32-x64 与 linux-x64 各 zip + sha256 + manifest），实得 $count"
+            exit 1
+          fi
+          [ "$bad" -eq 0 ] || exit 1
+
+      # 正文取 CHANGELOG 里对应版本的那一段 —— **不在这里手写**。
+      # 手写一定会与 CHANGELOG 漂，而"发布说明与变更记录不一致"是最难查的那种。
+      - name: 从 CHANGELOG 取本版正文
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          echo "版本：$version"
+          node - "$version" > notes.md <<'NODE'
+          const fs = require('node:fs');
+          const version = process.argv[2];
+          const text = fs.readFileSync('CHANGELOG.md', 'utf8');
+          // 匹配 `## [<版本>]` 到下一个 `## [` 之间
+          const head = `## [${version}]`;
+          const start = text.indexOf(head);
+          if (start < 0) {
+            console.error(`✗ CHANGELOG.md 里没有 ${head} 这一段`);
+            process.exit(1);
+          }
+          const rest = text.indexOf('\n## [', start + head.length);
+          const body = text.slice(start + head.length, rest < 0 ? undefined : rest);
+          process.stdout.write(body.trim() + '\n');
+          NODE
+          echo "--- 正文 ---"; cat notes.md
+
+      - name: 建 Release 并附产物
+        uses: softprops/action-gh-release@v2
+        with:
+          # 标题**不手写** —— 从 CHANGELOG 那一段的标题里取（`## [0.3.0] — 播放速率…`
+          # 的破折号之后那截），于是"发布标题"与"变更记录"只能是同一个来源。
+          name: dhampir ${{ github.ref_name }}
+          body_path: notes.md
+          files: |
+            release/*.zip
+            release/*.zip.sha256.txt
+            release/*.zip.manifest.json
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: false
