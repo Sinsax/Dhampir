@@ -595,7 +595,7 @@ pub fn validate_project_doc(doc: &ProjectDoc, effects: &[EffectSpec]) -> DocIssu
                         previous = stop.at;
                     }
                 }
-                if has_asset && index_of.get(mask.asset_id.as_str()).is_none() {
+                if has_asset && !index_of.contains_key(mask.asset_id.as_str()) {
                     errors.push(Issue::new(
                         "unknown_asset",
                         &format!("{base}.mask.asset_id"),

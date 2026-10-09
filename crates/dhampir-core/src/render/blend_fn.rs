@@ -106,6 +106,12 @@ impl BlendFnRenderer {
     }
 
     /// 跑一趟：`dst` 是已经画好的底、`src` 是这一层单独渲出来的像素，结果写进 `dest`。
+    ///
+    /// ⚠️ `too_many_arguments`：与 `compose.rs` 的 `compose` 同一处理 —— **allow，不拆结构体**。
+    /// 8 个参数里前 4 个（`device` / `queue` / `encoder` / 下文三个视图）是 wgpu 的**调用形状**，
+    /// 不能合并；后几个（`dst` / `src` / `mode` / `dest`）是**一张图里的三个不同角色**，
+    /// 合并成结构体只会把"哪个是底、哪个是本层、画到哪"藏进字段名里，读调用点反而更绕。
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
         device: &wgpu::Device,

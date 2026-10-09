@@ -901,6 +901,13 @@ fn paint_one(
 
 /// 真正干活的那一段。**栅格化器是参数**：于是「落点、叠加、问题、计数」这四件事
 /// 能在不起 ffmpeg 的前提下被单测（与 text_raster 里那个缓存缝同一个理由）。
+///
+/// ⚠️ `too_many_arguments`：与 `render/blend_fn.rs`、`render/compose.rs` **同一处理 ——
+/// allow，不拆结构体**。这几个参数是**四个互相独立的输入**（栅格化器 / 字体解析 /
+/// 字体目录 / 目标图）加三个账（overlay / 日志 / 计数），语义各自独立；
+/// 为了凑 clippy 的 7 造个结构体，只会让「这次画的是谁、画到哪」多一层跳转，
+/// **收益是关掉 lint，代价是让这里更难读**。
+#[allow(clippy::too_many_arguments)]
 fn paint_lines(
     rasterize: &mut impl FnMut(&TextRasterKey) -> Result<Rc<TextBitmap>, String>,
     // 按样式解析出字体文件的闭包（`OverlayPainter::font_for` 的借用版）——
@@ -1042,9 +1049,10 @@ mod font_reason_tests {
     use dhampir_core::overlay::TextStyle;
 
     fn style_with(family: Option<&str>) -> TextStyle {
-        let mut style = TextStyle::default();
-        style.family = family.map(str::to_string);
-        style
+        TextStyle {
+            family: family.map(str::to_string),
+            ..Default::default()
+        }
     }
 
     /// **判据（T4）**：`subtitle_font_missing` 那条消息要**点出真正的原因**。

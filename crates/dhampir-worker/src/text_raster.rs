@@ -964,8 +964,6 @@ pub fn font_dir(font_dir: Option<&Path>, font_file: &Path) -> Result<FontDir, St
 }
 
 /// 把这一行文本落成一份**单条字幕的 SRT**，给 `subtitles=` 用。
-
-/// 把这一行文本落成一份**单条字幕的 SRT**，给 `subtitles=` 用。
 ///
 /// # 为什么不直接写文本文件（`drawtext` 那种做法）
 ///
