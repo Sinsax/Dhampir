@@ -2543,6 +2543,38 @@ mod plan_tests {
         );
     }
 
+    /// §20 的前置守卫：`noise` 的参数**原样**搬到 `ColorMaskParams`，一个字都不放大。
+    ///
+    /// ⚠️ 为什么要单独钉这一条（2026-10-11）：下游把 `noise` 从"白纱"改造成"真黑白噪点"时，
+    /// 在真实 GPU 上**反解出增量比 `amount` 该给的大了一个数量级**（`amount=0.08` 观测到
+    /// `+171` 的跳变，而按 `(n-0.5)*255*amount` 最多只有 ±10）。
+    /// 本用例把"参数有没有被谁乘过"这件事**在纯函数层钉死** ——
+    /// 如果这里是对的，那多出来的放大只能来自**渲染路径**，排查范围立刻缩到一处；
+    /// 如果这里是错的，那就是这里改坏了一处映射，与 GPU 无关。
+    ///
+    /// ⚠️ 也钉住 `is_identity`：`amount=0` 时整条必须可跳过（少一趟纹理往返）。
+    #[test]
+    fn 噪声参数原样搬到参数结构() {
+        let effects = vec![effect("noise", &[("amount", 0.08), ("seed", 7.0)])];
+        let params = color_mask_params(&effects, (1920, 1080), 0);
+        assert_eq!(
+            params.noise_amount, 0.08,
+            "noise_amount 必须**原样**是 amount（被谁乘过就说明这里多了一层）"
+        );
+        assert_eq!(params.noise_seed, 7.0, "seed 要跟着走");
+        assert!(
+            !params.is_identity(),
+            "amount 非零却判成恒等 ⇒ 整条被跳过、噪声根本不画"
+        );
+
+        // 另一头：`amount=0` 时必须恒等（可跳过），且不残留 seed
+        let zero = vec![effect("noise", &[("amount", 0.0), ("seed", 7.0)])];
+        assert!(
+            color_mask_params(&zero, (1920, 1080), 0).is_identity(),
+            "amount=0 应当恒等（调用方据此整条跳过）"
+        );
+    }
+
     #[test]
     fn 覆盖层的角度在这里就转成弧度() {
         // **度转弧度只在一处发生**：两边各转一遍会让 90 度变成 90 弧度。

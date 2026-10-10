@@ -120,8 +120,21 @@ fn fs_color_mask(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f3
   rgb = rgb * vignette;
 
   // ---- 3) 噪声：加性灰度噪声，逐像素、逐帧不同、同一帧可复现。----
+  //
+  // ⚠️ **`noise_amount` 的契约是 0..1**（`color_mask_params` 里 `amount.clamp(0.0, 1.0)`），
+  //    而 `rgb` 来自 `textureLoad`（`Rgba8Unorm`）—— **那里是 0..255**。
+  //
+  // 所以必须乘 `NOISE_FULL_SCALE`。旧式写的是 `rgb + (n - 0.5) * amount`：
+  // 量纲对不上，`amount = 1.0`（契约上限）的增量也只有 ±0.5 —— **连一个 8 位量化台阶都不到**，
+  // 于是这个效果在成片里**完全不可见**（真机验证：挂上/不挂 `noise` 的输出**逐字节相同**）。
+  // 这条不是"观感调优"，是**量纲 bug**：调用方按 0..1 传，着色器按 0..255 用。
+  //
+  // ⚠️ 255.0 这个数**不能从 `mask` 里拿**（那里没有画面位深字段），所以写成常量。
+  //    源纹理的格式由宿主决定，本仓两处宿主都是 `Rgba8Unorm`（`WORK_FORMAT` / `FRAME_FORMAT`）。
+  //    哪天换成浮点格式，这里要跟着改成 1.0。
+  const NOISE_FULL_SCALE: f32 = 255.0;
   let n = noise_at(at.x, at.y, i32(mask.frame), i32(mask.noise_seed));
-  rgb = rgb + vec3<f32>((n - 0.5) * mask.noise_amount);
+  rgb = rgb + vec3<f32>((n - 0.5) * NOISE_FULL_SCALE * mask.noise_amount);
 
   // ---- 4) 覆盖层：纯色 / 线性渐变 / 径向渐变。----
   //
