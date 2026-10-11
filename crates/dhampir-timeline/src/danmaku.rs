@@ -394,6 +394,7 @@ mod tests {
     fn cue(start_ms: u64, text: &str) -> Cue {
         Cue {
             travel_ms: None,
+            scale: None,
             start_ms,
             end_ms: start_ms + 1000,
             text: text.to_string(),
@@ -405,6 +406,7 @@ mod tests {
     fn cue_travel(start_ms: u64, travel_ms: u64, text: &str) -> Cue {
         Cue {
             travel_ms: Some(travel_ms),
+            scale: None,
             ..cue(start_ms, text)
         }
     }
@@ -413,6 +415,7 @@ mod tests {
     fn cue_span(start_ms: u64, end_ms: u64, text: &str) -> Cue {
         Cue {
             travel_ms: None,
+            scale: None,
             start_ms,
             end_ms,
             text: text.to_string(),

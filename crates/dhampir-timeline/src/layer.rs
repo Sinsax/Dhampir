@@ -759,6 +759,73 @@ pub struct SubtitleStyle {
     /// （加字段时实测打红过）—— 它拦的正是"升级之后工程文件悄悄变形"。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plate_pad_px: Option<f32>,
+    // =====================================================================
+    // T1 弹入 / T3 强调 / T4 抖动（2026-10-11）
+    //
+    // ⚠️ **逻辑在 [`crate::text_motion`]，这里只有声明。**
+    //
+    // 这不是洁癖，是踩出来的：这六个字段与另一项工作（底衬）**同时**加在
+    // 同一个 `SubtitleStyle` 上，而"整份写回 `layer.rs`"把先写的那些**无声**
+    // 冲掉过一次（没有提交、没有报错，只在下游留下"函数找不到"）。
+    // 把逻辑放到自己的文件里之后，那种事故的代价从 ~180 行降到这 12 行。
+    // **往后再加字段照这个来**：声明留这里，求值放各自模块。
+    // =====================================================================
+    /// **弹入的起始缩放**（T1）。`None` = 1.0（不缩）。
+    ///
+    /// # 为什么是 `Option<f32>` 而不是裸 `f32` 默认 1.0
+    ///
+    /// 这一组六个字段的口径**全是** `None` = 用默认行为。理由与
+    /// `shadow_*` 那一组不同，值得写下来：这个字段的"默认值"**不是一个关掉的值**
+    /// （`scale_in_from` 的默认是 `1.0`，即"不缩"），而 `1.0` 同时也是一个
+    /// **用户可能显式写的合法值**。
+    ///
+    /// 裸 `f32` + `skip_serializing_if = "等于默认值"` 会让"显式写的 1.0"
+    /// 被静默吃掉 —— 读回来仍是 1.0、渲染也一样，所以**永远不会有症状**，
+    /// 但用户的显式意图没了。而"显式写了却读不回来"正是本仓最恨的那类静默。
+    ///
+    /// `Option` 一举两得：**不写键 = 默认行为**（老工程一个键都不多），
+    /// **写了就是写的那个值**（哪怕它恰好等于默认值）。
+    ///
+    /// 求值处见 [`crate::text_motion::scale_in_params`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_in_from: Option<f32>,
+    /// **弹入的过冲峰值**（T1）。`None` = 1.0（不过冲）。
+    ///
+    /// 参照值是 **1.15**；`scale_in_from` 参照 **0.7**、`scale_in_ms` 参照 **180**。
+    /// 三个一起才是一个"弹入"（`0.7 → 1.15 → 1.0`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_in_peak: Option<f32>,
+    /// **弹入窗口的时长（毫秒）**（T1）。`None` = 0 = 关（**不缩**）。
+    ///
+    /// ⚠️ 三个字段里**只有它**决定"开不开"。`from` / `peak` 都给了但它是 0
+    /// ⇒ 不缩 —— 因为"窗口多长"是唯一能定义"缩到什么程度"的量
+    /// （另两个只是端点）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_in_ms: Option<u64>,
+    /// **抖动幅度**（T4，**文档像素**）。`None` = 0.0 = 不抖。
+    ///
+    /// 单位与 `rise_in_px` / `transform.x/y` 同一套（文档像素），
+    /// 不是目标像素 —— 这样预览与成片落同一个比例。
+    ///
+    /// 求值处见 [`crate::text_motion::shake_params`] /
+    /// [`crate::text_motion::text_shake_px`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shake_px: Option<f32>,
+    /// **抖动频率（Hz）**（T4）。`None` = [`crate::text_motion::DEFAULT_SHAKE_HZ`]（18.0）。
+    ///
+    /// 只在 `shake_px > 0` 时有意义。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shake_hz: Option<f32>,
+    /// **抖动的相位**（弧度）（T4）。`None` = 0.0。
+    ///
+    /// # 为什么必须能逐条错开
+    ///
+    /// 抖动是**纯 `t` 的函数**（见 [`crate::text_motion::text_shake_px`]），
+    /// 同屏两条若相位相同就**整体同拍**地一起晃 —— 那不是"两条在抖"，
+    /// 是"整块字在抖"，看着像画面在抖而不是文字在抖。
+    /// 宿主给每条**不同的相位**才有各自的手抖感。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shake_phase: Option<f32>,
 }
 
 /// `0.0` 不写进文件 —— 这是"既有工程逐字节不变"的执行处：
@@ -860,6 +927,16 @@ impl Default for SubtitleStyle {
             // 但它在 `plate_color` 为 None 时**读都不会被读到**。
             plate_color: None,
             plate_pad_px: None,
+            // T1/T3/T4：**全部 `None`**。`None` = 用默认行为（不缩 / 不过冲 /
+            // 窗口 0 / 不抖），所以老工程重写一次**一个键都不多**，
+            // 而求值路径上它们各自落到"单位变换"（缩放恒 1.0、抖动恒 0）——
+            // 见 `text_motion::默认样式求值出来是单位变换`。
+            scale_in_from: None,
+            scale_in_peak: None,
+            scale_in_ms: None,
+            shake_px: None,
+            shake_hz: None,
+            shake_phase: None,
         }
     }
 }
@@ -1471,6 +1548,33 @@ pub fn source_frame_looped_rate(
 ///
 /// 返回 `(不透明度, 纵向偏移像素)`。偏移为正表示**向下**。
 pub fn text_envelope(
+    local_ms: u64,
+    span_ms: u64,
+    fade_in_ms: u64,
+    fade_out_ms: u64,
+    rise_in_px: f32,
+    rise_out_px: f32,
+) -> (f32, f32) {
+    text_envelope_plain(
+        local_ms,
+        span_ms,
+        fade_in_ms,
+        fade_out_ms,
+        rise_in_px,
+        rise_out_px,
+    )
+}
+
+/// [`text_envelope`] 的本体（**不含缩放**）。
+///
+/// 拆出来是因为 [`crate::text_motion::text_envelope_scaled`] 要**复用它**：
+/// 缩放是"另一件事"（T1 弹入），而淡入淡出这一套口径一个字都不该动 ——
+/// 复制一份就会漂，而漂了以后两端各自还都是"自洽"的。
+///
+/// ⚠️ **这个函数没有第三个返回值**：缩放那一路刻意不在这里。
+/// 谁要缩放就调 `text_motion` 那份，别往这里加参数 ——
+/// 加了它，弹幕那条（不缩放的）路就也得跟着改。
+pub fn text_envelope_plain(
     local_ms: u64,
     span_ms: u64,
     fade_in_ms: u64,

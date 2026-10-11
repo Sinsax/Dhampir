@@ -24,7 +24,13 @@
 use crate::schema::{Frame, TimebaseDto};
 
 /// 一条字幕。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// ⚠️ **没有 `Eq`**：`scale` 是 `Option<f32>`，而 `f32` 不是 `Eq`。
+/// 弹幕那条路有一批 `Eq` 断言（`布局` 的对拍），它们比的是**帧号与泳道** ——
+/// 那些判据改成 `PartialEq` 之后语义不变（浮点相等仍要求逐位相等，
+/// 只是不再承诺自反性）；若哪天要给 `Cue` 做 `HashMap` 键，
+/// 那时该拿的是它自己的稳定 id，不是这个派生。
+#[derive(Debug, Clone, PartialEq)]
 pub struct Cue {
     /// 相对字幕文件开头的起点（毫秒）。
     pub start_ms: u64,
@@ -46,6 +52,30 @@ pub struct Cue {
     /// 所以"把 travel 编码进素材"必须写 6 参数那一版。读不到就回退到轨道级
     /// （向后兼容：老素材一条都不会变）。
     pub travel_ms: Option<u64>,
+    /// **这一条的瞬时缩放倍率**（T3 强调放大）。`None` = 1.0。
+    ///
+    /// # 为什么在 cue 上、不在 `SubtitleStyle` 上
+    ///
+    /// 强调放大是**逐条**的：同一轨里只有"命中了高亮词"的那几条要放大，
+    /// 而"哪几条命中"是**宿主**知道的（本仓按 `highlight_color` 的
+    /// `<span class="hl">` 标记判）。轨道级字段表达不了"只有这一条大一点"。
+    ///
+    /// 与 [`Self::travel_ms`] 同一条分工：**逐条的事实放 cue 上**，
+    /// 轨道级只放"这一轨的默认"。
+    ///
+    /// # 与 T1 弹入的关系：**乘起来**，不是覆盖
+    ///
+    /// 两个缩放是**独立来源**（入场包络 vs 逐条强调），最终倍率是
+    /// `入场包络的 scale × 这一条的 scale`。写成"后者覆盖前者"会让
+    /// "弹入还没结束就命中高亮"时**突然跳一下**（从包络的 0.7 跳到强调的 1.3）。
+    ///
+    /// # ⚠️ 它不来自 ASS 文本
+    ///
+    /// 解析器（`parse_ass` / `parse_srt`）**一律给 `None`** —— ASS 里没有
+    /// "这一条整体放大"的原生标签，`\fscx`/`\fscy` 走的是另一套（逐字形的
+    /// 水平/垂直拉伸，与"整体等比"不是一回事）。这个字段是**宿主侧**的输入：
+    /// 由宿主决定"哪几条要强调"，再从外部赋进来。
+    pub scale: Option<f32>,
     pub style: CueStyle,
 }
 
@@ -59,7 +89,10 @@ pub struct CueStyle {
 }
 
 /// 解析结果。**跳过的条数是结论的一部分**，不是日志。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// ⚠️ **没有 `Eq`**：它内含 `Vec<Cue>`，而 `Cue` 因 `scale: Option<f32>` 不再
+/// 是 `Eq`（`f32` 不是 `Eq`）。理由与 `Cue` 那条同源，见它头上的说明。
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ParseReport {
     pub cues: Vec<Cue>,
     /// 看不懂而跳过的行/条目数。
@@ -235,6 +268,7 @@ pub fn parse_srt(text: &str) -> Result<ParseReport, String> {
             // **SRT 没有 travel 这个概念**（它是 ASS 的 `\move` 专有）；
             // SRT 那条路只用于字幕，而字幕不做滚动。
             travel_ms: None,
+            scale: None,
             style: CueStyle::default(),
         });
     }
@@ -489,6 +523,7 @@ pub fn parse_ass(text: &str) -> Result<ParseReport, String> {
             end_ms: end,
             text: body,
             travel_ms: tags.travel_ms,
+            scale: None,
             style: CueStyle {
                 color: tags.color,
                 ..CueStyle::default()
@@ -744,6 +779,7 @@ mod tests {
                 end_ms: 3500,
                 text: "第一句".to_string(),
                 travel_ms: None,
+                scale: None,
                 style: CueStyle::default(),
             },
             Cue {
@@ -751,6 +787,7 @@ mod tests {
                 end_ms: 62_000,
                 text: "两行\n第二行".to_string(),
                 travel_ms: None,
+                scale: None,
                 style: CueStyle::default(),
             },
         ];

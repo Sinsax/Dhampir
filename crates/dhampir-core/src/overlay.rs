@@ -58,6 +58,17 @@ pub struct TextItem {
     pub opacity: f32,
     /// 这一帧的纵向偏移（**文档像素**，正为向下）。同样是契约层算好的。
     pub dy_px: f32,
+    /// 这一帧的**横向**偏移（**文档像素**，正为向右）。契约层算好的。
+    ///
+    /// # 为什么现在才需要它（T4）
+    ///
+    /// 在 T4 之前，文字的位移只有"入场上浮 / 退场上移"这一种，而它**只有纵向** ——
+    /// 于是这个字段不存在，宿主拿 `dy_px` 就够了。抖动是**两维**的
+    /// （只抖一个方向看着像"在呼吸"而不是"在抖"），所以横向必须单独有一条通道。
+    ///
+    /// 与 `dy_px` 一样是**文档像素**：换导出尺寸时两端的位移比例不变。
+    /// 默认恒 0 ⇒ 既有工程逐字节不变（宿主加不加它都画在同一个位置）。
+    pub dx_px: f32,
     /// **这一条的颜色**（已解析）。
     ///
     /// 与"轨道样式里的颜色"的关系：轨道给的是**默认**，一条 cue 自己带的
@@ -325,14 +336,35 @@ pub fn evaluate_overlay(
             ) else {
                 continue;
             };
-            // **淡入淡出由契约层算**（`text_envelope`），宿主只照用。
-            let (opacity, dy_px) = dhampir_timeline::layer::text_envelope(
+            // **淡入淡出 + 弹入缩放由契约层算**（`text_envelope_scaled`），宿主只照用。
+            //
+            // 取值口径集中在 `text_motion` 的两个辅助函数里（`unwrap_or` 只在那里
+            // 出现一次）—— 六个字段散在调用点各写一遍 `unwrap_or`，
+            // 就一定会有一处漏掉，而漏掉的那处在"字段写了但没生效"之前**没有症状**。
+            let (scale_from, scale_peak, scale_ms) =
+                dhampir_timeline::text_motion::scale_in_params(style);
+            let (opacity, dy_px, enter_scale) = dhampir_timeline::text_motion::text_envelope_scaled(
                 local_ms,
                 span_ms,
                 style.fade_in_ms,
                 style.fade_out_ms,
                 style.rise_in_px,
                 style.rise_out_px,
+                scale_from,
+                scale_peak,
+                scale_ms,
+            );
+            // **抖动（T4）**：纯 `local_ms` 的函数 —— 顺序播放与 `seek` 同源。
+            //
+            // 相位默认给 0；"同屏多条要错开"由宿主显式写 `shake_phase` 决定
+            // （契约不给"自动错开"，那要靠条目身份，而契约层没有那个身份）。
+            let (shake_px, shake_hz, shake_phase) =
+                dhampir_timeline::text_motion::shake_params(style);
+            let (shake_dx, shake_dy) = dhampir_timeline::text_motion::text_shake_px(
+                local_ms as f32 / 1000.0,
+                shake_px,
+                shake_hz,
+                shake_phase,
             );
             let laid: dhampir_timeline::text_layout::TextLayout =
                 layout(&cue.text, style, sequence);
@@ -359,14 +391,43 @@ pub fn evaluate_overlay(
                 } else {
                     Vec::new()
                 };
+                // **三个缩放相乘**：
+                //   `line.scale`  = 装不下时的整体缩字（布局的事实，改动前就有）
+                //   `enter_scale` = T1 入场弹入（窗口外恒 1.0）
+                //   `cue.scale`   = T3 逐条强调（None = 1.0）
+                // 相乘而不是覆盖：三者是独立来源，"弹入没结束就命中强调"要连续。
+                let item_scale = line.scale * enter_scale * cue.scale.unwrap_or(1.0);
                 items.push(TextItem {
                     text: line.text,
                     rect: line.rect,
                     opacity,
-                    dy_px,
+                    // 抖动**加在**包络位移之上，不是替换它 ——
+                    // 两者来源不同（入场包络 vs 抖动），同一帧可以都在。
+                    dy_px: dy_px + shake_dy,
+                    dx_px: shake_dx,
                     color: item_color,
-                    font_ratio: line.font_ratio,
-                    scale: line.scale,
+                    // ⚠️ **字号必须乘上 `item_scale`，否则缩放对像素完全没有影响。**
+                    //
+                    // 2026-10-11 实测踩到的：`scale` 当时**只**被宿主用来缩描边宽度
+                    // （`stroke_px * scale`），而**字形大小**由渲染侧
+                    // `place_line(rect, target, font_ratio)` 的 `font_ratio` 决定 ——
+                    // 那一路**根本不读 `scale`**。于是 T1 弹入在数据层算得好好的、
+                    // 单测全绿，出片里却**一帧都不动**：
+                    //
+                    //     出片 21 帧逐帧量文字外接框宽度 → 与未开启的基线**一模一样**
+                    //     （`f_p_t1` 与 `f_p_base` 全部 102×20，比值恒 1.0000）
+                    //
+                    // 这正是本仓最怕的那类错：**跑得通、日志正常、结果不对**。
+                    //
+                    // 修在**求值层**而不是各宿主：两条渲染路（worker 的栅格化、
+                    // wasm 宿主）都从这里取 `font_ratio`，在这里乘一次就都盖住了 ——
+                    // 放到宿主里就会有两份实现，而"只有一条路生效"的症状
+                    // 恰恰是"预览对、成片不对"。
+                    //
+                    // `font_ratio` 的文档本来就写着它是"**布局算出来的事实**"；
+                    // 乘过缩放的才是这一帧真正的事实。
+                    font_ratio: line.font_ratio * item_scale,
+                    scale: item_scale,
                     parts: runs,
                 });
             }
@@ -693,6 +754,7 @@ mod tests {
                 end_ms: 2000,
                 text: "第一行中文".to_string(),
                 travel_ms: None,
+                scale: None,
                 style: Default::default(),
             },
             Cue {
@@ -700,6 +762,7 @@ mod tests {
                 end_ms: 4000,
                 text: "第二句".to_string(),
                 travel_ms: None,
+                scale: None,
                 style: Default::default(),
             },
         ]
@@ -709,6 +772,260 @@ mod tests {
         let mut table = SubtitleTable::new();
         table.insert("sub.srt".to_string(), cues());
         table
+    }
+
+    /// 与 [`table`] 同，但**第一条**的 `cue.scale` 是给定的（T3 强调）。
+    ///
+    /// `Cue.scale` 没有"从工程 JSON 读"这条路（它是宿主机给的逐条事实，
+    /// 见那个字段的文档），所以 T3 **只能**在这一层用 Rust 构造出来验 ——
+    /// 工程文件的 `layers[].scale` 写进去也不会被读到。
+    fn table_with_cue_scale(scale: Option<f32>) -> SubtitleTable {
+        let mut list = cues();
+        list[0].scale = scale;
+        let mut table = SubtitleTable::new();
+        table.insert("sub.srt".to_string(), list);
+        table
+    }
+
+    // =====================================================================
+    // T1 弹入 / T3 强调：**求值层到 `TextItem` 的整条路**
+    // =====================================================================
+
+    /// T1：弹入窗口内 `font_ratio` 真的随帧变化，窗口外回到单位值。
+    ///
+    /// # ⚠️ 这条判据是被"出片实测"逼出来的
+    ///
+    /// 一开始只有 `text_motion` 的函数级判据（`scale` 算得对），
+    /// 而**出片里文字一帧都不动** —— 因为渲染侧的字号读的是
+    /// `place_line(rect, target, style.font_ratio)`，**不读 `scale`**。
+    /// 21 帧逐帧量外接框宽度，与未开启的基线**一模一样**（全部 102×20）。
+    ///
+    /// 所以这条判据**必须盯 `font_ratio`**，不能只盯 `scale` ——
+    /// 只盯 `scale` 的话，"算对了但没送到渲染"这个洞它照样漏过去。
+    #[test]
+    fn 弹入窗口内字号随帧变化而窗口外回到单位() {
+        let style_json = r#"{
+            "schema": 3,
+            "timebase": { "num": 60, "den": 1 },
+            "tracks": [{
+                "id": "sub",
+                "kind": "subtitle",
+                "layers": [{
+                    "id": "cue", "start": 0, "end": 120,
+                    "source": { "asset_id": "sub.srt", "source_in": 0 }
+                }],
+                "subtitle": {
+                    "font_ratio": 0.055, "bottom_margin": 0.06, "max_lines": 2,
+                    "color": [255,255,255,255], "outline": false,
+                    "scale_in_from": 0.7, "scale_in_peak": 1.15, "scale_in_ms": 180
+                }
+            }]
+        }"#;
+        let tl = timeline(style_json);
+
+        // 基线：不开启（另造一份，只有 font_ratio）。
+        let base_tl = subtitle_timeline();
+        let base = evaluate_overlay(&base_tl, 0, SEQUENCE, Some(&table())).expect("基线要有覆盖层");
+
+        let fr = |t: &TimelineV2, frame: i64| -> Vec<f32> {
+            evaluate_overlay(t, frame, SEQUENCE, Some(&table()))
+                .expect("要有覆盖层")
+                .items
+                .iter()
+                .map(|i| i.font_ratio)
+                .collect()
+        };
+
+        let base_fr = base.items[0].font_ratio;
+        assert!(
+            (fr(&base_tl, 0)[0] - base_fr).abs() < 1e-9,
+            "基线（没写弹入字段）的字号必须一点不变"
+        );
+
+        // 第 0 帧 = 窗口起点 ⇒ 字号应当是 `from` 倍。
+        let f0 = fr(&tl, 0)[0];
+        assert!(
+            (f0 - base_fr * 0.7).abs() < 1e-4,
+            "第 0 帧字号应当是 0.7 倍（{:.6}），实际 {f0:.6}",
+            base_fr * 0.7
+        );
+
+        // 窗口过半附近应当**超过**基线（过冲）。
+        let mut peak = 0.0_f32;
+        for frame in 0..12 {
+            peak = peak.max(fr(&tl, frame)[0]);
+        }
+        assert!(
+            peak > base_fr * 1.15,
+            "窗口内必须出现过冲（字号超过基线的 1.15 倍），实际峰值 {peak:.6} / 基线 {base_fr:.6}"
+        );
+
+        // 窗口过了（180ms @60fps = 10.8 帧）⇒ 回到**恰好**基线字号。
+        for frame in [11, 12, 30, 119] {
+            let got = fr(&tl, frame)[0];
+            assert!(
+                (got - base_fr).abs() < 1e-6,
+                "第 {frame} 帧已过窗口，字号必须回到基线 {base_fr:.6}，实际 {got:.6}"
+            );
+        }
+    }
+
+    /// T3：`cue.scale` **乘进字号**，不开启时一点不影响。
+    ///
+    /// 这条同样盯 `font_ratio`（理由见上一条）：盯 `scale` 抓不住
+    /// "求值层算对、渲染侧没收到"。
+    #[test]
+    fn 逐条强调缩放乘进字号() {
+        let tl = subtitle_timeline();
+        let at = |t: &SubtitleTable, frame: i64| {
+            evaluate_overlay(&tl, frame, SEQUENCE, Some(t))
+                .expect("要有覆盖层")
+                .items
+        };
+
+        let none = at(&table(), 0);
+        let none_fr = none[0].font_ratio;
+
+        // `None` = 1.0（老工程逐字节不变的那条路）。
+        assert_eq!(
+            none[0].scale, 1.0,
+            "`cue.scale = None` 必须完全等价于 1.0"
+        );
+
+        let x2 = at(&table_with_cue_scale(Some(2.0)), 0);
+        assert!(
+            (x2[0].font_ratio - none_fr * 2.0).abs() < 1e-5,
+            "`cue.scale = 2.0` 必须把字号也乘成两倍：期望 {:.6}，实际 {:.6}",
+            none_fr * 2.0,
+            x2[0].font_ratio
+        );
+        assert!((x2[0].scale - 2.0).abs() < 1e-6, "`scale` 字段同时要是 2.0");
+
+        // 第二句（2–4 秒）没有设 scale ⇒ 在**它自己的帧上**不受影响
+        // （强调是**逐条**的，不是轨道级的）。
+        // 时间基 30/1 ⇒ 第 75 帧 = 2500ms，落在第二句（2000–4000ms）里。
+        let second_none = at(&table(), 75);
+        let second_x2 = at(&table_with_cue_scale(Some(2.0)), 75);
+        assert_eq!(second_none.len(), 1, "第 75 帧应当只有第二句在");
+        assert!(
+            (second_x2[0].font_ratio - second_none[0].font_ratio).abs() < 1e-9,
+            "没设 scale 的那一条不该被动到：{} vs {}",
+            second_x2[0].font_ratio,
+            second_none[0].font_ratio
+        );
+        assert!(
+            (second_x2[0].scale - 1.0).abs() < 1e-9,
+            "没设 scale 的那一条的 `scale` 应当恒为 1.0"
+        );
+    }
+
+    /// T1 × T3：两个缩放**相乘**，不是覆盖。
+    ///
+    /// "弹入还没结束就命中高亮"时，若写成覆盖，字会**突然跳一下**
+    /// （从包络的 0.7 跳到强调的 2.0）。这条钉住相乘。
+    #[test]
+    fn 弹入缩放与逐条强调相乘() {
+        let style_json = r#"{
+            "schema": 3,
+            "timebase": { "num": 60, "den": 1 },
+            "tracks": [{
+                "id": "sub",
+                "kind": "subtitle",
+                "layers": [{
+                    "id": "cue", "start": 0, "end": 120,
+                    "source": { "asset_id": "sub.srt", "source_in": 0 }
+                }],
+                "subtitle": {
+                    "font_ratio": 0.055, "bottom_margin": 0.06, "max_lines": 2,
+                    "color": [255,255,255,255], "outline": false,
+                    "scale_in_from": 0.7, "scale_in_peak": 1.15, "scale_in_ms": 180
+                }
+            }]
+        }"#;
+        let tl = timeline(style_json);
+        let with_both = table_with_cue_scale(Some(2.0));
+        let items = evaluate_overlay(&tl, 0, SEQUENCE, Some(&with_both))
+            .expect("要有覆盖层")
+            .items;
+
+        // 第 0 帧：包络给 0.7，强调给 2.0 ⇒ 相乘 = 1.4（覆盖的话是 2.0 或 0.7）。
+        let base_fr = evaluate_overlay(&subtitle_timeline(), 0, SEQUENCE, Some(&table()))
+            .expect("基线")
+            .items[0]
+            .font_ratio;
+        let expected = base_fr * 0.7 * 2.0;
+        assert!(
+            (items[0].font_ratio - expected).abs() < 1e-4,
+            "两个缩放必须**相乘**（期望 {expected:.6}），实际 {:.6}；\
+             若等于 {:.6} 说明强调**覆盖**了弹入",
+            items[0].font_ratio,
+            base_fr * 2.0
+        );
+    }
+
+    /// T4：抖动**真的落到 `dy_px` / `dx_px` 上**，且关掉时恒为 0。
+    ///
+    /// # 这条是被变异台补上的
+    ///
+    /// 原来只有 `text_motion` 的抖动函数级判据 —— 把
+    /// `dy_px: dy_px + shake_dy` 改成 `dy_px`（即**抖动不接线**）时，
+    /// 那些判据**全部照绿**：它们测的是函数返回值，不是"值有没有被用上"。
+    ///
+    /// 与 `font_ratio` 那个洞是同一类：**算对了 ≠ 送到了**。
+    /// 所以每条动效都必须有一条判据盯"它出现在了 `TextItem` 的哪个字段上"。
+    #[test]
+    fn 抖动落到偏移字段上而关掉时为零() {
+        let mk = |extra: &str| {
+            format!(
+                r#"{{
+                    "schema": 3,
+                    "timebase": {{ "num": 60, "den": 1 }},
+                    "tracks": [{{
+                        "id": "sub", "kind": "subtitle",
+                        "layers": [{{ "id": "cue", "start": 0, "end": 240,
+                            "source": {{ "asset_id": "sub.srt", "source_in": 0 }} }}],
+                        "subtitle": {{
+                            "font_ratio": 0.055, "bottom_margin": 0.06, "max_lines": 2,
+                            "color": [255,255,255,255], "outline": false{extra}
+                        }}
+                    }}]
+                }}"#
+            )
+        };
+
+        // 关（没写字段）⇒ 两个偏移都恒为 0。
+        let off = timeline(&mk(""));
+        for frame in [0_i64, 3, 7, 20] {
+            let items =
+                evaluate_overlay(&off, frame, SEQUENCE, Some(&table())).expect("要有覆盖层");
+            assert_eq!(items.items[0].dx_px, 0.0, "没写抖动 ⇒ 横向偏移恒 0");
+            assert_eq!(items.items[0].dy_px, 0.0, "没写抖动 ⇒ 纵向偏移恒 0");
+        }
+
+        // 开 ⇒ 至少有一帧、至少一个方向**非零**，且随时间变（不是常量偏置）。
+        let on = timeline(&mk(r#", "shake_px": 14.0, "shake_hz": 18.0"#));
+        let mut seen_dx = false;
+        let mut seen_dy = false;
+        let mut vals = std::collections::BTreeSet::new();
+        for frame in 0_i64..60 {
+            let items =
+                evaluate_overlay(&on, frame, SEQUENCE, Some(&table())).expect("要有覆盖层");
+            let it = &items.items[0];
+            if it.dx_px.abs() > 1e-4 {
+                seen_dx = true;
+            }
+            if it.dy_px.abs() > 1e-4 {
+                seen_dy = true;
+            }
+            vals.insert((it.dx_px * 1000.0).round() as i64);
+        }
+        assert!(seen_dx, "开了抖动之后横向偏移必须出现过非零值");
+        assert!(seen_dy, "开了抖动之后纵向偏移必须出现过非零值");
+        assert!(
+            vals.len() > 10,
+            "偏移必须随时间**变化**（常量偏置 = 错位，不是抖）；只有 {} 个不同值",
+            vals.len()
+        );
     }
 
     /// **字幕轨 + 弹幕轨同时存在**，且两者的颜色刻意不同。
@@ -1002,6 +1319,7 @@ mod tests {
                 end_ms: 22_000,
                 text: "很久以后".to_string(),
                 travel_ms: None,
+                scale: None,
                 style: Default::default(),
             }],
         );
@@ -1016,6 +1334,7 @@ mod tests {
             end_ms: 4000,
             text: "x".to_string(),
             travel_ms: None,
+            scale: None,
             style: Default::default(),
         };
         // 30fps：2000ms -> 第 60 帧，4000ms -> 第 120 帧。
@@ -1034,6 +1353,7 @@ mod tests {
             end_ms: 1003,
             text: "x".to_string(),
             travel_ms: None,
+            scale: None,
             style: Default::default(),
         };
         assert!(cue_visible_at(&cue, 30, &timebase));
@@ -1049,6 +1369,7 @@ mod tests {
                 end_ms: 2000,
                 text: "一\n二\n三\n四\n五".to_string(),
                 travel_ms: None,
+                scale: None,
                 style: Default::default(),
             }],
         );
@@ -1129,6 +1450,7 @@ mod tests {
             end_ms,
             text: text.to_string(),
             travel_ms: None,
+            scale: None,
             style: Default::default(),
         }
     }

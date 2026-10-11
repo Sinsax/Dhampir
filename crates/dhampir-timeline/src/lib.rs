@@ -65,6 +65,11 @@ pub mod subtitle;
 pub mod danmaku;
 pub mod selfcheck;
 pub mod text_layout;
+/// 文字的**逐帧动效**（T1 弹入 / T3 强调 / T4 抖动）。
+///
+/// 单独一个模块的理由写在它自己的文件头：两个任务曾并行改 `layer.rs`，
+/// 后写的把先写的**整份覆盖**掉了。逻辑挪出来的代价面从 ~180 行降到 12 行。
+pub mod text_motion;
 pub mod timebase;
 pub mod timecode;
 

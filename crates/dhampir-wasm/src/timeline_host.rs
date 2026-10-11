@@ -3208,7 +3208,7 @@ fn placement_json(line: &TextLineSpec) -> serde_json::Value {
     value
 }
 
-/// `{text, rect, opacity, dy_px, color, font_ratio, scale, parts}` —— 与 CLI 的
+/// `{text, rect, opacity, dy_px, dx_px, color, font_ratio, scale, parts}` —— 与 CLI 的
 /// `cmd_subtitle` **逐字段同名**。
 ///
 /// ⚠️ **`color` / `font_ratio` / `scale` / `parts` 这四个键曾经漏在预览侧**，
@@ -3229,6 +3229,11 @@ fn text_item_json(item: &dhampir_core::overlay::TextItem) -> serde_json::Value {
         // 淡入淡出：两端都要能对账"这一帧多透明、偏了多少"。
         "opacity": item.opacity,
         "dy_px": item.dy_px,
+        // **横向偏移**（T4 抖动）。与 `dy_px` 同一条理由：漏了它，
+        // 预览侧就只能纵向抖、成片侧两轴都抖 —— 而两边**各自都看不出来**，
+        // 只有把两端的帧对起来才看得见（本仓已经栽过 `color`/`font_ratio`/`scale`/`parts`
+        // 这四个键漏在预览侧，见上面那段 ⚠️）。
+        "dx_px": item.dx_px,
         // **逐条颜色**：同一轨里不同的条可以不一样（ASS 的 `\c`），求值层已经解析好。
         "color": item.color,
         // 字号与**这一条被缩了多少**：JS 侧栅格化要用（字号决定 `ctx.font`，

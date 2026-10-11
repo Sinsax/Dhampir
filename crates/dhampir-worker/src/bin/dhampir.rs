@@ -2067,6 +2067,7 @@ fn sidecar_text(
             text: span.text.clone(),
             // 侧挂 SRT 没有 travel（那是 ASS 的 `\move` 专有）。
             travel_ms: None,
+            scale: None,
             // 侧挂文件只带文本与时间：源里的加粗/斜体/颜色不进这里（`to_srt` 也没有地方放）。
             style: CueStyle::default(),
         });
@@ -2203,6 +2204,9 @@ fn text_item_json(item: &dhampir_core::overlay::TextItem) -> serde_json::Value {
         // 淡入淡出：两端都要能对账"这一帧多透明、偏了多少"。
         "opacity": item.opacity,
         "dy_px": item.dy_px,
+        // **横向偏移**（T4 抖动）。与 wasm 侧 `text_item_json` **逐字段同名** ——
+        // 漏在任一端就是"预览与成片各抖各的"，而两端**各自都看不出来**。
+        "dx_px": item.dx_px,
         // **逐条颜色**：同一轨里不同的条可以不一样（ASS 的 `\c`）。
         "color": item.color,
         // 字号与**这一条被缩了多少**。JS 侧栅格化要用它们：
@@ -2233,6 +2237,9 @@ fn danmaku_item_json(item: &dhampir_core::overlay::DanmakuTextItem) -> serde_jso
         rect: item.rect,
         opacity: item.opacity,
         dy_px: item.dy_px,
+        // 弹幕**不做横向抖动**（T4 的 `shake_*` 是字幕轨的字段，
+        // `DanmakuSpec` 上没有）。恒 0 ⇒ 与改动前画在同一个位置。
+        dx_px: 0.0,
         color: item.color,
         font_ratio: item.font_ratio,
         // 弹幕不缩字（参照的弹幕没有缩字逻辑）；这里是从弹幕条目转出来的。
