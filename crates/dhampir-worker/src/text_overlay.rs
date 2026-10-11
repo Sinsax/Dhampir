@@ -526,6 +526,9 @@ fn paint_parts(
     scale: f32,
     opacity: f32,
     dy_px: f32,
+    // **横向偏移**（文档像素，T4 抖动；正为向右）。与 `dy_px` 同一条规矩：
+    // 只挪落点，不重算布局。恒 0 时逐字节等于改动前。
+    dx_px: f32,
     judge_clip: bool,
     log: &mut IssueLog,
     placement: LinePlacement,
@@ -554,6 +557,7 @@ fn paint_parts(
         .collect();
     let total: f32 = widths.iter().sum();
     let offset_y = dy_px.round() as i32;
+    let offset_x = dx_px.round() as i32;
     let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u32;
     // 阴影参数整行算一次（它是**样式级**的，不是逐段的）。
     let shadow = shadow_spec(style);
@@ -597,7 +601,7 @@ fn paint_parts(
                 &key,
                 shadow,
                 image,
-                (placement.x, placement.y + offset_y),
+                (placement.x + offset_x, placement.y + offset_y),
                 alpha,
                 &path,
                 log,
@@ -610,7 +614,7 @@ fn paint_parts(
                 return Painted::Failed;
             }
         };
-        let report = match blit_scaled(image, &bitmap, placement.x, placement.y + offset_y, alpha) {
+        let report = match blit_scaled(image, &bitmap, placement.x + offset_x, placement.y + offset_y, alpha) {
             Ok(report) => report,
             Err(error) => {
                 log.record("subtitle_blit_failed", &path, error);
@@ -717,6 +721,142 @@ fn paint_shadow(
     }
 }
 
+// ---------------------------------------------------------------------------
+// 底衬（T6）：画字**之前**先铺一块纯色矩形
+// ---------------------------------------------------------------------------
+
+/// 一行字幕底衬的几何：矩形四边（目标像素，左闭右开半开区间）。
+///
+/// 从**行盒**（`NormalizedRect`）算，不是从位图算 —— 位图的宽**恒等于目标宽**
+/// （见 `text_raster` 的「几何」一节），拿它铺底衬会把整条画面铺满，
+/// 那不是底衬，是一层蒙版。
+///
+/// 外扩量 `pad_px` 是**目标像素**（与 `plate_pad_px` 的口径一致）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PlateRect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+impl PlateRect {
+    /// 行盒 + 外扩 ⇒ 目标帧里的矩形（含裁到画面内）。
+    ///
+    /// # 取整口径
+    ///
+    /// 行盒是归一化浮点，乘目标尺寸之后**四舍五入到整数像素**；
+    /// 外扩量原样加。`right` / `bottom` 用 `round()` 而不是 `ceil()` ——
+    /// 与 `place_line` 里 `bitmap` 的取整同一条理由：宁可差半像素的中心，
+    /// 也不要因为一律向上取整而让底衬比字**系统性偏大一圈**（那在
+    /// "底衬恰好包住字"这种一眼判据上会看得出来）。
+    ///
+    /// 返回值**可能整体在画面外**（字幕浮出画面时就是）；调用方负责裁，
+    /// 这里不静默改成空矩形 —— "算出来是多少"与"画得下多少"是两件事。
+    fn from_line(
+        rect: dhampir_core::timeline::text_layout::NormalizedRect,
+        target: (u32, u32),
+        pad_px: f32,
+    ) -> Self {
+        let w = target.0 as f32;
+        let h = target.1 as f32;
+        let left = (rect.x * w).round() - pad_px;
+        let top = (rect.y * h).round() - pad_px;
+        let right = ((rect.x + rect.width) * w).round() + pad_px;
+        let bottom = ((rect.y + rect.height) * h).round() + pad_px;
+        Self {
+            left: left as i32,
+            top: top as i32,
+            right: right as i32,
+            bottom: bottom as i32,
+        }
+    }
+
+    /// 空矩形（宽或高不足 1 像素）：**没有可铺的东西**。
+    fn is_empty(&self) -> bool {
+        self.right <= self.left || self.bottom <= self.top
+    }
+
+    /// source-over 铺一块纯色，裁到画面内。返回**真的写进去的像素数**。
+    ///
+    /// # 为什么不用 `blit_scaled`
+    ///
+    /// `blit_scaled` 吃的是 `TextBitmap`（栅格化出来的字）。底衬是一块纯色，
+    /// 为它造一张位图等于为了复用而多一次分配；而"覆盖度"这件事在底衬上
+    /// 是**平凡**的（整块都是 1），没有 `coverage_from_libass` 那种要恢复的东西。
+    ///
+    /// # 合成公式与 `blit_scaled` 逐字一致
+    ///
+    /// `out = src * a/255 + dst * (1 - a/255)`，alpha 通道同样累加。
+    /// 一致的目的是**底衬与它上面的字走同一条合成**：若两边公式不同，
+    /// 半透明底衬上的字会出现一圈"缝合边"（底衬那半圈与字那半圈算得不一样）。
+    fn paint(&self, image: &mut Rgba8Image, color: [u8; 4]) -> usize {
+        if self.is_empty() || color[3] == 0 {
+            return 0;
+        }
+        let width = image.width as i32;
+        let height = image.height as i32;
+        // 裁到画面内：越界的部分**丢掉**（与 `blit_scaled` 同款），不回绕。
+        let x0 = self.left.max(0);
+        let y0 = self.top.max(0);
+        let x1 = self.right.min(width);
+        let y1 = self.bottom.min(height);
+        if x1 <= x0 || y1 <= y0 {
+            return 0;
+        }
+        let alpha = color[3] as u32;
+        let inverse = 255 - alpha;
+        let mut written = 0usize;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let at = ((y as usize) * (image.width as usize) + x as usize) * 4;
+                if alpha == 255 {
+                    image.pixels[at] = color[0];
+                    image.pixels[at + 1] = color[1];
+                    image.pixels[at + 2] = color[2];
+                    image.pixels[at + 3] = 255;
+                } else {
+                    for channel in 0..3 {
+                        let src = color[channel] as u32;
+                        let dst = image.pixels[at + channel] as u32;
+                        image.pixels[at + channel] =
+                            (mul_alpha(src, alpha) + mul_alpha(dst, inverse)) as u8;
+                    }
+                    let dst_a = image.pixels[at + 3] as u32;
+                    // 上界：alpha + inverse = 255（`mul_alpha` 的取整不会超过系数）。
+                    image.pixels[at + 3] = (alpha + mul_alpha(dst_a, inverse)) as u8;
+                }
+                written += 1;
+            }
+        }
+        written
+    }
+}
+
+/// **铺这一行的底衬**（如果有）。画字之前调用 —— 顺序是有判据盯着的：
+/// 底衬画在字**之后**会把字盖住（"看着有底衬、其实把字糊了"）。
+///
+/// `color` 为 `None` 时**一个像素都不碰**（这是存量零回归的全部执行处）。
+/// `opacity` 乘进 alpha：底衬要跟着这一行的淡入淡出一起淡，
+/// 否则淡入时会出现"字还半透明、底衬已经全黑"的错帧。
+fn paint_plate(
+    image: &mut Rgba8Image,
+    rect: dhampir_core::timeline::text_layout::NormalizedRect,
+    target: (u32, u32),
+    color: Option<[u8; 4]>,
+    pad_px: f32,
+    opacity: f32,
+) -> usize {
+    let Some(mut color) = color else {
+        return 0;
+    };
+    // 不透明度与样式 alpha **相乘**（与 `blit_scaled` 把 scale 乘在 alpha 上同一处道理）。
+    let scaled = (color[3] as f32 * opacity.clamp(0.0, 1.0)).round();
+    color[3] = scaled.clamp(0.0, 255.0) as u8;
+    let plate = PlateRect::from_line(rect, target, pad_px);
+    plate.paint(image, color)
+}
+
 // ⚠️ `too_many_arguments`：**allow，不是拆结构体**。
 //
 // 这 14 个参数是"画一行字幕"所需的全部事实，彼此没有从属关系可归并：
@@ -747,6 +887,9 @@ fn paint_one(
     opacity: f32,
     // 这一帧的纵向偏移（文档像素，正为向下）。
     dy_px: f32,
+    // 这一帧的**横向**偏移（文档像素，正为向右）。T4 抖动走这里；
+    // 恒 0 时与改动前画在同一个位置。
+    dx_px: f32,
     judge_clip: bool,
     log: &mut IssueLog,
 ) -> Painted {
@@ -771,6 +914,32 @@ fn paint_one(
         );
         return Painted::Failed;
     };
+    // ---------------------------------------------------------------------
+    // **底衬（T6）：在字之前铺一块矩形。**
+    // ---------------------------------------------------------------------
+    //
+    // ⚠️ **顺序是判据的一部分，不是风格**：底衬画在字**之后**会把字盖住 ——
+    // 那是"看着有底衬、其实把字糊了"，与"字段是哑的"属于同一类静默错误
+    // （都有底衬、都看不出问题，只有数像素才分得开）。
+    // 判据见 `底衬铺在字之前_字仍然在`。
+    //
+    // 放在字体检查**之后**：字体给不出来这一行就是 `Failed`（一个字都不画），
+    // 那种情况下单独留一块底衬更糟 —— 画面上会出现一个没有字的色块。
+    //
+    // 底衬属于**字幕**这条通道；弹幕不铺（`plate_color` 是字幕轨道级样式，
+    // 滚动弹幕背后挂一块色块会把画面糊成一片，且参照实现也没有）。
+    // 这里靠 `style.plate_color` 是不是 `None` 决定 —— 弹幕轨道的 `TextStyle`
+    // 走的字段里没有它，于是恒为 `None`。
+    if judge_clip {
+        paint_plate(
+            image,
+            rect,
+            target,
+            style.plate_color,
+            style.plate_pad_px,
+            opacity,
+        );
+    }
     // ---------------------------------------------------------------------
     // **有 `.hl` 分段时：逐段各画一张（各自上色 + 各自的行内偏移）。**
     // ---------------------------------------------------------------------
@@ -809,6 +978,7 @@ fn paint_one(
             scale,
             opacity,
             dy_px,
+            dx_px,
             judge_clip,
             log,
             placement,
@@ -849,6 +1019,7 @@ fn paint_one(
     // 纵向偏移（淡入上浮/退场下移）：**只挪落点**，不重算布局 ——
     // 位置是"布局给的行盒 + 这一帧的动画偏移"，两件事分开才说得清。
     let offset_y = dy_px.round() as i32;
+    let offset_x = dx_px.round() as i32;
     let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u32;
     // ---------------------------------------------------------------------
     // **先阴影、后文字**（阴影必须在底下）。
@@ -865,7 +1036,7 @@ fn paint_one(
             &key,
             shadow,
             image,
-            (placement.x, placement.y + offset_y),
+            (placement.x + offset_x, placement.y + offset_y),
             alpha,
             &path,
             log,
@@ -878,7 +1049,7 @@ fn paint_one(
             return Painted::Failed;
         }
     };
-    let report = match blit_scaled(image, &bitmap, placement.x, placement.y + offset_y, alpha) {
+    let report = match blit_scaled(image, &bitmap, placement.x + offset_x, placement.y + offset_y, alpha) {
         Ok(report) => report,
         Err(error) => {
             log.record("subtitle_blit_failed", &path, error);
@@ -943,6 +1114,7 @@ fn paint_lines(
             &overlay.subtitle_style,
             item.opacity,
             item.dy_px,
+            item.dx_px,
             true,
             log,
         ) {
@@ -976,6 +1148,10 @@ fn paint_lines(
             &overlay.danmaku_style,
             item.opacity,
             item.dy_px,
+            // **弹幕不横向抖动**：T4 的 `shake_*` 是字幕轨的字段，`DanmakuSpec`
+            // 上没有它 —— 与上面那个恒 1.0 的 `scale` 同一条理由，
+            // 所以也不往 `DanmakuTextItem` 里放一个恒为 0 的字段。
+            0.0,
             // **不判切线**：滚动中越界是常态（见模块文档）。画面外的墨像素由 `blit`
             // 丢掉，但那既不进问题清单、也不计数 —— 计数只数"画了几条"。
             false,
@@ -1131,6 +1307,8 @@ mod tests {
                     color: [255, 255, 255, 255],
                     font_ratio: 0.04,
                     scale: 1.0,
+                    // task-14 加的横向抖动偏移：夹具里恒 0（"老行为"）。
+                    dx_px: 0.0,
                     parts: Vec::new(),
                 })
                 .collect(),
@@ -1149,6 +1327,9 @@ mod tests {
                 shadow_dx_px: 0.0,
                 shadow_dy_px: 0.0,
                 shadow_blur_px: 0.0,
+                // **不铺底衬**：同样是"老工程"的样式（T6 的存量零回归前提）。
+                plate_color: None,
+                plate_pad_px: 12.0,
             },
             danmaku_style: dhampir_core::overlay::TextStyle::default(),
             dropped_lines: dropped,
@@ -1195,6 +1376,9 @@ mod tests {
                 shadow_dx_px: 0.0,
                 shadow_dy_px: 0.0,
                 shadow_blur_px: 0.0,
+                // 弹幕恒不铺底衬（同一条理由）。
+                plate_color: None,
+                plate_pad_px: 12.0,
             },
             dropped_lines: 0,
             dropped_danmaku,
@@ -1823,5 +2007,313 @@ mod tests {
         assert_eq!((stats.lines_drawn, stats.lines_dropped), (1, 1));
         assert_eq!((stats.danmaku_drawn, stats.danmaku_dropped), (1, 3));
         assert_eq!(calls, 2, "字幕一行 + 弹幕一条");
+    }
+
+    // ---- 底衬（T6）：**数像素**的判据 ----
+    //
+    // ⚠️ 这一组是 T6 的唯一判据来源。"字段接上了"与"画出来了"是两件事：
+    // 字段接上而 `paint_one` 不认识它，**画面与今天逐像素相同**（哑字段）——
+    // 那正是本仓"跑得通、日志正常、结果不对"的同一形态。所以只数像素。
+
+    /// 数一张图里**等于给定色值**的像素个数。
+    fn count_color(image: &Rgba8Image, color: [u8; 4]) -> usize {
+        image
+            .pixels
+            .chunks_exact(4)
+            .filter(|px| {
+                px[0] == color[0] && px[1] == color[1] && px[2] == color[2] && px[3] == color[3]
+            })
+            .count()
+    }
+
+    /// 数一张图里**与背景不同**的像素个数。
+    fn count_non_background(image: &Rgba8Image, background: [u8; 4]) -> usize {
+        image
+            .pixels
+            .chunks_exact(4)
+            .filter(|px| {
+                px[0] != background[0]
+                    || px[1] != background[1]
+                    || px[2] != background[2]
+                    || px[3] != background[3]
+            })
+            .count()
+    }
+
+    /// 跑一次 `paint_lines`（一行字幕），返回画完的图。
+    ///
+    /// `background` 可选：**底衬那几条判据必须给一个"任何可能的底衬色都不等于它"
+    /// 的底色** —— 用黑底时，一个把默认值误当成"黑底衬"的实现会因为两者同色而
+    /// **看不出来**。这条已被变异抓住过：把 `None` 改成"默认铺一块不透明黑"，
+    /// 黑底图上的判据仍然全绿。
+    fn paint_single_subtitle_on(
+        target: (u32, u32),
+        background: Option<[u8; 4]>,
+        style_setup: impl FnOnce(&mut TextOverlay),
+    ) -> Rgba8Image {
+        let mut image = frame(target.0, target.1, background.unwrap_or([0, 0, 0, 255]));
+        let mut log = IssueLog::new();
+        let mut calls = 0usize;
+        let mut painter = OverlayPainter::new(Some(Path::new("C:/fake/font.ttf")));
+        let mut items = overlay(&[("字幕", rect(0.25, 0.8, 0.5, 0.066))], 0);
+        style_setup(&mut items);
+        paint_lines(
+            &mut |key| fake_rasterizer(&mut calls)(key),
+            &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            &None,
+            &mut image,
+            &items,
+            target,
+            &mut log,
+            &mut painter.stats,
+        );
+        assert!(log.is_empty(), "不该有问题记录：这一行没画出来过");
+        image
+    }
+
+    /// 黑底那条老路（历史用例都走它）。
+    fn paint_single_subtitle(
+        target: (u32, u32),
+        style_setup: impl FnOnce(&mut TextOverlay),
+    ) -> Rgba8Image {
+        paint_single_subtitle_on(target, None, style_setup)
+    }
+
+    /// **反向用例（渲染层）**：`plate_color = None` ⇒ **一个像素都不多画**。
+    ///
+    /// 这条是 T6 的存量零回归判据。与 `layer.rs` 的 JSON 层那条是**两道**
+    /// —— 这条证明"画面没变"，那条证明"工程文件没变"。
+    ///
+    /// **变异自证**：把 `paint_one` 里那个 `if judge_clip` 去掉、或把
+    /// `paint_plate` 开头的 `let Some(color) = color else` 改成 `unwrap_or(某个默认色)`，
+    /// 本条立刻打红（默认样式的 `plate_color` 是 `None`）。
+    #[test]
+    fn 没有底衬时一个像素都不多画() {
+        let target = (640u32, 360u32);
+        // ⚠️ 底色**故意不是一个"可能的底衬色"**（不是黑）。
+        // 用黑底时，"把默认值误当成铺一块不透明黑"的实现会与底色同色 ⇒
+        // 判据看不出来。这条是被变异逼出来的：见 `paint_single_subtitle_on` 的注释。
+        let background = [200, 30, 90, 255];
+
+        // **地基**：夹具那条字幕必须真的画得出字 —— 否则"没多画像素"是废话
+        // （一张空图当然没多画）。这一条不成立时下面全是空的。
+        let probe = paint_single_subtitle_on(target, Some(background), |_| {});
+        let ink = count_non_background(&probe, background);
+        assert!(ink > 0, "夹具本身要画得出字，否则这条判据是空的");
+
+        let default_style = paint_single_subtitle_on(target, Some(background), |_| {});
+        let explicit_none = paint_single_subtitle_on(target, Some(background), |o| {
+            o.subtitle_style.plate_color = None
+        });
+        assert_eq!(
+            default_style.pixels, explicit_none.pixels,
+            "plate_color = None 必须与默认样式逐像素相同"
+        );
+
+        // **核心判据：默认样式不许铺任何底衬**。
+        //
+        // 判法：数"底衬**该**占的那块矩形里、但**不在**字位图横向范围内"的像素
+        // —— 那些位置默认样式下必须是纯背景。比"数某个具体底衬色"更强：
+        // **任何**颜色/任何位置的误铺都会让这一条红。
+        let stray = count_stray_in_plate_band(&default_style, background);
+        assert_eq!(
+            stray, 0,
+            "默认样式（plate_color = None）在字之外多画了 {stray} 个像素（该是 0）"
+        );
+    }
+
+    /// 数"底衬矩形之内、但横向在字位图之外"的非背景像素。
+    ///
+    /// `ink_bitmap` 的墨在横向 `[w/8, 3w/8]`（居中 1/4 宽）—— 这里取矩形左右两端
+    /// 各 1/4 作为"字**不可能**占到"的带，于是任何非背景像素都只可能来自底衬。
+    fn count_stray_in_plate_band(image: &Rgba8Image, background: [u8; 4]) -> usize {
+        let r = rect(0.25, 0.8, 0.5, 0.066);
+        let pad = 12.0f32;
+        let w = 640.0f32;
+        let h = 360.0f32;
+        let left = ((r.x * w).round() - pad) as i32;
+        let right = (((r.x + r.width) * w).round() + pad) as i32;
+        let top = ((r.y * h).round() - pad) as i32;
+        let bottom = (((r.y + r.height) * h).round() + pad) as i32;
+        let ink_left = left + (right - left) / 4;
+        let ink_right = left + 3 * (right - left) / 4;
+        let mut stray = 0usize;
+        for y in top.max(0)..bottom {
+            for x in left.max(0)..right.min(image.width as i32) {
+                if x >= ink_left && x < ink_right {
+                    continue;
+                }
+                if let Some(px) = image.pixel(x as u32, y as u32) {
+                    if px != background {
+                        stray += 1;
+                    }
+                }
+            }
+        }
+        stray
+    }
+
+    /// **正向判据（数像素）**：有底衬时，行盒**外扩一圈**的区域里出现
+    /// **等于 `plate_color`** 的像素，且**多出来的像素全都**是它。
+    ///
+    /// # 判据怎么避开"字自己"
+    ///
+    /// 底衬色取一个字**不会用到的**颜色（`[10, 200, 30, 255]`，夹具的墨是纯白），
+    /// 于是"数这个色值"就**只**数得到底衬。再拿"有底衬"减"没底衬"：
+    /// **差出来的那些像素**就是底衬，与字无关。
+    ///
+    /// ⚠️ 特别验了"底衬比行盒大一圈"—— 只验"字周围有底衬"的话，
+    /// 一个把 `pad` 吃成 0 的实现也能过（那正是"看着有底衬、其实贴死在字上"）。
+    #[test]
+    fn 有底衬时外扩一圈出现底衬色() {
+        let target = (640u32, 360u32);
+        let plate = [10, 200, 30, 255];
+        let background = [0, 0, 0, 255];
+        let setup = |o: &mut TextOverlay| {
+            o.subtitle_style.plate_color = Some(plate);
+            o.subtitle_style.plate_pad_px = 12.0;
+        };
+
+        let without = paint_single_subtitle(target, |_| {});
+        let with_plate = paint_single_subtitle(target, setup);
+
+        let extra = count_non_background(&with_plate, background)
+            - count_non_background(&without, background);
+        let plate_px = count_color(&with_plate, plate);
+        assert!(
+            plate_px > 0,
+            "有底衬时该数得到底衬色的像素（数到 0 就是没画）"
+        );
+        assert_eq!(
+            extra, plate_px,
+            "多出来的像素必须**全部**是底衬色 —— 出现别的色说明铺块碰了字"
+        );
+
+        // 几何：底衬那块矩形 = 行盒外扩 12px。
+        // ⚠️ 它比"数得到的底衬像素"**大** —— 字是后画的，会把中间那条盖掉
+        // （那正是**对**的层序，见 `底衬铺在字之前_字仍然看得见`）。
+        // 所以判据分两步：① 底衬像素数 ≤ 矩形面积（不可能更满）；
+        // ② 少掉的那些**正是字盖住的那几条**（底衬像素 + 不透明墨 = 矩形面积）。
+        let rect_area = {
+            let r = rect(0.25, 0.8, 0.5, 0.066);
+            let pad = 12.0f32;
+            let w = 640.0f32;
+            let h = 360.0f32;
+            let left = (r.x * w).round() - pad;
+            let top = (r.y * h).round() - pad;
+            let right = ((r.x + r.width) * w).round() + pad;
+            let bottom = ((r.y + r.height) * h).round() + pad;
+            ((right - left) as usize) * ((bottom - top) as usize)
+        };
+        assert!(
+            plate_px <= rect_area,
+            "底衬像素（{plate_px}）不可能多于那块矩形（{rect_area}）"
+        );
+        // 少掉的那部分必须是**字盖住的**（否则就是"只铺了字那一小块"）。
+        let covered_by_ink = rect_area - plate_px;
+        assert!(
+            covered_by_ink > 0 && covered_by_ink < rect_area,
+            "字该盖住矩形的一部分（盖住 {covered_by_ink} / {rect_area}）"
+        );
+    }
+
+    /// ⚠️ **层序判据**：底衬铺在字**之前** —— 字必须仍然看得见。
+    ///
+    /// 铺在字**之后**会把字整个盖住：画面上"有底衬"，但字没了。
+    /// 它与"字段是哑的"属于同一类静默（都看着像做完了，只有数像素才分得开）。
+    ///
+    /// **变异自证**：把 `paint_one` 里那个 `paint_plate(…)` 调用挪到画字之后，
+    /// 本条打红 —— 白色墨像素会被底衬色盖掉。
+    #[test]
+    fn 底衬铺在字之前_字仍然看得见() {
+        let target = (640u32, 360u32);
+        let plate = [10, 200, 30, 255];
+        let image = paint_single_subtitle(target, |o| {
+            o.subtitle_style.plate_color = Some(plate);
+            o.subtitle_style.plate_pad_px = 12.0;
+        });
+
+        // 夹具的字是**纯白墨**，底衬是另一个颜色：字还在 ⇒ 图里仍有白色像素。
+        assert!(
+            count_color(&image, [255, 255, 255, 255]) > 0,
+            "铺了底衬之后字必须还在（铺在字之后会把字盖掉）"
+        );
+        // 两种色同时出现，才说明**层序**对（底衬在下、字在上）。
+        assert!(count_color(&image, plate) > 0, "底衬自己也要在");
+    }
+
+    /// `plate_pad_px` **真的改变外扩量**（不是个被忽略的字段）。
+    ///
+    /// 少了这条，一个"把 pad 写死成 0"的实现能过上面两条。
+    #[test]
+    fn 外扩量真的改变底衬大小() {
+        let target = (640u32, 360u32);
+        let plate = [10, 200, 30, 255];
+        let count_for = |pad: f32| {
+            count_color(
+                &paint_single_subtitle(target, |o| {
+                    o.subtitle_style.plate_color = Some(plate);
+                    o.subtitle_style.plate_pad_px = pad;
+                }),
+                plate,
+            )
+        };
+        // ⚠️ 不拿"绝对面积"当判据：字是后画的、会盖掉底衬中间那几条，
+        // 所以**可见的**底衬像素少于矩形面积。判据改成**两个 pad 之间的关系**
+        // —— 那正是这个字段有没有被读到的证明。
+        //
+        // 外扩大 2·Δ 的两圈，**每周多出来的底衬像素** =
+        //   (w + 2·(p+Δ))·(h + 2·(p+Δ)) − (w + 2p)·(h + 2p)
+        // 取 p = 0、Δ = 12，且矩形整体在画面内 ⇒ 差值可精确算出来。
+        let w = (0.5f32 * 640.0).round() as usize;
+        let h = (0.066f32 * 360.0).round() as usize;
+        let (zero, twelve) = (count_for(0.0), count_for(12.0));
+        assert!(zero > 0, "pad = 0 时也要铺（紧贴行盒的那块）");
+        assert!(
+            twelve > zero,
+            "pad 12 必须比 pad 0 大（{twelve} vs {zero}）—— 否则 pad 是被忽略的"
+        );
+        // 外扩一圈多出来的**矩形**面积；可见像素的增量必须落在它之内、
+        // 且不为零（若 pad 被忽略，增量恒为 0）。
+        let ring = (w + 24) * (h + 24) - w * h;
+        let gained = twelve - zero;
+        assert!(
+            gained > 0 && gained <= ring,
+            "外扩 12 该多出最多 {ring} 个底衬像素，实际 {gained}"
+        );
+        // 而 pad = 0 的那块矩形就是行盒本身：可见像素不可能超过它。
+        assert!(zero <= w * h, "pad = 0 时底衬不可能大过行盒（{w}x{h}）");
+    }
+
+    /// 底衬跟着这一行的**不透明度**淡入淡出。
+    ///
+    /// 不透明时铺满，半透明时铺半份 —— 否则淡入前半段会出现
+    /// "字还半透明、底衬已经全黑"的错帧。
+    #[test]
+    fn 底衬跟着不透明度淡入() {
+        let target = (640u32, 360u32);
+        let plate = [10, 200, 30, 255];
+        let background = [0, 0, 0, 255];
+        let opaque = paint_single_subtitle(target, |o| {
+            o.subtitle_style.plate_color = Some(plate);
+            o.subtitle_style.plate_pad_px = 12.0;
+        });
+        let half = paint_single_subtitle(target, |o| {
+            o.subtitle_style.plate_color = Some(plate);
+            o.subtitle_style.plate_pad_px = 12.0;
+            // 这一帧的不透明度 = 0.5（淡入中间）。
+            o.items[0].opacity = 0.5;
+        });
+
+        // 半透明那帧里**纯**底衬色变少（alpha 只有一半 ⇒ 合成出别的值）。
+        assert!(
+            count_color(&half, plate) < count_color(&opaque, plate),
+            "半透明那帧不该还有同样多的纯底衬像素"
+        );
+        // 但底衬确实铺了（只是淡了）：非背景像素仍明显多于"没底衬"那张。
+        assert!(
+            count_non_background(&half, background) > 0,
+            "半透明底衬也画得出来"
+        );
     }
 }
