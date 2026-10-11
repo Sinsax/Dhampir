@@ -42,7 +42,7 @@
 //! 只有弹幕的工程看不出这件事（默认白字带描边）。
 
 use dhampir_timeline::danmaku::{layout as layout_danmaku, rect_at};
-use dhampir_timeline::layer::TimelineV2;
+use dhampir_timeline::layer::{TimelineV2, default_plate_pad_px};
 use dhampir_timeline::schema::{Frame, TimebaseDto, TrackKind};
 use dhampir_timeline::subtitle::{Cue, frame_at_ms};
 use dhampir_timeline::text_layout::{NormalizedRect, layout};
@@ -178,6 +178,18 @@ pub struct TextStyle {
     ///
     /// 两端核不同（canvas `shadowBlur` / ffmpeg `gblur`），所以只保证观感近似。
     pub shadow_blur_px: f32,
+    /// **底衬的颜色**（`None` = 不铺底衬）。T6。
+    ///
+    /// 与 `SubtitleStyle::plate_color` 是同一个值，原样带过来 —— 底衬色
+    /// **不需要**按目标尺寸换算（它是纯色，没有"宽度"这种要换算的量）。
+    pub plate_color: Option<[u8; 4]>,
+    /// **底衬向四周外扩的像素数**（目标像素）。T6。
+    ///
+    /// 契约里是 `Option`（`None` = 默认 12），这里**已经解析成具体像素值** ——
+    /// 与 `stroke_px` / `shadow_blur_px` 同一条分工：**只有求值层知道
+    /// "没写时算多少"**，宿主只看到"多少像素"，不用再问一次默认值
+    /// （两处各问一次就是两个实现，改一处漏一处）。
+    pub plate_pad_px: f32,
 }
 
 impl Default for TextStyle {
@@ -199,6 +211,11 @@ impl Default for TextStyle {
             shadow_dx_px: 0.0,
             shadow_dy_px: 0.0,
             shadow_blur_px: 0.0,
+            // None = 不铺底衬（默认）—— 与阴影同一组："老工程什么都不变"。
+            plate_color: None,
+            // 没有底衬时这个数不会被读到；给 `SubtitleStyle` 的同一个默认值，
+            // 免得出现"两个 12"（见 `Default` 那段注释的同一理由）。
+            plate_pad_px: dhampir_timeline::layer::default_plate_pad_px(),
         }
     }
 }
@@ -369,6 +386,11 @@ pub fn evaluate_overlay(
                 shadow_dx_px: style.shadow_dx_px,
                 shadow_dy_px: style.shadow_dy_px,
                 shadow_blur_px: style.shadow_blur_ratio * target_h,
+                // **底衬（T6）**：颜色原样带过去；外扩量在这里把契约的
+                // `Option` 解析成具体像素 —— `None` 走同一个默认值函数
+                // （`default_plate_pad_px`），不在这里另写一个 12.0。
+                plate_color: style.plate_color,
+                plate_pad_px: style.plate_pad_px.unwrap_or_else(default_plate_pad_px),
             };
             styled = true;
         }
@@ -450,6 +472,11 @@ pub fn evaluate_overlay(
             shadow_dx_px: 0.0,
             shadow_dy_px: 0.0,
             shadow_blur_px: 0.0,
+            // **弹幕恒不铺底衬**（T6）：`DanmakuSpec` 没有这两个字段，与阴影
+            // 同一条理由 —— 跟着字幕走的话，字幕的底衬会**莫名其妙地**
+            // 变成每条滚动弹幕背后的一块色块，那是把画面糊掉。
+            plate_color: None,
+            plate_pad_px: default_plate_pad_px(),
         };
         danmaku_styled = true;
     }
