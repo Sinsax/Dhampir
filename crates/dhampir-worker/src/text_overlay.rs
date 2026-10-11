@@ -1173,7 +1173,8 @@ fn paint_lines(
     for item in &overlay.danmaku {
         match paint_one(
             &mut *rasterize,
-            font_for(&overlay.danmaku_style),
+            // ⚠️ 字体按**这一条所属轨**解析 —— 与字幕那半边同一条理由。
+            font_for(&item.track_style),
             font_dir.clone(),
             image,
             target,
@@ -1188,7 +1189,8 @@ fn paint_lines(
             item.font_ratio,
             // 弹幕没有 `.hl` 标记。
             &[],
-            &overlay.danmaku_style,
+            // ⚠️ **轨道级样式按条取**：`overlay.danmaku_style` 那个共享槽已删除。
+            &item.track_style,
             item.opacity,
             item.dy_px,
             // **弹幕不横向抖动**：T4 的 `shake_*` 是字幕轨的字段，`DanmakuSpec`
@@ -1376,6 +1378,28 @@ mod tests {
         }
     }
 
+    /// 弹幕夹具的轨道级样式（逐条带 —— 帧级那个共享槽已删除）。
+    fn danmaku_fixture_style() -> dhampir_core::overlay::TextStyle {
+        dhampir_core::overlay::TextStyle {
+            color: [255, 255, 255, 255],
+            highlight_color: None,
+            font_ratio: 0.04,
+            outline: true,
+            stroke_px: 0.0,
+            stroke_color: [0, 0, 0, 255],
+            family: None,
+            weight: 400,
+            // 弹幕恒不画阴影（`DanmakuSpec` 里没有阴影字段）。
+            shadow_color: None,
+            shadow_dx_px: 0.0,
+            shadow_dy_px: 0.0,
+            shadow_blur_px: 0.0,
+            // 弹幕恒不铺底衬（同一条理由）。
+            plate_color: None,
+            plate_pad_px: 12.0,
+        }
+    }
+
     fn overlay(lines: &[(&str, NormalizedRect)], dropped: usize) -> TextOverlay {
         TextOverlay {
             items: lines
@@ -1396,7 +1420,6 @@ mod tests {
                 })
                 .collect(),
             danmaku: Vec::new(),
-            danmaku_style: dhampir_core::overlay::TextStyle::default(),
             dropped_lines: dropped,
             dropped_danmaku: 0,
         }
@@ -1424,26 +1447,10 @@ mod tests {
                     dy_px: 0.0,
                     color: [255, 255, 255, 255],
                     font_ratio: 0.04,
+                    // ⚠️ 轨道级样式**逐条**带（帧级那个共享槽已删除）。
+                    track_style: danmaku_fixture_style(),
                 })
                 .collect(),
-            danmaku_style: dhampir_core::overlay::TextStyle {
-                color: [255, 255, 255, 255],
-                highlight_color: None,
-                font_ratio: 0.04,
-                outline: true,
-                stroke_px: 0.0,
-                stroke_color: [0, 0, 0, 255],
-                family: None,
-                weight: 400,
-                // 弹幕恒不画阴影（`DanmakuSpec` 里没有阴影字段）。
-                shadow_color: None,
-                shadow_dx_px: 0.0,
-                shadow_dy_px: 0.0,
-                shadow_blur_px: 0.0,
-                // 弹幕恒不铺底衬（同一条理由）。
-                plate_color: None,
-                plate_pad_px: 12.0,
-            },
             dropped_lines: 0,
             dropped_danmaku,
         }
@@ -2059,6 +2066,7 @@ mod tests {
             dy_px: 0.0,
             color: [255, 255, 255, 255],
             font_ratio: 0.04,
+            track_style: danmaku_fixture_style(),
         });
         items.dropped_danmaku = 3;
         paint_lines(

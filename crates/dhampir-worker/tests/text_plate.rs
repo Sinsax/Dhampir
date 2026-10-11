@@ -47,6 +47,9 @@ const CLIP: (Frame, Frame) = (FRAME, FRAME + 8);
 const SUBTITLE_ASSET: &str = "sub.srt";
 /// **第二条**字幕轨的素材 —— 双轨判据（task-18）用它当"覆盖者"。
 const SRT_ASSET: &str = "srt.srt";
+/// 两条弹幕轨的素材（task-18 第二处：弹幕轨的轨道级样式也是共享槽）。
+const DANMAKU_A_ASSET: &str = "dm_a.ass";
+const DANMAKU_B_ASSET: &str = "dm_b.ass";
 const BACKGROUND_ASSET: &str = "bg.png";
 const SUBTITLE_TEXT: &str = "第一行中文";
 const SRT_HERE: &str = "1\n00:00:00,500 --> 00:00:01,000\n第一行中文\n";
@@ -588,6 +591,256 @@ fn two_track_table() -> SubtitleTable {
     // 后面那条轨的素材：内容无所谓（它的样式才是关键），但要真的活着。
     let report = parse_srt(SRT_HERE).expect("夹具 SRT 必须能解析");
     table.insert(SRT_ASSET.to_string(), report.cues);
+    table
+}
+
+/// ★ **两条弹幕轨并存时，前面那条轨的描边必须真的落到像素上**（task-18 的第二处）。
+///
+/// # 它复现的是"同一个病根的第二处"
+///
+/// 字幕那个共享槽修完之后回头看，弹幕走的是**一模一样的形状**
+/// （`danmaku_style` 也是一个共享槽、每轨整份重写、循环后只留最后一份）。
+/// 而 `grep -c "TrackKind::Danmaku"` 在测试文件里**只有 2**
+/// —— 与字幕那个 bug **完全相同的盲区形状**。
+///
+/// # ⚠️ 判据不能用"描边色"（第一版就是这么错的）
+///
+/// 我第一版数**纯绿**（`stroke_color`）的像素，结果**单轨对照也是 0**。
+/// 查下来根因是**本仓一条既有的已知边界**（`text_raster.rs` 那条
+/// `描边颜色当前不受_stroke_color_控制_这条边界钉住`）：
+/// libass 路线上填充与描边**共用同一张覆盖度掩码**，输出的是**已合成**的颜色、
+/// alpha 恒为 0 ⇒ **黑描边与透明底逐字节相同**，覆盖度恢复不出来。
+/// 所以两处都涂白墨，颜色交回 `tint` —— 而 `tint_color()` 用的是**填充色**。
+/// ⇒ **描边色这一步根本消费不了**，数它是数不出来的。
+///
+/// # 那"描边生效"在像素上是什么
+///
+/// `outline = true` 会让 libass 多画一圈轮廓（白墨，最后按**填充色**上色）
+/// ⇒ **字变胖**。所以可判的是**墨迹面积**：
+/// 同样的文字，开了描边的墨像素**必须多于**不描边的。
+///
+/// ⇒ 判据：两条弹幕轨（轨 A `outline=true` + 非零 `stroke_ratio`，轨 B 不描边），
+/// 对比"双轨"与"只留轨 A"两种夹具的**墨迹像素数**。
+/// 共享槽被覆盖时，轨 A 的 `outline`/`stroke_px` 丢掉 ⇒ **墨迹变少**。
+#[test]
+#[ignore = "需要真 GPU、PATH 上的 ffmpeg 与一个中文字体；跑：cargo test -p dhampir-worker --test text_plate -- --ignored"]
+fn 两条弹幕轨并存时前面那条轨的描边仍然画得出来() {
+    if !temp_writable() {
+        return;
+    }
+    let fixture = Fixture::new("danmaku-two-tracks");
+
+    // 参照帧：同一份夹具但**没有任何弹幕轨** ⇒ 拿它当"背景"。
+    let bg = fixture.render(
+        "dm-background",
+        &no_danmaku_timeline(),
+        &two_danmaku_table(),
+    );
+
+    // 单轨：只留轨 A（配了描边）—— 描边一定画得出来。
+    let only = fixture.render(
+        "dm-one-track",
+        &two_danmaku_timeline(true, true),
+        &two_danmaku_table(),
+    );
+    let ink_only = count_diff(&bg.image, &only.image);
+
+    // 双轨：轨 A + **排在后面的**轨 B（轨 B 不描边，是"覆盖者"）。
+    let both = fixture.render(
+        "dm-two-tracks",
+        &two_danmaku_timeline(false, true),
+        &two_danmaku_table(),
+    );
+    let ink_both = count_diff(&bg.image, &both.image);
+
+    // ① 前提：这一帧弹幕真的画出来了。
+    assert!(
+        ink_only > 0,
+        "单轨对照一个弹幕像素都没画出来 —— 前提不成立（先查夹具/字体/帧号）"
+    );
+    // ② 对照组确实"有描边" ⇒ 至少该有个能被比较的量。
+    assert!(
+        ink_both > 0,
+        "双轨下弹幕像素为 0 —— 夹具或渲染路径有问题"
+    );
+
+    // ③ ★ 核心判据：轨 A **仍然带着描边**（字更胖）⇒ 双轨的墨迹
+    //    必须**不少于**单轨的。共享槽被覆盖时轨 A 的 outline 丢掉，
+    //    字变瘦 ⇒ 这里会明显小一截。
+    //
+    //    ⚠️ 不断言"相等"：轨 B 也画了字（它自己也占像素），所以双轨**本来就更多**。
+    //    真正能分辨"轨 A 的描边丢了"的是下面这条**用轨 B 的贡献做参照**的判据：
+    //    轨 B 单独渲染的墨迹 + 轨 A 无描边的墨迹 < 轨 A 带描边的墨迹。
+    // 轨 A **不描边**时的墨迹（把轨 A 的 outline 关掉）—— 这是"描边丢没丢"的标尺。
+    let a_no_outline = fixture.render(
+        "dm-a-no-outline",
+        &two_danmaku_timeline(true, false),
+        &two_danmaku_table(),
+    );
+    let ink_a_no_outline = count_diff(&bg.image, &a_no_outline.image);
+
+    // ★ 核心判据：**双轨的墨迹必须与"单轨（只留轨 A、带描边）"同量级。**
+    //
+    // 为什么这样量（而不是把几项加起来）：弹幕的字**画在同一批泳道上**，
+    // 轨 A 与轨 B 的墨迹**会重叠**，所以"相加"是错的（我第一版就是这么错的）。
+    // 但"双轨"与"单轨"这两个帧里，**轨 A 都在、且画法完全相同** ——
+    // 所以只要轨 A 的描边没丢，两者的墨迹就该**差不多**：
+    // 轨 B 的贡献最多是"多画几条"，不会让总墨迹**掉一大截**。
+    //
+    // 共享槽被覆盖时轨 A 的描边丢掉 ⇒ 墨迹会塌掉（实测 246 → 2，123 倍）。
+    assert!(
+        ink_both * 2 >= ink_only,
+        "★ 两条弹幕轨并存时墨迹塌了：双轨 {ink_both} vs 单轨（轨 A 带描边）{ink_only} \
+         —— 后面的轨把轨 A 的 `outline` / `stroke_px` 覆盖掉了，\
+         与字幕那个 bug 同形（真机原症状是 246 → 2）"
+    );
+    // 反向：轨 A 的描边**确实**是那个增量（否则上面那条没有分辨力）。
+    assert!(
+        ink_only > ink_a_no_outline,
+        "轨 A 开/关描边的墨迹差是 0（{ink_only} vs {ink_a_no_outline}）—— \
+         描边在这条路上本来就量不出来，上面的判据没有分辨力"
+    );
+}
+
+/// 同一份夹具但**没有任何弹幕轨** —— 拿它当"背景"来数弹幕的墨迹。
+fn no_danmaku_timeline() -> TimelineV2 {
+    let text = format!(
+        r#"{{
+            "schema": 3,
+            "timebase": {{ "num": 30, "den": 1 }},
+            "tracks": [{{
+                "id": "v1",
+                "kind": "video",
+                "layers": [{{
+                    "id": "bg",
+                    "start": {start},
+                    "end": {end},
+                    "source": {{ "asset_id": "{background}", "source_in": 0 }}
+                }}]
+            }}]
+        }}"#,
+        start = CLIP.0,
+        end = CLIP.1,
+        background = BACKGROUND_ASSET,
+    );
+    serde_json::from_str(&text).expect("夹具时间线必须能反序列化")
+}
+
+/// 两张图里**不同的像素数** —— 弹幕的墨迹就是"与无弹幕帧的差"。
+fn count_diff(a: &Rgba8Image, b: &Rgba8Image) -> usize {
+    a.pixels
+        .chunks_exact(4)
+        .zip(b.pixels.chunks_exact(4))
+        .filter(|(x, y)| x != y)
+        .count()
+}
+
+/// 两条弹幕轨：轨 A 配描边，轨 B **排在后面**且不描边。
+///
+/// - `drop_second`：对照组 —— **只删掉第二条轨**。
+/// - `a_outline`：轨 A 要不要描边（用来量"描边贡献了多少墨"）。
+fn two_danmaku_timeline(drop_second: bool, a_outline: bool) -> TimelineV2 {
+    two_danmaku_timeline_full(drop_second, false, a_outline)
+}
+
+/// 同上，但可以**只留轨 B**（`b_only`）—— 用来量轨 B 自己贡献了多少墨。
+fn two_danmaku_timeline_full(
+    drop_second: bool,
+    drop_first: bool,
+    a_outline: bool,
+) -> TimelineV2 {
+    // 轨 A 自己带前导逗号（它永远跟在背景轨后面）。
+    // 轨 A 自己带前导逗号（它永远跟在背景轨后面；`drop_first` 时才整条消失）。
+    let a_track = if drop_first {
+        String::new()
+    } else {
+        format!(
+            r#",{{
+                "id": "dm_a",
+                "kind": "danmaku",
+                "layers": [{{
+                    "id": "shots",
+                    "start": {start},
+                    "end": {end},
+                    "source": {{ "asset_id": "{a}", "source_in": 0 }}
+                }}],
+                "danmaku": {{
+                    "asset_id": "{a}",
+                    "lanes": 4,
+                    "duration_ms": 2000,
+                    "font_ratio": 0.04,
+                    "color": [255, 255, 255, 255],
+                    "outline": {outline},
+                    "stroke_ratio": {stroke}
+                }}
+            }}"#,
+            start = CLIP.0,
+            end = CLIP.1,
+            a = DANMAKU_A_ASSET,
+            outline = a_outline,
+            stroke = if a_outline { 0.03 } else { 0.0 },
+        )
+    };
+    let b_track = if drop_second {
+        String::new()
+    } else {
+        // ⚠️ 轨 B **永远**带前导逗号：它前面不是背景轨就是轨 A，两者都各占一个元素。
+        // 条件拼接会拼出 `}{`（JSON 非法）—— 这个 bug 已经被这条测试自己抓到过一次。
+        format!(
+            r#",{{
+                "id": "dm_b",
+                "kind": "danmaku",
+                "layers": [{{
+                    "id": "shots",
+                    "start": {start},
+                    "end": {end},
+                    "source": {{ "asset_id": "{b}", "source_in": 0 }}
+                }}],
+                "danmaku": {{
+                    "asset_id": "{b}",
+                    "lanes": 4,
+                    "duration_ms": 2000,
+                    "font_ratio": 0.04,
+                    "color": [255, 255, 255, 255]
+                }}
+            }}"#,
+            start = CLIP.0,
+            end = CLIP.1,
+            b = DANMAKU_B_ASSET,
+        )
+    };
+    let text = format!(
+        r#"{{
+            "schema": 3,
+            "timebase": {{ "num": 30, "den": 1 }},
+            "tracks": [
+                {{
+                    "id": "v1",
+                    "kind": "video",
+                    "layers": [{{
+                        "id": "bg",
+                        "start": {start},
+                        "end": {end},
+                        "source": {{ "asset_id": "{background}", "source_in": 0 }}
+                    }}]
+                }}{a_track}{b_track}
+            ]
+        }}"#,
+        start = CLIP.0,
+        end = CLIP.1,
+        background = BACKGROUND_ASSET,
+    );
+    if std::env::var("DUMP_JSON").is_ok() { eprintln!("===JSON===
+{text}
+===END==="); }
+    serde_json::from_str(&text).expect("双弹幕轨夹具时间线必须能反序列化")
+}
+
+fn two_danmaku_table() -> SubtitleTable {
+    let report = parse_srt(SRT_HERE).expect("夹具 SRT 必须能解析");
+    let mut table = SubtitleTable::new();
+    table.insert(DANMAKU_A_ASSET.to_string(), report.cues.clone());
+    table.insert(DANMAKU_B_ASSET.to_string(), report.cues);
     table
 }
 

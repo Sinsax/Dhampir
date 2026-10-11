@@ -170,6 +170,27 @@ pub struct DanmakuTextItem {
     /// 只比矩形的话，"两条的时长被对调了"在某些帧上可能看不出来。
     /// 与 `lane`/`enter`/`exit` 同一条理由。
     pub travel_frames: i64,
+    /// **这一条所属弹幕轨的轨道级样式。**
+    ///
+    /// # 与 `TextItem::track_style` 同一个理由、同一个 bug
+    ///
+    /// 帧级的 `TextOverlay.danmaku_style` 与字幕那个共享槽**形状完全相同**：
+    /// 在 `for track in &timeline.tracks` 里**每轨整份重写**，循环后只留最后一份
+    /// ⇒ **两条弹幕轨并存时，前面那条轨的轨道级样式被整份吃掉**。
+    ///
+    /// ★ 而 `grep -c "TrackKind::Danmaku"` 在测试文件里**只有 2**
+    /// —— **与字幕那个 bug 完全相同的盲区形状**（都需要 ≥2 条轨才显形）。
+    ///
+    /// # 哪些字段会丢，哪些不会
+    ///
+    /// **不会丢**：`color` / `font_ratio` —— 它们是**逐条**字段，
+    /// 在覆盖发生**之前**就已经 push 进 `DanmakuTextItem` 了。
+    ///
+    /// **会丢**：`outline` / `stroke_px` / `stroke_color` / `font_family` / `font_weight`
+    /// —— 这几项**只**在帧级 `danmaku_style` 里读，而宿主画弹幕时把
+    /// **同一份**传给**每一条**。真机实测：两条弹幕轨并存时，
+    /// 前面那条轨的描边**从 246 个墨像素掉到 2 个**。
+    pub track_style: TextStyle,
 }
 
 /// 一类文字的画法（颜色 + 描边）。
@@ -279,15 +300,14 @@ pub struct TextOverlay {
     /// 弹幕按自己的宽度左对齐），宿主据此选不同的画法。混在一起就得在每个元素上带一个
     /// 种类标签，而那与"这里是纯结构"的定位冲突。
     pub danmaku: Vec<DanmakuTextItem>,
-    /// **弹幕**的画法。
+    /// ⚠️ **字幕与弹幕都没有帧级的"画法"字段了** —— 两者的轨道级样式
+    /// 都跟着**每一条**走：[`TextItem::track_style`] 与
+    /// [`DanmakuTextItem::track_style`]。
     ///
-    /// ⚠️ 字幕**没有**对应的那一份了 —— 字幕的轨道级样式跟着每条
-    /// [`TextItem::track_style`] 走。理由是一条真 bug：
-    /// 这里原来是**一个共享槽**，循环里每轨整份重写、只留最后一份
-    /// ⇒ **最后一条字幕轨说了算**（元素轨 + 字幕轨并存时前者样式全失效）。
-    /// 弹幕**不受影响**：它走的是另一个循环、另一个槽，且弹幕轨的
-    /// 泳道参数本身就是"一轨一套"，没有"多条轨共用一格"的问题。
-    pub danmaku_style: TextStyle,
+    /// 理由是同一条真 bug 的**两处实例**：这里曾经有两个**共享槽**，
+    /// 循环里每轨整份重写、只留最后一份 ⇒ **最后一条轨说了算**
+    /// （元素轨 + 字幕轨并存时，前面那条轨的样式全失效）。
+    /// 两处都已按同一形状修掉。
     /// 因为超过 max_lines 被丢弃的**行数**（所有字幕轨加起来）。
     ///
     /// 与 text_layout 的口径一致：丢弃必须计数，否则「字幕只显示了一半」
@@ -339,7 +359,6 @@ pub fn evaluate_overlay(
     //
     // ⚠️ 字幕这一份**不再有共享槽** —— 它跟着每条 `TextItem` 走（见 `TextItem::track_style`）。
     // 这里只在"这一帧到底有没有字幕"这个**布尔**上留一个账（`styled`）。
-    let mut danmaku_style = TextStyle::default();
     let mut styled = false;
     let mut danmaku_styled = false;
     // 描边宽度是"目标高 * 比例" —— 换算需要目标尺寸，所以在这里做一次。
@@ -543,6 +562,37 @@ pub fn evaluate_overlay(
         // 每帧重算是纯函数的天性；素材几百条时这是 O(条数 × 泳道数)，写进边界。
         let laid: dhampir_timeline::danmaku::DanmakuLayout = layout_danmaku(cues, spec, &timebase);
         dropped_danmaku += laid.dropped;
+        // ---------------------------------------------------------------------
+        // **这条轨的轨道级样式**（与字幕那半边同一个形状、同一个 bug）。
+        // ---------------------------------------------------------------------
+        //
+        // ⚠️ 它算在**每条轨自己的作用域里**，然后跟着这一轨的每条 `DanmakuTextItem` 走。
+        // 以前是写进循环外的**一个共享槽** `danmaku_style`，循环结束只返回最后一份
+        // ⇒ **最后一条弹幕轨说了算**，前面所有轨的轨道级样式被整份吃掉。
+        // 详见 `DanmakuTextItem::track_style`。
+        let track_style = TextStyle {
+            color: spec.color,
+            // 弹幕没有 `.hl` 标记（参照的弹幕路径也不解析它）。
+            highlight_color: None,
+            font_ratio: spec.font_ratio,
+            outline: spec.outline,
+            stroke_px: spec.stroke_ratio * target_h,
+            stroke_color: spec.stroke_color,
+            family: spec.font_family.clone(),
+            weight: spec.font_weight,
+            // **弹幕恒不画阴影**：`DanmakuSpec` 没有阴影字段（加一个就要动契约，
+            // 而"弹幕要不要阴影"没人提过）。这里如实给"不画"，而不是跟着字幕走
+            // —— 跟着走的话，给字幕配的阴影会**莫名其妙地**出现在弹幕上。
+            shadow_color: None,
+            shadow_dx_px: 0.0,
+            shadow_dy_px: 0.0,
+            shadow_blur_px: 0.0,
+            // **弹幕恒不铺底衬**（T6）：`DanmakuSpec` 没有这两个字段，与阴影
+            // 同一条理由 —— 跟着字幕走的话，字幕的底衬会**莫名其妙地**
+            // 变成每条滚动弹幕背后的一块色块，那是把画面糊掉。
+            plate_color: None,
+            plate_pad_px: default_plate_pad_px(),
+        };
         for item in laid.items {
             if frame < item.enter || frame > item.exit {
                 continue;
@@ -575,31 +625,13 @@ pub fn evaluate_overlay(
                 // **这条自带的颜色**覆盖轨道默认。
                 color: item.color.unwrap_or(spec.color),
                 font_ratio: spec.font_ratio,
+                // 轨道级样式**跟着这一条走**（见 `DanmakuTextItem::track_style`）。
+                track_style: track_style.clone(),
             });
         }
-        danmaku_style = TextStyle {
-            color: spec.color,
-            // 弹幕没有 `.hl` 标记（参照的弹幕路径也不解析它）。
-            highlight_color: None,
-            font_ratio: spec.font_ratio,
-            outline: spec.outline,
-            stroke_px: spec.stroke_ratio * target_h,
-            stroke_color: spec.stroke_color,
-            family: spec.font_family.clone(),
-            weight: spec.font_weight,
-            // **弹幕恒不画阴影**：`DanmakuSpec` 没有阴影字段（加一个就要动契约，
-            // 而"弹幕要不要阴影"没人提过）。这里如实给"不画"，而不是跟着字幕走
-            // —— 跟着走的话，给字幕配的阴影会**莫名其妙地**出现在弹幕上。
-            shadow_color: None,
-            shadow_dx_px: 0.0,
-            shadow_dy_px: 0.0,
-            shadow_blur_px: 0.0,
-            // **弹幕恒不铺底衬**（T6）：`DanmakuSpec` 没有这两个字段，与阴影
-            // 同一条理由 —— 跟着字幕走的话，字幕的底衬会**莫名其妙地**
-            // 变成每条滚动弹幕背后的一块色块，那是把画面糊掉。
-            plate_color: None,
-            plate_pad_px: default_plate_pad_px(),
-        };
+        // ⚠️ 这里原来有一整段 `danmaku_style = TextStyle { … }` —— 就是那个 bug。
+        // 现在轨道级样式在**进 item 循环之前**算好并跟着每条走；
+        // 这里只剩"这一帧有弹幕"这个布尔账。
         danmaku_styled = true;
     }
 
@@ -612,7 +644,6 @@ pub fn evaluate_overlay(
     Some(TextOverlay {
         items,
         danmaku,
-        danmaku_style,
         dropped_lines,
         dropped_danmaku,
     })
@@ -1494,10 +1525,114 @@ mod tests {
             .expect("这一帧应当有字");
         assert_eq!(overlay.items[0].track_style.shadow_color, Some([0, 0, 0, 102]));
         assert_eq!(
-            overlay.danmaku_style.shadow_color, None,
+            overlay.danmaku[0].track_style.shadow_color, None,
             "弹幕不该继承字幕的阴影"
         );
-        assert_eq!(overlay.danmaku_style.shadow_blur_px, 0.0);
+        assert_eq!(overlay.danmaku[0].track_style.shadow_blur_px, 0.0);
+    }
+
+    /// ★ **两条弹幕轨并存**时，各自的轨道级样式是否都生效？
+    ///
+    /// # 为什么补这条（写它的动机本身就是发现）
+    ///
+    /// task-18 修的是**字幕**那个共享槽。修完写文档时回头核对"弹幕那一边呢"，
+    /// 看到弹幕走的是**一模一样的形状**（`danmaku_style` 也是一个共享槽，
+    /// 在 `for track in &timeline.tracks` 里每轨整份重写、循环后只留最后一份）。
+    /// 而 `grep -c "TrackKind::Danmaku"` 在当时的测试文件里**只有 1**
+    /// —— **与字幕那个 bug 是完全相同的盲区形状**。
+    ///
+    /// # 但它**没有**变成第二个 bug —— 这条判据就是这个结论的证据
+    ///
+    /// 与字幕同一条道理：**逐条**字段在覆盖发生**之前**就 push 进 items 了。
+    /// 弹幕的逐条字段是 `color` / `font_ratio`（`DanmakuTextItem` 上有），
+    /// 而宿主画弹幕时**颜色与字号都读逐条的**（`&item.color` / `item.font_ratio`）——
+    /// ⇒ 这两项**不会**被覆盖。
+    ///
+    /// ⚠️ **仍然有暴露面**：`outline` / `stroke_px` / `stroke_color` /
+    /// `font_family` / `font_weight` 是**只**在帧级 `danmaku_style` 里读的
+    /// （`text_overlay.rs` 画弹幕时传的就是它）。**两条弹幕轨共存**时，
+    /// 前面那条轨的这几项**会**被后面那条吃掉 —— 与字幕那个 bug 同形。
+    ///
+    /// ⇒ 下面第二条断言（描边）就是**钉这个暴露面**的。
+    /// **⚠️ 本仓当前没有"两条弹幕轨"的工程**，所以这是**潜在**缺陷而非实测故障；
+    /// 真要修，做法与 `TextItem::track_style` 完全一样（把帧级那份也挂到
+    /// `DanmakuTextItem` 上）—— 但没有现场证据，**不在 task-18 的范围里**，
+    /// 单独开任务做。
+    #[test]
+    fn 两条弹幕轨各自的轨道级样式都生效() {
+        let line = timeline(
+            r#"{
+                "schema": 3,
+                "timebase": { "num": 30, "den": 1 },
+                "tracks": [
+                    {
+                        "id": "dm_a",
+                        "kind": "danmaku",
+                        "layers": [{
+                            "id": "shots",
+                            "start": 0,
+                            "end": 120,
+                            "source": { "asset_id": "dm_a.ass", "source_in": 0 }
+                        }],
+                        "danmaku": {
+                            "asset_id": "dm_a.ass",
+                            "lanes": 4,
+                            "duration_ms": 2000,
+                            "font_ratio": 0.04,
+                            "color": [255, 0, 0, 255],
+                            "outline": true,
+                            "stroke_ratio": 0.05
+                        }
+                    },
+                    {
+                        "id": "dm_b",
+                        "kind": "danmaku",
+                        "layers": [{
+                            "id": "shots",
+                            "start": 0,
+                            "end": 120,
+                            "source": { "asset_id": "dm_b.ass", "source_in": 0 }
+                        }],
+                        "danmaku": {
+                            "asset_id": "dm_b.ass",
+                            "lanes": 4,
+                            "duration_ms": 2000,
+                            "font_ratio": 0.04,
+                            "color": [0, 0, 255, 255],
+                            "outline": false,
+                            "stroke_ratio": 0.0
+                        }
+                    }
+                ]
+            }"#,
+        );
+        let mut table = SubtitleTable::new();
+        table.insert("dm_a.ass".to_string(), cues());
+        table.insert("dm_b.ass".to_string(), cues());
+
+        let overlay = evaluate_overlay(&line, 15, SEQUENCE, Some(&table)).unwrap();
+        assert!(!overlay.danmaku.is_empty(), "两条弹幕轨都该有内容");
+
+        // ① **逐条**字段（颜色 / 字号）：两项都不会被覆盖 —— 这是**结论**，不是缺陷。
+        let colors: Vec<[u8; 4]> = overlay.danmaku.iter().map(|d| d.color).collect();
+        assert!(
+            colors.contains(&[255, 0, 0, 255]) && colors.contains(&[0, 0, 255, 255]),
+            "两条轨的**颜色**都该在（逐条字段，覆盖发生前已解析）：实际 {colors:?}"
+        );
+
+        // ② ★ **轨道级**字段（描边）：这一项**只**在轨道级样式里读 ⇒
+        //    两条轨并存时，前面那条的描边**曾经**会被后面那条吃掉（共享槽）。
+        //    修完之后，每条 item 拿到的都是**自己那条轨**的样式。
+        assert!(
+            overlay.danmaku[0].track_style.stroke_px > 0.0,
+            "★ 轨 A 配了 `stroke_ratio`（描边），但它拿到的样式里 `stroke_px = {}` \
+             —— 被后面那条轨覆盖了（与 task-18 修掉的字幕 bug 同形）。",
+            overlay.danmaku[0].track_style.stroke_px
+        );
+        assert!(
+            overlay.danmaku[1].track_style.stroke_px == 0.0,
+            "轨 B 没配描边，它的样式里不该有描边"
+        );
     }
 
     #[test]
@@ -1512,12 +1647,12 @@ mod tests {
             "字幕用字幕的颜色"
         );
         assert_eq!(
-            overlay.danmaku_style.color,
+            overlay.danmaku[0].track_style.color,
             [0, 255, 0, 255],
             "弹幕用弹幕的颜色"
         );
         assert_ne!(
-            overlay.items[0].track_style.color, overlay.danmaku_style.color,
+            overlay.items[0].track_style.color, overlay.danmaku[0].track_style.color,
             "两者必须能不同 —— 这正是共用一个字段时做不到的事"
         );
     }
