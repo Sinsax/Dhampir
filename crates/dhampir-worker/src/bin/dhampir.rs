@@ -2131,7 +2131,7 @@ fn cmd_subtitle(args: &Args) -> Result<ExitCode, CommandError> {
 
     let sequence = doc.sequence_size();
     let overlay = evaluate_overlay(&doc.timeline, frame, sequence, Some(&table));
-    let (items, danmaku, subtitle_style, danmaku_style, dropped_lines, dropped_danmaku) =
+    let (items, danmaku, danmaku_style, dropped_lines, dropped_danmaku) =
         match overlay {
             Some(overlay) => (
                 overlay.items.iter().map(text_item_json).collect::<Vec<_>>(),
@@ -2140,7 +2140,6 @@ fn cmd_subtitle(args: &Args) -> Result<ExitCode, CommandError> {
                     .iter()
                     .map(danmaku_item_json)
                     .collect::<Vec<_>>(),
-                text_style_json(&overlay.subtitle_style),
                 text_style_json(&overlay.danmaku_style),
                 overlay.dropped_lines,
                 overlay.dropped_danmaku,
@@ -2148,7 +2147,6 @@ fn cmd_subtitle(args: &Args) -> Result<ExitCode, CommandError> {
             None => (
                 Vec::new(),
                 Vec::new(),
-                serde_json::Value::Null,
                 serde_json::Value::Null,
                 0,
                 0,
@@ -2161,9 +2159,12 @@ fn cmd_subtitle(args: &Args) -> Result<ExitCode, CommandError> {
         "subtitle_assets": table.len(),
         "items": items,
         "danmaku": danmaku,
-        // **两类各一套画法**（以前是一份共用的，见 `TextStyle` 的说明）。
-        // 逐字段同名于 `host_api::TextStyleView` 与 wasm 的 `dhampir_project_text_frame`。
-        "subtitle_style": subtitle_style,
+        // **弹幕的画法**（帧级一份 —— 弹幕轨的泳道参数本来就是"一轨一套"，
+        // 不存在多条轨共用一格的问题）。
+        //
+        // ⚠️ 字幕**没有**帧级的那一份了：它的轨道级样式跟着**每个 item** 走
+        // （见上面 `text_item_json` 的 `"style"`）。以前这里的 `"subtitle_style"`
+        // 是个共享槽的残影 —— 两条字幕轨并存时它只知道最后一条。
         "danmaku_style": danmaku_style,
         "dropped_lines": dropped_lines,
         "dropped_danmaku": dropped_danmaku,
@@ -2220,6 +2221,16 @@ fn text_item_json(item: &dhampir_core::overlay::TextItem) -> serde_json::Value {
             .iter()
             .map(|r| serde_json::json!({ "text": r.text, "color": r.color }))
             .collect::<Vec<_>>(),
+        // ⚠️ **这一条所属轨的轨道级样式跟着条目走**（不是全帧一份共享的）。
+        //
+        // 这里曾经把 `subtitle_style` 放在**帧级**输出一份，而求值层那份来自一个
+        // "每轨整份重写、循环结束只留最后一份"的共享槽 ⇒ **两条字幕轨并存时，
+        // 前面那条轨的轨道级样式（描边 / 阴影 / 底衬 / 字体族…）全部失效**。
+        // 详见 `dhampir_core::overlay::TextItem::track_style`。
+        //
+        // 与 wasm 侧 `text_item_json` **逐字段同名** —— 漏在任一端就是
+        // "预览与成片不一样"，而两端各自都看不出来。
+        "style": text_style_json(&item.track_style),
     })
 }
 
@@ -2246,6 +2257,10 @@ fn danmaku_item_json(item: &dhampir_core::overlay::DanmakuTextItem) -> serde_jso
         scale: 1.0,
         // 弹幕没有 `.hl` 标记（参照的弹幕路径也不解析它）。
         parts: Vec::new(),
+        // 弹幕的轨道级样式（`danmaku_style`）—— 这个字段只为复用
+        // `text_item_json` 的序列化形状而填；弹幕的画法仍走**帧级**
+        // `danmaku_style`（它本来就不存在"多条轨共用一格"的问题）。
+        track_style: dhampir_core::overlay::TextStyle::default(),
     });
     value["lane"] = serde_json::json!(item.lane);
     value["enter"] = serde_json::json!(item.enter);

@@ -1133,7 +1133,9 @@ fn paint_lines(
     for item in &overlay.items {
         match paint_one(
             &mut *rasterize,
-            font_for(&overlay.subtitle_style),
+            // ⚠️ 字体按**这一条所属轨**解析（`item.track_style`），不是全帧一个 ——
+            // 两条字幕轨的字体族可以不同（见 `TextItem::track_style`）。
+            font_for(&item.track_style),
             font_dir.clone(),
             image,
             target,
@@ -1148,7 +1150,9 @@ fn paint_lines(
             item.font_ratio,
             // **逐段颜色**：空 = 没有 `.hl`，走一次画完的老路。
             &item.parts,
-            &overlay.subtitle_style,
+            // ⚠️ **轨道级样式按条取**：`overlay.subtitle_style` 那个共享槽
+            // 已删除（它让最后一条字幕轨吃掉前面所有轨，含 T6 底衬）。
+            &item.track_style,
             item.opacity,
             item.dy_px,
             item.dx_px,
@@ -1333,6 +1337,45 @@ mod tests {
         }
     }
 
+    /// 夹具用的"老工程"轨道级样式：不描边宽度、**不画阴影、不铺底衬**。
+    ///
+    /// ⚠️ 它是**逐条**填进 `TextItem.track_style` 的（不是帧级一份共享的）——
+    /// 帧级那个共享槽正是 task-18 修的 bug。
+    fn fixture_track_style() -> dhampir_core::overlay::TextStyle {
+        dhampir_core::overlay::TextStyle {
+            color: [255, 255, 255, 255],
+            highlight_color: None,
+            font_ratio: 0.04,
+            outline: true,
+            stroke_px: 0.0,
+            stroke_color: [0, 0, 0, 255],
+            family: None,
+            weight: 400,
+            // **不画阴影**：这是"老工程"的那套样式。
+            shadow_color: None,
+            shadow_dx_px: 0.0,
+            shadow_dy_px: 0.0,
+            shadow_blur_px: 0.0,
+            // **不铺底衬**：同样是"老工程"的样式（T6 的存量零回归前提）。
+            plate_color: None,
+            plate_pad_px: 12.0,
+        }
+    }
+
+    /// 把轨道级样式**写到每一条**上 —— 夹具里改样式时用它。
+    ///
+    /// ⚠️ 存在的理由就是 task-18：轨道级样式**逐条**存在（`TextItem::track_style`），
+    /// 再也没有"改一处、全帧生效"的共享槽了。夹具里所有条目本来就同属一条轨，
+    /// 所以这里就是"给那条轨改样式"。
+    fn set_track_style(
+        overlay: &mut TextOverlay,
+        mut edit: impl FnMut(&mut dhampir_core::overlay::TextStyle),
+    ) {
+        for item in &mut overlay.items {
+            edit(&mut item.track_style);
+        }
+    }
+
     fn overlay(lines: &[(&str, NormalizedRect)], dropped: usize) -> TextOverlay {
         TextOverlay {
             items: lines
@@ -1349,27 +1392,10 @@ mod tests {
                     // task-14 加的横向抖动偏移：夹具里恒 0（"老行为"）。
                     dx_px: 0.0,
                     parts: Vec::new(),
+                    track_style: fixture_track_style(),
                 })
                 .collect(),
             danmaku: Vec::new(),
-            subtitle_style: dhampir_core::overlay::TextStyle {
-                color: [255, 255, 255, 255],
-                highlight_color: None,
-                font_ratio: 0.04,
-                outline: true,
-                stroke_px: 0.0,
-                stroke_color: [0, 0, 0, 255],
-                family: None,
-                weight: 400,
-                // **不画阴影**：这是"老工程"的那套样式。
-                shadow_color: None,
-                shadow_dx_px: 0.0,
-                shadow_dy_px: 0.0,
-                shadow_blur_px: 0.0,
-                // **不铺底衬**：同样是"老工程"的样式（T6 的存量零回归前提）。
-                plate_color: None,
-                plate_pad_px: 12.0,
-            },
             danmaku_style: dhampir_core::overlay::TextStyle::default(),
             dropped_lines: dropped,
             dropped_danmaku: 0,
@@ -1400,7 +1426,6 @@ mod tests {
                     font_ratio: 0.04,
                 })
                 .collect(),
-            subtitle_style: dhampir_core::overlay::TextStyle::default(),
             danmaku_style: dhampir_core::overlay::TextStyle {
                 color: [255, 255, 255, 255],
                 highlight_color: None,
@@ -1776,7 +1801,7 @@ mod tests {
         let mut log = IssueLog::new();
         let mut painter = OverlayPainter::new(Some(Path::new("C:/fake/font.ttf")));
         let lines = overlay(&[("一", rect)], 0);
-        assert_eq!(lines.subtitle_style.shadow_color, None, "夹具就是老样式");
+        assert_eq!(lines.items[0].track_style.shadow_color, None, "夹具就是老样式");
         paint_lines(
             &mut |key| fake_rasterizer(&mut calls)(key),
             &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
@@ -1793,8 +1818,10 @@ mod tests {
         let mut transparent = frame(640, 360, [0, 0, 0, 255]);
         let mut calls = 0usize;
         let mut lines = overlay(&[("一", rect)], 0);
-        lines.subtitle_style.shadow_color = Some([0, 0, 0, 0]);
-        lines.subtitle_style.shadow_dy_px = 4.0;
+        set_track_style(&mut lines, |style| {
+            style.shadow_color = Some([0, 0, 0, 0]);
+            style.shadow_dy_px = 4.0;
+        });
         paint_lines(
             &mut |key| fake_rasterizer(&mut calls)(key),
             &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
@@ -1826,12 +1853,14 @@ mod tests {
         let mut calls = 0usize;
         let mut painter = OverlayPainter::new(Some(Path::new("C:/fake/font.ttf")));
         let mut lines = overlay(&[("一", rect)], 0);
-        lines.subtitle_style.shadow_color = Some([0, 0, 0, 255]);
+        set_track_style(&mut lines, |style| style.shadow_color = Some([0, 0, 0, 255]));
         // 只留垂直偏移（不用模糊）：**阴影的落点=文字落点+(0,20)**，于是
         // 两块墨在纵向完全错开，"偏移生效了没有"一眼可判。
-        lines.subtitle_style.shadow_dx_px = 0.0;
-        lines.subtitle_style.shadow_dy_px = 20.0;
-        lines.subtitle_style.shadow_blur_px = 0.0;
+        set_track_style(&mut lines, |style| {
+            style.shadow_dx_px = 0.0;
+            style.shadow_dy_px = 20.0;
+            style.shadow_blur_px = 0.0;
+        });
         paint_lines(
             &mut |key| {
                 calls += 1;
@@ -1893,8 +1922,10 @@ mod tests {
         let mut calls = 0usize;
         let mut painter = OverlayPainter::new(Some(Path::new("C:/fake/font.ttf")));
         let mut lines = overlay(&[("一", rect)], 0);
-        lines.subtitle_style.shadow_color = Some([0, 0, 0, 255]);
-        lines.subtitle_style.shadow_blur_px = 6.0;
+        set_track_style(&mut lines, |style| {
+            style.shadow_color = Some([0, 0, 0, 255]);
+            style.shadow_blur_px = 6.0;
+        });
         paint_lines(
             &mut |key| {
                 calls += 1;
@@ -2142,7 +2173,7 @@ mod tests {
 
         let default_style = paint_single_subtitle_on(target, Some(background), |_| {});
         let explicit_none = paint_single_subtitle_on(target, Some(background), |o| {
-            o.subtitle_style.plate_color = None
+            set_track_style(o, |style| style.plate_color = None)
         });
         assert_eq!(
             default_style.pixels, explicit_none.pixels,
@@ -2209,8 +2240,10 @@ mod tests {
         let plate = [10, 200, 30, 255];
         let background = [0, 0, 0, 255];
         let setup = |o: &mut TextOverlay| {
-            o.subtitle_style.plate_color = Some(plate);
-            o.subtitle_style.plate_pad_px = 12.0;
+            set_track_style(o, |style| {
+                style.plate_color = Some(plate);
+                style.plate_pad_px = 12.0;
+            });
         };
 
         let without = paint_single_subtitle(target, |_| {});
@@ -2268,8 +2301,10 @@ mod tests {
         let target = (640u32, 360u32);
         let plate = [10, 200, 30, 255];
         let image = paint_single_subtitle(target, |o| {
-            o.subtitle_style.plate_color = Some(plate);
-            o.subtitle_style.plate_pad_px = 12.0;
+            set_track_style(o, |style| {
+                style.plate_color = Some(plate);
+                style.plate_pad_px = 12.0;
+            });
         });
 
         // 夹具的字是**纯白墨**，底衬是另一个颜色：字还在 ⇒ 图里仍有白色像素。
@@ -2302,8 +2337,10 @@ mod tests {
         let count_for = |pad: f32| {
             count_color(
                 &paint_single_subtitle(target, |o| {
-                    o.subtitle_style.plate_color = Some(plate);
-                    o.subtitle_style.plate_pad_px = pad;
+                    set_track_style(o, |style| {
+                        style.plate_color = Some(plate);
+                        style.plate_pad_px = pad;
+                    });
                 }),
                 plate,
             )
@@ -2347,12 +2384,16 @@ mod tests {
         let plate = [10, 200, 30, 255];
         let background = [0, 0, 0, 255];
         let opaque = paint_single_subtitle(target, |o| {
-            o.subtitle_style.plate_color = Some(plate);
-            o.subtitle_style.plate_pad_px = 12.0;
+            set_track_style(o, |style| {
+                style.plate_color = Some(plate);
+                style.plate_pad_px = 12.0;
+            });
         });
         let half = paint_single_subtitle(target, |o| {
-            o.subtitle_style.plate_color = Some(plate);
-            o.subtitle_style.plate_pad_px = 12.0;
+            set_track_style(o, |style| {
+                style.plate_color = Some(plate);
+                style.plate_pad_px = 12.0;
+            });
             // 这一帧的不透明度 = 0.5（淡入中间）。
             o.items[0].opacity = 0.5;
         });

@@ -98,6 +98,43 @@ pub struct TextItem {
     /// 不用自己判该用哪一个 —— 两端各判一次就会在"有的条有标记、有的没有"
     /// 的工程上分叉。
     pub parts: Vec<TextRun>,
+    /// **这一条所属字幕轨的轨道级样式。**
+    ///
+    /// # ⚠️ 为什么挂在条目上，而不是 `TextOverlay.subtitle_style` 那一个共享槽
+    ///
+    /// 这里曾经是**一个共享槽**：`subtitle_style` 在 `for track in &timeline.tracks`
+    /// 循环里**每轨整份重写**，循环结束后只返回**最后一份**。于是
+    /// **最后一条字幕轨说了算，前面所有轨的轨道级样式被整份吃掉** ——
+    /// 症状是"元素轨 + 字幕轨并存时，元素轨的样式（含 T6 底衬）完全不生效"，
+    /// 而**单条字幕轨时行为完全正确**（"最后一条"就是"唯一一条"）。
+    ///
+    /// ★ **它为什么活了这么久**：`grep -c "TrackKind::Subtitle"` 在当时的
+    /// `overlay.rs` 里**只有 2** —— 既有单测**全都只放一条字幕轨**，
+    /// 而这个缺陷**需要 ≥2 条轨才可能显形**。
+    /// **不是测试写得差，是测试的形状恰好绕过了它。**
+    /// ⇒ 补的判据必须**两条字幕轨并存**（`两条字幕轨各自的轨道级样式都生效`）。
+    ///
+    /// # 为什么是"挂在条目上"而不是"frame 带一份 `Vec<(track_id, TextStyle)>`"
+    ///
+    /// 1. **渲染侧本来就是逐条取的**：`paint_lines` 的循环体里，
+    ///    字体解析、描边、底衬**全都按这一条**来。挂条目上 ⇒ 取用是
+    ///    `&item.track_style`，**没有查找、没有"按 id 匹配"这一步**，
+    ///    也就不存在"查不到时用哪个"这个必然出错的分支。
+    /// 2. **形状上不可能再犯同一个错**：共享槽的病根是"多条轨共用一个位置"。
+    ///    挂条目上之后，**同一个位置里的样式天生只属于那一条**，
+    ///    "被后一条覆盖"这件事在类型上就写不出来了。
+    /// 3. `Vec<(track_id, TextStyle)>` 那条路要求**每个取用点都记得按 id 查一次** ——
+    ///    而漏掉一处的症状恰恰是"看着有效、其实用了别人的样式"，
+    ///    与本仓最恨的那类静默同形。
+    ///
+    /// # 与逐条字段（`color` / `font_ratio` / `dx_px`）的关系
+    ///
+    /// 那三个字段**不受本 bug 影响** —— 它们在覆盖发生**之前**就 push 进 items 了。
+    /// 这正好解释了实测现象：**T1（逐条 `font_ratio`）/ T4（逐条 `dx_px`）活着，
+    /// T6（轨道级 `plate_color`）死了**。
+    /// 现在轨道级的那些（`outline` / `stroke_px` / `shadow_*` / `plate_*` / 字体族与字重）
+    /// 走这一条通道，两类字段各归各。
+    pub track_style: TextStyle,
 }
 
 /// 一段要画的文字 + 它**最终**的颜色。
@@ -242,9 +279,14 @@ pub struct TextOverlay {
     /// 弹幕按自己的宽度左对齐），宿主据此选不同的画法。混在一起就得在每个元素上带一个
     /// 种类标签，而那与"这里是纯结构"的定位冲突。
     pub danmaku: Vec<DanmakuTextItem>,
-    /// **字幕**的画法。与弹幕的那一套分开（见 `TextStyle` 的说明）。
-    pub subtitle_style: TextStyle,
     /// **弹幕**的画法。
+    ///
+    /// ⚠️ 字幕**没有**对应的那一份了 —— 字幕的轨道级样式跟着每条
+    /// [`TextItem::track_style`] 走。理由是一条真 bug：
+    /// 这里原来是**一个共享槽**，循环里每轨整份重写、只留最后一份
+    /// ⇒ **最后一条字幕轨说了算**（元素轨 + 字幕轨并存时前者样式全失效）。
+    /// 弹幕**不受影响**：它走的是另一个循环、另一个槽，且弹幕轨的
+    /// 泳道参数本身就是"一轨一套"，没有"多条轨共用一格"的问题。
     pub danmaku_style: TextStyle,
     /// 因为超过 max_lines 被丢弃的**行数**（所有字幕轨加起来）。
     ///
@@ -294,7 +336,9 @@ pub fn evaluate_overlay(
     let mut dropped_lines = 0_usize;
     let mut dropped_danmaku = 0_usize;
     // 两类文字**各一套**画法（见 `TextStyle` 的说明：以前共用一份，必错一个）。
-    let mut subtitle_style = TextStyle::default();
+    //
+    // ⚠️ 字幕这一份**不再有共享槽** —— 它跟着每条 `TextItem` 走（见 `TextItem::track_style`）。
+    // 这里只在"这一帧到底有没有字幕"这个**布尔**上留一个账（`styled`）。
     let mut danmaku_style = TextStyle::default();
     let mut styled = false;
     let mut danmaku_styled = false;
@@ -323,6 +367,38 @@ pub fn evaluate_overlay(
         };
         let Some(cues) = table.get(&source.asset_id) else {
             continue;
+        };
+        // ---------------------------------------------------------------------
+        // **这条轨的轨道级样式**（契约的比例 → 像素在这里落地一次）。
+        // ---------------------------------------------------------------------
+        //
+        // ⚠️ 它算在**每条轨自己的作用域里**，然后跟着这一轨的每个 `TextItem` 走。
+        //
+        // 以前这里是把结果写进循环外的**一个共享槽** `subtitle_style`，
+        // 循环结束只返回最后一份 ⇒ **最后一条字幕轨说了算**，前面所有轨的
+        // 轨道级样式被整份吃掉。这就是"元素轨 + 字幕轨并存时元素轨样式全失效"
+        // 的根因（含 T6 底衬）。详见 `TextItem::track_style`。
+        let track_style = TextStyle {
+            color: style.color,
+            highlight_color: style.highlight_color,
+            font_ratio: style.font_ratio,
+            outline: style.outline,
+            stroke_px: style.stroke_ratio * target_h,
+            stroke_color: style.stroke_color,
+            family: style.font_family.clone(),
+            weight: style.font_weight,
+            // **阴影也在这里落地**：契约给的是比例（`shadow_blur_ratio`），
+            // 换算成像素要目标尺寸 —— 与上面 `stroke_px` 同一条理由、同一处。
+            // 偏移本来就是像素（文档像素），原样带过去。
+            shadow_color: style.shadow_color,
+            shadow_dx_px: style.shadow_dx_px,
+            shadow_dy_px: style.shadow_dy_px,
+            shadow_blur_px: style.shadow_blur_ratio * target_h,
+            // **底衬（T6）**：颜色原样带过去；外扩量在这里把契约的
+            // `Option` 解析成具体像素 —— `None` 走同一个默认值函数
+            // （`default_plate_pad_px`），不在这里另写一个 12.0。
+            plate_color: style.plate_color,
+            plate_pad_px: style.plate_pad_px.unwrap_or_else(default_plate_pad_px),
         };
 
         for cue in cues {
@@ -429,30 +505,15 @@ pub fn evaluate_overlay(
                     font_ratio: line.font_ratio * item_scale,
                     scale: item_scale,
                     parts: runs,
+                    // 轨道级样式**跟着这一条走**（见 `TextItem::track_style` 的长注释）——
+                    // 这里就是"共享槽"那个 bug 的修复点：以前是循环里往一个
+                    // `subtitle_style` 上整份重写，于是最后一条轨吃掉前面所有轨。
+                    track_style: track_style.clone(),
                 });
             }
-            subtitle_style = TextStyle {
-                color: style.color,
-                highlight_color: style.highlight_color,
-                font_ratio: style.font_ratio,
-                outline: style.outline,
-                stroke_px: style.stroke_ratio * target_h,
-                stroke_color: style.stroke_color,
-                family: style.font_family.clone(),
-                weight: style.font_weight,
-                // **阴影也在这里落地**：契约给的是比例（`shadow_blur_ratio`），
-                // 换算成像素要目标尺寸 —— 与上面 `stroke_px` 同一条理由、同一处。
-                // 偏移本来就是像素（文档像素），原样带过去。
-                shadow_color: style.shadow_color,
-                shadow_dx_px: style.shadow_dx_px,
-                shadow_dy_px: style.shadow_dy_px,
-                shadow_blur_px: style.shadow_blur_ratio * target_h,
-                // **底衬（T6）**：颜色原样带过去；外扩量在这里把契约的
-                // `Option` 解析成具体像素 —— `None` 走同一个默认值函数
-                // （`default_plate_pad_px`），不在这里另写一个 12.0。
-                plate_color: style.plate_color,
-                plate_pad_px: style.plate_pad_px.unwrap_or_else(default_plate_pad_px),
-            };
+            // ⚠️ 这里原来有一句 `subtitle_style = TextStyle { … }` —— 就是那个 bug。
+            // 现在轨道级样式在**进 cue 循环之前**算好（`track_style`），
+            // 并跟着每条 item 走；这里只剩"这一帧有字幕"这个布尔账。
             styled = true;
         }
     }
@@ -551,7 +612,6 @@ pub fn evaluate_overlay(
     Some(TextOverlay {
         items,
         danmaku,
-        subtitle_style,
         danmaku_style,
         dropped_lines,
         dropped_danmaku,
