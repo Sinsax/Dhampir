@@ -785,9 +785,15 @@ fn default_font_weight() -> u32 {
 
 /// 底衬外扩的默认值（目标像素）。参照值就是 12。
 ///
-/// ⚠️ 与 `plate_pad_px` 上的 `skip_serializing_if` 是**一对**：等值不写，
-/// 老工程重写一个键都不多（`v2_tests` 那条键集判据盯着这件事）。
-fn default_plate_pad_px() -> f32 {
+/// ⚠️ 用在**求值处**：`plate_pad_px.unwrap_or(default_plate_pad_px())`。
+/// 字段是 `Option<f32>` + `skip_serializing_if = "Option::is_none"` ——
+/// 于是"没写过"与"写了 12.0"在**行为**上相同、在**文件**里不同
+/// （"等值不写"的形状会把后者静默吃掉）。
+///
+/// **`pub` 是契约的一部分**：消费方（`dhampir-worker` 铺底衬那一步）
+/// 读的是 `plate_pad_px` 这个 `Option`，而"没写时算多少"这个数必须从**这里**取 ——
+/// 不然它就变成了第二个实现，改一处不改另一处正是本仓最恨的那类漂移。
+pub fn default_plate_pad_px() -> f32 {
     12.0
 }
 
