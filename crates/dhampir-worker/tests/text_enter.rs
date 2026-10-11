@@ -43,17 +43,36 @@
 //! 需要真 GPU、PATH 上的 ffmpeg 与一个中文字体，所以默认 `#[ignore]`：
 //!
 //! ```text
-//! TMPDIR=F:\para\Code\Dhampir\.workbuddy-tmp \
-//! TEMP=F:\para\Code\Dhampir\.workbuddy-tmp \
 //! TMP=F:\para\Code\Dhampir\.workbuddy-tmp \
 //! cargo test -p dhampir-worker --test text_enter -- --ignored
 //! ```
 //!
-//! ⚠️ **那三个环境变量不是可选的**：字幕栅格化要往临时目录落一份 `.srt`，
+//! ⚠️ **那个环境变量不是可选的**：字幕栅格化要往临时目录落一份 `.srt`，
 //! 而沙箱化的环境（例如 DSH 的文件沙箱）会让 `%TEMP%` **写不了**
 //! （症状是 `subtitle_raster_failed: ... 拒绝访问。(os error 5)`）——
 //! 那时整条端到端会因为**环境**失败，与动效一点关系都没有。
 //! 指一个**仓内目录**就绕过去了（见上面的命令）。
+//!
+//! ## ⚠️⚠️ 必须是 `TMP`，**不能只给 `TMPDIR` / `TEMP`**（2026-10-11 实测更正）
+//!
+//! 本文件用的是 `std::env::temp_dir()`，而**Rust 在 Windows 上读的是 `TMP`**：
+//!
+//! | 给什么 | `std::env::temp_dir()` 得到 |
+//! |---|---|
+//! | `TMPDIR=…` | `C:\Users\…\Temp\` ← **完全忽略**（`TMPDIR` 是 unix 的约定） |
+//! | `TEMP=…` | `C:\Users\…\Temp\` ← **也被忽略**（优先级低于 `TMP`） |
+//! | `TMP=…` | `…\.workbuddy-tmp\` ✅ |
+//! | `TEMP=… TMP=…` | `…\.workbuddy-tmp\` ✅（`TMP` 赢） |
+//!
+//! ★ **只给 `TMPDIR` 的症状极其难认**：测试**不会报错**，而是走
+//! [`temp_writable`] 的"跳过"分支 ⇒ **`4 passed / 0 failed` 而耗时 `0.00s`**。
+//! **一条都没真跑，却报全绿** —— 与 `#[ignore]` 那类"跳过"是同一个谎。
+//! **唯一一眼能分辨的是耗时**：真跑是**秒级**（本文件约 12~14s），跳过是 `0.00s`。
+//!
+//! ⚠️ 前几版这里写的是 `TMPDIR=…` 打头（照搬 unix 习惯）—— 照着做**仍然会静默跳过**。
+//! 留这段是为了让下一个人不再踩（本仓的规矩：坑要写成能拦住下一个人的样子）。
+//!
+//! 判据本身在 [`temp_writable`]：**真去试着建一次目录**，不是嗅探环境变量。
 
 use std::path::{Path, PathBuf};
 
@@ -125,7 +144,7 @@ fn temp_writable() -> bool {
         Err(error) => {
             eprintln!(
                 "跳过：这个环境写不了临时目录 {}（{error}）—— 环境限制，不是实现坏了。\
-                 绕法：TMPDIR/TEMP/TMP 指一个仓内目录（见本文件头的命令）",
+                 绕法：**`TMP`** 指一个仓内目录（⚠️ 只给 TMPDIR/TEMP 没用，见本文件头）",
                 dir.display()
             );
             false
@@ -384,7 +403,7 @@ const SRT_FULL: &str = "1\n00:00:00,000 --> 00:00:01,983\n第一行中文\n";
 /// 这条就是"手工量 21 张 PNG"那次的固化。它盯的是**外接框宽度**：
 /// 字号没乘上缩放时，这一列数字会**整列恒等于基线**（历史症状）。
 #[test]
-#[ignore = "需要真 GPU / ffmpeg / 字体；用 --ignored 跑，并设 TMPDIR（见文件头）"]
+#[ignore = "需要真 GPU / ffmpeg / 字体；用 --ignored 跑，并设 TMP（见文件头，只给 TMPDIR 会静默跳过）"]
 fn t1_弹入逐帧先缩后过冲再回落() {
     if !temp_writable() {
         return;
@@ -452,7 +471,7 @@ fn t1_弹入逐帧先缩后过冲再回落() {
 
 /// **T4：抖动真的位移** —— 两轴各自变号、幅度有界、换相位轨迹不同。
 #[test]
-#[ignore = "需要真 GPU / ffmpeg / 字体；用 --ignored 跑，并设 TMPDIR（见文件头）"]
+#[ignore = "需要真 GPU / ffmpeg / 字体；用 --ignored 跑，并设 TMP（见文件头，只给 TMPDIR 会静默跳过）"]
 fn t4_抖动两轴各自变号且换相位轨迹不同() {
     if !temp_writable() {
         return;
@@ -528,7 +547,7 @@ fn t4_抖动两轴各自变号且换相位轨迹不同() {
 /// * `text_motion` —— 缺省时求值是**单位变换**；
 /// * **这一条** —— 出片**逐字节相同**。
 #[test]
-#[ignore = "需要真 GPU / ffmpeg / 字体；用 --ignored 跑，并设 TMPDIR（见文件头）"]
+#[ignore = "需要真 GPU / ffmpeg / 字体；用 --ignored 跑，并设 TMP（见文件头，只给 TMPDIR 会静默跳过）"]
 fn 全部缺省时逐字节等于老工程() {
     if !temp_writable() {
         return;
