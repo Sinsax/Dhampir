@@ -739,9 +739,26 @@ pub struct SubtitleStyle {
     /// 任何老工程重写一次都会多出一个 `"plate_pad_px":12.0`，那条判据当场打红
     /// —— 它拦的正是"升级之后工程文件悄悄变形"。
     ///
-    /// 而"显式写了 12 会被吃掉"**不是**损失：读回默认值仍是 12，渲染逐像素一样。
-    #[serde(default = "default_plate_pad_px", skip_serializing_if = "is_default_plate_pad_px")]
-    pub plate_pad_px: f32,
+    /// # ⚠️ 为什么是 `Option<f32>` 而不是裸 `f32` 默认 12.0
+    ///
+    /// 与 `scale_in_from` / `shake_hz` 那一组**同一条理由**（见它们的文档注释）：
+    ///
+    /// * 裸 `f32` + `skip_serializing_if = "等于默认值"` 能满足"老工程一个键都不多"，
+    ///   但会让**用户显式写的 `12.0`** 也被静默吃掉 —— 读回来仍是 12.0、
+    ///   渲染逐像素一样，所以**永远不会有症状**，而"显式写了却读不回来"
+    ///   正是本仓最恨的那类静默；
+    /// * `Option` 一举两得：**不写键 = 默认 12**（老工程一个键都不多），
+    ///   **写了就是写的那个值**（哪怕它恰好等于 12）。
+    ///
+    /// 求值处一律 `plate_pad_px.unwrap_or(default_plate_pad_px())`。
+    ///
+    /// ⚠️ 本仓有一条判据盯着"老工程的样式键集"：
+    /// `v2_tests::没写过阴影的样式重写出来一个字节都不多` 会把 `SubtitleStyle`
+    /// 全部键名与默认写法**逐字**比一次。所以这一行少了 `skip_serializing_if`，
+    /// 任何老工程重写一次都会多出一个 `"plate_pad_px":12.0`，那条判据当场打红
+    /// （加字段时实测打红过）—— 它拦的正是"升级之后工程文件悄悄变形"。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plate_pad_px: Option<f32>,
 }
 
 /// `0.0` 不写进文件 —— 这是"既有工程逐字节不变"的执行处：
@@ -772,13 +789,6 @@ fn default_font_weight() -> u32 {
 /// 老工程重写一个键都不多（`v2_tests` 那条键集判据盯着这件事）。
 fn default_plate_pad_px() -> f32 {
     12.0
-}
-
-/// 与默认值相等就不写 —— `shadow_dx_px` / `shadow_blur_ratio` 同款。
-///
-/// 比法用 `==`：`-0.0 == 0.0` 为真，而 12.0 这种默认值没有负零的歧义。
-fn is_default_plate_pad_px(value: &f32) -> bool {
-    *value == default_plate_pad_px()
 }
 
 fn subtitle_font_ratio() -> f32 {
@@ -843,7 +853,7 @@ impl Default for SubtitleStyle {
             // None = 不铺底衬（既有工程逐字节不变）。外扩量给参照值 12，
             // 但它在 `plate_color` 为 None 时**读都不会被读到**。
             plate_color: None,
-            plate_pad_px: default_plate_pad_px(),
+            plate_pad_px: None,
         }
     }
 }
@@ -3373,5 +3383,72 @@ mod v2_tests {
         };
         let text = serde_json::to_string(&style).expect("要能写回去");
         assert!(!text.contains("shadow_dx_px"), "负零写出了新键：{text}");
+    }
+    // ---- 底衬（T6）：**JSON 层**的"既有工程逐字节不变" ----
+
+    /// **反向用例（JSON 层）**：`plate_color = None` 时序列化出来
+    /// **一个键都不多**。
+    ///
+    /// ⚠️ 这条与 `paint_one` 那条**渲染层**判据是**两道**，缺一不可：
+    /// 渲染那条只证明"没多画像素"，证明不了"工程文件里多了键"；
+    /// 而后者正是本仓反复强调的"升级一次、工程变样"。
+    ///
+    /// **变异自证**：把 `plate_color` / `plate_pad_px` 上任意一个
+    /// `skip_serializing_if` 摘掉，两个 `contains` 立刻打红。
+    #[test]
+    fn 没写过底衬的样式重写出来一个字节都不多() {
+        let style = SubtitleStyle::default();
+        assert_eq!(style.plate_color, None, "默认必须是不铺底衬");
+        assert_eq!(style.plate_pad_px, None, "默认必须是'没写过'");
+
+        let again = serde_json::to_string(&style).expect("要能写回去");
+        for key in ["plate_color", "plate_pad_px"] {
+            assert!(
+                !again.contains(key),
+                "老工程里不该出现 {key}（少了 skip_serializing_if）：{again}"
+            );
+        }
+    }
+
+    /// **正向用例（JSON 层）**：显式写了底衬，两个键**都要原样往返**。
+    ///
+    /// ⚠️ 点名的那个坑：`plate_pad_px` 若写成裸 `f32` +
+    /// `skip_serializing_if = "等于默认值"`，**显式写的 12.0 会被吃掉** ——
+    /// 读回来仍是 12.0、渲染也一样，所以**永远不会有症状**，
+    /// 但用户的显式意图没了。用 `Option` 才分得开"没写"与"写了默认值"。
+    #[test]
+    fn 写过底衬的样式原样往返() {
+        let json = r#"{"plate_color":[0,0,0,140],"plate_pad_px":12.0}"#;
+        let style: SubtitleStyle = serde_json::from_str(json).expect("要能读进来");
+        assert_eq!(style.plate_color, Some([0, 0, 0, 140]), "参照值：黑 55%");
+        assert_eq!(
+            style.plate_pad_px,
+            Some(12.0),
+            "显式写的默认值必须留得住（这是 Option 唯一的理由）"
+        );
+
+        let again = serde_json::to_string(&style).expect("要能写回去");
+        assert!(
+            again.contains(r#""plate_color":[0,0,0,140]"#),
+            "底衬色被吃掉了：{again}"
+        );
+        assert!(
+            again.contains(r#""plate_pad_px":12.0"#),
+            "显式写的 12.0 被静默吃掉了（裸 f32 + 等值 skip 就是这症状）：{again}"
+        );
+    }
+
+    /// 求值口径：`None` ⇒ 参照值 12；写了就用写的那个。
+    #[test]
+    fn 底衬外扩量取默认值的口径() {
+        assert_eq!(default_plate_pad_px(), 12.0);
+        let none = SubtitleStyle::default();
+        assert_eq!(none.plate_pad_px.unwrap_or(default_plate_pad_px()), 12.0);
+        let some = SubtitleStyle {
+            plate_color: Some([0, 0, 0, 140]),
+            plate_pad_px: Some(30.0),
+            ..SubtitleStyle::default()
+        };
+        assert_eq!(some.plate_pad_px.unwrap_or(default_plate_pad_px()), 30.0);
     }
 }
