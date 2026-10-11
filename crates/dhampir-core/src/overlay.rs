@@ -1239,8 +1239,163 @@ mod tests {
     #[test]
     fn 颜色与描边来自轨道样式() {
         let overlay = evaluate_overlay(&subtitle_timeline(), 15, SEQUENCE, Some(&table())).unwrap();
-        assert_eq!(overlay.subtitle_style.color, [255, 240, 200, 255]);
-        assert!(!overlay.subtitle_style.outline, "轨道样式写了不描边");
+        assert_eq!(overlay.items[0].track_style.color, [255, 240, 200, 255]);
+        assert!(!overlay.items[0].track_style.outline, "轨道样式写了不描边");
+    }
+
+    // =========================================================================
+    // ★ task-18：**两条字幕轨并存**（这条就是当初漏掉的那条）
+    // =========================================================================
+    //
+    // # 为什么必须有它
+    //
+    // 这个 bug（轨道级样式被最后一条轨整份覆盖）**需要 ≥2 条轨才可能显形** ——
+    // 单轨时"最后一条"就是"唯一一条"，行为完全正确。
+    // 而在它被修掉之前，`grep -c "TrackKind::Subtitle"` 在这个文件里**只有 2**
+    // ⇒ **所有既有的单测都只放了一条字幕轨**，形状上恰好绕过了它。
+    //
+    // ⇒ **不是测试写得差，是测试的形状绕过了它。**
+    // ⇒ 所以这条判据不是"再补一个 case"，是**补上那个缺掉的形状**。
+    //
+    // 旁证（YekiTrim 侧实测，同一条二进制、只改"有没有第二条轨"）：
+    // | 工程 | 红线（底衬）像素 |
+    // |---|---|
+    // | 含两条轨 | **0** |
+    // | 只留配了样式的那条 | **7676** |
+    // 对照组（单轨）**在修复前也是绿的** —— 所以它自己单独抓不到 bug。
+    //
+    // # 判据怎么立
+    //
+    // 两条轨给**互不相同**的轨道级字段，且两边的字段都要被检查到：
+    // - 轨 A：`plate_color`（T6 底衬）+ 不描边；
+    // - 轨 B：`outline` / `stroke_ratio`（且**没有**底衬）。
+    //
+    // 覆盖 bug 的症状是"**只剩最后一条**" ⇒ 只要两条轨的东西**同时**在、
+    // 且各自挂在自己那条 item 上，就说明没有被覆盖。
+    #[test]
+    fn 两条字幕轨各自的轨道级样式都生效() {
+        let line = timeline(
+            r#"{
+                "schema": 3,
+                "timebase": { "num": 30, "den": 1 },
+                "tracks": [
+                    {
+                        "id": "elements",
+                        "kind": "subtitle",
+                        "layers": [{
+                            "id": "cue",
+                            "start": 0,
+                            "end": 120,
+                            "source": { "asset_id": "sub.srt", "source_in": 0 }
+                        }],
+                        "subtitle": {
+                            "font_ratio": 0.055,
+                            "bottom_margin": 0.06,
+                            "max_lines": 2,
+                            "color": [255, 0, 0, 255],
+                            "outline": false,
+                            "plate_color": [0, 0, 0, 140]
+                        }
+                    },
+                    {
+                        "id": "srt",
+                        "kind": "subtitle",
+                        "layers": [{
+                            "id": "cue",
+                            "start": 0,
+                            "end": 120,
+                            "source": { "asset_id": "srt.srt", "source_in": 0 }
+                        }],
+                        "subtitle": {
+                            "font_ratio": 0.055,
+                            "bottom_margin": 0.06,
+                            "max_lines": 2,
+                            "color": [0, 0, 255, 255],
+                            "outline": true,
+                            "stroke_ratio": 0.02
+                        }
+                    }
+                ]
+            }"#,
+        );
+        let mut table = SubtitleTable::new();
+        table.insert("sub.srt".to_string(), cues());
+        table.insert(
+            "srt.srt".to_string(),
+            vec![Cue {
+                start_ms: 0,
+                end_ms: 2000,
+                text: "另一轨".to_string(),
+                travel_ms: None,
+                scale: None,
+                style: Default::default(),
+            }],
+        );
+
+        let overlay = evaluate_overlay(&line, 15, SEQUENCE, Some(&table)).unwrap();
+        assert_eq!(overlay.items.len(), 2, "两条轨各一行，都该在");
+
+        let a = &overlay.items[0]; // 轨 `elements`
+        let b = &overlay.items[1]; // 轨 `srt`
+
+        // ① 轨 A 的**底衬**在 —— T6 在真实工程里失效的就是这一项。
+        assert_eq!(
+            a.track_style.plate_color,
+            Some([0, 0, 0, 140]),
+            "轨 A 写了 plate_color，它必须在这一条上"
+        );
+        // ② 轨 A 的**不描边**在 —— 若被轨 B 覆盖，这里会变成 `true`。
+        assert!(!a.track_style.outline, "轨 A 写了不描边，不该被轨 B 覆盖");
+        assert_eq!(a.track_style.color, [255, 0, 0, 255], "轨 A 的颜色");
+
+        // ③ 轨 B 的**描边**在 —— 若它反被轨 A 覆盖，这里会是 0。
+        assert!(b.track_style.outline, "轨 B 写了描边");
+        assert!(
+            b.track_style.stroke_px > 0.0,
+            "轨 B 的 stroke_ratio 要落地成像素，实际 {}",
+            b.track_style.stroke_px
+        );
+        assert_eq!(b.track_style.color, [0, 0, 255, 255], "轨 B 的颜色");
+        // ④ 轨 B **没有**底衬 —— 两条轨的样式必须各自独立，
+        //    不能出现"一条轨的字段漏到另一条"。
+        assert_eq!(
+            b.track_style.plate_color, None,
+            "轨 B 没写 plate_color，不该沾到轨 A 的"
+        );
+
+        // ⑤ 两条轨的样式**互不相同** —— 否则上面那些断言可能只是
+        //    "两份恰好一样"，而不是在测覆盖。
+        assert_ne!(
+            a.track_style, b.track_style,
+            "两条轨的样式必须不同，否则这条测试测不出覆盖"
+        );
+    }
+
+    /// 单轨时与**改动前逐字段相等**（R4 存量零回归）。
+    ///
+    /// 既有工程绝大多数是单轨，它们必须**一个字段都不变**。
+    /// 与上面那条是一对：上面钉"多条轨不复用"，这条钉"单条轨没被改坏"。
+    #[test]
+    fn 单条字幕轨的样式与改动前逐字段相等() {
+        let overlay = evaluate_overlay(&subtitle_timeline(), 15, SEQUENCE, Some(&table())).unwrap();
+        // 单轨时"按条取"与"共享槽"本来就该**完全一致** ——
+        // 这正是这个 bug 能藏那么久的原因（单轨场景下两者没有区别）。
+        let style = &overlay.items[0].track_style;
+        assert_eq!(style.color, [255, 240, 200, 255]);
+        assert_eq!(style.font_ratio, 0.055);
+        assert!(!style.outline);
+        assert_eq!(style.stroke_px, 0.0, "没写 stroke_ratio ⇒ 0（既有工程不变）");
+        // 描边色的默认不是纯黑 —— 是 `subtitle_stroke_color()` 的 `[0x40,0x3c,0x3b]`。
+        // （我第一版按"想当然"写了 `[0,0,0,255]` 被这条测试当场抓住；
+        //   这里照 `dhampir_timeline::layer` 的实际默认值写。）
+        assert_eq!(style.stroke_color, [0x40, 0x3c, 0x3b, 255]);
+        assert_eq!(style.shadow_color, None, "没写阴影");
+        assert_eq!(style.plate_color, None, "没写底衬");
+        assert_eq!(style.plate_pad_px, 12.0, "底衬外扩取默认值");
+        // 同一帧里每条都该是**同一份**（它们同属一条轨）。
+        for item in &overlay.items {
+            assert_eq!(&item.track_style, style, "同一条轨的样式必须一致");
+        }
     }
 
     #[test]
@@ -1255,7 +1410,7 @@ mod tests {
         // 既有工程的产物全变。默认值是**契约的一部分**，不是风格偏好。
         let overlay = evaluate_overlay(&subtitle_timeline(), 15, SEQUENCE, Some(&table())).unwrap();
         assert_eq!(
-            overlay.subtitle_style.stroke_px, 0.0,
+            overlay.items[0].track_style.stroke_px, 0.0,
             "默认必须是 0（走字号推的老路径）"
         );
 
@@ -1267,9 +1422,9 @@ mod tests {
         let overlay = evaluate_overlay(&styled, 15, SEQUENCE, Some(&table())).unwrap();
         let expected = 12.0 / 1080.0 * SEQUENCE.1 as f32;
         assert!(
-            (overlay.subtitle_style.stroke_px - expected).abs() < 1e-4,
+            (overlay.items[0].track_style.stroke_px - expected).abs() < 1e-4,
             "写了的比例要按目标高换算：期望 {expected}，实得 {}",
-            overlay.subtitle_style.stroke_px
+            overlay.items[0].track_style.stroke_px
         );
     }
 
@@ -1283,7 +1438,7 @@ mod tests {
     fn 阴影字段透传且模糊按目标高换算成像素() {
         let overlay = evaluate_overlay(&shadow_timeline(), 15, SEQUENCE, Some(&table()))
             .expect("这一帧应当有字幕");
-        let style = &overlay.subtitle_style;
+        let style = &overlay.items[0].track_style;
         assert_eq!(style.shadow_color, Some([0, 0, 0, 102]), "颜色要原样透传");
         assert_eq!(
             (style.shadow_dx_px, style.shadow_dy_px),
@@ -1302,12 +1457,12 @@ mod tests {
         let large = evaluate_overlay(&shadow_timeline(), 15, (1920, 1080), Some(&table()))
             .expect("这一帧应当有字幕");
         assert!(
-            (large.subtitle_style.shadow_blur_px - 12.0).abs() < 1e-4,
+            (large.items[0].track_style.shadow_blur_px - 12.0).abs() < 1e-4,
             "1080 高下 12/1080 应当换出 12px，实得 {}",
-            large.subtitle_style.shadow_blur_px
+            large.items[0].track_style.shadow_blur_px
         );
         assert_eq!(
-            large.subtitle_style.shadow_dx_px, 3.0,
+            large.items[0].track_style.shadow_dx_px, 3.0,
             "偏移是文档像素：它**不**随目标尺寸变（变了就是预览与成片不一致）"
         );
     }
@@ -1319,7 +1474,7 @@ mod tests {
     #[test]
     fn 没写过阴影的工程一个阴影都不画() {
         let overlay = evaluate_overlay(&subtitle_timeline(), 15, SEQUENCE, Some(&table())).unwrap();
-        let style = &overlay.subtitle_style;
+        let style = &overlay.items[0].track_style;
         assert_eq!(style.shadow_color, None);
         assert_eq!(
             (style.shadow_dx_px, style.shadow_dy_px, style.shadow_blur_px),
@@ -1337,7 +1492,7 @@ mod tests {
     fn 字幕配了阴影弹幕也不画() {
         let overlay = evaluate_overlay(&shadow_timeline(), 15, SEQUENCE, Some(&both_table()))
             .expect("这一帧应当有字");
-        assert_eq!(overlay.subtitle_style.shadow_color, Some([0, 0, 0, 102]));
+        assert_eq!(overlay.items[0].track_style.shadow_color, Some([0, 0, 0, 102]));
         assert_eq!(
             overlay.danmaku_style.shadow_color, None,
             "弹幕不该继承字幕的阴影"
@@ -1352,7 +1507,7 @@ mod tests {
         let overlay =
             evaluate_overlay(&both_timeline(), 15, SEQUENCE, Some(&both_table())).unwrap();
         assert_eq!(
-            overlay.subtitle_style.color,
+            overlay.items[0].track_style.color,
             [255, 240, 200, 255],
             "字幕用字幕的颜色"
         );
@@ -1362,7 +1517,7 @@ mod tests {
             "弹幕用弹幕的颜色"
         );
         assert_ne!(
-            overlay.subtitle_style.color, overlay.danmaku_style.color,
+            overlay.items[0].track_style.color, overlay.danmaku_style.color,
             "两者必须能不同 —— 这正是共用一个字段时做不到的事"
         );
     }
