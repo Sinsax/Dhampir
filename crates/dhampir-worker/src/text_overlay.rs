@@ -741,34 +741,45 @@ struct PlateRect {
 }
 
 impl PlateRect {
-    /// 行盒 + 外扩 ⇒ 目标帧里的矩形（含裁到画面内）。
+    /// **字墨迹** + 外扩 ⇒ 目标帧里的矩形。
     ///
-    /// # 取整口径
+    /// # ⚠️ 为什么不从**行盒**算（这是一个真机才抓到的 bug）
     ///
-    /// 行盒是归一化浮点，乘目标尺寸之后**四舍五入到整数像素**；
-    /// 外扩量原样加。`right` / `bottom` 用 `round()` 而不是 `ceil()` ——
-    /// 与 `place_line` 里 `bitmap` 的取整同一条理由：宁可差半像素的中心，
-    /// 也不要因为一律向上取整而让底衬比字**系统性偏大一圈**（那在
-    /// "底衬恰好包住字"这种一眼判据上会看得出来）。
+    /// 第一版拿行盒（`rect.y + rect.height`）四边外扩 `pad_px`，单测全绿 ——
+    /// 但**真机端到端**红在"下侧没有外扩"：底衬 349 / 字 341。
+    /// 反推：`py1 = 行盒下边 + 12 = 349` ⇒ 行盒下边 337，而**字墨迹实际下缘 341**
+    /// —— **字比行盒低了 4px**（下伸部 ＋ 真字体的行盒溢出，见 `bitmap_size`
+    /// 里 `pad_px` 那段注释：位图比行盒高，正是为了装这些墨）。
     ///
-    /// 返回值**可能整体在画面外**（字幕浮出画面时就是）；调用方负责裁，
-    /// 这里不静默改成空矩形 —— "算出来是多少"与"画得下多少"是两件事。
-    fn from_line(
-        rect: dhampir_core::timeline::text_layout::NormalizedRect,
-        target: (u32, u32),
+    /// 于是下侧实际留白只剩 8px 而不是契约的 12 —— **`plate_pad_px` 被悄悄吃掉**。
+    /// 这正是本仓最贵的那类错：跑得通、不报错、数字不对；而且**只有端到端**
+    /// 才暴露（单测用的是构造出来的几何，测不到"栅格化出来的墨迹比行盒大"）。
+    ///
+    /// ⇒ 口径钉死为「**从字墨迹外扩 N 像素**」（用户的直觉口径：字外面留一圈），
+    /// 四个方向的留白**都是真的 `pad_px`**。
+    ///
+    /// # 墨迹从哪来
+    ///
+    /// `bitmap.ink_bounds()` 给位图内的**闭区间**墨迹盒，把它平移到帧坐标即可
+    /// （位图左上角就是 `placement.x/y`，再加上这一帧的偏移）。
+    /// 空位图（没有墨）给 `None` ⇒ 没有可围的东西，**不铺**。
+    fn from_ink(
+        ink: (u32, u32, u32, u32),
+        placement: (i32, i32),
         pad_px: f32,
     ) -> Self {
-        let w = target.0 as f32;
-        let h = target.1 as f32;
-        let left = (rect.x * w).round() - pad_px;
-        let top = (rect.y * h).round() - pad_px;
-        let right = ((rect.x + rect.width) * w).round() + pad_px;
-        let bottom = ((rect.y + rect.height) * h).round() + pad_px;
+        // 墨迹是**闭区间** ⇒ 右/下边要 `+1` 才是半开区间的边界。
+        // 除了"多铺一列像素"，更实际的理由：`ink_bounds` 是闭区间而底衬的
+        // `paint` 走半开区间，不 +1 会让右侧/下侧**少整整一列**。
+        let left = placement.0 + ink.0 as i32;
+        let top = placement.1 + ink.1 as i32;
+        let right = placement.0 + ink.2 as i32 + 1;
+        let bottom = placement.1 + ink.3 as i32 + 1;
         Self {
-            left: left as i32,
-            top: top as i32,
-            right: right as i32,
-            bottom: bottom as i32,
+            left: left - pad_px as i32,
+            top: top - pad_px as i32,
+            right: right + pad_px as i32,
+            bottom: bottom + pad_px as i32,
         }
     }
 
@@ -839,21 +850,30 @@ impl PlateRect {
 /// `color` 为 `None` 时**一个像素都不碰**（这是存量零回归的全部执行处）。
 /// `opacity` 乘进 alpha：底衬要跟着这一行的淡入淡出一起淡，
 /// 否则淡入时会出现"字还半透明、底衬已经全黑"的错帧。
+///
+/// ⚠️ **必须在栅格化之后调**：矩形要按**真实墨迹**算，而墨迹只有拿到位图才知道
+/// （见 [`PlateRect::from_ink`] 那段——这是真机端到端抓到的 bug）。
 fn paint_plate(
     image: &mut Rgba8Image,
-    rect: dhampir_core::timeline::text_layout::NormalizedRect,
-    target: (u32, u32),
+    ink: Option<(u32, u32, u32, u32)>,
+    placement: (i32, i32),
     color: Option<[u8; 4]>,
     pad_px: f32,
     opacity: f32,
 ) -> usize {
+    // ⚠️ 这里**先查颜色再查墨迹**：`plate_color = None` 是存量零回归那条路，
+    // 它必须"一个像素都不碰"且**不依赖墨迹是否存在**。
     let Some(mut color) = color else {
+        return 0;
+    };
+    // 没有墨迹就没有可围的东西（空行 / 整行透明）—— 不铺。
+    let Some(ink) = ink else {
         return 0;
     };
     // 不透明度与样式 alpha **相乘**（与 `blit_scaled` 把 scale 乘在 alpha 上同一处道理）。
     let scaled = (color[3] as f32 * opacity.clamp(0.0, 1.0)).round();
     color[3] = scaled.clamp(0.0, 255.0) as u8;
-    let plate = PlateRect::from_line(rect, target, pad_px);
+    let plate = PlateRect::from_ink(ink, placement, pad_px);
     plate.paint(image, color)
 }
 
@@ -880,6 +900,13 @@ fn paint_one(
     // **这一条被整体缩了多少**（1.0 = 没缩）。描边要跟着它缩 ——
     // 参照是 `swEff = sw * wrapped.scale`。函数参数上不能用文档注释。
     scale: f32,
+    // **这一条的字号比例**（求值层已把动画缩放乘进来）。
+    //
+    // 以前这里读的是 `style.font_ratio`（**轨道级**），于是"逐条缩放"
+    // 在求值层算对了、到渲染这一层被丢掉 —— 出片里弹入**一帧都不动**，
+    // 而数据层与单测全是对的。wasm 那条路读的本来就是 `item.font_ratio`，
+    // 两条路因此**不一致**；现在都读这一条。
+    font_ratio: f32,
     // **按高亮切好的分段**（颜色已解析）。空 = 没有 `.hl`，走一次画完的老路。
     parts: &[dhampir_core::overlay::TextRun],
     style: &dhampir_core::overlay::TextStyle,
@@ -898,7 +925,7 @@ fn paint_one(
     if opacity <= 0.0 {
         return Painted::Nothing;
     }
-    let Some(placement) = place_line(rect, target, style.font_ratio) else {
+    let Some(placement) = place_line(rect, target, font_ratio) else {
         return Painted::Nothing;
     };
     let path = issue_path(text);
@@ -914,32 +941,6 @@ fn paint_one(
         );
         return Painted::Failed;
     };
-    // ---------------------------------------------------------------------
-    // **底衬（T6）：在字之前铺一块矩形。**
-    // ---------------------------------------------------------------------
-    //
-    // ⚠️ **顺序是判据的一部分，不是风格**：底衬画在字**之后**会把字盖住 ——
-    // 那是"看着有底衬、其实把字糊了"，与"字段是哑的"属于同一类静默错误
-    // （都有底衬、都看不出问题，只有数像素才分得开）。
-    // 判据见 `底衬铺在字之前_字仍然在`。
-    //
-    // 放在字体检查**之后**：字体给不出来这一行就是 `Failed`（一个字都不画），
-    // 那种情况下单独留一块底衬更糟 —— 画面上会出现一个没有字的色块。
-    //
-    // 底衬属于**字幕**这条通道；弹幕不铺（`plate_color` 是字幕轨道级样式，
-    // 滚动弹幕背后挂一块色块会把画面糊成一片，且参照实现也没有）。
-    // 这里靠 `style.plate_color` 是不是 `None` 决定 —— 弹幕轨道的 `TextStyle`
-    // 走的字段里没有它，于是恒为 `None`。
-    if judge_clip {
-        paint_plate(
-            image,
-            rect,
-            target,
-            style.plate_color,
-            style.plate_pad_px,
-            opacity,
-        );
-    }
     // ---------------------------------------------------------------------
     // **有 `.hl` 分段时：逐段各画一张（各自上色 + 各自的行内偏移）。**
     // ---------------------------------------------------------------------
@@ -1049,6 +1050,40 @@ fn paint_one(
             return Painted::Failed;
         }
     };
+    // ---------------------------------------------------------------------
+    // **底衬（T6）：在字之前铺一块矩形。**
+    // ---------------------------------------------------------------------
+    //
+    // ⚠️ **位置有两重约束，都不是风格**：
+    //
+    // 1. **必须在栅格化之后**：矩形按**真实墨迹**算（`bitmap.ink_bounds()`），
+    //    而墨迹只有拿到位图才知道。第一版从**行盒**算、又在栅格化**之前**铺，
+    //    真机端到端红在"下侧没有外扩"（底衬 349 / 字 341）—— 字比行盒低 4px，
+    //    于是契约的 12px 在下侧被悄悄吃成 8px。见 [`PlateRect::from_ink`]。
+    // 2. **必须在 `blit_scaled` 之前**：底衬画在字**之后**会把字盖住 ——
+    //    "看着有底衬、其实把字糊了"，与"字段是哑的"是同一类静默错误。
+    //    判据见 `底衬铺在字之前_字仍然看得见`。
+    //
+    // 也放在字体检查**之后**：字体给不出来这一行就是 `Failed`（一个字都不画），
+    // 那时单独留一块底衬更糟 —— 画面上会出现一个没有字的色块。
+    //
+    // 底衬属于**字幕**这条通道；弹幕不铺（`plate_color` 是字幕轨道级样式，
+    // 滚动弹幕背后挂一块色块会把画面糊成一片，且参照实现也没有）。
+    // 靠 `style.plate_color` 是不是 `None` 决定 —— 弹幕轨道的 `TextStyle`
+    // 走的字段里没有它，于是恒为 `None`。
+    //
+    // ⚠️ 用**带 `offset_x/offset_y` 的落点**：底衬必须跟着这一帧的抖动/位移走，
+    // 用 `placement` 那个没含偏移的会让底衬在抖动时**纹丝不动**。
+    if judge_clip {
+        paint_plate(
+            image,
+            bitmap.ink_bounds(),
+            (placement.x + offset_x, placement.y + offset_y),
+            style.plate_color,
+            style.plate_pad_px,
+            opacity,
+        );
+    }
     let report = match blit_scaled(image, &bitmap, placement.x + offset_x, placement.y + offset_y, alpha) {
         Ok(report) => report,
         Err(error) => {
@@ -1109,6 +1144,8 @@ fn paint_lines(
             item.color,
             // 字幕的缩放：布局算出来的（参照从不截断，缩字是它的常规路径）。
             item.scale,
+            // 字号比例：求值层已乘上动画缩放（T1 弹入 / T3 强调）。
+            item.font_ratio,
             // **逐段颜色**：空 = 没有 `.hl`，走一次画完的老路。
             &item.parts,
             &overlay.subtitle_style,
@@ -1143,6 +1180,8 @@ fn paint_lines(
             // 不把这个字段放进 `DanmakuTextItem` —— 放进去就等于宣称弹幕会缩，
             // 一个恒为 1 的字段只会让读的人以为它有意义。
             1.0,
+            // 弹幕字号：求值层给的（弹幕不缩放，所以就是轨道字号）。
+            item.font_ratio,
             // 弹幕没有 `.hl` 标记。
             &[],
             &overlay.danmaku_style,
@@ -2244,7 +2283,18 @@ mod tests {
 
     /// `plate_pad_px` **真的改变外扩量**（不是个被忽略的字段）。
     ///
-    /// 少了这条，一个"把 pad 写死成 0"的实现能过上面两条。
+    /// 少了这条，一个"把 pad 写死成某个常数"的实现能过上面两条。
+    ///
+    /// # ⚠️ 口径变了（按**字墨迹**外扩，不是行盒）
+    ///
+    /// 真机端到端抓到的 bug：从**行盒**外扩时，字的下伸部会吃掉几像素，
+    /// 于是契约的 12px 在下侧只剩 8px。现在从 `bitmap.ink_bounds()` 外扩，
+    /// 四个方向的留白都是真的 `pad_px`。
+    ///
+    /// 这改变了本条的**前提**：`pad = 0` 时矩形**正好等于墨迹盒**，
+    /// 而字把它盖满 ⇒ 可见的底衬像素是 **0**（第一版从行盒算时，
+    /// 行盒比墨迹大，所以 pad=0 仍看得见一圈）。所以判据改成：
+    /// **pad 越大，可见的底衬像素越多**（严格单调），且 pad = 0 时可见为 0。
     #[test]
     fn 外扩量真的改变底衬大小() {
         let target = (640u32, 360u32);
@@ -2258,31 +2308,33 @@ mod tests {
                 plate,
             )
         };
-        // ⚠️ 不拿"绝对面积"当判据：字是后画的、会盖掉底衬中间那几条，
-        // 所以**可见的**底衬像素少于矩形面积。判据改成**两个 pad 之间的关系**
-        // —— 那正是这个字段有没有被读到的证明。
-        //
-        // 外扩大 2·Δ 的两圈，**每周多出来的底衬像素** =
-        //   (w + 2·(p+Δ))·(h + 2·(p+Δ)) − (w + 2p)·(h + 2p)
-        // 取 p = 0、Δ = 12，且矩形整体在画面内 ⇒ 差值可精确算出来。
-        let w = (0.5f32 * 640.0).round() as usize;
-        let h = (0.066f32 * 360.0).round() as usize;
-        let (zero, twelve) = (count_for(0.0), count_for(12.0));
-        assert!(zero > 0, "pad = 0 时也要铺（紧贴行盒的那块）");
+        let (zero, four, twelve) = (count_for(0.0), count_for(4.0), count_for(12.0));
+
+        // `pad = 0`：底衬 == 墨迹盒，被字**完全盖住** ⇒ 一个可见的底衬像素都没有。
+        // ⚠️ 这不是"没铺"：铺了，只是被盖住了。下面 pad>0 的单调性才是"铺了"的证明。
+        assert_eq!(zero, 0, "pad = 0 时底衬正好是墨迹盒，应被字完全盖住");
         assert!(
-            twelve > zero,
-            "pad 12 必须比 pad 0 大（{twelve} vs {zero}）—— 否则 pad 是被忽略的"
+            four > zero,
+            "pad 4 必须比 pad 0 多（{four} vs {zero}）—— 否则 pad 是被忽略的"
         );
-        // 外扩一圈多出来的**矩形**面积；可见像素的增量必须落在它之内、
-        // 且不为零（若 pad 被忽略，增量恒为 0）。
-        let ring = (w + 24) * (h + 24) - w * h;
-        let gained = twelve - zero;
+        assert!(
+            twelve > four,
+            "pad 12 必须比 pad 4 多（{twelve} vs {four}）—— 只看一档分不出'写死常数'"
+        );
+
+        // 外扩 Δ 多出来的**矩形**面积 = (iw+2Δ)(ih+2Δ) − iw·ih，其中 `iw/ih`
+        // 是**墨迹盒**（闭区间 +1 成半开，见 `PlateRect::from_ink`）。
+        // 可见像素的增量**小于**它（字盖住中间那条），但必须落在它之内。
+        // `iw`/`ih` 从夹具的 `ink_bitmap` 推：位图 640 × (24 + 2·pad_px(14)) = 640×32，
+        // 墨迹横向 `[w/8, 3w/8]`、纵向居中一半高 ⇒ 160×16（闭区间）。
+        let (iw, ih) = (160usize + 1, 16usize + 1);
+        let area = |p: usize| (iw + 2 * p) * (ih + 2 * p);
+        let ring = area(12) - area(4); // Δ = 8
+        let gained = twelve - four;
         assert!(
             gained > 0 && gained <= ring,
-            "外扩 12 该多出最多 {ring} 个底衬像素，实际 {gained}"
+            "外扩 8px 该多出最多 {ring} 个可见底衬像素，实际 {gained}"
         );
-        // 而 pad = 0 的那块矩形就是行盒本身：可见像素不可能超过它。
-        assert!(zero <= w * h, "pad = 0 时底衬不可能大过行盒（{w}x{h}）");
     }
 
     /// 底衬跟着这一行的**不透明度**淡入淡出。

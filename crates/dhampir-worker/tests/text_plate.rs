@@ -344,26 +344,25 @@ fn 底衬比字多长一圈并且用的是契约那个色() {
     );
     let (px0, py0, px1, py1) = plate_box.expect("有底衬就该有包围盒");
 
-    // ③ **四周都外扩一圈**（`plate_pad_px`）—— 只验"变大"的话，
-    //    一个只往一个方向长的实现也能过。
+    // ③ **四周的留白都等于 `plate_pad_px`**（±`slack`）。
+    //
+    //    ⚠️ **上下界都要**：只验"不小于"的话，一个铺了**巨大**底衬的实现
+    //    （把画面糊掉）也能过。上界才是"留白就是契约那个数"的证明。
+    //
+    //    ⚠️ 这条当初正是抓 bug 的那条：第一版从**行盒**外扩，下侧实际只有 8px
+    //    而不是 12px —— 报的是 `底衬在下侧没有外扩：底衬 349 / 字 341`。
     let pad = PLATE_PAD_PX as i32;
-    let slack = 2i32; // 栅格化的抗锯齿会让字本身的足迹抖动一两像素。
-    for (name, outer, inner) in [
-        ("左", px0 as i32, tx0 as i32),
-        ("上", py0 as i32, ty0 as i32),
+    // 栅格化的抗锯齿会让**字**本身的足迹抖动一两像素，所以留白允许差 1~2px。
+    let slack = 2i32;
+    for (name, gap) in [
+        ("左", tx0 as i32 - px0 as i32),
+        ("上", ty0 as i32 - py0 as i32),
+        ("右", px1 as i32 - tx1 as i32),
+        ("下", py1 as i32 - ty1 as i32),
     ] {
         assert!(
-            outer <= inner - (pad - slack),
-            "底衬在{name}侧没有外扩：底衬 {outer} / 字 {inner}"
-        );
-    }
-    for (name, outer, inner) in [
-        ("右", px1 as i32, tx1 as i32),
-        ("下", py1 as i32, ty1 as i32),
-    ] {
-        assert!(
-            outer >= inner + (pad - slack),
-            "底衬在{name}侧没有外扩：底衬 {outer} / 字 {inner}"
+            (gap - pad).abs() <= slack,
+            "底衬在{name}侧的留白是 {gap}px，契约要求 {pad}px（±{slack}）"
         );
     }
 
