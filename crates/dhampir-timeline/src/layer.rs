@@ -692,6 +692,56 @@ pub struct SubtitleStyle {
     /// 谁要拿它当逐像素判据，先看 `plan/text-shadow-design.md` §2。
     #[serde(default, skip_serializing_if = "is_zero_f32")]
     pub shadow_blur_ratio: f32,
+    /// **底衬（plate）的颜色**。`None` = 不铺底衬（默认，既有工程逐字节不变）。
+    ///
+    /// 半透明是常态（参照给的是黑 55%：`[0,0,0,140]`），所以四通道是 RGBA，
+    /// `alpha` 与 `color` / `shadow_color` 一样**生效**。
+    ///
+    /// # 为什么不能走 libass 的 `BorderStyle=3`
+    ///
+    /// 那是 ASS 原生的"不透明底盒"，看着正好是这件事 —— 但底座这条路走不通，
+    /// 两条理由**各自独立成立**：
+    ///
+    /// 1. **传不下去**：底座走 `subtitles=…:fontsdir=…:force_style=…`，而
+    ///    `force_style` 的拼装只写 `FontName/FontSize/PrimaryColour/Outline/OutlineColour`
+    ///    五个键（见 `text_raster.rs::drawtext_args`）。`BorderStyle` 与 `BackColour`
+    ///    **一个都不在里面** ⇒ 在 `.ass` 里写 `BorderStyle=3` 会被 force_style 盖掉。
+    /// 2. **与"白墨"那条设计正面冲突**：底座**有意**把填充与描边**都**画成
+    ///    [`crate`] 的白墨（见 `text_raster.rs::WHITE_INK` 的注释）—— 因为 libass
+    ///    输出的 alpha **恒为 0**、颜色提前合成进 RGB，只有"全是白墨"时覆盖度
+    ///    才恢复得出来。而底衬要的是**另一种墨**，混进去覆盖度就再也分不开了。
+    ///
+    /// ⇒ 实现改在宿主侧（`text_overlay.rs::paint_one`）：**画字之前先铺一块矩形**，
+    /// 纯几何，既不动 libass，也不碰白墨那条设计。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plate_color: Option<[u8; 4]>,
+    /// **底衬向四周外扩的像素数**（目标像素）。默认 12。
+    ///
+    /// 只在 `plate_color` 有值时生效 —— 没有底衬就无所谓留白。
+    ///
+    /// # 为什么是**目标像素**而不是像 `font_ratio` 那样的比例
+    ///
+    /// 参照的底衬是浏览器 `padding: 12px` 那种"离字多远"的观感量，它的参照值
+    /// 就是 **12**；把它写成比例会在预览（640x360）与成片（1920x1080）上给出
+    /// 两个不同的外扩量，而"底衬包得住字"是**一眼能看出来**的 —— 那正是这个仓
+    /// 最不想有的那类"预览看着对、成片贴不住"。
+    ///
+    /// ⚠️ 与 `transform.x/y`、`rise_in_px` 那套**文档像素**不是同一个坐标系：
+    /// 这里定的是**目标像素**，因为底衬是宿主在**已经栅格化好的目标帧**上铺的
+    /// （`place_line` 给的就是目标像素坐标）。
+    ///
+    /// # ⚠️ 这一项**必须** `skip_serializing_if`
+    ///
+    /// 它等于默认值时**不写进文件** —— 与 `shadow_dx_px` / `shadow_blur_ratio`
+    /// 同款。理由不是省字节，是**本仓有一条判据盯着"老工程的样式键集"**：
+    /// `v2_tests::没写过阴影的样式重写出来一个字节都不多` 会把
+    /// `SubtitleStyle` 全部键名与默认写法**逐字**比一次。少了这个 `skip`，
+    /// 任何老工程重写一次都会多出一个 `"plate_pad_px":12.0`，那条判据当场打红
+    /// —— 它拦的正是"升级之后工程文件悄悄变形"。
+    ///
+    /// 而"显式写了 12 会被吃掉"**不是**损失：读回默认值仍是 12，渲染逐像素一样。
+    #[serde(default = "default_plate_pad_px", skip_serializing_if = "is_default_plate_pad_px")]
+    pub plate_pad_px: f32,
 }
 
 /// `0.0` 不写进文件 —— 这是"既有工程逐字节不变"的执行处：
@@ -714,6 +764,21 @@ fn is_zero_f32(value: &f32) -> bool {
 
 fn default_font_weight() -> u32 {
     400
+}
+
+/// 底衬外扩的默认值（目标像素）。参照值就是 12。
+///
+/// ⚠️ 与 `plate_pad_px` 上的 `skip_serializing_if` 是**一对**：等值不写，
+/// 老工程重写一个键都不多（`v2_tests` 那条键集判据盯着这件事）。
+fn default_plate_pad_px() -> f32 {
+    12.0
+}
+
+/// 与默认值相等就不写 —— `shadow_dx_px` / `shadow_blur_ratio` 同款。
+///
+/// 比法用 `==`：`-0.0 == 0.0` 为真，而 12.0 这种默认值没有负零的歧义。
+fn is_default_plate_pad_px(value: &f32) -> bool {
+    *value == default_plate_pad_px()
 }
 
 fn subtitle_font_ratio() -> f32 {
@@ -775,6 +840,10 @@ impl Default for SubtitleStyle {
             shadow_dx_px: 0.0,
             shadow_dy_px: 0.0,
             shadow_blur_ratio: 0.0,
+            // None = 不铺底衬（既有工程逐字节不变）。外扩量给参照值 12，
+            // 但它在 `plate_color` 为 None 时**读都不会被读到**。
+            plate_color: None,
+            plate_pad_px: default_plate_pad_px(),
         }
     }
 }
