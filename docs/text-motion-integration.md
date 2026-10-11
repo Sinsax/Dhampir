@@ -189,3 +189,17 @@ dy = px × ( 0.62·sin(2π·hz·1.3·t  + φ+1.1) + 0.38·sin(2π·hz·3.1·t + 
 | 逐条 `Cue.scale` | `crates/dhampir-timeline/src/subtitle.rs` |
 | 求值到 `TextItem` | `crates/dhampir-core/src/overlay.rs` |
 | 出片端到端判据 | `crates/dhampir-worker/tests/text_enter.rs` |
+
+---
+
+## 附：一处**提交归属错位**（不改历史，仅记录）
+
+`text_overlay.rs` 里那几行**修掉"逐条缩放没落到字号"的改动**
+（`place_line(rect, target, font_ratio)` 形参化 + `item.font_ratio` 透传）
+**落在了 T6 的提交 `903ed85` 里**，而**不在** T1/T3/T4 的 `ac97b70` 里 ——
+两个任务在同一文件上交叠，T6 侧先提交时把它一起带走了。
+
+- **代码在 HEAD 里是对的**（逐行验过），功能没有丢。
+- ⚠️ 但**将来 `git log -S "font_ratio"` 会指到 T6 那个提交**，而那条提交信息讲的是底衬几何。
+- **决定：不改写已提交的历史**（改写比错位危险得多）。这份记录就是纠正 ——
+  找"逐条缩放是什么时候修的"请以本文件与 `ac97b70` 的说明合起来看。
