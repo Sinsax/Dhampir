@@ -45,6 +45,8 @@ const FRAME: Frame = 15;
 const CLIP: (Frame, Frame) = (FRAME, FRAME + 8);
 
 const SUBTITLE_ASSET: &str = "sub.srt";
+/// **第二条**字幕轨的素材 —— 双轨判据（task-18）用它当"覆盖者"。
+const SRT_ASSET: &str = "srt.srt";
 const BACKGROUND_ASSET: &str = "bg.png";
 const SUBTITLE_TEXT: &str = "第一行中文";
 const SRT_HERE: &str = "1\n00:00:00,500 --> 00:00:01,000\n第一行中文\n";
@@ -440,6 +442,153 @@ fn 不铺底衬时与老工程逐字节相同() {
         legacy.image.pixels, plated.image.pixels,
         "加上底衬必须改变像素 —— 否则这条测试没在测底衬"
     );
+}
+
+/// ★ **两条字幕轨并存时，配了底衬的那条轨的底衬必须真的画出来**（task-18）。
+///
+/// # 它复现的是真实故障现场
+///
+/// YekiTrim 侧一个真实剪辑工程（**元素轨 + SRT 轨并存**）里，
+/// 底衬 `plate_color = [255,0,0,255]`（纯红不透明）**一个红像素都没有**；
+/// **只删掉 SRT 轨** ⇒ 红像素 **7676**。
+/// 根因是求值层把轨道级样式存在**一个共享槽**里、每轨整份重写、
+/// 循环结束只留最后一份 ⇒ 最后一条轨吃掉前面所有轨。
+///
+/// ⚠️ **这条判据的形状必须"两条轨"**：单轨时"最后一条"就是"唯一一条"，
+/// 行为完全正确 —— 所以**单轨用例在 bug 存在时也是绿的**
+/// （`dhampir-core` 里那条 `单条字幕轨的样式与改动前逐字段相等`
+/// 在变异下实测**保持绿色**，正面印证了这一点）。
+///
+/// # 为什么用纯红 + 白背景（transition 的实测经验）
+///
+/// `plate_color = [0,0,0,200]` 铺在**黑背景**上**量不出来**（第一版就这么白查的）；
+/// 而"外接框宽度"也不行 —— 底衬让框变宽，但**字形自己的白像素也在里面**，两者会混。
+/// ⇒ **纯红 + 白背景、直接数红像素**，没有歧义。
+#[test]
+#[ignore = "需要真 GPU、PATH 上的 ffmpeg 与一个中文字体；跑：cargo test -p dhampir-worker --test text_plate -- --ignored"]
+fn 两条字幕轨并存时配了底衬的那条轨仍然铺底衬() {
+    if !temp_writable() {
+        return;
+    }
+    /// 参照实现实测的那个数（YekiTrim 侧量的 7676）。
+    /// 这里不硬套绝对值（字体不同），只要求"**多到不像噪声**"。
+    const MIN_RED_PIXELS: usize = 500;
+
+    let fixture = Fixture::new("plate-two-tracks");
+    let plate_red = [255u8, 0, 0, 255];
+
+    // ① 双轨：`elements`（配底衬）+ `srt`（**排在后面**、没有底衬）——
+    //    这正是"覆盖者"的位置。
+    let both = fixture.render(
+        "two-tracks",
+        &two_track_timeline(false),
+        &two_track_table(),
+    );
+    let red_both = count_color(&both.image, plate_red);
+
+    // ② 对照：**只删掉后面那条轨**，其余一字不改。
+    let only = fixture.render(
+        "one-track",
+        &two_track_timeline(true),
+        &two_track_table(),
+    );
+    let red_only = count_color(&only.image, plate_red);
+
+    // ③ ★ 核心判据：**两条轨都在时，底衬照样画出来**。
+    assert!(
+        red_both >= MIN_RED_PIXELS,
+        "两条字幕轨并存时底衬没画出来：红色像素只有 {red_both}（该 ≥ {MIN_RED_PIXELS}）—— \
+         轨道级样式被后面那条轨覆盖了（task-18 的原症状）"
+    );
+    // ④ 对照组也必须画得出来（否则"没画出来"可能是别的原因，比如字体）。
+    assert!(
+        red_only >= MIN_RED_PIXELS,
+        "单轨对照组也没画出底衬：红色像素 {red_only} —— 那这条测试的前提就不成立"
+    );
+    // ⑤ 两者应当**数量级相同**：覆盖 bug 的症状是"从有到无"（7676 → 0），
+    //    不是"少几个"。这条挡住"只剩边缘一点点"那种半覆盖。
+    let ratio = red_both as f64 / red_only as f64;
+    assert!(
+        ratio > 0.8,
+        "双轨的底衬像素 {red_both} 比单轨的 {red_only} 少太多（比值 {ratio:.3}）—— \
+         说明后面那条轨仍然吃掉了一部分"
+    );
+}
+
+/// 双轨夹具：`elements` 轨**永远配底衬**（纯红），`srt` 轨**排在后面**。
+///
+/// `drop_second_track` 决定**要不要删掉后面那条轨** ——
+/// 那就是"只改一个变量"的对照组：底衬写在哪条轨上一字不改，
+/// **唯一的变量是"有没有第二条轨"**。
+fn two_track_timeline(drop_second_track: bool) -> TimelineV2 {
+    let srt_track = if drop_second_track {
+        String::new()
+    } else {
+        format!(
+            r#",{{
+                "id": "srt",
+                "kind": "subtitle",
+                "layers": [{{
+                    "id": "cue",
+                    "start": {start},
+                    "end": {end},
+                    "source": {{ "asset_id": "{srt}", "source_in": 0 }}
+                }}],
+                "subtitle": {{ "font_ratio": 0.055, "color": [255, 255, 255, 255], "outline": false }}
+            }}"#,
+            start = CLIP.0,
+            end = CLIP.1,
+            srt = SRT_ASSET,
+        )
+    };
+    let text = format!(
+        r#"{{
+            "schema": 3,
+            "timebase": {{ "num": 30, "den": 1 }},
+            "tracks": [
+                {{
+                    "id": "v1",
+                    "kind": "video",
+                    "layers": [{{
+                        "id": "bg",
+                        "start": {start},
+                        "end": {end},
+                        "source": {{ "asset_id": "{background}", "source_in": 0 }}
+                    }}]
+                }},
+                {{
+                    "id": "elements",
+                    "kind": "subtitle",
+                    "layers": [{{
+                        "id": "cue",
+                        "start": {start},
+                        "end": {end},
+                        "source": {{ "asset_id": "{subtitle}", "source_in": 0 }}
+                    }}],
+                    "subtitle": {{
+                        "font_ratio": 0.055,
+                        "color": [255, 255, 255, 255],
+                        "outline": false,
+                        "plate_color": [255, 0, 0, 255],
+                        "plate_pad_px": 10.0
+                    }}
+                }}{srt_track}
+            ]
+        }}"#,
+        start = CLIP.0,
+        end = CLIP.1,
+        background = BACKGROUND_ASSET,
+        subtitle = SUBTITLE_ASSET,
+    );
+    serde_json::from_str(&text).expect("双轨夹具时间线必须能反序列化")
+}
+
+fn two_track_table() -> SubtitleTable {
+    let mut table = table(SRT_HERE);
+    // 后面那条轨的素材：内容无所谓（它的样式才是关键），但要真的活着。
+    let report = parse_srt(SRT_HERE).expect("夹具 SRT 必须能解析");
+    table.insert(SRT_ASSET.to_string(), report.cues);
+    table
 }
 
 /// 与 `tests/overlay.rs` 同一条纪律：`#[ignore]` 的文案里必须带**本文件**的跑法
