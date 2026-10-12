@@ -41,6 +41,7 @@
 //! **颜色与描边两者共用**：`DanmakuSpec` 没有颜色字段（要分开就得动契约）。
 //! 只有弹幕的工程看不出这件事（默认白字带描边）。
 
+use dhampir_timeline::curve::channel_from;
 use dhampir_timeline::danmaku::{layout as layout_danmaku, rect_at};
 use dhampir_timeline::layer::{TimelineV2, default_plate_pad_px};
 use dhampir_timeline::schema::{Frame, TimebaseDto, TrackKind};
@@ -592,19 +593,30 @@ pub fn evaluate_overlay(
                     track_style: track_style.clone(),
                     // **文字形变（T1）**：取这一轨**当前活着那个元素**自己的 `transform`。
                     //
-                    // ⚠️ 取的是**静态值** —— `evaluate_overlay` 是纯函数、不求值关键帧
-                    // （它没有 `local_frame`，也不读 `keyframes`）。关键帧求值在
-                    // `compose.rs::element_to_draw` 那条路上，与这里**尚未连接**。
-                    // 详见 `TextItem::rotation_deg` 的说明与 `docs/plan/text-option-d-scope.md`。
+                    // ★ **关键帧已接通（2026-10-13）**：这两个值现在**逐帧求值** ——
+                    //   静态值是 fallback，键存在时按 `local_frame` 走曲线。
+                    //   于是"摇摆（rotation 往复）"这条效果**真的可以做了**。
                     //
-                    // ⚠️ 读的是 element 的 transform，不是轨道级 `SubtitleStyle`：
-                    // 后者是**轨级**的，而旋转/压扁按用户口径是**每条自己的**事
-                    // （与 `dx_px` / `dy_px` 同类）。
+                    //   ⚠️ 原先是直接读静态值，注释写着"`evaluate_overlay` 不求值关键帧，
+                    //   关键帧求值在 `compose.rs::element_to_draw` 那条路上，与这里**尚未连接**"。
+                    //   现在连上了 —— 用的是**同一条** `channel_from`（不是第二份实现），
+                    //   所以不会与 GPU 那条路漂移。
                     //
-                    // `element` 就是上面 `find(|layer| layer.covers(frame))` 那一个，
-                    // 与下面 `styled = true` 认定的是同一个元素 —— **不是**第二份查找。
-                    rotation_deg: element.transform.rotation,
-                    scale_y: element.transform.scale_y,
+                    //   `local_frame = frame - element.start`：与 `compose.rs:294`
+                    //   （`let local = frame - layer.start`）**同一个口径**。
+                    //   ⚠️ 用 `element` 自己的 `start`，不是轨的 —— 元素可以晚于轨开始。
+                    rotation_deg: channel_from(
+                        element.transform.rotation,
+                        &element.keyframes,
+                        "rotation",
+                        frame.saturating_sub(element.start),
+                    ),
+                    scale_y: channel_from(
+                        element.transform.scale_y,
+                        &element.keyframes,
+                        "scale_y",
+                        frame.saturating_sub(element.start),
+                    ),
                 });
             }
             // ⚠️ 这里原来有一句 `subtitle_style = TextStyle { … }` —— 就是那个 bug。
@@ -2132,8 +2144,125 @@ mod tests {
         }
     }
 
-    /// ⚠️ **形变是「条级」的，不是轨级**：两条字幕轨各写各的，互不污染。
+    // =====================================================================
+    // 摇摆：`rotation` 的**逐帧求值**（2026-10-13）
+    //
+    // 这一组把「文字形变能不能被关键帧驱动」钉死 —— 它是"摇摆"效果的地基：
+    // 昨天这里读的是**静态值**，所以关键帧写了也**不生效**（不报错、只是没动）。
+    // =====================================================================
+
+    /// 一条字幕轨 + 带 `rotation` 关键帧的元素（往复摆动 = 摇摆）。
     ///
+    /// 关键帧：0 帧 → −8°，30 帧 → +8°，60 帧 → −8°（一个来回）。
+    /// 时间基 30/1 ⇒ 30 帧 = 1 秒。
+    fn sway_timeline() -> TimelineV2 {
+        timeline(
+            r#"{
+                "schema": 3,
+                "timebase": { "num": 30, "den": 1 },
+                "tracks": [{
+                    "id": "sub",
+                    "kind": "subtitle",
+                    "layers": [{
+                        "id": "cue",
+                        "start": 0,
+                        "end": 120,
+                        "source": { "asset_id": "sub.srt", "source_in": 0 },
+                        "transform": { "x": 0.0, "y": 0.0, "scale": 1.0, "rotation": 0.0, "scale_y": 1.0 },
+                        "keyframes": [
+                            { "frame": 0,  "target": "rotation", "value": -8.0, "easing": "linear" },
+                            { "frame": 30, "target": "rotation", "value":  8.0, "easing": "linear" },
+                            { "frame": 60, "target": "rotation", "value": -8.0, "easing": "linear" }
+                        ]
+                    }],
+                    "subtitle": { "font_ratio": 0.05 }
+                }]
+            }"#,
+        )
+    }
+
+    /// ★ **`rotation` 关键帧真的逐帧求值**（摇摆的地基）。
+    ///
+    /// ⚠️ 判据必须是**多个帧各不相同**：只测一帧的话，
+    /// "读静态值 0.0" 与"求值恰好也 0.0"分不开。
+    /// 这里取 0 / 15 / 30 三帧 —— 线性曲线上是 −8 / 0 / +8。
+    #[test]
+    fn 旋转关键帧逐帧求值() {
+        let tl = sway_timeline();
+        let at = |frame| {
+            let overlay = evaluate_overlay(&tl, frame, SEQUENCE, Some(&table()))
+                .expect("每一帧都要有覆盖层");
+            overlay.items.first().expect("至少一条字幕").rotation_deg
+        };
+
+        assert_eq!(at(0), -8.0, "第 0 帧应是曲线起点 −8°");
+        assert_eq!(at(30), 8.0, "第 30 帧应是曲线峰值 +8°");
+        // 中点：线性插值 ⇒ 0°。⚠️ 这条是"真的在求值"的关键 ——
+        // 读静态值的话三帧**全是 0.0**，只有这一条能分辨出来。
+        assert_eq!(at(15), 0.0, "第 15 帧应是 +8/−8 的中点 0°");
+        // 后半程往回摆（往复 = 摇摆）。
+        assert_eq!(at(60), -8.0, "第 60 帧应摆回 −8°");
+    }
+
+    /// ⚠️ **反向**：没有 `rotation` 关键帧时**必须仍是静态值**（老工程逐字节不变）。
+    ///
+    /// 与上面那条是一对：只测"写了生效"会漏掉"没写时会不会自己变成别的值"，
+    /// 而那个症状是**所有老工程的文字一起漂移**。
+    #[test]
+    fn 没有旋转关键帧时仍用静态值() {
+        // 静态 12°，**不带 keyframes**。
+        let tl = tilted_timeline(12.0, 1.0);
+        for frame in [0, 15, 30, 60, 119] {
+            let overlay = evaluate_overlay(&tl, frame, SEQUENCE, Some(&table()))
+                .expect("每一帧都要有覆盖层");
+            for item in &overlay.items {
+                assert_eq!(item.rotation_deg, 12.0, "第 {frame} 帧：没写键就该恒用静态值 12°");
+            }
+        }
+    }
+
+    /// ⚠️ **关键帧作用在自己那个元素上**：`local_frame = frame − element.start`。
+    ///
+    /// 元素若晚于轨开始（`start = 30`），第 30 帧才是它的**第 0 帧** ——
+    /// 用轨的 `start` 会整体错位（症状：动画提前/延后一段，肉眼像"没对齐"）。
+    #[test]
+    fn 关键帧按元素自己的起点算() {
+        let tl = timeline(
+            r#"{
+                "schema": 3,
+                "timebase": { "num": 30, "den": 1 },
+                "tracks": [{
+                    "id": "sub",
+                    "kind": "subtitle",
+                    "layers": [{
+                        "id": "cue",
+                        "start": 30,
+                        "end": 120,
+                        "source": { "asset_id": "sub.srt", "source_in": 0 },
+                        "transform": { "x": 0.0, "y": 0.0, "scale": 1.0, "rotation": 0.0, "scale_y": 1.0 },
+                        "keyframes": [
+                            { "frame": 0,  "target": "rotation", "value": -8.0, "easing": "linear" },
+                            { "frame": 30, "target": "rotation", "value":  8.0, "easing": "linear" }
+                        ]
+                    }],
+                    "subtitle": { "font_ratio": 0.05 }
+                }]
+            }"#,
+        );
+        let at = |frame| {
+            evaluate_overlay(&tl, frame, SEQUENCE, Some(&table()))
+                .expect("覆盖层在")
+                .items
+                .first()
+                .expect("一条字幕")
+                .rotation_deg
+        };
+        // 元素第 30 帧才出现 ⇒ 那一刻是它的第 0 帧 ⇒ 曲线起点 −8°。
+        assert_eq!(at(30), -8.0, "元素自己的第 0 帧 = 时间线第 30 帧，应取曲线起点");
+        assert_eq!(at(60), 8.0, "元素自己的第 30 帧 = 时间线第 60 帧，应取曲线终点");
+    }
+
+    /// ⚠️ **形变是「条级」的，不是轨级**：两条字幕轨各写各的，互不污染。
     /// 这正是 `TextItem::track_style` 那个"共享槽"bug 的形状：
     /// 轨级共享槽会让**最后一条轨说了算**，而单条轨时完全正确 ——
     /// 所以判据必须**两条轨并存**，否则它永远绿。
@@ -2184,8 +2313,24 @@ mod tests {
     /// 条目拿到的仍是**静态值**。若哪天求值层打通了，这条会红 ——
     /// **那时应该红**：它提醒你去更新 `TextItem::rotation_deg` 的注释与
     /// `docs/plan/text-option-d-scope.md`，而不是删掉这条测试。
+    /// ★ **关键帧已连接** —— 这条**原本是反向的**（钉"已知限制"）。
+    ///
+    /// # 它的来历（别把它改回去）
+    ///
+    /// 前一版是 `关键帧尚未连接_条目取的是静态值`，断言第 60 帧仍拿静态值 5.0，
+    /// 并在注释里写着：
+    ///
+    /// > 若哪天求值层打通了，这条会红 —— **那时应该红**：它提醒你去更新
+    /// > `TextItem::rotation_deg` 的注释与 `docs/plan/text-option-d-scope.md`，
+    /// > 而不是删掉这条测试。
+    ///
+    /// 2026-10-13 接通关键帧时它**确实红了**（`left: 45.0, right: 5.0`）——
+    /// 那条绊线按设计生效了。于是按它的嘱咐**更新成正向判据**（不是删掉）：
+    /// 同一份夹具、同一帧，现在必须取到**曲线值 45.0**。
+    ///
+    /// ⇒ 摇摆（rotation 往复）的地基在这一层已经通了。
     #[test]
-    fn 关键帧尚未连接_条目取的是静态值() {
+    fn 关键帧已连接_条目取的是曲线值() {
         let tl = timeline(
             r#"{
                 "schema": 3,
@@ -2199,8 +2344,8 @@ mod tests {
                             "source": { "asset_id": "sub.srt", "source_in": 0 },
                             "transform": { "x": 0.0, "y": 0.0, "scale": 1.0, "rotation": 5.0, "scale_y": 1.0 },
                             "keyframes": [
-                                { "target": "rotation", "frame": 0, "value": 5.0 },
-                                { "target": "rotation", "frame": 60, "value": 45.0 }
+                                { "target": "rotation", "frame": 0, "value": 5.0, "easing": "linear" },
+                                { "target": "rotation", "frame": 60, "value": 45.0, "easing": "linear" }
                             ]
                         }],
                         "subtitle": { "font_ratio": 0.05 }
@@ -2211,9 +2356,15 @@ mod tests {
         let overlay = evaluate_overlay(&tl, 60, SEQUENCE, Some(&table())).expect("要有覆盖层");
         for item in &overlay.items {
             assert_eq!(
-                item.rotation_deg, 5.0,
-                "关键帧**尚未**连接：取的是静态值 5.0，不是第 60 帧的 45.0"
+                item.rotation_deg, 45.0,
+                "关键帧已连接：第 60 帧应取曲线值 45.0（静态 5.0 只是 fallback）"
             );
+        }
+        // ⚠️ 反向仍要立着：静态值**不许**被无条件丢掉 —— 第 0 帧的曲线值恰好
+        //    也是 5.0，所以另取中点验"确实是插值出来的"。
+        let mid = evaluate_overlay(&tl, 30, SEQUENCE, Some(&table())).expect("要有覆盖层");
+        for item in &mid.items {
+            assert_eq!(item.rotation_deg, 25.0, "第 30 帧应是 5→45 的中点 25.0");
         }
     }
 }
