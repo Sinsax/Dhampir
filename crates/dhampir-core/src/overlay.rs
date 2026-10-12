@@ -152,26 +152,33 @@ pub struct TextItem {
     /// **没有任何位置**能表达"这一条要斜着画" —— 文字的变换只有位移（`dx_px`/`dy_px`）
     /// 与缩放（`scale`），三者各管一件事，旋转是缺的那一个自由度。
     ///
-    /// # ⚠️ 来源与**尚未连接**的关键帧
+    /// # ✅ 来源与**已连接**的关键帧（2026-10-13）
     ///
-    /// 这里填的是**文字元素自己的 `LayerV2.transform.rotation` 的静态值**
-    /// （`dhampir_timeline::layer::TransformV2::rotation`）。
+    /// 这里填的是**文字元素自己的 `LayerV2.transform.rotation`**，
+    /// 但**逐帧求值**：静态值只是 fallback，写了键就走曲线。
     ///
-    /// ⚠️ **关键帧求值在 `compose.rs` 那条路上，与本字段尚未连接** ——
-    /// `evaluate_overlay` 是纯函数、不读 `keyframes`（它连 `local_frame` 都没有）。
-    /// 所以：**给文字元素写 `rotation` 关键帧，本字段不会跟着动**。
-    /// 要让文字旋转"可动画"，必须在求值层打通（把已求值的 transform 传进来），
-    /// 那是另一件事，见 `docs/plan/text-option-d-scope.md`。
+    /// ```text
+    /// channel_from(element.transform.rotation, &element.keyframes, "rotation",
+    ///              frame.saturating_sub(element.start))
+    /// ```
     ///
-    /// ⚠️ 之所以要在这里写死这条限制：**字段有了 ≠ 动画就有了**。
-    /// 不写清楚，后来的人会以为"契约支持旋转 ⇒ 关键帧也该生效"，
-    /// 而症状是"关键帧写了、单测绿、出片里一动不动" —— 本仓最恨的那类静默。
+    /// ⚠️ `channel_from` 与 `compose.rs::element_to_draw` 用的是**同一个函数**
+    /// ⇒ 求值逻辑仍然只有一处，不会漂移。
+    /// ⚠️ `local_frame` 用 **element 自己的** `start`，不是轨的 —— 元素可以晚于轨开始。
+    ///
+    /// > 沿革：本条原先写着"关键帧求值在 `compose.rs` 那条路上，与本字段**尚未连接**，
+    /// > 给文字元素写 `rotation` 关键帧，本字段不会跟着动"。
+    /// > 那句在 `bcff0a5` 之后**已过期**。「摇摆（rotation 往复）」因此可以做了。
+    /// > ⇒ "**字段有了 ≠ 动画就有了**"那条教训仍然成立 —— 所以这里显式写出**已接通**，
+    /// > 免得后来的人照着旧注释以为写键没用。
     ///
     /// # 落到工程 JSON 的坐标（下游写 tilt 时看这条）
     ///
     /// 要倾斜一段文字，写 **文字图层自己的** `layers[i].transform.rotation`；
     /// 写进 `TrackV2.subtitle`（轨级样式）**不会生效** —— 本字段读的是
     /// **element 的 transform**，不是轨道级样式。
+    /// 想让它动，把关键帧写在**同一个元素**上（`layers[i].keyframes`，
+    /// `target = "rotation"`，**帧号相对元素自己的 `start`**）。
     pub rotation_deg: f32,
     /// **这一条纵向额外拉伸的倍数**（`1.0` = 不拉伸）。恒 `1.0` = 老行为。
     ///
@@ -184,7 +191,10 @@ pub struct TextItem {
     /// 契约层只有等比 `scale`，压扁一个字是**表达不出来**的。
     ///
     /// ⚠️ 同样是**条级**，理由与 `rotation_deg` 一样（见上）。
-    /// ⚠️ 同样**只有静态值**，关键帧未连接（见上）。
+    /// ⚠️ 也**逐帧求值**（`bcff0a5` 接通，与 `rotation_deg` 共用一条 `channel_from`）——
+    /// 但 `scale_y` **不在 `TRANSFORM_TARGETS` 里** ⇒ 写 `target = "scale_y"`
+    /// 会被**校验层拒绝**（而不是静默忽略，那是好事）。
+    /// 要做"逐帧压扁"得先把它加进那张表，见 `docs/plan/text-option-d-scope.md` §4.5。
     /// ⚠️ 落点坐标同 `rotation_deg`：`layers[i].transform.scale_y`。
     pub scale_y: f32,
 }

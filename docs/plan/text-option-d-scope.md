@@ -73,40 +73,73 @@
 判据（单测钉死，见 §5）：不写这两个键时，序列化出来的 JSON **里没有这两个键**——
 否则每个老工程的变换键集都变大，R4 判据当场红。
 
-## 4. ⚠️ 关键帧**尚未连接**（本版已知限制）
+## 4. ✅ 关键帧**已连接**（2026-10-13，`bcff0a5`）—— 「摇摆」的地基通了
 
-`TextItem::rotation_deg` / `scale_y` 填的是 **`element.transform` 的静态值**。
+> 本节原先标题是「⚠️ 关键帧**尚未连接**（本版已知限制）」，正文断言
+> "给文字元素写 `rotation` 关键帧，`TextItem` 不会跟着动"。
+> **那个限制已经解除**，正文保留在下面第 4.3 节当沿革。
 
-**`evaluate_overlay` 不求值关键帧** —— 它是纯函数，不读 `keyframes`，
-连 `local_frame` 都没有。关键帧求值目前在**另一条路**上：
-`compose.rs::element_to_draw` 的
+`TextItem::rotation_deg` / `scale_y` 现在**逐帧求值**：
 
 ```rust
-rotation_deg: animated(element.transform.rotation, "rotation"),
+rotation_deg: channel_from(
+    element.transform.rotation,     // ← 静态值降级为 fallback
+    &element.keyframes,
+    "rotation",
+    frame.saturating_sub(element.start),   // ← local_frame
+),
 ```
 
-⇒ **给文字元素写 `rotation` 关键帧，`TextItem` 不会跟着动。**
+### 4.1 怎么做到"不引入第二处求值"
 
-### 为什么本版不做
+原计划担心的是"两份实现必然漂移"。**绕开的办法是别写第二份**：
+`channel_from`（`dhampir-timeline/src/curve.rs:41`）本来就是**公开**的，
+`compose.rs::element_to_draw` 用的也是它。这里调**同一个函数**，
+只是把 `local_frame` 自己算出来 —— 于是求值逻辑仍然只有**一处**。
 
-要做就得让 `evaluate_overlay` 也求值一次，或把已求值的 transform 传进来 ——
-两种做法都会引入**第二处关键帧求值**，而求值逻辑现在唯一在 `compose.rs`。
-两份实现必然漂移，那正是本仓最恨的形状。
+⭐ `local_frame = frame − element.start`，与 `compose.rs:294`
+（`let local = frame - layer.start`）**同一口径**。
+⚠️ 用 **element 自己的** `start`，**不是轨的** —— 元素可以晚于轨开始，
+用错会让动画整体错位（症状：像"没对齐"，不像"没生效"）。
 
-而且这会改 `evaluate_overlay` 的签名，牵连 5 个调用点
-（`dhampir-wasm/src/timeline_host.rs:976/1737`、
-`dhampir-worker/src/bin/dhampir.rs:2133`、`dhampir-worker/src/pipeline.rs:2205/2423`）——
-那是**另一件事**的范围。
+### 4.2 签名**没改**（原计划高估了改动面）
 
-### `TRANSFORM_TARGETS` 为什么没加 `scale_y`
+原正文说"这会改 `evaluate_overlay` 的签名、牵连 5 个调用点"。
+**实测不需要**：`frame` 已经是它的入参，`element.start` 也在手上 ⇒
+`local_frame` 就地能算，**零调用点改动**。
 
-`schema.rs` 的 `TRANSFORM_TARGETS = ["opacity","x","y","scale","rotation"]` **保持 5 项**。
+### 4.3 沿革：当时的顾虑与它为什么没成立
 
-加了 `scale_y` 就等于宣告"它可被关键帧驱动"，那就**必须有人求值** ——
-而按本节，`evaluate_overlay` 不求值 ⇒ 加了是个**死字段**，
-用户写了关键帧会被**静默忽略**，比不加更坏。
+- ~~"`evaluate_overlay` 是纯函数，不读 `keyframes`，连 `local_frame` 都没有"~~
+  ⇒ `frame` 就是入参，`local_frame` 是**派生**的，不是缺输入。
+- ~~"两种做法都会引入第二处关键帧求值"~~
+  ⇒ 复用公开的 `channel_from`，仍然只有一处。
+- ~~"要改签名、牵连 5 个调用点"~~ ⇒ 实测 0 个。
 
-⇒ **等真做"可动画"时一起加**（求值打通 + 进表，同一件事的两半）。
+### 4.4 那条绊线按设计生效了
+
+本仓这里原来有一条**反向测试** `关键帧尚未连接_条目取的是静态值`
+（断言第 60 帧仍拿静态 `5.0`），注释写着：
+
+> 若哪天求值层打通了，这条会红 —— **那时应该红**：它提醒你去更新注释与本文档，
+> 而不是删掉这条测试。
+
+接通后它**确实红了**（`left: 45.0, right: 5.0`）。按它的嘱咐**更新成正向判据**
+（`关键帧已连接_条目取的是曲线值`，同一份夹具、同一帧，现在断言取到曲线值 `45.0`），
+**没有删**。
+
+### 4.5 `TRANSFORM_TARGETS` 仍然没加 `scale_y`
+
+`schema.rs` 的 `TRANSFORM_TARGETS = ["opacity","x","y","scale","rotation"]` **仍是 5 项**。
+
+⚠️ 但**理由变了**：原来说"不加，因为没人求值、加了是死字段"——
+**现在有人求值了**（`scale_y` 那条 `channel_from` 就在上面）。
+现在不加是因为它**还不在 `TRANSFORM_TARGETS` 的语义里**：那张表是
+"哪些键能被 `Keyframe::target` 指到"的**契约面**，加它要同时定值域、
+进 TS 类型、加校验分支 —— 是**另一件事**，不是"顺手加一个字符串"。
+
+⇒ **要做"逐帧压扁"时再一起加**（进表 + 校验 + TS + 文档，同一件事的几半）。
+`rotation` **本来就在表里**，所以摇摆**不需要**等这一步。
 
 ## 5. 判据
 
