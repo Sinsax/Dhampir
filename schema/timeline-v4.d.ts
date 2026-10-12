@@ -147,6 +147,8 @@ export interface PerCharSpec {
   rotation_to?: number;
   /** 逐字**起始缩放**（1.0 = 不缩）。 */
   scale_from?: number;
+  /** **按序号放大的字号**（乘数，不是加法）：越靠后的字越大（负数 = 越小）。 */
+  scale_spread?: number;
   /** 逐字**终止缩放**（1.0 = 不缩）。 */
   scale_to?: number;
   /** **按序号放大的位移**（em）：越靠后的字挪得越多（负数 = 越靠前挪得多）。 */

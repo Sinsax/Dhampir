@@ -133,6 +133,35 @@ pub struct PerCharSpec {
     pub spread_y_from: f32,
     #[serde(default)]
     pub spread_y_to: f32,
+    /// **按序号放大的字号**（乘数，不是加法）：越靠后的字越大（负数 = 越小）。
+    ///
+    /// # ⚠️⚠️ 为什么单有 `scale_from/to` 不够（2026-10-13，C 组施工时发现）
+    ///
+    /// `scale_from` / `scale_to` 是**每个字同一个值** ⇒ 只能整行缩放。
+    /// 而 C 组的「大小字」（末/首/中字重音）、「变小」（递减/骤降/尾音）、
+    /// 「放大」（递增/爆开/首字引爆）**共 11 档**要的都是
+    /// **按序号改字号** —— 一个档把**某一个字**放大、其余不变。
+    /// 那是 `rank` 的函数，不是常数。
+    ///
+    /// ```text
+    /// rank = reverse ? (count-1-index) : index   // 与 spread_x_em 同一个
+    /// 第 i 个字最终 scale = mix(scale_from, scale_to) × (1 + scale_spread × rank)
+    /// ```
+    ///
+    /// # 为什么是**乘法**而不是加法
+    ///
+    /// 字号是**倍率**。倍率的"再大 20%"与"再加 0.2"在 `scale_from != 1.0` 时
+    /// 完全不是一回事：上式里 `scale_from = 0.6`（先缩小）再 `+0.2`
+    /// 得到的是 `0.8`（相对原字仍小），而 `×(1+0.2)` 得到 `0.72`。
+    /// 观感上要的是**相对当前倍率的比例**，所以用乘法。
+    ///
+    /// ⚠️ `rank` 与 `spread_x_em` **共用**：同一个"第几个字"。
+    ///    各算一份的话，"沿弧线散开"这类组合档（位移递增 + 字号递增）
+    ///    会在 `reverse` 下**方向不一致**（一个从左起、一个从右起）。
+    ///
+    /// ⚠️ `count <= 1` 时 rank 项为 0（一个字没有"哪个字重音"可言）。
+    #[serde(default)]
+    pub scale_spread: f32,
 }
 
 /// `1.0` 的 serde 默认（缩放的两个端点）。
@@ -176,6 +205,7 @@ impl Default for PerCharSpec {
             spread_x_to: 0.0,
             spread_y_from: 0.0,
             spread_y_to: 0.0,
+            scale_spread: 0.0,
         }
     }
 }
@@ -200,6 +230,12 @@ impl PerCharSpec {
             //    "只配了 spread 的档**完全不生效**"（`is_active` 为假 ⇒ 走老路）。
             || moves(self.spread_x_from, self.spread_x_to)
             || moves(self.spread_y_from, self.spread_y_to)
+            // ⚠️⚠️ **`scale_spread` 单独判**，不能并进上面那行 ——
+            //    它是**乘数**、且只看它自己非零（不看 `scale_from/to`）：
+            //    「按序号放大字号」那类档的两个端点**是相等的**（都是 1.0），
+            //    用 `moves(scale_from, scale_to)` 判会**漏掉整个档**
+            //    ⇒ 症状是"只配字号递增的档完全不生效"（实测：4 条判据一起红）。
+            || self.scale_spread.abs() > 1e-6
     }
 
     /// 第 `index` 个字（共 `count` 个）**自己那一份动画的起始帧**。
@@ -303,7 +339,9 @@ pub fn char_transform_at(
     let spread_x = mix(spec.spread_x_from, spec.spread_x_to) * spec.spread_x_em * rank;
     let spread_y = mix(spec.spread_y_from, spec.spread_y_to) * spec.spread_y_em * rank;
     CharTransform {
-        scale: mix(spec.scale_from, spec.scale_to),
+        // ⚠️ `scale_spread` 是**乘数**（见它的文档：倍率的比例才是"大一点"的直觉）。
+        //    `rank` 与位移**共用**同一个，保证组合档在 `reverse` 下方向一致。
+        scale: mix(spec.scale_from, spec.scale_to) * (1.0 + spec.scale_spread * rank),
         rotation_deg: mix(spec.rotation_from, spec.rotation_to),
         offset_x_em: mix(spec.offset_x_from, spec.offset_x_to) + spread_x,
         offset_y_em: mix(spec.offset_y_from, spec.offset_y_to) + spread_y,
@@ -710,6 +748,162 @@ mod tests {
         assert!((ts[0] - 0.25).abs() < 1e-5, "{ts:?}");
         assert!((ts[1] - 0.75).abs() < 1e-5, "{ts:?}");
         assert!((ts[2] - 1.25).abs() < 1e-5, "{ts:?}");
+    }
+
+    // =====================================================================
+    // ⑩ **按序号放大字号**（`scale_spread`）—— C 组 11 档靠它
+    // =====================================================================
+    //
+    // ⚠️⚠️ 这组判据守的是**一个能力缺口**，不是一个边界情况：
+    //    `scale_from/to` 是每个字同一个值 ⇒ 只能整行缩放，而
+    //    「大小字」「变小」「放大」共 11 档要的都是**某一个字**与其他不同。
+    //    没有它时那 11 档**做不出来**（不是"做得不好"）。
+
+    #[test]
+    fn 字号按序号放大而常数缩放是整行缩放() {
+        let n = 6;
+        // ① 常数缩放：每个字**同一个**倍数 ⇒ 只能是整行缩放
+        let flat = PerCharSpec {
+            scale_from: 0.5,
+            scale_to: 1.0,
+            per_char_frames: 10,
+            ..Default::default()
+        };
+        let ss: Vec<f32> = (0..n)
+            .map(|i| char_transform_at(&flat, i, n, 10).scale)
+            .collect();
+        assert!(
+            ss.windows(2).all(|w| (w[1] - w[0]).abs() < 1e-6),
+            "常数缩放下每个字的倍数必须相同，实得 {ss:?}"
+        );
+
+        // ② 按序号：最后一个是 1+scale_spread 倍
+        let acc = PerCharSpec {
+            scale_from: 1.0,
+            scale_to: 1.0,
+            scale_spread: 0.5,
+            per_char_frames: 10,
+            ..Default::default()
+        };
+        let ss: Vec<f32> = (0..n)
+            .map(|i| char_transform_at(&acc, i, n, 10).scale)
+            .collect();
+        assert!((ss[0] - 1.0).abs() < 1e-6, "第一个字不该变：{}", ss[0]);
+        assert!(
+            (ss[n - 1] - 1.5).abs() < 1e-6,
+            "最后一个字该是 1.5 倍：{}",
+            ss[n - 1]
+        );
+        let step = 0.5 / (n - 1) as f32;
+        for w in ss.windows(2) {
+            assert!((w[1] - w[0] - step).abs() < 1e-5, "{ss:?}");
+        }
+    }
+
+    #[test]
+    fn 字号按序号是乘法而不是加法() {
+        // ⚠️ 这条钉的是**语义选择**：倍率的"再大 20%"是 ×1.2，不是 +0.2。
+        //    `scale_from = 0.5` 时两者差一倍多（0.6 vs 0.5×1.2=0.6 恰好同？
+        //    不 —— 用 0.5 举不出来，取 scale_to = 0.6、scale_spread = 1.0：
+        //      加法 0.6+1.0 = 1.6，乘法 0.6×2.0 = 1.2）
+        let spec = PerCharSpec {
+            scale_from: 0.6,
+            scale_to: 0.6,
+            scale_spread: 1.0,
+            per_char_frames: 10,
+            ..Default::default()
+        };
+        let last = char_transform_at(&spec, 3, 4, 10).scale;
+        assert!(
+            (last - 1.2).abs() < 1e-5,
+            "该是乘法 0.6×2.0 = 1.2，实得 {last}（1.6 就是写成了加法）"
+        );
+    }
+
+    #[test]
+    fn 字号递增也能反向() {
+        let mut spec = PerCharSpec {
+            scale_from: 1.0,
+            scale_to: 1.0,
+            scale_spread: 1.0,
+            per_char_frames: 10,
+            ..Default::default()
+        };
+        spec.reverse = true;
+        let n = 4;
+        let ss: Vec<f32> = (0..n)
+            .map(|i| char_transform_at(&spec, i, n, 10).scale)
+            .collect();
+        assert!((ss[0] - 2.0).abs() < 1e-5, "反向时**第一个**字最大：{ss:?}");
+        assert!((ss[n - 1] - 1.0).abs() < 1e-5, "{ss:?}");
+    }
+
+    #[test]
+    fn 字号递增与位移递增共用同一个序号() {
+        // ⚠️ 组合档（散开 + 放大）在 `reverse` 下两维必须**同向**。
+        //    各算一份 rank 的话会一个从左起、一个从右起 ——
+        //    画面是"字往左散、字号往右大"，两边各自看都正常。
+        let mut spec = PerCharSpec {
+            scale_from: 1.0,
+            scale_to: 1.0,
+            scale_spread: 0.5,
+            spread_x_from: 0.0,
+            spread_x_to: 1.0,
+            spread_x_em: 1.0,
+            per_char_frames: 10,
+            ..Default::default()
+        };
+        spec.reverse = true;
+        let n = 5;
+        let ts: Vec<_> = (0..n)
+            .map(|i| char_transform_at(&spec, i, n, 10))
+            .collect();
+        // 反向：index 0 的 rank 最大 ⇒ 字号最大、位移最多
+        assert!(
+            ts[0].scale > ts[n - 1].scale,
+            "字号该从前往后递减：{:?}",
+            ts.iter().map(|t| t.scale).collect::<Vec<_>>()
+        );
+        assert!(
+            ts[0].offset_x_em > ts[n - 1].offset_x_em,
+            "位移该从前往后递减：{:?}",
+            ts.iter().map(|t| t.offset_x_em).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn 只配字号递增也能让档生效() {
+        // ⚠️ `is_active` 漏掉它的症状：只配字号的档**完全不生效**。
+        //    ⚠️ 注意不能只看 `scale_from != scale_to` —— 这一个档那两个是**相等**的。
+        let only_scale = PerCharSpec {
+            scale_from: 1.0,
+            scale_to: 1.0,
+            scale_spread: 0.8,
+            per_char_frames: 10,
+            ..Default::default()
+        };
+        assert!(
+            only_scale.is_active(),
+            "只配了「按序号放大字号」的档也必须算生效（两个端点相等也算）"
+        );
+    }
+
+    #[test]
+    fn 字号递增与字数无关() {
+        let spec = PerCharSpec {
+            scale_from: 1.0,
+            scale_to: 1.0,
+            scale_spread: 1.0,
+            per_char_frames: 10,
+            ..Default::default()
+        };
+        for n in [2, 5, 40] {
+            let last = char_transform_at(&spec, n - 1, n, 10).scale;
+            assert!(
+                (last - 2.0).abs() < 1e-5,
+                "{n} 个字时最后一个字是 {last}，应当恒为 2.0（归一化）"
+            );
+        }
     }
 
     // =====================================================================

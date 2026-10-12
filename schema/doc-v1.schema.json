@@ -919,6 +919,12 @@
           "format": "float",
           "default": 1.0
         },
+        "scale_spread": {
+          "description": "**按序号放大的字号**（乘数，不是加法）：越靠后的字越大（负数 = 越小）。\n\n# ⚠️⚠️ 为什么单有 `scale_from/to` 不够（2026-10-13，C 组施工时发现）\n\n`scale_from` / `scale_to` 是**每个字同一个值** ⇒ 只能整行缩放。\n而 C 组的「大小字」（末/首/中字重音）、「变小」（递减/骤降/尾音）、\n「放大」（递增/爆开/首字引爆）**共 11 档**要的都是\n**按序号改字号** —— 一个档把**某一个字**放大、其余不变。\n那是 `rank` 的函数，不是常数。\n\n```text\nrank = reverse ? (count-1-index) : index   // 与 spread_x_em 同一个\n第 i 个字最终 scale = mix(scale_from, scale_to) × (1 + scale_spread × rank)\n```\n\n# 为什么是**乘法**而不是加法\n\n字号是**倍率**。倍率的\"再大 20%\"与\"再加 0.2\"在 `scale_from != 1.0` 时\n完全不是一回事：上式里 `scale_from = 0.6`（先缩小）再 `+0.2`\n得到的是 `0.8`（相对原字仍小），而 `×(1+0.2)` 得到 `0.72`。\n观感上要的是**相对当前倍率的比例**，所以用乘法。\n\n⚠️ `rank` 与 `spread_x_em` **共用**：同一个\"第几个字\"。\n   各算一份的话，\"沿弧线散开\"这类组合档（位移递增 + 字号递增）\n   会在 `reverse` 下**方向不一致**（一个从左起、一个从右起）。\n\n⚠️ `count <= 1` 时 rank 项为 0（一个字没有\"哪个字重音\"可言）。",
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
         "scale_to": {
           "description": "逐字**终止缩放**（1.0 = 不缩）。",
           "type": "number",
