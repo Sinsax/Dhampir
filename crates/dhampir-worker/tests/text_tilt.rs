@@ -743,6 +743,133 @@ fn t5_形变不碰文字带以外() {
     );
 }
 
+/// ★★ **`.hl` 逐段那条路也有形变**（2026-10-13）—— 把「未验」变成「已验」。
+///
+/// # 为什么这条必须单独存在
+///
+/// 上面 5 条全部走**整行一次画完**那条路（`paint_lines`，无 `.hl` 分段）。
+/// 而带高亮的字幕走的是**另一条**：`paint_one` 里的 `.hl` 分支
+/// ⇒ `paint_parts` ⇒ **逐段各栅格化一次、各自算行内偏移 `offset_x`、再各自上色**。
+///
+/// 这两条路：
+/// - 共用同一份 `blit_affine` 与同一个 `transform` 参数（所以**逻辑上**必然一致）；
+/// - 但 `paint_parts` **自己算落点**（`offset_x` 累加那套 `measure_em` 度量）。
+///
+/// ⚠️ 正因如此，"共用 blit_affine"**不能替代实测** —— 若 `.hl` 的落点计算有既有残差，
+/// 形变会**在一个已经偏了的位置上**再形变，而成片里只表现为"高亮段位置怪"，
+/// 不会报错、上面 5 条也全绿。**读代码推出来的"必然一致"不是证据**。
+///
+/// # 判据
+///
+/// 与整行那条同款 —— 量墨迹的**主轴倾角**（方向性）+ **包围盒高度**。
+/// 重点是：`.hl` 分段存在时，形变**照样**改变像素，且幅度与整行那条同量级。
+#[test]
+#[ignore = "需要真 GPU + 字体；用 --ignored 跑，并设 TMP（见文件头）"]
+fn t5_hl_逐段一样有形变() {
+    if !temp_writable() {
+        return;
+    }
+    let fixture = Fixture::new("hl-parts");
+    let base = progress();
+
+    // 带 `.hl` 的 SRT：**前半高亮、后半不高亮** ⇒ 必然切成 ≥2 段。
+    // ⚠️ 段边界落在中间（不是行首/行尾）：否则退化成一个段，这条就空转了。
+    let hl_srt = format!(
+        "1\n00:00:00,000 --> 00:00:00,983\n<span class=\"hl\">{}</span>{}\n",
+        &LINE[..LINE.len() / 2],
+        &LINE[LINE.len() / 2..]
+    );
+    let hl_table = table(&hl_srt);
+    // 自证夹具**真的**切出了高亮段（判据不许空转）。
+    // ⚠️ 分段**不在 `parse_srt` 里**（`Cue` 只有 `text`），而在排版那一步
+    //    （`text_layout::layout` → `parse_highlight` → `TextPart`）。
+    //    第一版断言 `cue.parts.len()` —— `Cue` 根本没这个字段，编译就过不去。
+    //    这里直接问**真的排版函数**要结果：没有高亮段 ⇒ 走的是整行那条路、判据空转。
+    let laid = dhampir_core::timeline::text_layout::layout(
+        &format!(
+            "<span class=\"hl\">{}</span>{}",
+            &LINE[..LINE.len() / 2],
+            &LINE[LINE.len() / 2..]
+        ),
+        &Default::default(),
+        TARGET,
+    );
+    let hl_parts: usize = laid
+        .lines
+        .iter()
+        .map(|l| l.parts.iter().filter(|p| p.highlight).count())
+        .sum();
+    assert!(
+        hl_parts >= 1,
+        "带 `<span class=\"hl\">` 的文本必须排出高亮段（否则这条判据测的不是 `.hl` 那条路）"
+    );
+
+    let bare = fixture.render("bare", &background_only_timeline(), &hl_table);
+    let flat = fixture.render("flat", &fixture_timeline(IDENTITY), &hl_table);
+    let tilted = fixture.render(
+        "tilt",
+        &fixture_timeline(
+            r#"{ "x": 0.0, "y": 0.0, "scale": 1.0, "rotation": 12.0, "scale_y": 1.0 }"#,
+        ),
+        &hl_table,
+    );
+    let squashed = fixture.render(
+        "squash",
+        &fixture_timeline(
+            r#"{ "x": 0.0, "y": 0.0, "scale": 1.0, "rotation": 0.0, "scale_y": 0.5 }"#,
+        ),
+        &hl_table,
+    );
+
+    let flat_ink = stats(&flat.image, &bare.image)
+        .expect("`.hl` 那一帧必须画出了字（否则是**字体**或**没画**，不是形变）");
+    let tilt_ink = stats(&tilted.image, &bare.image).expect("`.hl` 倾斜那帧必须画出了字");
+    let squash_ink = stats(&squashed.image, &bare.image).expect("`.hl` 压扁那帧必须画出了字");
+
+    // ① 反向先立：恒等那份倾角应接近 0（量法无偏）。
+    let flat_angle = flat_ink.angle_deg();
+    assert!(
+        flat_angle.abs() < 3.0,
+        "`.hl` 恒等那帧倾角应接近 0，实得 {flat_angle:.2}° —— 量法有偏，正向判据不能信"
+    );
+
+    // ② 倾斜在 `.hl` 逐段那条路上**照样**落进像素。
+    let tilt_angle = tilt_ink.angle_deg();
+    assert!(
+        tilt_angle > 4.0,
+        "`.hl` 分段那帧的倾角应显著为正（设定 12°），实得 {tilt_angle:.2}° —— \
+         0 附近说明**逐段那条路没把 transform 传下去**（整行那条绿、这条红正是它的价值）"
+    );
+    assert!(tilt_angle < 45.0, "`.hl` 倾角 {tilt_angle:.2}° 量级不对");
+
+    // ③ 压扁：高度变小、宽度基本不变（非等比）。
+    assert!(
+        squash_ink.height() < flat_ink.height(),
+        "`.hl` 压扁后包围盒高度应变小：恒等 {} → 压扁 {}",
+        flat_ink.height(),
+        squash_ink.height()
+    );
+    assert!(
+        squash_ink.width().abs_diff(flat_ink.width()) <= 2,
+        "`.hl` 压扁不该改宽度（非等比）：恒等 {} → 压扁 {}",
+        flat_ink.width(),
+        squash_ink.width()
+    );
+
+    eprintln!(
+        "t5 .hl 逐段：高亮段 {hl_parts} 个；恒等倾角 {flat_angle:.2}° → 倾斜 {tilt_angle:.2}°；\
+         包围盒 恒等 {}×{} / 压扁 {}×{}（宽 {} → {}）；墨迹 {} 像素；耗时 {:.1}s",
+        flat_ink.width(),
+        flat_ink.height(),
+        squash_ink.width(),
+        squash_ink.height(),
+        flat_ink.width(),
+        squash_ink.width(),
+        flat_ink.count,
+        base.elapsed().as_secs_f64()
+    );
+}
+
 /// 计时起点。**它是"真跑了还是静默跳过"的唯一一眼判据**：
 /// 跳过时这里报 `0.0s`，真跑是秒级（见文件头）。
 fn progress() -> std::time::Instant {
