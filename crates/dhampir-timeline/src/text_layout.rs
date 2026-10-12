@@ -438,12 +438,32 @@ pub fn layout(text: &str, style: &SubtitleStyle, sequence: (u32, u32)) -> TextLa
     };
     let line_px = font_px * line_em;
 
-    // 安全边距：左右复用 bottom_margin。
+    // ---------------------------------------------------------------------
+    // 左右安全宽 与 纵向位置 —— **来源分开，不再复用同一个字段**
+    // ---------------------------------------------------------------------
     //
-    // 契约里没有独立的侧边距字段，而**加一个可选字段不改契约版本**（见 plan 里
-    // 那条约定的用法）。现在先复用，是为了这一轮不动契约。
-    let margin = style.bottom_margin.clamp(0.0, 0.5);
-    let max_width_px = sequence_width * (1.0 - 2.0 * margin);
+    // 本仓先前拿 `bottom_margin`（"距底边多远"）同时当**左右边距**用。那是"不动契约"
+    // 的权宜，代价是**两个用途互相锁死**：安全宽 0.875 要求它 = 0.0625，
+    // 而要把字幕抬到画面上方需要它 ≈ 0.6 —— 抬上去 `max_width` 变负数 ⇒
+    // **一个字都排不出来**（静默：布局返回空，报告里一行差异都没有）。
+    //
+    // 现在：`safe_width_ratio` 一旦显式配了（> 0），左右就**只认它**，
+    // `bottom_margin` 回归"纵向位置"的本职。两个都是可选字段，
+    // 老工程（`safe_width_ratio = 0`）走原来那条路 —— 见那条逐字节单测。
+    let safe_w = if style.safe_width_ratio > 0.0 {
+        style.safe_width_ratio.clamp(0.0, 1.0)
+    } else {
+        // 老行为：复用 `bottom_margin` 当左右边距（既有工程一字不变）
+        (1.0 - 2.0 * style.bottom_margin.clamp(0.0, 0.5)).max(0.0)
+    };
+    let max_width_px = sequence_width * safe_w;
+    // 纵向：`anchor_bottom` 是**文字块底边的归一化 y**（1.0 = 贴底 = 老行为）。
+    // ⚠️ 只在显式配了（< 1.0）时才接管，否则仍走 `1.0 - bottom_margin` 那条老式子。
+    let block_bottom = if style.anchor_bottom < 1.0 {
+        style.anchor_bottom.clamp(0.0, 1.0)
+    } else {
+        1.0 - style.bottom_margin
+    };
 
     // 字号或可用宽度为 0：没有可排的东西。**返回空，而不是一排零宽度的行** ——
     // 后者会让调用方以为「有字要画」。
@@ -500,7 +520,7 @@ pub fn layout(text: &str, style: &SubtitleStyle, sequence: (u32, u32)) -> TextLa
     let font_px = font_px * scale;
     let line_px = line_px * scale;
     let line_height_norm = line_px / sequence_height;
-    let block_top = 1.0 - margin - (keep as f32) * line_height_norm;
+    let block_top = block_bottom - (keep as f32) * line_height_norm;
 
     let mut lines = Vec::with_capacity(keep);
     for (index, raw) in raw_lines.iter().take(keep).enumerate() {
@@ -1242,5 +1262,130 @@ mod tests {
             (center - 320.0).abs() <= 0.5,
             "居中排版的落点中心该在 320，得到 {center}"
         );
+    }
+
+    // =====================================================================
+    // v6 -> v7：**左右安全宽 与 纵向位置解耦**
+    //
+    // 这一组盯的是那件"以前做不到"的事：宿主想分档摆文字（上/中/下），
+    // 而唯一的纵向旋钮 `bottom_margin` 同时是左右安全宽的输入 ——
+    // 抬上去就把宽度挤成负数、**一个字都排不出来**（且不报错）。
+    // =====================================================================
+
+    /// 块底边（最后一行矩形的下沿）—— 三档比较用的就是它。
+    fn block_bottom(l: &TextLayout) -> f32 {
+        l.lines
+            .last()
+            .map(|line| line.rect.y + line.rect.height)
+            .unwrap_or(f32::NAN)
+    }
+
+    #[test]
+    fn 纵向锚把块抬到画面上方且不影响左右安全宽() {
+        let text = "这是一句够长的字幕用来逼出折行";
+        // 转译器那条路的配法：左右显式给 0.875，纵向交给 anchor_bottom。
+        let base = SubtitleStyle {
+            safe_width_ratio: 0.875,
+            ..style()
+        };
+
+        let bottom = layout(text, &base, SEQUENCE);
+        let top = layout(
+            text,
+            &SubtitleStyle {
+                anchor_bottom: 0.30,
+                ..base.clone()
+            },
+            SEQUENCE,
+        );
+
+        // ① 纵向**真的动了**（这是本字段存在的全部理由）
+        assert!(
+            block_bottom(&top) < block_bottom(&bottom) - 0.1,
+            "上档必须明显高于贴底档：top={} bottom={}",
+            block_bottom(&top),
+            block_bottom(&bottom)
+        );
+        // ② 折行结果**一模一样** —— 左右安全宽没被牵连
+        //    （解耦没做对的话，抬纵向会把 max_width 压小 ⇒ 行数变多）
+        assert_eq!(top.lines.len(), bottom.lines.len(), "抬纵向不该改变折行结果");
+        // ③ 每行的宽度与字号都不变（同一条：没被牵连）
+        for (a, b) in top.lines.iter().zip(bottom.lines.iter()) {
+            assert_eq!(a.font_ratio, b.font_ratio, "字号不该变");
+            assert!(
+                (a.rect.width - b.rect.width).abs() < 1e-6,
+                "行宽不该变：{} vs {}",
+                a.rect.width,
+                b.rect.width
+            );
+        }
+    }
+
+    #[test]
+    fn 纵向锚缺省时走老式子() {
+        // 老工程：两个新字段都按缺省（`safe_width_ratio = 0`、`anchor_bottom = 1.0`）。
+        // 缺省必须仍走 `1.0 - bottom_margin` 那条老式子。
+        let a = layout("老工程的这一行", &style(), SEQUENCE);
+        let b = layout("老工程的这一行", &SubtitleStyle::default(), SEQUENCE);
+        assert_eq!(a.lines.len(), b.lines.len());
+        for (x, y) in a.lines.iter().zip(b.lines.iter()) {
+            assert_eq!(x.rect.y, y.rect.y, "缺省纵向锚必须走老式子");
+            assert_eq!(x.rect.width, y.rect.width);
+        }
+        // 且块顶必须**不是** new-style 的 1.0（那会贴到最底、与老行为差一个 bottom_margin）
+        let expected_top =
+            1.0 - SubtitleStyle::default().bottom_margin - a.lines.len() as f32 * a.lines[0].rect.height;
+        let got_top = a.lines[0].rect.y;
+        assert!(
+            (got_top - expected_top).abs() < 1e-5,
+            "老式子的 block_top 必须是 1.0 - bottom_margin - 行数*行高，得到 {got_top}"
+        );
+    }
+
+    /// ⚠️ **这条是那次事故的判据**：老做法拿 `bottom_margin` 当纵向旋钮，
+    /// 调大之后左右安全宽变负 ⇒ 布局**空**（真发生过：文字静默全没）。
+    /// 解耦之后，纵向锚再高也不该有这个副作用 —— 这条绿着就是"解耦成了"的证据。
+    #[test]
+    fn 只抬纵向锚不会把布局压空() {
+        let l = layout(
+            "一句不该消失的字幕",
+            &SubtitleStyle {
+                safe_width_ratio: 0.875,
+                anchor_bottom: 0.20,
+                // 这个值在老式做法下直接让 `max_width` 变负（0.875 - 1.2 < 0）
+                bottom_margin: 0.60,
+                ..style()
+            },
+            SEQUENCE,
+        );
+        assert!(
+            !l.lines.is_empty(),
+            "解耦之后，纵向锚再高也不该让布局变空（这正是老做法的死法）"
+        );
+        assert!(block_bottom(&l) < 0.5, "且它确实落在画面上半部分");
+    }
+
+    /// 三档**单调**：上 < 中 < 下。宿主界面上的"上/中/下"就是这个顺序，
+    /// 若哪天系数被谁改成乱序，这条立刻红。
+    #[test]
+    fn 三档纵向锚单调递增() {
+        let mut prev = f32::NAN;
+        for anchor in [0.30_f32, 0.62, 1.0] {
+            let l = layout(
+                "档位",
+                &SubtitleStyle {
+                    safe_width_ratio: 0.875,
+                    anchor_bottom: anchor,
+                    ..style()
+                },
+                SEQUENCE,
+            );
+            let b = block_bottom(&l);
+            assert!(
+                prev.is_nan() || b > prev,
+                "档位必须越往下 block_bottom 越大：anchor={anchor} prev={prev} now={b}"
+            );
+            prev = b;
+        }
     }
 }

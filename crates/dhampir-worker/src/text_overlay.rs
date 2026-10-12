@@ -1358,6 +1358,7 @@ mod tests {
             shadow_dx_px: 0.0,
             shadow_dy_px: 0.0,
             shadow_blur_px: 0.0,
+            anchor_bottom: 1.0,
             // **不铺底衬**：同样是"老工程"的样式（T6 的存量零回归前提）。
             plate_color: None,
             plate_pad_px: 12.0,
@@ -1394,6 +1395,7 @@ mod tests {
             shadow_dx_px: 0.0,
             shadow_dy_px: 0.0,
             shadow_blur_px: 0.0,
+            anchor_bottom: 1.0,
             // 弹幕恒不铺底衬（同一条理由）。
             plate_color: None,
             plate_pad_px: 12.0,

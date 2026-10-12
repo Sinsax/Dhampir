@@ -247,6 +247,12 @@ pub struct TextStyle {
     ///
     /// 两端核不同（canvas `shadowBlur` / ffmpeg `gblur`），所以只保证观感近似。
     pub shadow_blur_px: f32,
+    /// **文字块底边的归一化 y**（1.0 = 贴底）。
+    ///
+    /// 与 `SubtitleStyle::anchor_bottom` **同名同形**，原样带过去（不换算）——
+    /// 它本来就是归一化坐标，与目标尺寸无关（同 `plate_color` 那条理由的反面：
+    /// 那个不需要换算是因为它是纯色，这个不需要是因为它已经归一化了）。
+    pub anchor_bottom: f32,
     /// **底衬的颜色**（`None` = 不铺底衬）。T6。
     ///
     /// 与 `SubtitleStyle::plate_color` 是同一个值，原样带过来 —— 底衬色
@@ -280,6 +286,9 @@ impl Default for TextStyle {
             shadow_dx_px: 0.0,
             shadow_dy_px: 0.0,
             shadow_blur_px: 0.0,
+            // **1.0 = 贴底**，与 `SubtitleStyle::anchor_bottom` 的缺省同值 ——
+            // 同样属于"老工程什么都不变"那一组。
+            anchor_bottom: 1.0,
             // None = 不铺底衬（默认）—— 与阴影同一组："老工程什么都不变"。
             plate_color: None,
             // 没有底衬时这个数不会被读到；给 `SubtitleStyle` 的同一个默认值，
@@ -412,6 +421,8 @@ pub fn evaluate_overlay(
             shadow_color: style.shadow_color,
             shadow_dx_px: style.shadow_dx_px,
             shadow_dy_px: style.shadow_dy_px,
+            // **文字纵向锚**：归一化坐标，原样带过去（不换算）。
+            anchor_bottom: style.anchor_bottom,
             shadow_blur_px: style.shadow_blur_ratio * target_h,
             // **底衬（T6）**：颜色原样带过去；外扩量在这里把契约的
             // `Option` 解析成具体像素 —— `None` 走同一个默认值函数
@@ -587,6 +598,10 @@ pub fn evaluate_overlay(
             shadow_dx_px: 0.0,
             shadow_dy_px: 0.0,
             shadow_blur_px: 0.0,
+            // **弹幕恒贴底那套**（1.0）：`DanmakuSpec` 没有纵向锚字段。
+            // 与阴影同一条理由 —— 跟着字幕走的话，给字幕选的"上"会让
+            // **弹幕也整体上移**，而弹幕的纵向位置本来就是泳道分配的。
+            anchor_bottom: 1.0,
             // **弹幕恒不铺底衬**（T6）：`DanmakuSpec` 没有这两个字段，与阴影
             // 同一条理由 —— 跟着字幕走的话，字幕的底衬会**莫名其妙地**
             // 变成每条滚动弹幕背后的一块色块，那是把画面糊掉。

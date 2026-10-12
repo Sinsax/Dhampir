@@ -237,7 +237,18 @@ pub fn to_json<T: Serialize>(value: &T) -> String {
 ///
 /// 为什么不攒一个更大的版本：动图这条路的契约面就是这两条导出加
 /// [`AnimInfoView`]，而版本号的作用是**拦住两端错配**，不是攒够一批才升。
-pub const HOST_API_VERSION: u32 = 6;
+///
+/// ## v6 -> v7
+///
+/// **形状面**多了一个键：`overlay.subtitle_style.anchor_bottom`（文字块底边的归一化 y）。
+/// **导出面一个都没动。**
+///
+/// 与 v4 -> v5（`shadow_*` 四键）**完全同类**：wasm 返回体加字段即视为 API 变更，
+/// 即使该键能缺省、即使老对端"不会用到它" —— 对端拿到的形状变了就是破坏性改动。
+///
+/// 老工程**一个键都不多**：`anchor_bottom` 带 `skip_serializing_if = "is_one_f32_view"`，
+/// 缺省 1.0 不进返回体（与"既有工程逐字节不变"同一口径，有单测钉着）。
+pub const HOST_API_VERSION: u32 = 7;
 
 /// `dhampir_project_open` 的返回体。
 ///
@@ -397,6 +408,26 @@ pub struct TextStyleView {
     /// 只保证"观感近似"，不保证逐像素一致（见 `SubtitleStyle::shadow_blur_ratio`）。
     #[serde(default, skip_serializing_if = "is_zero_f32_view")]
     pub shadow_blur_px: f32,
+    /// **文字块底边的归一化 y**（1.0 = 贴底）。
+    ///
+    /// 契约里那个字段是 `SubtitleStyle::anchor_bottom`，这里**同名同形**。
+    /// 宿主拿它表达"上 / 中 / 下"三档纵向位置。
+    ///
+    /// ⚠️ 与 `bottom_margin` 的分工：那个字段曾经**身兼两职**（距底边 + 左右安全宽），
+    /// 现在左右归 `safe_width_ratio`、纵向归本字段。缺省 1.0 = 贴底 = 老行为。
+    #[serde(default = "one_f32_view", skip_serializing_if = "is_one_f32_view")]
+    pub anchor_bottom: f32,
+}
+
+/// `skip_serializing_if` 用：**1.0 不写进返回体**。
+///
+/// 与 `is_zero_f32_view` 同一条理由 —— **缺省值不进形状**，老对端读到的键集一个都不多。
+fn is_one_f32_view(value: &f32) -> bool {
+    *value == 1.0
+}
+
+fn one_f32_view() -> f32 {
+    1.0
 }
 
 /// `skip_serializing_if` 用：0 的浮点量不写进返回体。
@@ -697,11 +728,44 @@ mod tests {
     }
 
     /// 版本常量与 docs/host-api.md 那一行由 scripts/api-surface.mjs 比对；
-    /// 这里再钉一遍**这一版是 6** —— 免得有人改了导出面却忘了升版本，
+    /// 这里再钉一遍**这一版是 7** —— 免得有人改了形状却忘了升版本，
     /// 而「忘了升」正是版本号要防的那件事。
     #[test]
-    fn 动图导出把版本推到六() {
-        assert_eq!(HOST_API_VERSION, 6);
+    fn 文字纵向锚把版本推到七() {
+        assert_eq!(HOST_API_VERSION, 7);
+    }
+
+    /// ⚠️ `anchor_bottom` 缺省（1.0）时**不许进返回体** ——
+    /// 与 `shadow_*` 那条"老对端读到的键集一个都不多"同一口径。
+    /// 少了这条，v7 就会把**每一个**老工程的返回体都撑大一个键。
+    #[test]
+    fn 纵向锚缺省时不进返回体() {
+        let view = TextStyleView {
+            color: [255, 255, 255, 255],
+            outline: true,
+            stroke_px: 0.0,
+            stroke_color: [0, 0, 0, 255],
+            shadow_color: None,
+            shadow_dx_px: 0.0,
+            shadow_dy_px: 0.0,
+            shadow_blur_px: 0.0,
+            anchor_bottom: 1.0,
+        };
+        let json = to_json(&view);
+        assert!(
+            !json.contains("anchor_bottom"),
+            "缺省 1.0 不该出现，实际：{json}"
+        );
+        // 显式配了才出现 —— 否则这个字段等于没接上
+        let lit = TextStyleView {
+            anchor_bottom: 0.3,
+            ..view
+        };
+        assert!(
+            to_json(&lit).contains("\"anchor_bottom\":0.3"),
+            "显式配了必须写出来，实际：{}",
+            to_json(&lit)
+        );
     }
 
     #[test]
@@ -898,6 +962,7 @@ mod tests {
                     shadow_dx_px: 0.0,
                     shadow_dy_px: 0.0,
                     shadow_blur_px: 0.0,
+                    anchor_bottom: 1.0,
                 },
                 danmaku_style: TextStyleView {
                     color: [255, 255, 255, 255],
@@ -909,6 +974,7 @@ mod tests {
                     shadow_dx_px: 0.0,
                     shadow_dy_px: 0.0,
                     shadow_blur_px: 0.0,
+                    anchor_bottom: 1.0,
                 },
                 dropped_lines: 3,
                 dropped_danmaku: 2,
@@ -996,6 +1062,7 @@ mod tests {
                     shadow_dx_px: 0.0,
                     shadow_dy_px: 0.0,
                     shadow_blur_px: 0.0,
+                    anchor_bottom: 1.0,
                 },
                 danmaku_style: TextStyleView {
                     color: [255, 255, 255, 255],
@@ -1007,6 +1074,7 @@ mod tests {
                     shadow_dx_px: 0.0,
                     shadow_dy_px: 0.0,
                     shadow_blur_px: 0.0,
+                    anchor_bottom: 1.0,
                 },
                 dropped_lines: 0,
                 dropped_danmaku: 0,
@@ -1052,6 +1120,7 @@ mod tests {
                     shadow_dx_px: 0.0,
                     shadow_dy_px: 0.0,
                     shadow_blur_px: 0.0,
+                    anchor_bottom: 1.0,
                 },
                 danmaku_style: TextStyleView {
                     color: [255, 255, 255, 255],
@@ -1063,6 +1132,7 @@ mod tests {
                     shadow_dx_px: 0.0,
                     shadow_dy_px: 0.0,
                     shadow_blur_px: 0.0,
+                    anchor_bottom: 1.0,
                 },
 
                 dropped_lines: 0,
@@ -1128,6 +1198,7 @@ mod tests {
             shadow_dx_px: 0.0,
             shadow_dy_px: 0.0,
             shadow_blur_px: 0.0,
+            anchor_bottom: 1.0,
         };
         let value = serde_json::to_value(plain).unwrap();
         assert_eq!(

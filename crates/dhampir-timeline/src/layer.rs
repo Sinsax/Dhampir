@@ -515,6 +515,29 @@ pub struct SubtitleStyle {
     /// 底边距 = 目标高度 * 这个比例。
     #[serde(default = "subtitle_bottom_margin")]
     pub bottom_margin: f32,
+    /// **文字块底边的归一化 y**（0 = 画面顶边，1 = 画面底边）。默认 1.0 = 贴底。
+    ///
+    /// # 为什么要有它（与 `safe_width_ratio` 是一对）
+    ///
+    /// `bottom_margin` 本来身兼两职：既是"距底边多远"，又被拿去当**左右安全宽**，
+    /// 于是两个用途**互相锁死** —— 安全宽 0.875 要求它 = 0.0625，
+    /// 而要把文字抬到画面上方需要它 ≈ 0.6，抬上去 `max_width` 变负数
+    /// ⇒ **一个字都排不出来**（布局返回空，报告里一行差异都没有）。
+    ///
+    /// 拆分办法：`safe_width_ratio` 显式配了就**只认它**管左右，
+    /// 本字段专管纵向。本字段 `< 1.0` 时接管，否则仍走 `1.0 - bottom_margin` 的老式子
+    /// ⇒ **不写这两个字段的既有工程逐字节不变**（有单测钉着）。
+    ///
+    /// ⚠️ 与 `bottom_margin` 的单位不同：那个是**比例（相对目标高）**，
+    /// 这个是**归一化坐标**（1.0 就是"整个画面高"，不再是比例）。
+    /// 二者在同一量纲里，正因为如此才能相减 —— 但别把它们当成一个东西。
+    ///
+    /// 宿主（YekiTrim）就是拿它表达"上 / 中 / 下"三档纵向位置的。
+    ///
+    /// ⚠️ **`skip_serializing_if` 不能省**：缺省 1.0 时**一个键都不许出现在工程文件里**，
+    /// 否则每个老工程的样式键集都变大（R4 判据当场红）。
+    #[serde(default = "one", skip_serializing_if = "is_one_f32")]
+    pub anchor_bottom: f32,
     /// 最多几行（超出的行丢掉 —— 字幕不该盖住半屏）。
     #[serde(default = "subtitle_max_lines")]
     pub max_lines: u32,
@@ -846,6 +869,16 @@ fn is_zero_f32(value: &f32) -> bool {
     *value == 0.0
 }
 
+/// `skip_serializing_if` 用：**1.0 不写进工程文件**。
+///
+/// 与 [`is_zero_f32`] 同一条理由 —— 那一条管"默认是 0"的字段，这一条管"默认是 1"的。
+/// ⚠️ 少了它，`anchor_bottom` 会把**每一个老工程**的样式键集撑大一个键，
+/// 而那正是两条 R4 判据（`写过阴影的样式原样往返` / `没写过阴影的样式重写出来一个字节都不多`）
+/// 当场抓住的东西 —— 这两条判据**不认识新字段**，只认识"键集变了"。
+fn is_one_f32(value: &f32) -> bool {
+    *value == 1.0
+}
+
 fn default_font_weight() -> u32 {
     400
 }
@@ -894,6 +927,10 @@ impl Default for SubtitleStyle {
         Self {
             font_ratio: subtitle_font_ratio(),
             bottom_margin: subtitle_bottom_margin(),
+            // **默认 1.0 = 贴底 = 老行为**。不是"我觉得合理的位置"——
+            // 契约默认值的判据是"**让老工程一字不变**"（同 `subtitle_stroke_ratio`
+            // 那段注释里记的坑）。
+            anchor_bottom: 1.0,
             max_lines: subtitle_max_lines(),
             color: subtitle_color(),
             outline: true,

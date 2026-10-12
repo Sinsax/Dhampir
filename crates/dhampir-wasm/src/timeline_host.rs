@@ -3296,6 +3296,9 @@ fn text_style_view(style: &dhampir_core::overlay::TextStyle) -> host_api::TextSt
         shadow_dx_px: style.shadow_dx_px,
         shadow_dy_px: style.shadow_dy_px,
         shadow_blur_px: style.shadow_blur_px,
+        // **文字纵向锚**（v6 -> v7）。原样带过去 —— 它本来就归一化好了，
+        // 与上面 `stroke_px` 那些"要按目标尺寸换算"的字段不同。
+        anchor_bottom: style.anchor_bottom,
     }
 }
 
