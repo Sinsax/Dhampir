@@ -117,7 +117,19 @@ use std::collections::{BTreeMap, HashMap};
 use dhampir_core::animation::{decode as decode_animation, detect_format};
 use dhampir_core::compose::{self, Composite};
 use dhampir_core::io::{FrameSink, FrameSource};
-use dhampir_core::overlay::{DanmakuTextItem, SubtitleTable, evaluate_overlay};
+use dhampir_core::overlay::{DanmakuTextItem, SubtitleTable, TextStyle, evaluate_overlay};
+
+/// **一帧里一条文字都没有**时，形状里那个样式该填什么。
+///
+/// `host_api::OverlayView` 的 `subtitle_style` / `danmaku_style` 是**必需的**
+/// `TextStyleView`（不是 `Option`）—— 类型上就没有"没有样式"这个状态。
+/// 帧级那个字段在 `0e3209b` 之后已经不存在（样式改由每一条自己带），
+/// 所以"一条都没有"时必须给一个**确定的**值，而不是凭空造。
+///
+/// 给 [`TextStyle::default`]：它同时是"什么都没配"的语义，
+/// 与"这一帧没有弹幕/字幕要画"正好对得上 —— 消费方此时也没有东西要画。
+static DEFAULT_TRACK_STYLE: std::sync::LazyLock<TextStyle> =
+    std::sync::LazyLock::new(TextStyle::default);
 use dhampir_core::readback::Rgba8Image;
 use dhampir_core::render::{
     AnimationTextures, OverlayItem, RenderSpace, SourceResolver, compose_overlay, ink_report,
@@ -1753,8 +1765,30 @@ fn frame_overlay(doc: &ProjectDoc, frame: i64) -> Option<host_api::OverlayView> 
                 })
                 .collect(),
             // **两类各一套画法**（字幕暖色、弹幕白色）。
-            subtitle_style: text_style_view(&overlay.subtitle_style),
-            danmaku_style: text_style_view(&overlay.danmaku_style),
+            // ⚠️ 轨道级样式现在是**逐条**带着的（`TextItem::track_style`，
+            // 见 `0e3209b`：帧级共享槽会让"后一条轨的样式覆盖前一条"）——
+            // 帧级那个字段已经没了。取第一条即这一帧字幕的画法；
+            // 一条都没有时退回**默认样式**（见下 `danmaku_style` 那段同一条理由）。
+            subtitle_style: text_style_view(
+                overlay
+                    .items
+                    .first()
+                    .map(|item| &item.track_style)
+                    .unwrap_or(&DEFAULT_TRACK_STYLE),
+            ),
+            // ⚠️ 与上面  同一个理由：弹幕的轨道级样式
+            // 现在是**逐条**带着的（`DanmakuTextItem::track_style`，`0e3209b` 那次搬家），
+            // 帧级那个字段已经没了。取第一条即这一帧弹幕的画法；
+            // 一条都没有时退回**字幕**那套 —— 这里返回类型是必需的 `TextStyleView`
+            // （不是 `Option`），没有没有样式这个状态可表达，退回同帧字幕样式
+            // 是唯一不凭空造值的选择（对端此时也没有弹幕要画）。
+            danmaku_style: text_style_view(
+                overlay
+                    .danmaku
+                    .first()
+                    .map(|item| &item.track_style)
+                    .unwrap_or(&DEFAULT_TRACK_STYLE),
+            ),
             dropped_lines: overlay.dropped_lines,
             dropped_danmaku: overlay.dropped_danmaku,
         })
@@ -3102,8 +3136,27 @@ pub fn dhampir_project_text_frame(frame: i32) -> String {
                         .iter()
                         .map(|item| danmaku_item_json(item))
                         .collect::<Vec<_>>(),
-                    text_style_json(&overlay.subtitle_style),
-                    text_style_json(&overlay.danmaku_style),
+                    // 与上面 typed 那条同口径：轨道级样式从**条目**上取。
+                    overlay
+                        .items
+                        .first()
+                        .map(|item| text_style_json(&item.track_style))
+                        .unwrap_or(serde_json::Value::Null),
+                    // ⚠️ **弹幕的画法从条目上取，不再有帧级的 `danmaku_style`**。
+                    //
+                    // `0e3209b` 把弹幕的轨道级样式从"帧级共享槽"搬成了
+                    // `DanmakuTextItem::track_style`（那次修的是"两条轨并存时
+                    // 后一条的样式覆盖前一条"的 bug），**但漏改了本文件** ⇒
+                    // 这里一直编译不过。搬家的语义是：同一轨的每一条**都带着**
+                    // 自己那份轨道级样式，所以取**第一条**就是这一帧弹幕的画法。
+                    //
+                    // 没有弹幕条目时给 `Null`（不是"凭空造一份默认样式"）——
+                    // 消费方据此知道"这一帧没有弹幕"，与"有弹幕但样式是默认值"分开。
+                    overlay
+                        .danmaku
+                        .first()
+                        .map(|item| text_style_json(&item.track_style))
+                        .unwrap_or(serde_json::Value::Null),
                     overlay.dropped_lines,
                     overlay.dropped_danmaku,
                 ),
@@ -3265,8 +3318,15 @@ fn danmaku_item_json(item: &DanmakuTextItem) -> serde_json::Value {
         rect: item.rect,
         opacity: item.opacity,
         dy_px: item.dy_px,
+        // ⚠️ **弹幕没有逐条的抖动**（`DanmakuTextItem` 上本来就没有这个字段）——
+        //    抖动是字幕那条路的东西（T4）。这里如实给 0，不是"忘了填"。
+        dx_px: 0.0,
         color: item.color,
         font_ratio: item.font_ratio,
+        // **轨道级样式跟着这一条走**（见 `DanmakuTextItem::track_style` 的长注释：
+        // 弹幕的轨道级字段曾经是**丢**的，T6 底衬那个 bug 就是这么来的）。
+        // 这里原样转交 —— 与真路径同一条口径，不另拼一份。
+        track_style: item.track_style.clone(),
         // 弹幕不缩字（参照的弹幕没有缩字逻辑）；这里是从弹幕条目转出来的。
         scale: 1.0,
         // 弹幕没有 `.hl` 标记（参照的弹幕路径也不解析它）。
