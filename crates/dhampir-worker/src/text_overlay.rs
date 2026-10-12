@@ -529,6 +529,8 @@ fn paint_parts(
     // **横向偏移**（文档像素，T4 抖动；正为向右）。与 `dy_px` 同一条规矩：
     // 只挪落点，不重算布局。恒 0 时逐字节等于改动前。
     dx_px: f32,
+    // **这一条的文字形变**（T2）：倾斜 + 纵向压扁。逐段共用同一个（条级字段）。
+    transform: crate::text_transform::TextTransform,
     judge_clip: bool,
     log: &mut IssueLog,
     placement: LinePlacement,
@@ -603,6 +605,7 @@ fn paint_parts(
                 image,
                 (placement.x + offset_x, placement.y + offset_y),
                 alpha,
+                transform,
                 &path,
                 log,
             );
@@ -614,7 +617,16 @@ fn paint_parts(
                 return Painted::Failed;
             }
         };
-        let report = match blit_scaled(image, &bitmap, placement.x + offset_x, placement.y + offset_y, alpha) {
+        // ⚠️ **恒等时走老路径**（`blit_scaled` 逐行拷贝：零开销、逐字节不变）；
+        // 非恒等才走 CPU 仿射（双线性 + 越界透明）。判据是 `is_identity()`。
+        let text_origin = (placement.x + offset_x, placement.y + offset_y);
+        let blitted = if transform.is_identity() {
+            blit_scaled(image, &bitmap, text_origin.0, text_origin.1, alpha)
+        } else {
+            let written = crate::text_transform::blit_affine(image, &bitmap, text_origin, transform, alpha);
+            Ok(BlitReport { written: written as u64, skipped: 0 })
+        };
+        let report = match blitted {
             Ok(report) => report,
             Err(error) => {
                 log.record("subtitle_blit_failed", &path, error);
@@ -687,6 +699,14 @@ fn paint_shadow(
     // 文字位图的落点。阴影的原点 = 它 - pad + 偏移。
     origin: (i32, i32),
     alpha: u32,
+    // **与文字完全相同的形变**（T2）。
+    //
+    // ⚠️ 影子**必须跟着一起转/压**，否则症状是"字歪了、影子还是正的" —— 肉眼可见。
+    // ⚠️ 但**偏移 `(dx,dy)` 不参与旋转**：那两个量是**文档/屏幕空间**的
+    //    （`TextItem::shadow_dx_px` 的文档原话："**文档像素**，与 `transform.x/y` 同一坐标系"）。
+    //    所以这里只把 `transform` 交给叠图，落点仍按 `origin - pad + (dx,dy)` 算 ——
+    //    "光源方向固定"的物理语义。
+    transform: crate::text_transform::TextTransform,
     path: &str,
     log: &mut IssueLog,
 ) -> bool {
@@ -706,13 +726,14 @@ fn paint_shadow(
             return false;
         }
     };
-    match blit_scaled(
-        image,
-        &bitmap,
-        origin.0 - pad + shadow.dx,
-        origin.1 - pad + shadow.dy,
-        alpha,
-    ) {
+    let shadow_origin = (origin.0 - pad + shadow.dx, origin.1 - pad + shadow.dy);
+    let blitted = if transform.is_identity() {
+        blit_scaled(image, &bitmap, shadow_origin.0, shadow_origin.1, alpha).map(|_| ())
+    } else {
+        crate::text_transform::blit_affine(image, &bitmap, shadow_origin, transform, alpha);
+        Ok(())
+    };
+    match blitted {
         Ok(_) => true,
         Err(error) => {
             log.record("subtitle_blit_failed", path, error);
@@ -917,6 +938,9 @@ fn paint_one(
     // 这一帧的**横向**偏移（文档像素，正为向右）。T4 抖动走这里；
     // 恒 0 时与改动前画在同一个位置。
     dx_px: f32,
+    // **这一条的文字形变**（T2）：倾斜 + 纵向压扁。
+    // 恒等时（`TextTransform::default()`）走原来的逐行拷贝路径 ⇒ 老工程零开销、逐字节不变。
+    transform: crate::text_transform::TextTransform,
     judge_clip: bool,
     log: &mut IssueLog,
 ) -> Painted {
@@ -980,6 +1004,7 @@ fn paint_one(
             opacity,
             dy_px,
             dx_px,
+            transform,
             judge_clip,
             log,
             placement,
@@ -1039,6 +1064,7 @@ fn paint_one(
             image,
             (placement.x + offset_x, placement.y + offset_y),
             alpha,
+            transform,
             &path,
             log,
         );
@@ -1084,7 +1110,15 @@ fn paint_one(
             opacity,
         );
     }
-    let report = match blit_scaled(image, &bitmap, placement.x + offset_x, placement.y + offset_y, alpha) {
+    // ⚠️ 恒等走老路径、非恒等走 CPU 仿射（与 `paint_parts` 那处同一条判据）。
+    let text_origin = (placement.x + offset_x, placement.y + offset_y);
+    let blitted = if transform.is_identity() {
+        blit_scaled(image, &bitmap, text_origin.0, text_origin.1, alpha)
+    } else {
+        let written = crate::text_transform::blit_affine(image, &bitmap, text_origin, transform, alpha);
+        Ok(BlitReport { written: written as u64, skipped: 0 })
+    };
+    let report = match blitted {
         Ok(report) => report,
         Err(error) => {
             log.record("subtitle_blit_failed", &path, error);
@@ -1156,6 +1190,11 @@ fn paint_lines(
             item.opacity,
             item.dy_px,
             item.dx_px,
+            crate::text_transform::TextTransform {
+                rotation_deg: item.rotation_deg,
+                scale_x: 1.0,
+                scale_y: item.scale_y,
+            },
             true,
             log,
         ) {
@@ -1197,6 +1236,10 @@ fn paint_lines(
             // 上没有它 —— 与上面那个恒 1.0 的 `scale` 同一条理由，
             // 所以也不往 `DanmakuTextItem` 里放一个恒为 0 的字段。
             0.0,
+            // **弹幕不做文字形变**（T2 的倾斜/压扁是**字幕轨**的字段，
+            // 与上面那个恒 1.0 的 `scale`、恒 0 的 `dx` 同一条理由 ——
+            // 不往 `DanmakuTextItem` 里放恒缺省字段）。恒等 ⇒ 走老路径、零开销。
+            crate::text_transform::TextTransform::default(),
             // **不判切线**：滚动中越界是常态（见模块文档）。画面外的墨像素由 `blit`
             // 丢掉，但那既不进问题清单、也不计数 —— 计数只数"画了几条"。
             false,
@@ -2422,6 +2465,129 @@ mod tests {
         assert!(
             count_non_background(&half, background) > 0,
             "半透明底衬也画得出来"
+        );
+    }
+
+    // ── T2：文字形变端到端 ────────────────────────────────────────────
+
+    /// ★ **恒等变换下与接线前逐字节相同**（端到端，不只是 `blit_affine` 级别）。
+    ///
+    /// 判据：同一个 `TextOverlay`，把每条 item 的 `rotation_deg`/`scale_y` 显式设成
+    /// **缺省值**（0.0 / 1.0）画一遍，必须与"根本没接形变"时的结果**逐字节相同**。
+    ///
+    /// ⚠️ 这条防的是"接线时顺手改了老路径的行为" —— 那种错**不报错、只在像素里**，
+    /// 而且会让所有存量工程静默变样。
+    #[test]
+    fn t2_恒等形变端到端逐字节不变() {
+        let mut painter = OverlayPainter::new(Some(Path::new("C:/fake/font.ttf")));
+        let mut log = IssueLog::new();
+        let lines = overlay(&[("恒等", rect(0.25, 0.4, 0.5, 0.066))], 0);
+
+        // 甲：显式恒等（走的是 is_identity() ⇒ 老路径 blit_scaled）。
+        let mut image = frame(640, 360, [0, 0, 0, 255]);
+        let mut calls = 0;
+        paint_lines(
+            &mut |key| fake_rasterizer(&mut calls)(key),
+            &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            &None,
+            &mut image,
+            &lines,
+            (640, 360),
+            &mut log,
+            &mut painter.stats,
+        );
+
+        // 乙：同上，但把形变字段设成**非缺省**再手动清零 —— 确认"设过 = 没设过"。
+        let mut lines2 = overlay(&[("恒等", rect(0.25, 0.4, 0.5, 0.066))], 0);
+        lines2.items[0].rotation_deg = 0.0;
+        lines2.items[0].scale_y = 1.0;
+        let mut image2 = frame(640, 360, [0, 0, 0, 255]);
+        let mut calls2 = 0;
+        paint_lines(
+            &mut |key| fake_rasterizer(&mut calls2)(key),
+            &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            &None,
+            &mut image2,
+            &lines2,
+            (640, 360),
+            &mut log,
+            &mut painter.stats,
+        );
+
+        assert_eq!(
+            image.pixels, image2.pixels,
+            "恒等形变必须逐字节相同（接线没有改变老路径的行为）"
+        );
+        assert!(image.pixels.iter().any(|&b| b != 0), "这一帧确实画了字");
+    }
+
+    /// ★ **旋转真的落到帧上**（端到端）。
+    ///
+    /// 判据：`rotation_deg = 30` 与 `0` 画出来的帧**必须不同**，且差异只落在文字带附近。
+    #[test]
+    fn t2_旋转真的改变成片像素() {
+        let mut log = IssueLog::new();
+        let mut stats_a = OverlayStats::default();
+        let mut stats_b = OverlayStats::default();
+
+        let mut draw = |rot: f32, stats: &mut OverlayStats| {
+            let mut lines = overlay(&[("斜", rect(0.25, 0.4, 0.5, 0.066))], 0);
+            lines.items[0].rotation_deg = rot;
+            let mut image = frame(640, 360, [0, 0, 0, 255]);
+            let mut calls = 0;
+            paint_lines(
+                &mut |key| fake_rasterizer(&mut calls)(key),
+                &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+                &None,
+                &mut image,
+                &lines,
+                (640, 360),
+                &mut log,
+                stats,
+            );
+            image
+        };
+
+        let flat = draw(0.0, &mut stats_a);
+        let tilted = draw(30.0, &mut stats_b);
+
+        assert_ne!(
+            flat.pixels, tilted.pixels,
+            "rotation_deg=30 必须改变成片像素（否则形变没接上）"
+        );
+        // 两者都真的画出了字。
+        assert!(flat.pixels.iter().any(|&b| b != 0), "未旋转那帧要有字");
+        assert!(tilted.pixels.iter().any(|&b| b != 0), "旋转那帧要有字");
+    }
+
+    /// ★ **纵向压扁真的改变成片像素**（端到端）。
+    #[test]
+    fn t2_压扁真的改变成片像素() {
+        let mut log = IssueLog::new();
+        let mut draw = |sy: f32, stats: &mut OverlayStats| {
+            let mut lines = overlay(&[("扁", rect(0.25, 0.4, 0.5, 0.066))], 0);
+            lines.items[0].scale_y = sy;
+            let mut image = frame(640, 360, [0, 0, 0, 255]);
+            let mut calls = 0;
+            paint_lines(
+                &mut |key| fake_rasterizer(&mut calls)(key),
+                &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+                &None,
+                &mut image,
+                &lines,
+                (640, 360),
+                &mut log,
+                stats,
+            );
+            image
+        };
+        let mut sa = OverlayStats::default();
+        let mut sb = OverlayStats::default();
+        let normal = draw(1.0, &mut sa);
+        let squashed = draw(0.5, &mut sb);
+        assert_ne!(
+            normal.pixels, squashed.pixels,
+            "scale_y=0.5 必须改变成片像素（否则压扁没接上）"
         );
     }
 }
