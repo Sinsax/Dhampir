@@ -1419,6 +1419,11 @@ mod tests {
                     dx_px: 0.0,
                     parts: Vec::new(),
                     track_style: fixture_track_style(),
+                    // T1 的文字形变：夹具里恒 0.0 / 1.0 = **老行为**。
+                    // 本文件所有既有判据都拿这个 `overlay()` 造数据，
+                    // 给非缺省值会让它们全都变成"在测新行为"。
+                    rotation_deg: 0.0,
+                    scale_y: 1.0,
                 })
                 .collect(),
             danmaku: Vec::new(),

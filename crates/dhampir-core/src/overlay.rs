@@ -135,6 +135,57 @@ pub struct TextItem {
     /// 现在轨道级的那些（`outline` / `stroke_px` / `shadow_*` / `plate_*` / 字体族与字重）
     /// 走这一条通道，两类字段各归各。
     pub track_style: TextStyle,
+    /// **这一条要旋转的角度**（角度制，正为顺时针）。恒 `0.0` = 老行为。
+    ///
+    /// # 为什么是条级字段，不是轨级
+    ///
+    /// 与 `dx_px` / `dy_px` 同一条规矩（见上面 `track_style` 的长注释）：
+    /// **逐条的字段天生不会被"后一条覆盖前一条"**。旋转如果做成轨级共享槽，
+    /// 就会重演 `subtitle_style` 那个 bug —— 两条字幕轨并存时最后一条轨说了算，
+    /// 而**单条轨时行为完全正确**（"最后一条"就是"唯一一条"），
+    /// 于是缺陷只在"≥2 条轨"的工程上显形，单测全都绕过它。
+    ///
+    /// # 为什么需要它
+    ///
+    /// 宿主拿它画"倾斜的文字"（漫画感的强调、贴纸式排字）。在此之前契约层
+    /// **没有任何位置**能表达"这一条要斜着画" —— 文字的变换只有位移（`dx_px`/`dy_px`）
+    /// 与缩放（`scale`），三者各管一件事，旋转是缺的那一个自由度。
+    ///
+    /// # ⚠️ 来源与**尚未连接**的关键帧
+    ///
+    /// 这里填的是**文字元素自己的 `LayerV2.transform.rotation` 的静态值**
+    /// （`dhampir_timeline::layer::TransformV2::rotation`）。
+    ///
+    /// ⚠️ **关键帧求值在 `compose.rs` 那条路上，与本字段尚未连接** ——
+    /// `evaluate_overlay` 是纯函数、不读 `keyframes`（它连 `local_frame` 都没有）。
+    /// 所以：**给文字元素写 `rotation` 关键帧，本字段不会跟着动**。
+    /// 要让文字旋转"可动画"，必须在求值层打通（把已求值的 transform 传进来），
+    /// 那是另一件事，见 `docs/plan/text-option-d-scope.md`。
+    ///
+    /// ⚠️ 之所以要在这里写死这条限制：**字段有了 ≠ 动画就有了**。
+    /// 不写清楚，后来的人会以为"契约支持旋转 ⇒ 关键帧也该生效"，
+    /// 而症状是"关键帧写了、单测绿、出片里一动不动" —— 本仓最恨的那类静默。
+    ///
+    /// # 落到工程 JSON 的坐标（下游写 tilt 时看这条）
+    ///
+    /// 要倾斜一段文字，写 **文字图层自己的** `layers[i].transform.rotation`；
+    /// 写进 `TrackV2.subtitle`（轨级样式）**不会生效** —— 本字段读的是
+    /// **element 的 transform**，不是轨道级样式。
+    pub rotation_deg: f32,
+    /// **这一条纵向额外拉伸的倍数**（`1.0` = 不拉伸）。恒 `1.0` = 老行为。
+    ///
+    /// 语义与 `TransformV2::scale_y` 一致、口径也一致：**乘在 `scale` 之上**
+    /// （最终纵向倍数 = `scale × scale_y`）。缺省 1.0 ⇒ 纵向跟随 `scale` ⇒ 等比，
+    /// 与"没有这个字段"逐字节相同。
+    ///
+    /// 用途是"非等比压缩"：横向压扁、纵向拉长（或反过来）做出挤扁/拉长的字。
+    /// 与 `rotation_deg` 一起构成"倾斜 + 非等比压缩"那两种形变 —— 在此之前
+    /// 契约层只有等比 `scale`，压扁一个字是**表达不出来**的。
+    ///
+    /// ⚠️ 同样是**条级**，理由与 `rotation_deg` 一样（见上）。
+    /// ⚠️ 同样**只有静态值**，关键帧未连接（见上）。
+    /// ⚠️ 落点坐标同 `rotation_deg`：`layers[i].transform.scale_y`。
+    pub scale_y: f32,
 }
 
 /// 一段要画的文字 + 它**最终**的颜色。
@@ -539,6 +590,21 @@ pub fn evaluate_overlay(
                     // 这里就是"共享槽"那个 bug 的修复点：以前是循环里往一个
                     // `subtitle_style` 上整份重写，于是最后一条轨吃掉前面所有轨。
                     track_style: track_style.clone(),
+                    // **文字形变（T1）**：取这一轨**当前活着那个元素**自己的 `transform`。
+                    //
+                    // ⚠️ 取的是**静态值** —— `evaluate_overlay` 是纯函数、不求值关键帧
+                    // （它没有 `local_frame`，也不读 `keyframes`）。关键帧求值在
+                    // `compose.rs::element_to_draw` 那条路上，与这里**尚未连接**。
+                    // 详见 `TextItem::rotation_deg` 的说明与 `docs/plan/text-option-d-scope.md`。
+                    //
+                    // ⚠️ 读的是 element 的 transform，不是轨道级 `SubtitleStyle`：
+                    // 后者是**轨级**的，而旋转/压扁按用户口径是**每条自己的**事
+                    // （与 `dx_px` / `dy_px` 同类）。
+                    //
+                    // `element` 就是上面 `find(|layer| layer.covers(frame))` 那一个，
+                    // 与下面 `styled = true` 认定的是同一个元素 —— **不是**第二份查找。
+                    rotation_deg: element.transform.rotation,
+                    scale_y: element.transform.scale_y,
                 });
             }
             // ⚠️ 这里原来有一句 `subtitle_style = TextStyle { … }` —— 就是那个 bug。
@@ -1991,6 +2057,163 @@ mod tests {
                     "cue {start}..{end} 在第 {frame} 帧：逐帧判定与帧区间必须同答"
                 );
             }
+        }
+    }
+
+    // =====================================================================
+    // T1：文字条级 `rotation_deg` / `scale_y`（倾斜 + 非等比压缩）
+    // =====================================================================
+
+    /// 一条字幕轨 + 一个覆盖 `[0, 120)` 的元素，元素 `transform` 按参数给。
+    ///
+    /// ⚠️ 旋转/压扁写在**元素自己的 `transform`**（`layers[i].transform`），
+    /// **不是**轨道级 `subtitle` 样式 —— 那正是本组的判据之一。
+    fn tilted_timeline(rotation: f32, scale_y: f32) -> TimelineV2 {
+        timeline(&format!(
+            r#"{{
+                "schema": 3,
+                "timebase": {{ "num": 30, "den": 1 }},
+                "tracks": [
+                    {{
+                        "id": "sub",
+                        "kind": "subtitle",
+                        "layers": [{{
+                            "id": "cue",
+                            "start": 0,
+                            "end": 120,
+                            "source": {{ "asset_id": "sub.srt", "source_in": 0 }},
+                            "transform": {{
+                                "x": 0.0, "y": 0.0,
+                                "scale": 1.0,
+                                "rotation": {rotation},
+                                "scale_y": {scale_y}
+                            }}
+                        }}],
+                        "subtitle": {{ "font_ratio": 0.05 }}
+                    }}
+                ]
+            }}"#
+        ))
+    }
+
+    /// **倾斜真的透传到 `TextItem`**：写 12° ⇒ 这一条就是 12°。
+    #[test]
+    fn 文字条带旋转角度() {
+        let tl = tilted_timeline(12.0, 1.0);
+        let overlay = evaluate_overlay(&tl, 0, SEQUENCE, Some(&table())).expect("要有覆盖层");
+        assert!(!overlay.items.is_empty(), "至少一条字幕");
+        for item in &overlay.items {
+            assert_eq!(item.rotation_deg, 12.0, "元素写的 12° 必须逐值到达条目");
+        }
+    }
+
+    /// **非等比压缩真的透传**：写 0.6 ⇒ 这一条纵向 0.6 倍。
+    #[test]
+    fn 文字条带纵向倍数() {
+        let tl = tilted_timeline(0.0, 0.6);
+        let overlay = evaluate_overlay(&tl, 0, SEQUENCE, Some(&table())).expect("要有覆盖层");
+        for item in &overlay.items {
+            assert_eq!(item.scale_y, 0.6, "元素写的 0.6 必须逐值到达条目");
+        }
+    }
+
+    /// ⚠️ **没有写这两个键的老工程 ⇒ 恒 `0.0` / `1.0`**（= 老行为，逐字节不变）。
+    ///
+    /// 这条与上面两条是**一对**：只测"写了生效"会漏掉"没写时会不会自己变成别的值"，
+    /// 而缺省值错了症状是**所有老工程的文字一起歪掉 / 压扁**。
+    #[test]
+    fn 没写旋转与纵向倍数时是老行为() {
+        let tl = subtitle_timeline();
+        let overlay = evaluate_overlay(&tl, 0, SEQUENCE, Some(&table())).expect("要有覆盖层");
+        assert!(!overlay.items.is_empty(), "夹具本身要有字幕，否则这条判据是空转");
+        for item in &overlay.items {
+            assert_eq!(item.rotation_deg, 0.0, "没写 ⇒ 0°（不转）");
+            assert_eq!(item.scale_y, 1.0, "没写 ⇒ 1.0（纵向跟随 scale = 等比）");
+        }
+    }
+
+    /// ⚠️ **形变是「条级」的，不是轨级**：两条字幕轨各写各的，互不污染。
+    ///
+    /// 这正是 `TextItem::track_style` 那个"共享槽"bug 的形状：
+    /// 轨级共享槽会让**最后一条轨说了算**，而单条轨时完全正确 ——
+    /// 所以判据必须**两条轨并存**，否则它永远绿。
+    #[test]
+    fn 两条字幕轨各自的形变互不污染() {
+        let tl = timeline(
+            r#"{
+                "schema": 3,
+                "timebase": { "num": 30, "den": 1 },
+                "tracks": [
+                    {
+                        "id": "sub_a",
+                        "kind": "subtitle",
+                        "layers": [{
+                            "id": "cue_a", "start": 0, "end": 120,
+                            "source": { "asset_id": "sub.srt", "source_in": 0 },
+                            "transform": { "x": 0.0, "y": 0.0, "scale": 1.0, "rotation": 10.0, "scale_y": 1.0 }
+                        }],
+                        "subtitle": { "font_ratio": 0.05 }
+                    },
+                    {
+                        "id": "sub_b",
+                        "kind": "subtitle",
+                        "layers": [{
+                            "id": "cue_b", "start": 0, "end": 120,
+                            "source": { "asset_id": "sub.srt", "source_in": 0 },
+                            "transform": { "x": 0.0, "y": 0.0, "scale": 1.0, "rotation": 30.0, "scale_y": 0.5 }
+                        }],
+                        "subtitle": { "font_ratio": 0.05 }
+                    }
+                ]
+            }"#,
+        );
+        let overlay =
+            evaluate_overlay(&tl, 0, SEQUENCE, Some(&table())).expect("要有覆盖层");
+        // 两条轨各出一条（cue 文本相同，靠角度区分是哪条轨的）
+        let angles: Vec<f32> = overlay.items.iter().map(|i| i.rotation_deg).collect();
+        assert!(angles.contains(&10.0), "第一条轨的 10° 必须还在，实际：{angles:?}");
+        assert!(angles.contains(&30.0), "第二条轨的 30° 必须也在，实际：{angles:?}");
+        assert_eq!(angles.len(), 2, "两条轨各一条，不许被后一条吃掉");
+        let ys: Vec<f32> = overlay.items.iter().map(|i| i.scale_y).collect();
+        assert!(ys.contains(&1.0) && ys.contains(&0.5), "纵向倍数同样各归各：{ys:?}");
+    }
+
+    /// ⚠️ **关键帧尚未连接** —— 这条把"已知限制"钉成判据，防止有人误以为已经支持。
+    ///
+    /// 元素上写了 `rotation` 关键帧，但 `evaluate_overlay` 不求值 ⇒
+    /// 条目拿到的仍是**静态值**。若哪天求值层打通了，这条会红 ——
+    /// **那时应该红**：它提醒你去更新 `TextItem::rotation_deg` 的注释与
+    /// `docs/plan/text-option-d-scope.md`，而不是删掉这条测试。
+    #[test]
+    fn 关键帧尚未连接_条目取的是静态值() {
+        let tl = timeline(
+            r#"{
+                "schema": 3,
+                "timebase": { "num": 30, "den": 1 },
+                "tracks": [
+                    {
+                        "id": "sub",
+                        "kind": "subtitle",
+                        "layers": [{
+                            "id": "cue", "start": 0, "end": 120,
+                            "source": { "asset_id": "sub.srt", "source_in": 0 },
+                            "transform": { "x": 0.0, "y": 0.0, "scale": 1.0, "rotation": 5.0, "scale_y": 1.0 },
+                            "keyframes": [
+                                { "target": "rotation", "frame": 0, "value": 5.0 },
+                                { "target": "rotation", "frame": 60, "value": 45.0 }
+                            ]
+                        }],
+                        "subtitle": { "font_ratio": 0.05 }
+                    }
+                ]
+            }"#,
+        );
+        let overlay = evaluate_overlay(&tl, 60, SEQUENCE, Some(&table())).expect("要有覆盖层");
+        for item in &overlay.items {
+            assert_eq!(
+                item.rotation_deg, 5.0,
+                "关键帧**尚未**连接：取的是静态值 5.0，不是第 60 帧的 45.0"
+            );
         }
     }
 }

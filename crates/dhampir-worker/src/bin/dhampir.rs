@@ -2251,6 +2251,11 @@ fn danmaku_item_json(item: &dhampir_core::overlay::DanmakuTextItem) -> serde_jso
         // 弹幕的轨道级样式（现在是**逐条**的 `DanmakuTextItem::track_style`）。
         // 这个字段只为复用 `text_item_json` 的序列化形状而填。
         track_style: item.track_style.clone(),
+        // ⚠️ 弹幕**不做旋转 / 非等比压缩**（T1 那两个字段是**字幕轨**的：
+        // `DanmakuSpec` 上没有对应旋钮，`evaluate_overlay` 的弹幕那半边也不填它们）。
+        // 恒 0.0 / 1.0 ⇒ 与改动前画在同一个位置、同一个形状。
+        rotation_deg: 0.0,
+        scale_y: 1.0,
     });
     value["lane"] = serde_json::json!(item.lane);
     value["enter"] = serde_json::json!(item.enter);

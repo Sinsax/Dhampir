@@ -126,6 +126,30 @@ pub struct TransformV2 {
     pub x: f32,
     pub y: f32,
     pub scale: f32,
+    /// **纵向倍数**（`1.0` = 纵向跟随 `scale`，即**等比**）。
+    ///
+    /// # 语义：`scale` 管横向，`scale_y` 管纵向
+    ///
+    /// * `scale` = **横向**缩放（`scale_y` 缺省时它同时管纵向 ⇒ 退化成等比，与改动前完全一致）；
+    /// * `scale_y` = **纵向**的**额外**倍数，**乘在 `scale` 之上**。
+    ///
+    /// 最终纵向倍数 = `scale × scale_y`。
+    ///
+    /// # 为什么是"倍数"而不是"纵向绝对值"
+    ///
+    /// 做成"纵向绝对值"（让 `scale_y` 顶替 `scale` 管纵向）的话，缺省就得表达成
+    /// "跟随 scale" —— 那只能靠哨兵值（`0`？`NaN`？），而哨兵值是第二份真相。
+    /// 做成倍数则让**缺省 1.0 恰好等于老语义**：纵向倍数 = `scale × 1.0` = `scale`，
+    /// 与"没有这个字段"逐字节相同。
+    ///
+    /// ⇒ **非等比压缩**（横向压扁、纵向拉伸）就是 `scale` 与 `scale_y` 不相等；
+    /// 相等时走的就是老工程那条路，一个像素都不差。
+    ///
+    /// ⚠️ **`skip_serializing_if` 不能省**：缺省 1.0 时**一个键都不许出现在工程文件里**，
+    /// 否则每个老工程的变换键集都变大（R4 判据当场红）。与 `SubtitleStyle::anchor_bottom`
+    /// （`:537`）是同一条纪律、同一对 helper（`one` / `is_one_f32`）——这里**不新造**。
+    #[serde(default = "one", skip_serializing_if = "is_one_f32")]
+    pub scale_y: f32,
     /// **角度制**（契约规定，不由字段名暗示）。
     pub rotation: f32,
 }
@@ -136,6 +160,7 @@ impl Default for TransformV2 {
             x: 0.0,
             y: 0.0,
             scale: 1.0,
+            scale_y: 1.0,
             rotation: 0.0,
         }
     }
@@ -1181,6 +1206,11 @@ pub fn migrate_v1_to_v2(project: &Project) -> Result<TimelineV2, MigrateError> {
                     x: clip.transform.x,
                     y: clip.transform.y,
                     scale: clip.transform.scale,
+                    // v1 没有非等比缩放 —— 迁移一律给 1.0。
+                    // ⚠️ 这正是"缺省 1.0 = 老语义（纵向跟随 scale）"要保证的：
+                    // 迁移后纵向倍数 = scale × 1.0 = scale，与 v1 逐字节同义。
+                    // 给 0.0 会让所有老工程的画面纵向塌成一条线。
+                    scale_y: 1.0,
                     rotation: clip.transform.rotation_deg,
                 },
                 opacity: clip.opacity,
@@ -2410,6 +2440,70 @@ mod tests {
             212,
             "元素挪了，标记跟着挪"
         );
+    }    // =====================================================================
+    // T1：`TransformV2::scale_y` —— 非等比缩放的契约表达
+    // =====================================================================
+
+    /// ⚠️ **缺省 1.0 时 `scale_y` 一个键都不许出现在 JSON 里。**
+    ///
+    /// 少了 `skip_serializing_if`，每个老工程的变换键集都凭空多一个键 ——
+    /// R4（"存量工程逐字节不变"）当场红。与 `SubtitleStyle::anchor_bottom` 同一条纪律。
+    #[test]
+    fn 缺省_scale_y_不写进_json() {
+        let json = serde_json::to_string(&TransformV2::default()).expect("要能序列化");
+        assert!(
+            !json.contains("scale_y"),
+            "缺省 1.0 时 scale_y 不许出现在 JSON 里，实际：{json}"
+        );
+        // 其余四个键照旧都在（没顺手把别的也 skip 掉）
+        for key in ["\"x\"", "\"y\"", "\"scale\"", "\"rotation\""] {
+            assert!(json.contains(key), "{key} 不该被吃掉：{json}");
+        }
+    }
+
+    /// 非缺省时必须**写出来**，否则这个字段等于不存在（用户设了看不到、也存不住）。
+    #[test]
+    fn 非缺省的_scale_y_要写进_json() {
+        let transform = TransformV2 { scale_y: 0.6, ..TransformV2::default() };
+        let json = serde_json::to_string(&transform).expect("要能序列化");
+        assert!(
+            json.contains("\"scale_y\":0.6"),
+            "非缺省的 scale_y 必须写出来，实际：{json}"
+        );
+    }
+
+    /// 老工程（没有这个键）读进来 ⇒ `scale_y == 1.0` ⇒ 纵向跟随 `scale` = 等比。
+    #[test]
+    fn 老工程没有_scale_y_键时按_1_0_补齐() {
+        let json = r#"{"x":0.0,"y":0.0,"scale":1.5,"rotation":0.0}"#;
+        let transform: TransformV2 = serde_json::from_str(json).expect("老工程要能读进来");
+        assert_eq!(
+            transform.scale_y, 1.0,
+            "缺省必须是 1.0（纵向跟随 scale），不是 0.0 —— 0.0 会让画面纵向塌成一条线"
+        );
+        assert_eq!(transform.scale, 1.5, "scale 原样保留");
+    }
+
+    /// `Default` 与 serde 缺省值**必须是同一个数**：两处各写一个常量是经典的漂移点，
+    /// 症状是"新建的工程对、读进来的老工程不对"。
+    #[test]
+    fn default_与_serde_缺省值一致() {
+        assert_eq!(TransformV2::default().scale_y, 1.0);
+        let from_empty: TransformV2 =
+            serde_json::from_str(r#"{"x":0.0,"y":0.0,"scale":1.0,"rotation":0.0}"#).unwrap();
+        assert_eq!(from_empty.scale_y, TransformV2::default().scale_y);
+        assert_eq!(one(), TransformV2::default().scale_y, "serde 缺省函数 one() 要同值");
+    }
+
+    /// v1 → v2 迁移一律给 1.0：迁移后纵向倍数 = `scale × 1.0` = `scale`，
+    /// 与 v1 逐字节同义（v1 本来就没有非等比缩放）。
+    #[test]
+    fn v1_迁移过来的_scale_y_是_1_0() {
+        let v2 = migrate_v1_to_v2(&v1_project()).expect("v1 要能迁移到 v2");
+        let transform = &v2.tracks[0].layers[0].transform;
+        assert_eq!(transform.scale_y, 1.0, "v1 迁移不给 0.0 / 别的值");
+        assert_eq!(transform.scale, 1.5, "v1 的 scale 原样搬过来");
+        assert_eq!(transform.rotation, 90.0, "v1 的 rotation_deg 搬到 rotation");
     }
 }
 
@@ -3598,4 +3692,5 @@ mod v2_tests {
         };
         assert_eq!(some.plate_pad_px.unwrap_or(default_plate_pad_px()), 30.0);
     }
+
 }
