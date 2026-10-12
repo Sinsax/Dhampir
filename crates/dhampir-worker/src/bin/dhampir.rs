@@ -2248,6 +2248,7 @@ fn danmaku_item_json(item: &dhampir_core::overlay::DanmakuTextItem) -> serde_jso
         scale: 1.0,
         // 弹幕没有 `.hl` 标记（参照的弹幕路径也不解析它）。
         parts: Vec::new(),
+        cells: Vec::new(),
         // 弹幕的轨道级样式（现在是**逐条**的 `DanmakuTextItem::track_style`）。
         // 这个字段只为复用 `text_item_json` 的序列化形状而填。
         track_style: item.track_style.clone(),

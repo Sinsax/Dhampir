@@ -70,6 +70,11 @@ pub mod text_layout;
 /// 单独一个模块的理由写在它自己的文件头：两个任务曾并行改 `layer.rs`，
 /// 后写的把先写的**整份覆盖**掉了。逻辑挪出来的代价面从 ~180 行降到 12 行。
 pub mod text_motion;
+/// **逐字格子**（P3，2026-10-13）：把一行拆成"每个字各自的盒子"，
+/// 供下游做逐字位移 / 缩放 / 旋转 / 竖排。理由写在它自己的文件头。
+pub mod text_perchar;
+/// **逐字动效的求值**（P3/P4）：逐字档位在某一帧上摊成每字变换。纯函数，无累积状态。
+pub mod text_perchar_anim;
 pub mod timebase;
 pub mod timecode;
 

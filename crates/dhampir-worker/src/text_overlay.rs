@@ -645,6 +645,177 @@ fn paint_parts(
     Painted::Drawn { clipped }
 }
 
+/// **逐字画一行**（P3，2026-10-13）。
+///
+/// 与 [`paint_parts`] 的关系：那个是"逐**段**"（一段 = 一个 `.hl` 高亮段，
+/// 整段共用一次栅格化 + 一个位图落点）；本函数是"逐**字**"，
+/// 每个字可以有自己的缩放 / 旋转 / 位移。
+///
+/// # ⚠️ 为什么不直接把 `paint_parts` 改成逐字
+///
+/// 因为**恒等是常态**。绝大多数字幕没有逐字效果，而逐字意味着
+/// "每个字一次栅格化 + 一次仿射" —— 在 1080p 上一条 20 字的字幕就是
+/// 20 倍的光栅化开销，且缓存键从"整行"碎成"每个字"（命中率暴跌）。
+/// ⇒ 调用方必须在行级判据为真时才进来，否则一律走 `paint_parts`（老路）。
+///
+/// # 口径：逐字位图的落点怎么算
+///
+/// `paint_parts` 把**整行**居中（`x_offset` 是段相对整行中心的偏移）。
+/// 这里改成：**每个字各自**定位到"它在行内的位置"，再加上逐字位移。
+///
+/// ```text
+/// 行左端像素 = (位图左 + 位图宽/2) − 整行宽/2      // 位图里文字是居中的
+/// 第 i 个字左端 = 行左端 + (cells[i].offset_em + offset_x_em) × font_px
+/// ```
+///
+/// ⚠️ **`font_px` 要乘这个字自己的 `scale`**（逐字放大是真的把那个字画大，
+/// 不是把整行放大再裁）—— 这也正是"逐字"与"整条 `transform.scale`"的区别。
+#[allow(clippy::too_many_arguments)]
+fn paint_per_char(
+    rasterize: &mut impl FnMut(&TextRasterKey) -> Result<Rc<TextBitmap>, String>,
+    font_file: Option<PathBuf>,
+    font_dir: Option<PathBuf>,
+    image: &mut Rgba8Image,
+    target: (u32, u32),
+    cells: &[dhampir_core::timeline::text_perchar::CharCell],
+    style: &dhampir_core::overlay::TextStyle,
+    scale: f32,
+    opacity: f32,
+    dy_px: f32,
+    dx_px: f32,
+    transform: crate::text_transform::TextTransform,
+    log: &mut IssueLog,
+    placement: LinePlacement,
+) -> Painted {
+    let whole: String = cells.iter().map(|c| c.ch).collect();
+    let path = issue_path(&whole);
+    let Some(font_file) = font_file else {
+        log.record(
+            "subtitle_font_missing",
+            &path,
+            format!(
+                "这一帧要逐字画「{whole}」，却画不出来：{}。不给字体就不出一份「看起来成功、其实没有字幕」的片子",
+                font_missing_reason(&font_file, &font_dir, style)
+            ),
+        );
+        return Painted::Failed;
+    };
+
+    let font_px = placement.font_px as f32;
+    // 整行逻辑宽（em）—— 逐字落点是**相对于行左端**的，所以先要知道整行多宽。
+    let total_em: f32 = cells.iter().map(|c| c.advance_em).sum();
+    // 行左端（目标像素）。
+    // ⚠️ **不能直接用 `placement.x`**：那是"整行位图的左上角"，
+    //    而文字在整行位图里是**居中**的（栅格化那侧的规矩）
+    //    ⇒ 文字左端 = 位图中心 − 整行文字宽 / 2。用 `placement.x` 的结果是
+    //      每个字都偏右（整行宽的一半那么远），而且**行越长偏得越多**。
+    let row_left = placement.x as f32 + placement.bitmap_width as f32 / 2.0 - total_em * font_px / 2.0;
+    // 行盒的垂直中心（逐字纵向位移相对于它）。
+    let row_center_y = placement.y as f32 + placement.bitmap_height as f32 / 2.0;
+
+    let offset_x = dx_px.round() as i32;
+    let offset_y = dy_px.round() as i32;
+    let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u32;
+    let shadow = shadow_spec(style);
+    let half_w = (placement.bitmap_width as f32 / 2.0).round() as i32;
+    let half_h = (placement.bitmap_height as f32 / 2.0).round() as i32;
+
+    for cell in cells {
+        // 这个字自己的字号：**整条缩放 × 逐字缩放**（乘法关系）。
+        let cell_font = font_px * cell.scale * scale;
+        if !(cell_font >= 1.0) {
+            // 缩到 0 的字**不画**（不是"画一张 0 像素的位图" ——
+            // 那会在光栅化那边退化成 1px 并留下一个墨点）。
+            continue;
+        }
+        let cell_font_px = cell_font.round().max(1.0) as u32;
+        // 这个字的宽度（像素）—— 用它**自己的** `advance_em`，不是整行的。
+        let cell_w = cell.advance_em * font_px;
+        // 行内左端（含逐字位移；位移是 em ⇒ 乘 `font_px` 变像素）。
+        let cell_left = row_left + (cell.offset_em + cell.offset_x_em) * font_px;
+        // 这个字位图的**中心**（水平）= 这个字在行内的中心。
+        let cell_center_x = cell_left + cell_w / 2.0;
+        // ⚠️ 位图宽度是**整条目标宽**，字只在中间（栅格化居中）
+        //    ⇒ 左上角 = 中心 − 位图宽/2。这里若用"字的宽/2"回推，
+        //      字会随缩放**平移**（看着像"放大时飘走"）。
+        let x = (cell_center_x + offset_x as f32).round() as i32 - half_w;
+        let y = (row_center_y + cell.offset_y_em * font_px + offset_y as f32).round() as i32 - half_h;
+
+        let key = TextRasterKey {
+            text: cell.ch.to_string(),
+            // ⚠️ **不用 `x_offset` 做行内定位**（那是"段相对整行中心"的旧口径）。
+            //    这里每个字是**独立一张位图**，位置由上面的 `x`/`y` 说了算，
+            //    `x_offset` 恒 0 ⇒ 位图里只有这一个字、它自己居中。
+            x_offset: 0,
+            font_px: cell_font_px,
+            color: style.color,
+            outline: style.outline,
+            // 描边跟着**这个字的**缩放走（与 `paint_parts` 的 `stroke_px * scale` 同口径）。
+            stroke_px: (style.stroke_px * scale * cell.scale).round() as u32,
+            stroke_color: style.stroke_color,
+            shadow_color: None,
+            shadow_blur_px: 0,
+            shadow_dx_px: 0,
+            shadow_dy_px: 0,
+            shadow_pad: 0,
+            font_file: font_file.clone(),
+            font_family: style.family.clone(),
+            font_dir: font_dir.clone(),
+            width: placement.bitmap_width,
+            height: placement.bitmap_height,
+        };
+        if let Some(shadow) = shadow {
+            paint_shadow(
+                &mut *rasterize,
+                &key,
+                shadow,
+                image,
+                (x, y),
+                alpha,
+                transform,
+                &path,
+                log,
+            );
+        }
+        let bitmap = match rasterize(&key) {
+            Ok(bitmap) => bitmap,
+            Err(error) => {
+                log.record("subtitle_raster_failed", &path, error);
+                return Painted::Failed;
+            }
+        };
+        // 这个字自己的旋转**叠加**在整条形变上（条级旋转 = "整句话歪"，
+        // 逐字旋转 = "这个字歪"，两者独立且可同时有）。
+        let cell_transform = if cell.rotation_deg == 0.0 {
+            transform
+        } else {
+            crate::text_transform::TextTransform {
+                rotation_deg: transform.rotation_deg + cell.rotation_deg,
+                ..transform
+            }
+        };
+        let text_origin = (x, y);
+        let blitted = if cell_transform.is_identity() {
+            blit_scaled(image, &bitmap, text_origin.0, text_origin.1, alpha)
+        } else {
+            let written =
+                crate::text_transform::blit_affine(image, &bitmap, text_origin, cell_transform, alpha);
+            Ok(BlitReport { written: written as u64, skipped: 0 })
+        };
+        if let Err(error) = blitted {
+            log.record("subtitle_blit_failed", &path, error);
+            return Painted::Failed;
+        }
+    }
+    // ⚠️ 逐字路**不做** `clip_message` 判定：那是按"整行位图 vs 行盒"算的，
+    //    而这里每个字各自一张位图、各自落点 —— 拿整行盒去比会得到
+    //    **恒不报**（每张位图只有一个字那么点墨）。报假警比漏警更坏
+    //    （用户会去改一个没问题的布局），所以这里显式不报，
+    //    逐字溢出判定留给后续"逐字散开"那一档自己带（它知道自己的包围盒）。
+    let _ = target;
+    Painted::Drawn { clipped: false }
+}
+
 /// 一条文字这一帧要不要画阴影 —— 要的话：什么色、挪多远、糊多少。
 ///
 /// # 判据只有一条，而且它决定"老路走不走得通"
@@ -941,6 +1112,14 @@ fn paint_one(
     // **这一条的文字形变**（T2）：倾斜 + 纵向压扁。
     // 恒等时（`TextTransform::default()`）走原来的逐行拷贝路径 ⇒ 老工程零开销、逐字节不变。
     transform: crate::text_transform::TextTransform,
+    // **逐字格子**（P3）：空 = 没有逐字效果（走老路）。非空且**行内有变换**时
+    // 才走逐字路径（见 `paint_per_char`）。
+    //
+    // ⚠️ 判据是"非空 **且** 有变换"两级，不是单看空 —— 求值层已经用
+    //    `is_active()` 滤过一遍，但渲染侧不该信任上游（`cells` 也可能由别处造出、
+    //    全是恒等），多一步判断的代价是零，漏判的代价是"所有字幕都改走逐字路"
+    //    （缓存碎掉、老工程产物变化）。
+    cells: &[dhampir_core::timeline::text_perchar::CharCell],
     judge_clip: bool,
     log: &mut IssueLog,
 ) -> Painted {
@@ -990,6 +1169,36 @@ fn paint_one(
     // 影响：全角字（中文）逻辑宽与实际推进一致，**偏移是准的**；
     // 中英混排时英文半角的逻辑宽是估算值，**偏移会差几像素**。
     // 这是"逻辑度量 vs 真实字体"那一类既有差异的延续，不是新引入的形状。
+    // ---------------------------------------------------------------------
+    // **逐字（P3）：配了逐字动效才走这条路。**
+    // ---------------------------------------------------------------------
+    //
+    // ⚠️ 排在 `parts` 之前：逐字比逐段更细（逐段是"一段一个位图"、
+    //    逐字是"一个字一个位图"），两者同时有时逐字能把段色带上（未来），
+    //    而现在同时出现时**逐字优先、`.hl` 颜色暂不生效** —— 已知缺口，
+    //    登记在 `TextItem::cells` 的文档里。
+    //
+    // ⚠️ 两级判据（非空 **且** 真有变换）：光非空不够 —— 一个全恒等的
+    //    `cells` 走逐字路只会把缓存打碎而画面一模一样。
+    if !cells.is_empty() && cells.iter().any(|c| !c.is_identity_transform()) {
+        return paint_per_char(
+            rasterize,
+            // `paint_one` 上面已经确认过字体给没给，这里带下去就行。
+            Some(font_file),
+            font_dir.clone(),
+            image,
+            target,
+            cells,
+            style,
+            scale,
+            opacity,
+            dy_px,
+            dx_px,
+            transform,
+            log,
+            placement,
+        );
+    }
     if !parts.is_empty() {
         return paint_parts(
             rasterize,
@@ -1195,6 +1404,8 @@ fn paint_lines(
                 scale_x: 1.0,
                 scale_y: item.scale_y,
             },
+            // **逐字格子（P3）**：空 = 没有逐字效果，走原来那条路。
+            &item.cells,
             true,
             log,
         ) {
@@ -1240,6 +1451,10 @@ fn paint_lines(
             // 与上面那个恒 1.0 的 `scale`、恒 0 的 `dx` 同一条理由 ——
             // 不往 `DanmakuTextItem` 里放恒缺省字段）。恒等 ⇒ 走老路径、零开销。
             crate::text_transform::TextTransform::default(),
+            // **弹幕没有逐字效果**（`per_char` 是字幕轨的字段，弹幕契约上没有它）
+            // —— 与上面那个恒 1.0 的 `scale`、恒 0 的 `dx` 同一条理由，
+            // 不往 `DanmakuTextItem` 里塞一个恒空的字段。
+            &[],
             // **不判切线**：滚动中越界是常态（见模块文档）。画面外的墨像素由 `blit`
             // 丢掉，但那既不进问题清单、也不计数 —— 计数只数"画了几条"。
             false,
@@ -1461,6 +1676,7 @@ mod tests {
                     // task-14 加的横向抖动偏移：夹具里恒 0（"老行为"）。
                     dx_px: 0.0,
                     parts: Vec::new(),
+                    cells: Vec::new(),
                     track_style: fixture_track_style(),
                     // T1 的文字形变：夹具里恒 0.0 / 1.0 = **老行为**。
                     // 本文件所有既有判据都拿这个 `overlay()` 造数据，

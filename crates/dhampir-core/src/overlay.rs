@@ -99,6 +99,25 @@ pub struct TextItem {
     /// 不用自己判该用哪一个 —— 两端各判一次就会在"有的条有标记、有的没有"
     /// 的工程上分叉。
     pub parts: Vec<TextRun>,
+    /// **逐字格子**（P3，2026-10-13）：每个字的位置 + 这一帧它自己的变换。
+    ///
+    /// # 空 `Vec` = 这一条没有逐字效果（**绝大多数情况**）
+    ///
+    /// 与 `parts` 的"空 = 没有 `.hl`"同一个形状：宿主判一次空就分流。
+    /// ⚠️ 逐字与 `.hl` **可以同时有** —— 逐字是按字定位、`.hl` 是按段配色，
+    /// 两件事正交。真的同时出现时宿主走逐字路（逐字能把段色逐字带上，
+    /// 因为每个字都知道自己属于哪一段 —— 但**目前不实现**，
+    /// 同时出现时逐字路优先、`.hl` 的颜色暂时不生效，这是已知缺口）。
+    ///
+    /// # 为什么在**求值层**就把变换算进格子里
+    ///
+    /// 与 `font_ratio` 那条"乘过缩放的才是这一帧真正的事实"同一条理由：
+    /// 时间只有求值层知道（`frame`），宿主拿到的是"这一帧的样子"。
+    /// 让宿主自己按 `local_frame` 求值 = 两条渲染路（worker / wasm）
+    /// 各写一份错峰逻辑 —— 而"预览对、成片不对"正是那么来的。
+    ///
+    /// 默认空 ⇒ 既有工程逐字节不变（宿主不读它就画在原来的位置）。
+    pub cells: Vec<crate::timeline::text_perchar::CharCell>,
     /// **这一条所属字幕轨的轨道级样式。**
     ///
     /// # ⚠️ 为什么挂在条目上，而不是 `TextOverlay.subtitle_style` 那一个共享槽
@@ -548,6 +567,31 @@ pub fn evaluate_overlay(
                 // 原来那条"一次画完"的路，既有工程逐字节不变。
                 // 反过来（无标记也填一段）会让每一帧都多一次栅格化。
                 let has_mark = line.parts.iter().any(|p| p.highlight);
+                // **逐字格子（P3）**：只有这一轨真的配了逐字动效时才拆。
+                //
+                // ⚠️ 判据走 `PerCharSpec::is_active()` 而**不是** `per_char.is_some()`：
+                //    一个"有名字但四个通道端点全相等"的档什么都不会动，
+                //    拆开它等于让这一条白白放弃老路的栅格化缓存
+                //    （每个字一张位图），而画面**一点变化都没有**。
+                // ⚠️ 拆出来的格子在这一层就带上**这一帧**的变换（`local_frame`
+                //    口径与上面 `rotation_deg` 那条一致：`frame - element.start`）。
+                let cells: Vec<dhampir_timeline::text_perchar::CharCell> =
+                    match style.per_char.as_ref().filter(|s| s.is_active()) {
+                        None => Vec::new(),
+                        Some(spec) => {
+                            let local = frame.saturating_sub(element.start);
+                            let mut layout =
+                                dhampir_timeline::text_perchar::CharLayout::of(&line.text);
+                            let transforms = dhampir_timeline::text_perchar_anim::layout_transforms_at(
+                                spec, &layout, local,
+                            );
+                            dhampir_timeline::text_perchar_anim::apply_transforms(
+                                &mut layout.cells,
+                                &transforms,
+                            );
+                            layout.cells
+                        }
+                    };
                 let runs: Vec<TextRun> = if has_mark {
                     line.parts
                         .iter()
@@ -597,6 +641,8 @@ pub fn evaluate_overlay(
                     font_ratio: line.font_ratio * item_scale,
                     scale: item_scale,
                     parts: runs,
+                    // 逐字格子跟着这一条走（空 = 没有逐字效果，宿主走老路）。
+                    cells,
                     // 轨道级样式**跟着这一条走**（见 `TextItem::track_style` 的长注释）——
                     // 这里就是"共享槽"那个 bug 的修复点：以前是循环里往一个
                     // `subtitle_style` 上整份重写，于是最后一条轨吃掉前面所有轨。
@@ -1328,6 +1374,102 @@ mod tests {
                 ]
             }"#,
         )
+    }
+
+    /// **逐字格子真的被求值层填上了**（P3，2026-10-13）。
+    ///
+    /// ⚠️ 这条是"逐字"整条链的**接缝判据**：`paint_per_char` 只有在
+    /// `cells` 非空时才会被调用，而 `cells` 是求值层填的。
+    /// 少了这条，逐字功能的失败模式是**静默的** ——
+    /// 渲染侧一切正常，只是永远走老路（画面里一个字都不动）。
+    #[test]
+    fn 配了逐字动效时格子被填上且带变换() {
+        let line = timeline(
+            r#"{
+                "schema": 3,
+                "timebase": { "num": 30, "den": 1 },
+                "tracks": [{
+                    "id": "sub",
+                    "kind": "subtitle",
+                    "layers": [{
+                        "id": "cue",
+                        "start": 0,
+                        "end": 120,
+                        "source": { "asset_id": "sub.srt", "source_in": 0 }
+                    }],
+                    "subtitle": {
+                        "font_ratio": 0.055,
+                        "color": [255, 240, 200, 255],
+                        "outline": false,
+                        "per_char": {
+                            "name": "scatter",
+                            "offset_x_to": 0.4,
+                            "per_char_frames": 10,
+                            "stagger_frames": 0,
+                            "easing": "linear"
+                        }
+                    }
+                }]
+            }"#,
+        );
+        // 第 60 帧（30fps ⇒ 2s）：`per_char_frames = 10` 早跑完 ⇒ 全部到位。
+        let overlay = evaluate_overlay(&line, 60, SEQUENCE, Some(&table())).expect("有字幕");
+        let item = &overlay.items[0];
+        assert_eq!(item.cells.len(), item.text.chars().count(), "格子数必须等于字数");
+        // 每个字都应当已经被挪到 0.4em（全部错峰为 0 ⇒ 同时动完）
+        for (i, c) in item.cells.iter().enumerate() {
+            assert!(
+                (c.offset_x_em - 0.4).abs() < 1e-5,
+                "第 {i} 个字的横向位移应当是 0.4em，实得 {}",
+                c.offset_x_em
+            );
+            assert!(!c.is_identity_transform(), "配了动效就不该是恒等");
+        }
+    }
+
+    /// **没配逐字动效时 `cells` 必须是空的**（R4：走老路、缓存不碎）。
+    #[test]
+    fn 没配逐字动效时格子是空的() {
+        let overlay = evaluate_overlay(&subtitle_timeline(), 15, SEQUENCE, Some(&table()))
+            .expect("有字幕");
+        assert!(
+            overlay.items.iter().all(|i| i.cells.is_empty()),
+            "没配 `per_char` 时 `cells` 必须为空，否则所有字幕都被迫走逐字路"
+        );
+    }
+
+    /// **配了一个「什么都不动」的档时也必须是空的**。
+    ///
+    /// ⚠️ 判据是 `is_active()` 而不是 `is_some()` —— 这条钉的就是那个区别。
+    #[test]
+    fn 空档的格子也是空的() {
+        let line = timeline(
+            r#"{
+                "schema": 3,
+                "timebase": { "num": 30, "den": 1 },
+                "tracks": [{
+                    "id": "sub",
+                    "kind": "subtitle",
+                    "layers": [{
+                        "id": "cue",
+                        "start": 0,
+                        "end": 120,
+                        "source": { "asset_id": "sub.srt", "source_in": 0 }
+                    }],
+                    "subtitle": {
+                        "font_ratio": 0.055,
+                        "color": [255, 240, 200, 255],
+                        "outline": false,
+                        "per_char": { "name": "nothing", "per_char_frames": 10 }
+                    }
+                }]
+            }"#,
+        );
+        let overlay = evaluate_overlay(&line, 60, SEQUENCE, Some(&table())).expect("有字幕");
+        assert!(
+            overlay.items.iter().all(|i| i.cells.is_empty()),
+            "一个四个端点全相等的档什么都不会动，不该进逐字路"
+        );
     }
 
     #[test]

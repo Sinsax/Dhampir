@@ -3336,6 +3336,7 @@ fn danmaku_item_json(item: &DanmakuTextItem) -> serde_json::Value {
         scale_y: 1.0,
         // 弹幕没有 `.hl` 标记（参照的弹幕路径也不解析它）。
         parts: Vec::new(),
+        cells: Vec::new(),
     });
     value["lane"] = serde_json::json!(item.lane);
     value["enter"] = serde_json::json!(item.enter);
@@ -4226,6 +4227,7 @@ mod tests {
             font_ratio: 0.055,
             scale: 0.75,
             parts: Vec::new(),
+            cells: Vec::new(),
         };
         let value = text_item_json(&item);
         // 逐字段同名是**契约**，不是巧合：CLI 的 `cmd_subtitle` 发的是同一组键。

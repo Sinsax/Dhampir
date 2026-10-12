@@ -874,6 +874,24 @@ pub struct SubtitleStyle {
     /// 宿主给每条**不同的相位**才有各自的手抖感。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shake_phase: Option<f32>,
+    /// **逐字动效**（P3，2026-10-13）：每一个字各自动、按序号错峰。
+    ///
+    /// # 为什么单开一个结构而不是往上面那几个字段上再挂几个
+    ///
+    /// 上面六个字段（`scale_in_*` / `shake_*`）全是**轨级常量**：
+    /// 一条轨上一次求值得到一对数字，整行公用。逐字动效的**本质**是
+    /// "同一个曲线在每个字上晚开始一会儿" —— 它需要**按序号求值**，
+    /// 形状上就不是"再挂一个常量"，而是"一份能按 index 查的函数参数"。
+    /// 硬塞进上面那组会让"这条轨到底逐字不逐字"要靠多个字段的**组合**去猜。
+    ///
+    /// # `None` = 没有逐字动效
+    ///
+    /// 与上面六个字段同一条纪律（[`Option`] + `skip_serializing_if`）：
+    /// 老工程重写**一个键都不多**，求值结果必须与改动前**逐字节相同**。
+    /// 渲染侧靠 [`text_perchar_anim::PerCharSpec::is_active`] 分流 ——
+    /// 为假时**整条逐字路径都不进**（老路的栅格化缓存仍然有效）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_char: Option<crate::text_perchar_anim::PerCharSpec>,
 }
 
 /// `0.0` 不写进文件 —— 这是"既有工程逐字节不变"的执行处：
@@ -999,6 +1017,8 @@ impl Default for SubtitleStyle {
             shake_px: None,
             shake_hz: None,
             shake_phase: None,
+            // 逐字动效默认**关**：老工程求值结果与改动前逐字节相同。
+            per_char: None,
         }
     }
 }

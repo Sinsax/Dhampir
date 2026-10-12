@@ -163,6 +163,39 @@ export interface Meta {
   title?: string;
 }
 
+export interface PerCharSpec {
+  /** **曲线**（`back_out` / `linear` / …），名字与 */
+  easing?: string;
+  /** **这是第几档**（诊断用）。`None` = 本档不做逐字动效。 */
+  name?: string | null;
+  /** 逐字**位移**（em；x 向右、y 向下），起始 / 终止。 */
+  offset_x_from?: number;
+  offset_x_to?: number;
+  offset_y_from?: number;
+  offset_y_to?: number;
+  /** **每个字自己的动画时长**（帧）。 */
+  per_char_frames?: number;
+  /** **错峰方向**：`false` = 从第 0 个字往后（默认）。 */
+  reverse?: boolean;
+  /** 逐字**起始旋转**（角度）。 */
+  rotation_from?: number;
+  rotation_to?: number;
+  /** 逐字**起始缩放**（1.0 = 不缩）。 */
+  scale_from?: number;
+  /** 逐字**终止缩放**（1.0 = 不缩）。 */
+  scale_to?: number;
+  /** **按序号放大的位移**（em）：越靠后的字挪得越多（负数 = 越靠前挪得多）。 */
+  spread_x_em?: number;
+  /** 逐字位移的**基线**（每个字共同的，与 `offset_x_from/to` 同形）。 */
+  spread_x_from?: number;
+  spread_x_to?: number;
+  spread_y_em?: number;
+  spread_y_from?: number;
+  spread_y_to?: number;
+  /** **相邻两个字开始的间隔**（帧）。0 = 全部同时（"逐字"退化成"整行"）。 */
+  stagger_frames?: number;
+}
+
 export interface RenderHints {
   /** **画布底色**：`#rgb` / `#rrggbb` / `#rrggbbaa`。`None` = 透明（宿主/编码器那边就是黑）。 */
   background?: string | null;
@@ -189,6 +222,8 @@ export interface SourceRef {
 }
 
 export interface SubtitleStyle {
+  /** **文字块底边的归一化 y**（0 = 画面顶边，1 = 画面底边）。默认 1.0 = 贴底。 */
+  anchor_bottom?: number;
   /** 底边距 = 目标高度 * 这个比例。 */
   bottom_margin?: number;
   /** 文字颜色，RGBA。 */
@@ -213,12 +248,24 @@ export interface SubtitleStyle {
   max_lines?: number;
   /** 是否加描边（压住亮背景）。 */
   outline?: boolean;
+  /** **逐字动效**（P3，2026-10-13）：每一个字各自动、按序号错峰。 */
+  per_char?: PerCharSpec | null;
+  /** **底衬（plate）的颜色**。`None` = 不铺底衬（默认，既有工程逐字节不变）。 */
+  plate_color?: number[] | null;
+  /** **底衬向四周外扩的像素数**（目标像素）。默认 12。 */
+  plate_pad_px?: number | null;
   /** 入场时从下方浮上来的距离（**文档像素**）。参照实现 是 `20`。 */
   rise_in_px?: number;
   /** 退场时向上浮的距离（文档像素）。参照实现 是 `8`。 */
   rise_out_px?: number;
   /** **换行安全宽**（占画布宽的比例）。默认 0 = 沿用老行为。 */
   safe_width_ratio?: number;
+  /** **弹入的起始缩放**（T1）。`None` = 1.0（不缩）。 */
+  scale_in_from?: number | null;
+  /** **弹入窗口的时长（毫秒）**（T1）。`None` = 0 = 关（**不缩**）。 */
+  scale_in_ms?: number | null;
+  /** **弹入的过冲峰值**（T1）。`None` = 1.0（不过冲）。 */
+  scale_in_peak?: number | null;
   /** **阴影的模糊半径**（占**文档高**的比例；0 = 硬阴影）。 */
   shadow_blur_ratio?: number;
   /** **文字阴影的颜色**（`None` = 不画阴影，默认 —— 既有工程逐字节不变）。 */
@@ -227,6 +274,12 @@ export interface SubtitleStyle {
   shadow_dx_px?: number;
   /** 阴影的垂直偏移（文档像素，**正数向下**）。 */
   shadow_dy_px?: number;
+  /** **抖动频率（Hz）**（T4）。`None` = [`crate::text_motion::DEFAULT_SHAKE_HZ`]（18.0）。 */
+  shake_hz?: number | null;
+  /** **抖动的相位**（弧度）（T4）。`None` = 0.0。 */
+  shake_phase?: number | null;
+  /** **抖动幅度**（T4，**文档像素**）。`None` = 0.0 = 不抖。 */
+  shake_px?: number | null;
   /** **装不下时整体缩字号的下限**。默认 0 = 不缩（老行为：超出直接丢行）。 */
   shrink_min_scale?: number;
   /** 描边颜色。`outline` 为假时忽略。 */
@@ -265,6 +318,8 @@ export interface TransformV2 {
   /** **角度制**（契约规定，不由字段名暗示）。 */
   rotation: number;
   scale: number;
+  /** **纵向倍数**（`1.0` = 纵向跟随 `scale`，即**等比**）。 */
+  scale_y?: number;
   x: number;
   y: number;
 }
