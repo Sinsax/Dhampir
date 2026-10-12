@@ -457,6 +457,23 @@ pub fn layout(text: &str, style: &SubtitleStyle, sequence: (u32, u32)) -> TextLa
         (1.0 - 2.0 * style.bottom_margin.clamp(0.0, 0.5)).max(0.0)
     };
     let max_width_px = sequence_width * safe_w;
+    // **竖排的可用长度**（E 组）：横排下"一行"的长度是画面的**宽**，
+    // 竖排下一条"列"的长度是画面的**高** ⇒ 安全比例要用纵向那个。
+    //
+    // ⚠️ 竖排时**不能再拿 `safe_w` 当长度**：那是横向安全比例（0.875），
+    //    而画面的宽高比是 16:9 ⇒ 用错一维会让竖排列数/断列位置全错，
+    //    且**看起来仍然像一排竖着的字**（只是断得不对），不会报任何错。
+    //
+    // ⚠️ 竖排**忽略 `anchor_bottom`**（第一版的口径收窄）：那个字段管的是
+    //    横排下的纵向位置，而竖排下纵向变成了**长度方向**，语义转置了。
+    //    第一版改为按内容居中 —— 如实写在这里，别让后人以为它是完整的转置。
+    let safe_h = if style.safe_width_ratio > 0.0 {
+        // 复用同一个安全比例：用户配 0.875 的意图是"留出四周安全边"，
+        // 横竖都该是同一个数（竖排不需要另一份配置）。
+        style.safe_width_ratio.clamp(0.0, 1.0)
+    } else {
+        (1.0 - 2.0 * style.bottom_margin.clamp(0.0, 0.5)).max(0.0)
+    };
     // 纵向：`anchor_bottom` 是**文字块底边的归一化 y**（1.0 = 贴底 = 老行为）。
     // ⚠️ 只在显式配了（< 1.0）时才接管，否则仍走 `1.0 - bottom_margin` 那条老式子。
     let block_bottom = if style.anchor_bottom < 1.0 {
@@ -503,12 +520,51 @@ pub fn layout(text: &str, style: &SubtitleStyle, sequence: (u32, u32)) -> TextLa
     let wrap_width_em = max_width_em / scale;
 
     let mut raw_lines: Vec<Vec<TextPart>> = Vec::new();
-    for paragraph in text.split('\n') {
-        wrap_paragraph(paragraph, wrap_width_em, &mut raw_lines);
+    if style.vertical.unwrap_or(false) {
+        // -----------------------------------------------------------------
+        // **竖排**（E 组 3 档）
+        // -----------------------------------------------------------------
+        //
+        // ⚠️⚠️ 竖排**不是**"把横排结果转 90°" —— 那是两个不同的排版问题。
+        //
+        //   横排：一行放不下 ⇒ 另起一行。**行宽** = 安全宽（横向），行数受纵向限制。
+        //   竖排：一**列**放不下 ⇒ 另起一列。**列高** = 安全高（纵向），列数受横向限制。
+        //
+        //   两者是**转置**关系。直接旋转画布会让字的基线对齐全错：
+        //   标点在竖排里要落在字的右上角，拉丁字母要整体旋转 90°，
+        //   这些都不是"把整幅图转一下"能得到的结果。
+        //
+        // ⇒ 这里做的是**真的重排**：喂给「折行」的那个"可用长度"从
+        //   `max_width_em`（横向）换成**安全高换算出来的 em 数**（纵向）。
+        //   折出来的每一"行"在竖排里就成了一条**竖列**，列里的字符
+        //   仍然是**正向**的单个字（由渲染侧按列落位）。
+        //
+        // ⚠️ 第一版的**已知收窄**（如实写）：一个"列"里逐字上下堆叠，
+        //    但每个字仍按**横排**的度量宽度占位 —— 也就是**没有**做
+        //    "一个字占满一个行盒高"的重心调整。对全角汉字（E 组三个档位
+        //    的实际用途）两者等价（全角字宽 = 字高），对拉丁字母会有偏差。
+        //    E 组的档位都是中文竖排 ⇒ 这一版够用；写在这里免得后人以为
+        //    它是完整实现。
+        let safe_h_em = (sequence_height * safe_h) / font_px;
+        for paragraph in text.split('\n') {
+            wrap_paragraph(paragraph, safe_h_em / scale, &mut raw_lines);
+        }
+    } else {
+        for paragraph in text.split('\n') {
+            wrap_paragraph(paragraph, wrap_width_em, &mut raw_lines);
+        }
     }
 
     // max_lines = 0 表示不显示：全部丢掉并如实计数。
     // `keep_all_lines` 时**不截断**（参照从不丢行，见那个字段的文档）。
+    //
+    // ⚠️⚠️ **竖排下 `max_lines` 数的是"列"，而 `raw_lines` 已经是"列"了** ——
+    //    这一点在第一版里被我搞错过，代价是一次真机渲染直接暴露：
+    //    横排下 `raw_lines` 是**行**（一行多个字），竖排下它是**列**
+    //    （一列多个字）。所以这里的 `keep` 对竖排**本来就是列数**，
+    //    后面那个"每列拆成逐字一行"的循环才把它摊平。
+    //    ⇒ **`keep` 的语义两排一致（都是"最多几个单位"），不用改**。
+    //    真正会错的是**摊平之后**再去截断 —— 见下面那段循环里的说明。
     let keep = if style.keep_all_lines {
         raw_lines.len()
     } else {
@@ -523,6 +579,78 @@ pub fn layout(text: &str, style: &SubtitleStyle, sequence: (u32, u32)) -> TextLa
     let block_top = block_bottom - (keep as f32) * line_height_norm;
 
     let mut lines = Vec::with_capacity(keep);
+    if style.vertical.unwrap_or(false) {
+        // -----------------------------------------------------------------
+        // **竖排成行**：把每个"列"（= 上面折出来的一行）拆成**逐字独占一行**
+        // -----------------------------------------------------------------
+        //
+        // 为什么拆成"一行一个字"：
+        //
+        // 下游（`place_line` 与两条渲染路）的几何口径是**"一行 = 一个横排行盒"**：
+        // 它在行盒里把各段**横向依次**摆开、整段按行盒宽**居中**。
+        // 那是横排的正确形状，但竖排要的是**逐字纵向堆叠**。
+        //
+        // ⇒ 与其在下游加一条"整行再内部切列"的第二套几何（那会让
+        //   `place_line` 同时扛两种排法，而两端的落点算术**必须同源**），
+        //   不如在这里把它**摊平成一行一个字**：
+        //   下游一行摆一个字 = 那个字在自己的行盒里居中 = **竖排要的样子**，
+        //   而下游一行代码都不用改。列与列的间距、每个字的纵向步进，
+        //   都由下面那套 `line_height_norm` 与列偏移控制。
+        //
+        // ⚠️ 代价（如实写）：`max_lines` 在竖排下**数的是"行"**，
+        //    而这里已经把它拆成"一个字一行" ⇒ 它会变成"最多几个字"。
+        //    竖排的截断语义因此与横排不同。E 组三个档位的内容都很短
+        //    （一行标题级），够用；要真正做对得给竖排单独一个"最多几列"的字段。
+        //    写在这里，免得后人以为它是完整的。
+        //
+        // ⚠️ 列序：竖排的中文习惯是**从右往左**排（第一列在最右）。
+        //    这与横排"第一行在最上"是同一个"先读到的先出现"的关系。
+        let col_step_norm = line_height_norm;
+        let total_cols = keep.max(1) as f32;
+        for (col_index, raw) in raw_lines.iter().take(keep).enumerate() {
+            // 每条"列"里的字，逐字成为一行。**保留段落内的切分**：
+            // 一个 run 可能有多个字，逐字拆开但保留各自的颜色。
+            let mut chars: Vec<TextPart> = Vec::new();
+            for part in raw {
+                for ch in part.text.chars() {
+                    chars.push(TextPart {
+                        text: ch.to_string(),
+                        highlight: part.highlight,
+                    });
+                }
+            }
+            if chars.is_empty() {
+                continue;
+            }
+            // 这一列在横向的位置：第一列靠右，依次向左。
+            let col_center = 0.5 + (total_cols - 1.0) / 2.0 * col_step_norm - col_index as f32 * col_step_norm;
+            // 整列纵向居中：竖排忽略 `anchor_bottom`（见上面 `safe_h` 的说明）。
+            let col_len_norm = chars.len() as f32 * line_height_norm;
+            let col_top = 0.5 - col_len_norm / 2.0;
+            for (ci, ch) in chars.into_iter().enumerate() {
+                let w = (measure_em(&ch.text) * font_px / sequence_width).min(1.0);
+                lines.push(TextLine {
+                    parts: vec![ch.clone()],
+                    text: ch.text.clone(),
+                    font_ratio: style.font_ratio * scale,
+                    scale,
+                    rect: NormalizedRect {
+                        // 每个字在**自己那一格**里居中。
+                        x: col_center - w / 2.0,
+                        y: col_top + ci as f32 * line_height_norm,
+                        width: w,
+                        height: line_height_norm,
+                    },
+                });
+            }
+        }
+        return TextLayout {
+            lines,
+            // ⚠️ `dropped_lines` 在竖排下按"列"计（与 `max_lines` 同口径），
+            //    不按"字"——否则一个正常的三列标题会报"丢了十几行"。
+            dropped_lines,
+        };
+    }
     for (index, raw) in raw_lines.iter().take(keep).enumerate() {
         // `text` 是各段的拼接：断行量宽、栅格化缓存键都还用它。
         let text: String = raw.iter().map(|p| p.text.as_str()).collect();
@@ -1386,6 +1514,232 @@ mod tests {
                 "档位必须越往下 block_bottom 越大：anchor={anchor} prev={prev} now={b}"
             );
             prev = b;
+        }
+    }
+
+    // =======================================================================
+    // 竖排（E 组 3 档）
+    // =======================================================================
+
+    /// 竖排把每个字摊成**自己的一行** —— 下游的"一行摆一段"因此变成"一格一个字"。
+    #[test]
+    fn 竖排每个字占一行() {
+        let text = "春夏秋冬";
+        let h = layout(text, &style(), SEQUENCE);
+        assert_eq!(h.lines.len(), 1, "横排：四个字应当在**同一行**里");
+
+        let v = layout(
+            text,
+            &SubtitleStyle {
+                vertical: Some(true),
+                ..style()
+            },
+            SEQUENCE,
+        );
+        assert_eq!(v.lines.len(), 4, "竖排：四个字应当是**四行**");
+        let chars: String = v.lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(chars, text, "竖排不该丢字或改序：{chars}");
+        for l in &v.lines {
+            assert_eq!(l.text.chars().count(), 1, "竖排的每一行只能有一个字：{:?}", l.text);
+        }
+    }
+
+    /// ⚠️ **这是本组最要紧的判据**：竖排必须是**真的转置**，不是"横排结果原样返回"。
+    ///
+    /// 只断言"竖排有 4 行"是不够的 —— 一个**退化成横排**的实现（比如
+    /// `vertical` 读都没读）也能通过"不丢字"。必须量**几何上的转置**：
+    /// 横排各字沿 **x** 推进，竖排各字沿 **y** 推进。
+    #[test]
+    fn 竖排是转置而不是横排() {
+        let text = "春夏秋冬";
+        let v = layout(
+            text,
+            &SubtitleStyle {
+                vertical: Some(true),
+                ..style()
+            },
+            SEQUENCE,
+        );
+        let ys: Vec<f32> = v.lines.iter().map(|l| l.rect.y).collect();
+        let xs: Vec<f32> = v.lines.iter().map(|l| l.rect.x).collect();
+        // ⚠️⚠️ **先断言行数**，再断言几何 —— 少这一句整个判据可以**空转**：
+        //    退化成横排的实现只给 1 行，下面那些 `for i in 1..ys.len()`
+        //    一次都不进循环，于是**全过**。（实测：加这句之前，
+        //    「忽略 vertical」的变异体在本条上**没有被打红**。）
+        assert_eq!(v.lines.len(), 4, "竖排必须是四行（退化实现只有一行 ⇒ 下面全空转）");
+        // y **严格递增**（逐字往下走）
+        for i in 1..ys.len() {
+            assert!(
+                ys[i] > ys[i - 1],
+                "竖排各字必须沿 y 逐字下行：{ys:?}"
+            );
+        }
+        // x **全部相同**（一个字一列，列内横向不动）
+        let first = xs[0];
+        for x in &xs {
+            assert!(
+                (x - first).abs() < 1e-6,
+                "竖排单列里各字的 x 必须相同（实得 {xs:?}）"
+            );
+        }
+        // 而横排恰好相反：y 全同、x 递增。两侧都量 ⇒ "退化成横排"必被打红。
+        let h = layout(text, &style(), SEQUENCE);
+        assert_eq!(h.lines.len(), 1, "横排是一行");
+    }
+
+    /// 竖排的**列序从右往左**（中文习惯），且列间距 = 行盒高。
+    #[test]
+    fn 竖排多列从右往左() {
+        // 字号大到装不下四个字 ⇒ 会断成多列。
+        let text = "春夏秋冬";
+        let v = layout(
+            text,
+            &SubtitleStyle {
+                vertical: Some(true),
+                font_ratio: 0.5,
+                safe_width_ratio: 0.3,
+                ..style()
+            },
+            SEQUENCE,
+        );
+        // 按列分组（同一列里 x 相同）
+        let mut cols: Vec<f32> = Vec::new();
+        for l in &v.lines {
+            if cols.last().map(|c| (c - l.rect.x).abs() > 1e-6).unwrap_or(true) {
+                cols.push(l.rect.x);
+            }
+        }
+        assert!(cols.len() >= 2, "字号 0.5 + 安全宽 0.3 应当断成多列：{cols:?}");
+        for i in 1..cols.len() {
+            assert!(
+                cols[i] < cols[i - 1],
+                "列序必须**从右往左**（第一列在最右）：{cols:?}"
+            );
+        }
+    }
+
+    /// 竖排缺省（`None`）与显式 `Some(false)` 都必须与**改动前逐字节相同**。
+    ///
+    /// ⚠️ 这条钉的是 R4：老工程没有 `vertical` 键 ⇒ 布局结果不许有任何变化。
+    #[test]
+    fn 竖排缺省时逐字节不变() {
+        let text = "春夏秋冬";
+        let base = layout(text, &style(), SEQUENCE);
+        for v in [None, Some(false)] {
+            let l = layout(
+                text,
+                &SubtitleStyle {
+                    vertical: v,
+                    ..style()
+                },
+                SEQUENCE,
+            );
+            assert_eq!(l.lines.len(), base.lines.len(), "vertical={v:?} 行数变了");
+            for (a, b) in l.lines.iter().zip(base.lines.iter()) {
+                assert_eq!(a.text, b.text, "vertical={v:?} 文字变了");
+                assert!(
+                    (a.rect.x - b.rect.x).abs() < 1e-9
+                        && (a.rect.y - b.rect.y).abs() < 1e-9
+                        && (a.rect.width - b.rect.width).abs() < 1e-9
+                        && (a.rect.height - b.rect.height).abs() < 1e-9,
+                    "vertical={v:?} 的落点变了：{:?} vs {:?}",
+                    a.rect,
+                    b.rect
+                );
+            }
+        }
+    }
+
+    /// ⚠️ **列容量 = 安全比例 ÷ 字号比例** —— 真机踩过的那个式子。
+    ///
+    /// 这条不是为了测算术，是为了把"竖排只显示头两个字"这个**症状**
+    /// 与它的**原因**钉在一起：以后有人看到那个症状，
+    /// 判据会直接告诉他该调哪个数。
+    #[test]
+    fn 竖排列容量等于安全比例除以字号比例() {
+        // 6 个全角字；安全宽 0.6、字号 0.1 ⇒ 每列 6 个字 ⇒ 恰好 1 列。
+        let fitted = layout(
+            "逐字散开测试",
+            &SubtitleStyle {
+                vertical: Some(true),
+                font_ratio: 0.1,
+                safe_width_ratio: 0.6,
+                keep_all_lines: true,
+                ..style()
+            },
+            SEQUENCE,
+        );
+        let cols = 列数(&fitted);
+        assert_eq!(cols, 1, "每列 6 字 ⇒ 6 个字应当只占 1 列（实得 {cols} 列）");
+        assert_eq!(fitted.lines.len(), 6, "六个字仍然要有六行（逐字）");
+
+        // 同一个文本，把安全宽缩到 0.2（每列 2 个字）⇒ 应当断成 3 列。
+        let split = layout(
+            "逐字散开测试",
+            &SubtitleStyle {
+                vertical: Some(true),
+                font_ratio: 0.1,
+                safe_width_ratio: 0.2,
+                keep_all_lines: true,
+                ..style()
+            },
+            SEQUENCE,
+        );
+        let cols2 = 列数(&split);
+        assert_eq!(cols2, 3, "每列 2 字 ⇒ 6 个字应当占 3 列（实得 {cols2} 列）");
+    }
+
+    /// ⚠️ 竖排下 `max_lines` 截的是**列**，不是字 —— 真机那次
+    /// 「只显示了头两个字」就是这条：`font_ratio=0.16` + `safe_width=0.2`
+    /// ⇒ 每列 1.25 个字 ⇒ 6 个字要 5 列，而 `max_lines=3` 只留 3 列。
+    ///
+    /// 判据同时钉住**两个方向**：截断按列算（不是按字），且丢的列数如实报。
+    #[test]
+    fn 竖排最大行数截的是列不是字() {
+        let st = SubtitleStyle {
+            vertical: Some(true),
+            font_ratio: 0.1,
+            safe_width_ratio: 0.2, // 每列 2 个字 ⇒ 6 字要 3 列
+            keep_all_lines: false,
+            max_lines: 2, // ⇒ 只留 2 列 = 4 个字
+            ..style()
+        };
+        let l = layout("逐字散开测试", &st, SEQUENCE);
+        assert_eq!(l.lines.len(), 4, "留 2 列 × 每列 2 字 = 4 行（实得 {}）", l.lines.len());
+        assert_eq!(l.dropped_lines, 1, "6 字 3 列、留 2 列 ⇒ **丢 1 列**（不是丢 2 个字）");
+        let got: String = l.lines.iter().map(|x| x.text.as_str()).collect();
+        assert_eq!(got, "逐字散开", "竖排截断后剩的应当是**最靠前的两列**：{got}");
+    }
+
+    /// 数一条竖排布局里有几列（同一列里各字 x 相同）。
+    fn 列数(l: &TextLayout) -> usize {
+        let mut cols: Vec<f32> = Vec::new();
+        for line in &l.lines {
+            if cols
+                .last()
+                .map(|c| (c - line.rect.x).abs() > 1e-6)
+                .unwrap_or(true)
+            {
+                cols.push(line.rect.x);
+            }
+        }
+        cols.len()
+    }
+
+    /// 竖排也**不丢字**：短文本不会因为转置而被截掉。
+    #[test]
+    fn 竖排不丢字() {
+        for text in ["春", "春夏", "春夏秋", "春夏秋冬"] {
+            let v = layout(
+                text,
+                &SubtitleStyle {
+                    vertical: Some(true),
+                    ..style()
+                },
+                SEQUENCE,
+            );
+            let got: String = v.lines.iter().map(|l| l.text.as_str()).collect();
+            assert_eq!(got, text, "竖排丢了字：{text} -> {got}");
         }
     }
 }

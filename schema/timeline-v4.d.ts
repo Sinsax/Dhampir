@@ -245,6 +245,8 @@ export interface SubtitleStyle {
   stroke_color?: number[];
   /** **描边宽度** = 目标高度 * 这个比例，单位是**外侧宽度**（见下）。 */
   stroke_ratio?: number;
+  /** **竖排**（E 组 3 档）。`None` / `false` = 横排（既有行为）。 */
+  vertical?: boolean | null;
 }
 
 export interface TimebaseDto {
