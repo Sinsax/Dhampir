@@ -8,6 +8,64 @@
 
 ---
 
+## [0.4.0] — 文字纵向锚（`anchor_bottom`）· **未发布 / 仅供下游本地测试**
+
+> ⚠️ **这一版还没发。** 产物已按发布形态生成并落在 `dist/dhampir-0.4.0+<sha>/`，
+> 只为给下游（YekiTrim）在**本机**试，**没打 tag、没上传 Release、没改 `latest` 指针**。
+> 发布动作（tag + Release 资产 + 下载页）等确认后再做。
+
+**契约号动了**：`host_api` **6 → 7**（`project_schema` 仍是 1）。
+`overlay.subtitle_style` 多了 `anchor_bottom` —— 按本仓一贯口径
+「wasm 返回体加字段即视为 API 变更」（与 v4→v5 的 `shadow_*` 四键同类）。
+
+### ⚠️ 下游必须先换产物再改代码
+
+`host_api` 变了，**旧前端对着新底座（或新前端对着旧底座）会当场报"版本不匹配"** ——
+这正是那个哨兵存在的意义。下游要**先**把新产物放进去，再动 `DHAMPIR_HOST_API`；
+只改一边会让预览整个不可用。
+
+### Added
+
+- **`SubtitleStyle::anchor_bottom`** —— 文字块**底边**的归一化 y（`1.0` = 贴底 = 缺省）。
+  宿主据此在画面上**分档**摆文字（上 / 中 / 下）。
+
+  在此之前唯一能表达纵向的旋钮是 `bottom_margin`，而它**同时**被当作左右安全宽的输入：
+
+  ```rust
+  let margin = style.bottom_margin.clamp(0.0, 0.5);
+  let max_width_px = sequence_width * (1.0 - 2.0 * margin);   // ← 左右安全宽
+  let block_top    = 1.0 - margin - keep * line_height_norm;  // ← 纵向位置
+  ```
+
+  安全宽 0.875 要求它 = `0.0625`，而把文字抬到画面上方需要它 ≈ `0.6` ——
+  抬上去 `max_width` 变负数 ⇒ **一个字都排不出来**，且**不报错**
+  （调用方只看到"没有字要画"）。这是**真实发生过**的事故，不是推演。
+
+### Changed
+
+- **`safe_width_ratio` 现在真的被 `layout()` 读到**（在此之前它只在缩字那条路上被读）。
+  显式配了（`> 0`）就**只认它**管左右；不配（缺省 `0`）仍走"复用 `bottom_margin`"的老路。
+  ⇒ **不写这两个字段的既有工程逐字节不变**（有单测钉着）。
+
+### 兼容性
+
+| 面 | 变没变 |
+|---|---|
+| 工程文件形状（`project_schema = 1`） | 老工程**照读，一个键都不多**（`anchor_bottom` 带 `skip_serializing_if`） |
+| `dhampir_host_api_version` | **6 → 7** |
+| 既有字段 | **全都不变** |
+
+### 顺带修掉一处**一直编译不过**的代码
+
+`crates/dhampir-wasm` 在 `--target wasm32-unknown-unknown` 下编不过 ——
+`0e3209b` 把轨道级样式从帧级共享槽搬成逐条携带（`track_style`）时**漏改了 wasm 侧**。
+
+⚠️ 它藏了很久是因为 **`cargo build -p dhampir-wasm` 与 `cargo test` 都是绿的**：
+出问题的代码在 `#[cfg(target_arch = "wasm32")]` 一条路径上，**只有那个 target 才编到**。
+而那正是发版编的东西。（`check-dual-end` 因此一直红。）
+
+---
+
 ## [0.3.0] — 播放速率（`source.source_rate`）
 
 **契约号仍未动**（`project_schema = 1`、`host_api = 6`）：加的是**可选字段**，
