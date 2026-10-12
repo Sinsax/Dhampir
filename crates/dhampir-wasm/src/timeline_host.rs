@@ -3329,6 +3329,11 @@ fn danmaku_item_json(item: &DanmakuTextItem) -> serde_json::Value {
         track_style: item.track_style.clone(),
         // 弹幕不缩字（参照的弹幕没有缩字逻辑）；这里是从弹幕条目转出来的。
         scale: 1.0,
+        // ⚠️ **弹幕没有逐条的形变**（`DanmakuTextItem` 上本来就没有这两个字段）——
+        //    倾斜/压扁是字幕那条路的东西。这里如实给 0 / 1，不是"忘了填"，
+        //    与上面 `dx_px: 0.0` 同一条理由。
+        rotation_deg: 0.0,
+        scale_y: 1.0,
         // 弹幕没有 `.hl` 标记（参照的弹幕路径也不解析它）。
         parts: Vec::new(),
     });
