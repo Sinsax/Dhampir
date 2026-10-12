@@ -3300,6 +3300,32 @@ fn text_item_json(item: &dhampir_core::overlay::TextItem) -> serde_json::Value {
             .iter()
             .map(|r| serde_json::json!({ "text": r.text, "color": r.color }))
             .collect::<Vec<_>>(),
+        // **逐字格子（P3，2026-10-13）**：每个字的位置 + 这一帧它自己的变换。
+        //
+        // ⚠️⚠️ **必须导出** —— 这是"预览↔成片逐字对拍"的**唯一**依据。
+        //    不导出的话 P4 判据只能比整行，而"整行一样、逐字不一样"
+        //    正是逐字功能最典型的失败模式（预览里散开了、成片里没有）。
+        //    ⚠️ 本仓已经栽过**四次**同形状的坑：`color` / `font_ratio` /
+        //       `scale` / `parts` 都曾漏在预览侧的导出里，而两端**各自都看不出来**。
+        //    空数组 = 这一条没有逐字效果（宿主走老路）。
+        "cells": item
+            .cells
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    // 字符本身：对拍时**要能认出是哪一个字**，
+                    // 否则"第 3 个字"在两端可能指到不同的字上（零宽字符、
+                    // 组合记号的存在让"序号"与"字形"不是一一对应）。
+                    "ch": c.ch.to_string(),
+                    "offset_em": c.offset_em,
+                    "advance_em": c.advance_em,
+                    "scale": c.scale,
+                    "rotation_deg": c.rotation_deg,
+                    "offset_x_em": c.offset_x_em,
+                    "offset_y_em": c.offset_y_em,
+                })
+            })
+            .collect::<Vec<_>>(),
     })
 }
 
