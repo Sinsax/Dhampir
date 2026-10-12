@@ -201,6 +201,20 @@ impl Fixture {
         line: &TimelineV2,
         subtitles: &SubtitleTable,
     ) -> Rendered {
+        self.render_at(out, line, subtitles, STEADY_FRAME)
+    }
+
+    /// 渲染**指定帧**。
+    ///
+    /// ⚠️ 摇摆那条必须用它：摆动是"**同一个元素在不同帧角度不同**"，
+    /// 只渲染一帧看不出任何东西（那正是判据会空转的形状）。
+    fn render_at(
+        &self,
+        out: &str,
+        line: &TimelineV2,
+        subtitles: &SubtitleTable,
+        frame: Frame,
+    ) -> Rendered {
         let sources = self.sources();
         let mut timebases = AssetTimebases::new();
         timebases.insert(BACKGROUND_ASSET, timebase());
@@ -209,8 +223,8 @@ impl Fixture {
             timeline: line,
             sources: &sources,
             asset_timebases: &timebases,
-            from: STEADY_FRAME,
-            to: STEADY_FRAME,
+            from: frame,
+            to: frame,
             width: TARGET.0,
             height: TARGET.1,
             sequence: TARGET,
@@ -223,7 +237,7 @@ impl Fixture {
             audio: AudioMode::Silent,
             output: &output,
         };
-        let frames: Vec<Frame> = vec![STEADY_FRAME];
+        let frames: Vec<Frame> = vec![frame];
         let written = render_frames_png(&plan, &frames).expect("渲染必须成功");
         assert_eq!(written.len(), 1, "要一帧就该写一帧");
         let png = written.into_iter().next().expect("有一帧");
@@ -310,6 +324,58 @@ fn fixture_timeline(transform: &str) -> TimelineV2 {
         transform = transform,
     );
     serde_json::from_str(&text).expect("夹具时间线必须能反序列化")
+}
+
+/// 与 [`fixture_timeline`] 同形，但字幕图层**多一组 `keyframes`**（T7 摇摆用）。
+///
+/// ⚠️ 关键帧写在**元素自己**身上（`layers[i].keyframes`），与 `transform` 同级 ——
+/// 底座 `evaluate_overlay` 求的就是它。写到轨级会**不生效且不报错**。
+///
+/// ⚠️ 关键帧的 `frame` 是**相对元素 `start` 的**（`local_frame = frame − start`），
+/// 本夹具 `start = 0` ⇒ 两者相同。要测"元素晚于轨开始"得让 `start ≠ 0`。
+fn timeline_with_keyframes(transform: &str, keyframes: &str) -> TimelineV2 {
+    let text = format!(
+        r#"{{
+            "schema": 3,
+            "timebase": {{ "num": 60, "den": 1 }},
+            "tracks": [
+                {{
+                    "id": "v1",
+                    "kind": "video",
+                    "layers": [{{
+                        "id": "bg",
+                        "start": {start},
+                        "end": {end},
+                        "source": {{ "asset_id": "{background}", "source_in": 0 }}
+                    }}]
+                }},
+                {{
+                    "id": "sub",
+                    "kind": "subtitle",
+                    "layers": [{{
+                        "id": "cue",
+                        "start": {start},
+                        "end": {end},
+                        "source": {{ "asset_id": "{subtitle}", "source_in": 0 }},
+                        "transform": {transform},
+                        "keyframes": {keyframes}
+                    }}],
+                    "subtitle": {{
+                        "font_ratio": 0.055,
+                        "color": [255, 255, 255, 255],
+                        "outline": false
+                    }}
+                }}
+            ]
+        }}"#,
+        start = SPAN.0,
+        end = SPAN.1,
+        background = BACKGROUND_ASSET,
+        subtitle = SUBTITLE_ASSET,
+        transform = transform,
+        keyframes = keyframes,
+    );
+    serde_json::from_str(&text).expect("带关键帧的夹具时间线必须能反序列化")
 }
 
 fn table(srt: &str) -> SubtitleTable {
@@ -866,6 +932,99 @@ fn t5_hl_逐段一样有形变() {
         flat_ink.width(),
         squash_ink.width(),
         flat_ink.count,
+        base.elapsed().as_secs_f64()
+    );
+}
+
+/// ★★ **摇摆真的摆起来了**（T7，2026-10-13）—— 逐帧真机验证。
+///
+/// # 它补的是哪一半
+///
+/// 「摇摆」= `rotation` 的**往复**，而往复只能靠**关键帧**表达。
+/// 在此之前底座 `evaluate_overlay` **不求值关键帧** ⇒ 写了会被静默忽略，
+/// 所以规格里这条长期标 ❌「做不到」。`bcff0a5` 接通求值后，本文件把它钉在像素上。
+///
+/// ⚠️⚠️ **判据必须是"同一元素、不同帧、角度不同"**：
+/// 只渲染一帧的话，"关键帧生效了"与"关键帧被忽略、用了静态值"**完全一样** ——
+/// 判据会空转。所以这里取**同一段字的四个帧**分别量倾角。
+///
+/// # 量什么
+///
+/// 关键帧是 `0 → +8 → 0 → −8 → 0`（四分之一周期 = 7 帧 @60fps、900ms 周期）。
+/// 于是第 0 / 7 / 14 / 21 帧应分别约 `0° / +8° / 0° / −8°`。
+/// 判的是**符号与量级**（二阶矩反解的倾角有偏差，精确性由 `overlay.rs` 的
+/// `旋转关键帧逐帧求值` 负责 —— 那条逐值断言曲线本身）。
+#[test]
+#[ignore = "需要真 GPU + 字体；用 --ignored 跑，并设 TMP（见文件头）"]
+fn t7_摇摆真的逐帧改变倾角() {
+    if !temp_writable() {
+        return;
+    }
+    let fixture = Fixture::new("sway");
+    let base = progress();
+
+    // 元素 + `rotation` 关键帧：0 → +8 → 0 → −8。
+    // ⚠️ 周期给 28 帧（≈467ms @60fps）—— 比默认 900ms 短，
+    //    这样**四个采样点都落在 60 帧的 SPAN 里**（默认周期下 −8° 那一点在 42 帧，
+    //    也在范围内，但用 28 帧能让"摆得快"这件事一并体现）。
+    let transform = r#"{ "x": 0.0, "y": 0.0, "scale": 1.0, "rotation": 0.0, "scale_y": 1.0 }"#;
+    let tl = timeline_with_keyframes(
+        transform,
+        r#"[
+            { "frame": 0,  "target": "rotation", "value": 0.0,  "easing": "linear" },
+            { "frame": 7,  "target": "rotation", "value": 8.0,  "easing": "linear" },
+            { "frame": 14, "target": "rotation", "value": 0.0,  "easing": "linear" },
+            { "frame": 21, "target": "rotation", "value": -8.0, "easing": "linear" },
+            { "frame": 28, "target": "rotation", "value": 0.0,  "easing": "linear" }
+        ]"#,
+    );
+    let table = table(&srt());
+    let bare = fixture.render_at("bare", &background_only_timeline(), &table, 7);
+
+    // 逐帧量倾角。四个采样点 = 关键帧的四个极值/中点。
+    let mut measured: Vec<(Frame, f64)> = Vec::new();
+    for frame in [0_i64, 7, 14, 21] {
+        let shot = fixture.render_at(&format!("f{frame}"), &tl, &table, frame);
+        let ink = stats(&shot.image, &bare.image)
+            .unwrap_or_else(|| panic!("第 {frame} 帧必须画出了字（否则是字体/没画，不是摆动）"));
+        measured.push((frame, ink.angle_deg()));
+    }
+
+    let at = |f: Frame| measured.iter().find(|(m, _)| *m == f).expect("采过").1;
+    let (a0, a7, a14, a21) = (at(0), at(7), at(14), at(21));
+
+    // ① 起点 ≈ 0°（关键帧值 0）。
+    assert!(
+        a0.abs() < 3.0,
+        "第 0 帧关键帧值 0° ⇒ 倾角应接近 0，实得 {a0:.2}°"
+    );
+    // ② 第 7 帧应明显**正**倾（关键帧 +8）。
+    assert!(
+        a7 > 3.0,
+        "第 7 帧关键帧 +8° ⇒ 倾角应显著为正，实得 {a7:.2}° —— \
+         接近 0 说明**关键帧没被求值**（那正是接通前的老行为）"
+    );
+    // ③ 第 14 帧回到 ≈ 0°（关键帧 0）—— 这是"往复"的关键一步。
+    assert!(
+        a14.abs() < 3.0,
+        "第 14 帧关键帧回到 0° ⇒ 倾角应接近 0，实得 {a14:.2}° —— \
+         若仍是 +8 附近，说明曲线**卡在首值**（`channel_from` 没在求值）"
+    );
+    // ④ 第 21 帧应明显**负**倾（关键帧 −8）—— 方向翻过来了，这才是"摆"。
+    assert!(
+        a21 < -3.0,
+        "第 21 帧关键帧 −8° ⇒ 倾角应显著为负（方向翻转），实得 {a21:.2}° —— \
+         没翻说明只是单调插值、不是往复"
+    );
+    // ⑤ 正负两侧量级应接近（对称摆动）。
+    assert!(
+        (a7.abs() - a21.abs()).abs() < 4.0,
+        "正负两侧摆幅应对称：+侧 {a7:.2}° vs −侧 {a21:.2}°"
+    );
+
+    eprintln!(
+        "t7 摇摆：关键帧 0/+8/0/−8 ⇒ 实测倾角 {a0:.2}° / {a7:.2}° / {a14:.2}° / {a21:.2}°（帧 0/7/14/21）；\
+         耗时 {:.1}s",
         base.elapsed().as_secs_f64()
     );
 }
