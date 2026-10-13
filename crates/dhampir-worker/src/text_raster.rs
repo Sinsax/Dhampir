@@ -619,10 +619,10 @@ pub fn drawtext_args(
 
     if key.outline {
         if key.stroke_px > 0 {
-            // **契约给了宽度。** 宽度口径见 [`ass_outline_px`]（实测不用换算）。
+            // **契约给了宽度**（成品像素）。换算到 libass 的虚拟画布见 [`ass_outline_px`]。
             style.push_str(&format!(
                 ",Outline={},OutlineColour={}",
-                ass_outline_px(key.stroke_px),
+                ass_outline_px(key.stroke_px, key.height),
                 WHITE_INK
             ));
         } else {
@@ -632,7 +632,7 @@ pub fn drawtext_args(
             // 都走这里，而它们升级前渲染出来的描边宽度就是 `border_px(font_px)`。
             style.push_str(&format!(
                 ",Outline={},OutlineColour={WHITE_INK}",
-                ass_outline_px(border_px(key.font_px))
+                ass_outline_px(border_px(key.font_px), key.height)
             ));
         }
     } else {
@@ -769,14 +769,58 @@ pub fn ass_font_size(font_px: u32, bitmap_height: u32) -> u32 {
         .max(1.0) as u32
 }
 
-/// drawtext/契约的描边宽度（em 侧像素）→ ASS 的 `Outline`。
+/// drawtext/契约的描边宽度（**成品像素**）→ ASS 的 `Outline`（**虚拟画布像素**）。
 ///
-/// 本机实测：drawtext 的 `borderw=k` 与 ASS 的 `Outline=k` 画出来的描边**同宽**
-/// （两者都是"从字形轮廓向外 k 像素"），所以这里**不换算、直接透传**。
-/// 留这个函数是为了把"这里量过、结论是不用换"写下来 ——
-/// 否则下一个人看到"别处都换算、这里没有"会以为是漏了。
-pub fn ass_outline_px(stroke_px: u32) -> u32 {
-    stroke_px
+/// # ⚠️ 这里曾经"不换算"，那是一个真缺陷（2026-10-13）
+///
+/// 老写法是 `stroke_px` **直接透传**，理由是"本机实测 drawtext 的 `borderw=k`
+/// 与 ASS 的 `Outline=k` 同宽"。那条实测**本身没错，但它量的是老路**（`drawtext`）——
+/// `drawtext` 在**成品画布**上画，`borderw=k` 就是 k 成品像素。
+///
+/// 而**新路**（`subtitles=` / libass）的 `Outline` 活在 libass 的**虚拟画布**上，
+/// 高恒为 [`LIBASS_PLAY_RES_Y`]（288），与位图高**无关**。于是同一个 `Outline`
+/// 在位图高 161 时被画成 `161/288 ≈ 0.56` 倍 ⇒ **契约要 6 成品像素、实得 3.4**。
+/// 反过来说，老代码把 6 直接喂进去，本意是 6、libass 却按"虚拟画布 6"理解 —— 两端口径不同。
+///
+/// # ⚠️⚠️ 但换算是**必要不充分**的：真正让字糊掉的是"白填充 + 白描边"
+///
+/// 这一条必须写清楚，否则下一个人会以为"修了这个函数就完事了"。
+/// 实测（位图 900×161、`FontSize=192`、文本「逐字散开测试」）：
+///
+/// | `Outline` | 墨数 | 包围盒 | **覆盖率密度** |
+/// |---|---|---|---|
+/// | 0 | 15540 | 506×83 | **0.370**（清晰） |
+/// | 9（= 契约 5 成品像素） | 46098 | 548×93 | **0.905**（糊） |
+/// | 21（= 契约 12 成品像素） | 48680→ | 573×103 | 更糊 |
+///
+/// ⇒ **只要开了描边就糊**，与换算对不对**无关**。原因在 [`coverage_from_libass`]：
+/// 那条路要求"填充与描边**都画成白墨**"（否则黑描边与透明底逐字节相同、覆盖度
+/// **在数学上恢复不出来**），于是覆盖度 = **字形 ∪ 描边** —— 一个膨胀过的并集。
+/// 汉字笔画间隙只有 4–8px，`border_px(86) = 5` 的描边两侧共 10px ⇒ **间隙被填满**
+/// ⇒ 连成一块实心。这不是"描边太粗"，是**并集本身没有间隙**。
+///
+/// ⇒ 真正的修法在**覆盖度那一层**（要让填充与描边在灰度上可区分，
+/// 或干脆分两张位图），不在这个换算函数里。**本条只修口径不一致**，
+/// 并把"糊"这件事留一个能测的判据（见 `描边宽度要按_libass_虚拟画布高补偿`）。
+///
+/// # 换算
+///
+/// 与 [`ass_font_size`] 是**同一个** `play_res_scale`，方向相反：
+/// 那边是"成品字号 → 虚拟画布字号"（**乘**），这边是"成品描边 → 虚拟画布描边"
+/// 也要**乘** `play_res_scale`（= `288 / 位图高`）。
+/// ⚠️ 我第一版把方向写成了**除**，判据当场报 `left: 4, right: 1` —— 方向反了。
+///
+/// ⚠️ **必须与 `ass_font_size` 用同一个分母**（都用 `bitmap_height`），
+/// 否则字号与描边会脱钩：同一个工程换分辨率出片、字大小跟着变、描边却不跟着变。
+///
+/// ⚠️ 结果**至少为 1**：`Outline=0` 在 ASS 里是"不描边"，那是 `outline` 为假时
+/// **显式**写的值。走到这条路上说明用户**要**描边，给 0 会让"细描边"静默退化成"没描边"。
+pub fn ass_outline_px(stroke_px: u32, bitmap_height: u32) -> u32 {
+    if stroke_px == 0 {
+        return 0;
+    }
+    let play_res_scale = LIBASS_PLAY_RES_Y / f64::from(bitmap_height.max(1));
+    (f64::from(stroke_px) * play_res_scale).round().max(1.0) as u32
 }
 
 /// 把字体搬一份到**纯 ASCII 名的临时路径**，返回**接下来要喂给 ffmpeg 的那条路径**。
@@ -1922,9 +1966,13 @@ mod tests {
             Path::new("t.txt"),
         )
         .join(" ");
+        // ⚠️ **默认走老路径**（`stroke_px == 0`）：宽度从字号推 ⇒ `border_px(48) = 3`
+        //    成品像素。而这条路的位图是 **20 高** ⇒ 换算到虚拟画布：
+        //    `3 × 288/20 = 43.2 → 43`。libass 再按 `20/288` 缩放 ⇒ 正好 3 成品像素。
+        //    ⚠️ 修之前这里断言的是 `Outline=3` ⇒ 实得 `3 × 288/20 = 43` 成品像素（**14 倍**）。
         assert!(
-            joined.contains("Outline=3"),
-            "字号 48 的描边是 3 像素：{joined}"
+            joined.contains("Outline=43"),
+            "字号 48 ⇒ 3 成品像素描边、20 高位图 ⇒ 要换算成 Outline=43：{joined}"
         );
         // **默认走老路径**：`stroke_px == 0` → 宽度从字号推、颜色写死黑。
         // 这是默认值那条分支（`stroke_ratio` 的默认值是 0）。
@@ -2008,9 +2056,14 @@ mod tests {
             Path::new("t.txt"),
         )
         .join(" ");
+        // ⚠️ 契约要的是 **12 成品像素**，而这条路的位图是 **48 高** ⇒
+        //    喂给 libass 的 `Outline` 要按虚拟画布高（288）换算：`12 × 288/48 = 72`。
+        //    libass 再把它按 `48/288` 缩放画出来 ⇒ 正好 12 成品像素。
+        //    ⚠️ 修之前这里断言的是 `Outline=12` —— 那是**把成品像素当虚拟画布像素**，
+        //       48 高的画布上会画出 `12 × 288/48 = 72` 成品像素的描边（**6 倍**）。
         assert!(
-            joined.contains("Outline=12"),
-            "宽度要用契约给的 12，实得：{joined}"
+            joined.contains("Outline=72"),
+            "契约的 12 成品像素、48 高位图 ⇒ 要换算成 Outline=72，实得：{joined}"
         );
         // **描边色不进参数串**：libass 那条路上填充与描边共用同一张覆盖度 mask，
         // 描边的颜色由 tint 决定（见 coverage_from_libass 里写的那条口径收窄）。
@@ -2032,9 +2085,10 @@ mod tests {
             Path::new("t.txt"),
         )
         .join(" ");
+        // 同上：`border_px(48) = 3` 成品像素、**48 高位图** ⇒ `3 × 288/48 = 18`。
         assert!(
-            legacy_args.contains("Outline=3"),
-            "老行为：字号 48 -> 3 像素，实得：{legacy_args}"
+            legacy_args.contains("Outline=18"),
+            "老行为：字号 48 ⇒ 3 成品像素、48 高位图 ⇒ 要换算成 Outline=18，实得：{legacy_args}"
         );
         assert!(
             legacy_args.contains(&format!("OutlineColour={WHITE_INK}")),
@@ -2078,9 +2132,17 @@ mod tests {
         // 描边在 ASS 里就是 `force_style` 里的两项，追加在 `Outline=0` 的位置上。
         // 这里**照着实现改**（把 `Outline=0` 替换成带宽度与颜色的那两项），
         // 而不是重新拼一遍 —— 重拼会让这条测试与实现同源，那就验不出东西了。
+        // ⚠️ 宽度那一步要**走实现自己的换算函数**（`border_px` 给成品像素，
+        //    `ass_outline_px` 再换算到虚拟画布），**不要**在这里硬写一个数字 ——
+        //    硬写会在下一次改换算时静默失效（测试仍绿，因为它比的是自己写死的那个数）。
+        //    这条测试的价值是"参数串的**结构**没被人顺手改过"，宽度换算另由
+        //    `描边宽度要按_libass_虚拟画布高补偿` 负责。
         expected[at] = expected[at].replace(
             "Outline=0",
-            &format!("Outline={},OutlineColour={WHITE_INK}", border_px(32)),
+            &format!(
+                "Outline={},OutlineColour={WHITE_INK}",
+                ass_outline_px(border_px(32), outlined.height)
+            ),
         );
         assert_eq!(
             drawtext_args(
@@ -2981,6 +3043,62 @@ mod tests {
             drawtext_args(&k, &k.font_file, Path::new("C:/fontsB"), Path::new("t.txt")).join(" ");
         assert!(b.contains(r"fontsdir='C\:/fontsB'"), "换目录要跟着换：{b}");
         assert_ne!(a, b, "换字体目录必须换参数串（回退落在哪个字体上会变）");
+    }
+
+    /// **判据（本缺陷的回归）**：描边宽度也要按 libass 的虚拟画布高补偿。
+    ///
+    /// 与 [`字号要按_libass_虚拟画布高补偿`] 是**同一条理由**，只是方向相反：
+    /// `ass_font_size` 是成品字号 **乘** `288/位图高`，
+    /// `ass_outline_px` 是成品描边 **也乘** 同一个比例。
+    ///
+    /// ⚠️ 修之前这个函数是**恒等**的 ⇒ `Outline` 与位图高**脱钩**：
+    /// 同一条字幕在 161 高的行位图上和在 288 高的位图上会得到同一个 `Outline`，
+    /// 而 libass 会把它们画成**不同宽度**的描边。症状是"描边宽度随分辨率乱变"，
+    /// **不报错**。
+    #[test]
+    fn 描边宽度要按_libass_虚拟画布高补偿() {
+        // 正好是虚拟画布高 ⇒ 比例 1，透传。
+        assert_eq!(ass_outline_px(6, 288), 6, "虚拟画布高上应当透传");
+
+        // 两张不同的位图高 ⇒ 得到的 `Outline` 必须**不同**（否则就是没补偿）。
+        let tall = ass_outline_px(6, 1080);
+        let short = ass_outline_px(6, 288);
+        assert_ne!(
+            tall, short,
+            "位图高不同，Outline 必须不同（相同就是没补偿）"
+        );
+        // 且方向是"位图越高、给 libass 的值越小"。
+        assert!(
+            tall < short,
+            "位图越高 ⇒ 虚拟画布相对越小 ⇒ 喂进去的 Outline 应当越小：1080 高给 {tall}、288 高给 {short}"
+        );
+        // 1080 高：6 × 288/1080 = 1.6 → round 成 2。
+        assert_eq!(ass_outline_px(6, 1080), 2, "6 × 288/1080 ≈ 1.6 → 2");
+
+        // ⚠️ **与字号用同一个分母**：这条防的是"字跟着分辨率变、描边不跟着变"。
+        let r_font = f64::from(ass_font_size(40, 1080)) / f64::from(ass_font_size(40, 288));
+        let r_out = f64::from(ass_outline_px(40, 1080)) / f64::from(ass_outline_px(40, 288));
+        assert!(
+            (r_font - r_out).abs() < 0.05,
+            "字号与描边的**缩放方向必须一致**：字号比 {r_font:.4} vs 描边比 {r_out:.4}"
+        );
+    }
+
+    /// ⚠️ 用户**要**描边时，绝不能算出 `Outline=0` —— ASS 里那等于**不描边**。
+    ///
+    /// 这条盯的是"细描边静默消失"：`round()` 会把小值抹成 0，
+    /// 而 `Outline=0` 与"没开描边"在画面上**逐像素相同**、且不报错。
+    #[test]
+    fn 细描边不许退化成不描边() {
+        // 1080p 上 1 成品像素：1 × 0.2667 = 0.27 → round 成 0 ⇒ 必须兜到 1。
+        assert_eq!(
+            ass_outline_px(1, 1080),
+            1,
+            "算出来 0.27 会 round 成 0，而 ASS 的 Outline=0 是**不描边** —— \
+             用户要的是细描边，不能静默变成没有"
+        );
+        // 宽度本来就是 0 ⇒ 给 0。不能把 0 兜成 1，那会**凭空多出一圈描边**。
+        assert_eq!(ass_outline_px(0, 1080), 0, "宽度 0 就该是 0");
     }
 
     /// **判据（T2 里最阴的一条）**：字号要按 libass 的虚拟画布高（288）补偿。
