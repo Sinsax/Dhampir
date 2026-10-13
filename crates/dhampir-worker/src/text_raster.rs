@@ -644,6 +644,49 @@ pub fn drawtext_args(
     rawvideo_args(source, subtitles_filter(subtitle_file, font_dir, &style))
 }
 
+/// **只画描边环**那一遍的 ffmpeg 参数：填充全透明，描边照画（白）。
+///
+/// # 为什么单独写一个构造函数，而不是复用 `drawtext_args` 再改串
+///
+/// `drawtext_args` 那条串是**冻结**的（有 `不画阴影时参数串逐字符与冻结串相同`
+/// 盯着它），往里面塞一个"填充透明"的开关会把那条判据的意义搅浑。
+/// 而且这一遍**不要**阴影那一支（阴影由第一遍负责），分支结构也不同。
+///
+/// ⚠️ **字号、描边宽度、画布高必须与第一遍逐字段一致** —— 两边算歪的话，
+/// 描边环与字形就对不上，接缝处会出现一圈毛边。所以这里复用
+/// [`ass_font_size`] / [`ass_outline_px`] 与同一条 [`subtitles_filter`]。
+///
+/// `PrimaryColour=&HFF000000`：ASS 的 alpha 是 **0 = 不透明、255 = 全透明**，
+/// 所以 `FF` 前缀 = 填充完全透明。`OutlineColour` 仍是白（覆盖度必须可恢复）。
+fn stroke_only_args(
+    key: &TextRasterKey,
+    font_file: &Path,
+    font_dir: &Path,
+    subtitle_file: &Path,
+) -> Vec<String> {
+    // ⚠️ 源画布尺寸与第一遍**逐字符同源**（同一条 `format!`）——
+    //    两边尺寸不一致会让描边层与字形层错位。
+    let source = format!(
+        "color=c=black@0.0:s={}x{},format=rgba",
+        key.width, key.height
+    );
+    let family = font_family_name(key, font_file);
+    // ⚠️ 宽度与第一遍走**同一个**判断（`stroke_px > 0` 用契约值、否则按字号推），
+    //    再经过**同一个** `ass_outline_px` 换算到虚拟画布。
+    let stroke_px = if key.stroke_px > 0 {
+        key.stroke_px
+    } else {
+        border_px(key.font_px)
+    };
+    let style = format!(
+        // `&HFF000000`：ASS 的 alpha 是 **0 = 不透明、255 = 全透明** ⇒ 填充全透明。
+        "FontName={family},FontSize={},PrimaryColour=&HFF000000,Outline={},OutlineColour={WHITE_INK}",
+        ass_font_size(key.font_px, key.height),
+        ass_outline_px(stroke_px, key.height),
+    );
+    rawvideo_args(source, subtitles_filter(subtitle_file, font_dir, &style))
+}
+
 /// 白墨。**填充与描边都用它**，理由见 [`drawtext_args`] 里那一段
 /// 与 [`coverage_from_libass`]：libass 的 alpha 恒为 0、颜色提前合成进 RGB，
 /// 所以只有"全是白墨"时覆盖度才恢复得出来。
@@ -1094,13 +1137,71 @@ pub fn rasterize_line(key: &TextRasterKey) -> Result<TextBitmap, String> {
     // 字体目录：宿主给了 `--font-dir` 就用它，否则退回这份字体的父目录。
     // 它是 libass 找字体与**回退字体**的唯一入口，见 [`font_dir`]。
     let dir = font_dir(key.font_dir.as_deref(), font.path())?;
-    let result = run_ffmpeg(key, font.path(), dir.path(), &subtitle_file);
+    // ⚠️ **开了描边走两次渲染**（见 [`rasterize_with_stroke`] 的长注释）：
+    //    一次渲染给不出"描边另一种颜色"，因为 libass 那条路必须把填充与描边
+    //    都画成白墨，底座拿到的是一张并集掩码。
+    //    没开描边时行为**逐字节不变**（单次渲染，走原来的 `run_ffmpeg`）。
+    let result = if key.outline && key.shadow_color.is_none() {
+        rasterize_with_stroke(key, font.path(), dir.path(), &subtitle_file)
+    } else {
+        run_ffmpeg(key, font.path(), dir.path(), &subtitle_file)
+    };
     // 字幕临时文件用完就删，成功失败都删：一次出片几百行，留一地文件是在给下次查问题挖坑。
     // （字体那份由 `font` 的 Drop 删，连提前 return 都覆盖得到。）
     let _ = std::fs::remove_file(&subtitle_file);
     result
 }
 
+/// 跑一次 ffmpeg 拿**原始 RGBA 字节**（不染色），供两次渲染各自取覆盖度用。
+fn run_ffmpeg_raw(
+    key: &TextRasterKey,
+    args: &[String],
+    what: &str,
+) -> Result<Vec<u8>, String> {
+    let output = Command::new("ffmpeg")
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| format!("起不了 ffmpeg（{what}那一遍）：{error}（PATH 里有 ffmpeg 吗？）"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ffmpeg 画不出这一行的{what}（退出码 {:?}）：{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let expected = key.width as usize * key.height as usize * 4;
+    if output.stdout.len() != expected {
+        return Err(format!(
+            "ffmpeg 本该吐 {expected} 字节（{what}那一遍，{}x{} RGBA），实际 {}",
+            key.width,
+            key.height,
+            output.stdout.len()
+        ));
+    }
+    Ok(output.stdout)
+}
+
+/// **只画填充**那一遍的参数：`Outline=0`，纯字形。
+fn fill_only_args(
+    key: &TextRasterKey,
+    font_file: &Path,
+    font_dir: &Path,
+    subtitle_file: &Path,
+) -> Vec<String> {
+    let source = format!(
+        "color=c=black@0.0:s={}x{},format=rgba",
+        key.width, key.height
+    );
+    let family = font_family_name(key, font_file);
+    // `Outline=0` ⇒ 不描边；`PrimaryColour` 白 ⇒ 覆盖度可恢复。
+    let style = format!(
+        "FontName={family},FontSize={},PrimaryColour={WHITE_INK},Outline=0",
+        ass_font_size(key.font_px, key.height),
+    );
+    rawvideo_args(source, subtitles_filter(subtitle_file, font_dir, &style))
+}
 fn run_ffmpeg(
     key: &TextRasterKey,
     font_file: &Path,
@@ -1142,11 +1243,112 @@ fn run_ffmpeg(
     // **libass 的覆盖度在 RGB 里、alpha 恒为 0** —— 先搬成 drawtext 那种
     // 「覆盖度预乘」形态，再交给同一个 [`tint`]。搬运与判据见 [`coverage_from_libass`]。
     let premultiplied = coverage_from_libass(&output.stdout);
-    TextBitmap::new(
-        key.width,
-        key.height,
-        tint(&premultiplied, key.tint_color()),
-    )
+    let pixels = tint(&premultiplied, key.tint_color());
+
+    TextBitmap::new(key.width, key.height, pixels)
+}
+
+/// **两次渲染合成带描边的字**：先画描边环、再把填充盖上去。
+///
+/// # 为什么必须两次（这是本缺陷的根因，不是优化）
+///
+/// libass 这条路**必须**把填充与描边都画成**白墨**：它的 alpha 恒为 0、
+/// 颜色提前合成进 RGB，黑描边与透明底**逐字节相同** ⇒ 覆盖度在数学上恢复不出来
+/// （见 [`coverage_from_libass`]）。于是底座拿到的是一张
+/// 「**字形 ∪ 描边**」的并集掩码，而 [`tint`] 只能给**一种**颜色
+/// ⇒ **描边永远是白的、与填充同色**。
+///
+/// 后果不是"描边不好看"，是**整行不可读**：汉字笔画间隙只有 4–8px，
+/// 而 1080p 上 `border_px(86) = 5` 的描边两侧共 **10px** ⇒ 间隙被填满
+/// ⇒ 连成一整块实心（实测覆盖率密度 **0.921**，正常字形是 **0.363**）。
+/// 而 `lines_drawn = 1`、`failed = false`、`issues` 为空 —— **它不报错**。
+///
+/// # 为什么"叠加顺序"必须是"描边在下、填充在上"
+///
+/// 描边那一遍（[`stroke_only_args`]：填充 `&HFF…` 全透明）画出的是
+/// 「字形 ∪ 描边」的**整块**（实测 548×93），不是一圈环 ——
+/// 因为 ASS 的描边是"沿字形轮廓外扩"，外扩出来的形状**包含**字形本身。
+/// ⇒ 把它整块盖上去会把字填满描边色。正确做法是**先铺描边、再盖填充**。
+///
+/// ⚠️⚠️ 所以**第一遍必须是"只画填充"**（这一遍由 [`fill_only_args`] 承担），
+/// 不能用 `drawtext_args` 那条"填充+描边"的串：那条串产出的掩码里
+/// **描边像素已经是不透明的白**，再往上叠描边色会被 `composite` 全部跳过
+/// —— 这正是我第一版的错法（改完密度**一个数都没变**，仍是 0.933）。
+///
+/// # 判据在哪
+///
+/// * `描边是另一种颜色而不是与填充连成一块` —— 覆盖率密度必须降回字形量级
+/// * `两次渲染的字形与单次渲染逐像素一致` —— 填充那一遍不能被描边改动
+fn rasterize_with_stroke(
+    key: &TextRasterKey,
+    font_file: &Path,
+    font_dir: &Path,
+    subtitle_file: &Path,
+) -> Result<TextBitmap, String> {
+    // 描边那一遍：填充全透明、只留描边（白墨，覆盖度可恢复）。
+    let stroke_args = stroke_only_args(key, font_file, font_dir, subtitle_file);
+    let stroke_layer = run_ffmpeg_raw(key, &stroke_args, "描边")?;
+    // 填充那一遍：`Outline=0`，纯字形。
+    let fill_args = fill_only_args(key, font_file, font_dir, subtitle_file);
+    let fill_layer = run_ffmpeg_raw(key, &fill_args, "填充")?;
+
+    let stroke_cov = coverage_from_libass(&stroke_layer);
+    let fill_cov = coverage_from_libass(&fill_layer);
+
+    // 先把描边染成契约色铺满，再把填充染成样式色盖上去。
+    let pixels = compose_stroke_and_fill(&stroke_cov, &fill_cov, key.stroke_color, key.color);
+
+    TextBitmap::new(key.width, key.height, pixels)
+}
+
+/// **把描边层与填充层合成一张**：先铺描边、再把填充盖上去。
+///
+/// ⚠️ 这个顺序**不能反**，理由见 [`rasterize_with_stroke`]：
+/// 描边那一遍给的是「字形 ∪ 描边」的**整块**（ASS 的描边是沿轮廓外扩，
+/// 外扩形状包含字形），把它盖在填充上会把**整个字**填成描边色。
+///
+/// ⚠️ 单独抽成函数是**为了让判据真的能测到它**：`描边是另一种颜色而不是
+/// 与填充连成一块` 一开始在测试里**又抄了一遍**这两行，于是把生产代码的顺序
+/// 反过来（变异）时测试**照样绿** —— 它测的是自己抄的那份。抽出来之后
+/// 两边调的是同一个函数，变异才拦得住。
+fn compose_stroke_and_fill(
+    stroke_cov: &[u8],
+    fill_cov: &[u8],
+    stroke_color: [u8; 4],
+    fill_color: [u8; 4],
+) -> Vec<u8> {
+    let mut pixels = tint(stroke_cov, stroke_color);
+    let fill_tinted = tint(fill_cov, fill_color);
+    overlay(&mut pixels, &fill_tinted);
+    pixels
+}
+
+/// 把 `top` 按**正常 alpha 混合**盖在 `base` 上（`top` 在上层）。
+///
+/// ⚠️ 与 [`composite_stroke_under`] 的区别：那个是"只在底下是透明时才写"
+/// （描边垫在填充**下面**），这个是标准的"上层遮住下层"。
+/// 两者都按预乘约定处理，别互相类推 —— 方向反了不会报错，只会画错。
+fn overlay(base: &mut [u8], top: &[u8]) {
+    for (dst, src) in base.chunks_exact_mut(4).zip(top.chunks_exact(4)) {
+        let sa = u32::from(src[3]);
+        if sa == 0 {
+            continue;
+        }
+        let da = u32::from(dst[3]);
+        let out_a = sa + da * (255 - sa) / 255;
+        if out_a == 0 {
+            dst.copy_from_slice(&[0, 0, 0, 0]);
+            continue;
+        }
+        for i in 0..3 {
+            let sc = u32::from(src[i]);
+            let dc = u32::from(dst[i]);
+            // 预乘合成：`src + dst * (1 - src_a/255)`，最后再按 out_a 归一。
+            let v = sc + dc * (255 - sa) / 255;
+            dst[i] = (v * 255 / out_a).min(255) as u8;
+        }
+        dst[3] = out_a.min(255) as u8;
+    }
 }
 
 /// libass 的输出 → `drawtext` 那种**覆盖度预乘**形态，喂给同一个 [`tint`]。
@@ -3099,6 +3301,134 @@ mod tests {
         );
         // 宽度本来就是 0 ⇒ 给 0。不能把 0 兜成 1，那会**凭空多出一圈描边**。
         assert_eq!(ass_outline_px(0, 1080), 0, "宽度 0 就该是 0");
+    }
+
+    /// **判据：描边是"另一种颜色"，而不是与填充连成一整块。**
+    ///
+    /// # 这条盯的是什么
+    ///
+    /// 缺陷的形状（修前实测）：`outline = true` 时整行字糊成一整块实心，
+    /// **覆盖率密度 0.921**（正常字形 0.363），而 `lines_drawn = 1`、
+    /// `issues` 为空 —— **完全不报错**。
+    ///
+    /// ⚠️ **判据不能只看"总墨量"**：糊团**也有墨**，而且更多 ——
+    /// 那正是它藏得住的原因。要分开量**填充**与**描边**两张量。
+    /// （同一个形状：P4 逐字判据上只量"包围盒变宽了"会把"整行平移"
+    /// 误判成"逐字散开"。**量一个总量，必须同时量它的分布。**）
+    ///
+    /// ⚠️ 用 `overlay`/`tint` 直接量，不起 ffmpeg：这条判据盯的是**合成数学**，
+    /// 而"ffmpeg 真的画出了两色"由真机验证负责。两者分开，跑得快也定位得准。
+    ///
+    /// # ⚠️ 为什么"字形那一格"的描边覆盖度**必须小于 255**
+    ///
+    /// 我第一版把描边层每一格都写成 `255`（全满），结果**把合成顺序反过来也照样绿**
+    /// —— 因为两层都全满时，后叠的那层把下面整个盖掉，两种顺序的产物**完全一样**
+    /// （变异自证时发现的，`cargo test` 通过、而代码是错的）。
+    /// 只有当描边层在字形那几格是**部分覆盖**（< 255）时，两种顺序才会给出不同结果：
+    /// * 正确顺序（描边在下、填充在上）⇒ 那几格 = **纯填充白**；
+    /// * 错误顺序（填充在下、描边在上）⇒ 那几格 = 白被深灰按比例**压暗**。
+    ///
+    /// 这正好对应真实情形：libass 的描边在字形**内部**也是满的，
+    /// 但抗锯齿边缘与两遍渲染的取整差异会让它落在 255 以下 —— 判据按"能分辨"来造。
+    #[test]
+    fn 描边是另一种颜色而不是与填充连成一块() {
+        // 描边那一遍给的是**整块**（ASS 的描边沿轮廓外扩，外扩形状含字形），
+        // 不是一圈环 —— 这一点反直觉，判据里如实造出来。
+        // ⚠️ 字形那两格是 **170**（部分覆盖），见上面那条注释。
+        let stroke_cov = vec![
+            255, 255, 255, 255, // px0 只有描边（满）
+            170, 170, 170, 255, // px1 字形（**部分**覆盖）
+            170, 170, 170, 255, // px2 字形（**部分**覆盖）
+            255, 255, 255, 255, // px3 只有描边（满）
+        ];
+        // 填充只有中间两个字。
+        let fill_cov = vec![
+            0, 0, 0, 0, // px0 空
+            255, 255, 255, 255, // px1 字形
+            255, 255, 255, 255, // px2 字形
+            0, 0, 0, 0, // px3 空
+        ];
+        let stroke_color = [0x40, 0x3c, 0x3b, 255]; // 深灰（契约默认）
+        let fill_color = [255, 255, 255, 255]; // 白
+
+        // 与 `rasterize_with_stroke` 里**同一个顺序**：先铺描边、再盖填充。
+        // ⚠️ 调的是**生产代码那个函数**，不是在这里抄一遍 ——
+        //    抄一遍的话，把生产代码的顺序反过来、这条测试**照样绿**（实测过）。
+        let out = compose_stroke_and_fill(&stroke_cov, &fill_cov, stroke_color, fill_color);
+
+        // 两端：只有描边 ⇒ 必须是**深灰**，不是白。
+        for (i, name) in [(0usize, "左端"), (3, "右端")] {
+            let px = &out[i * 4..i * 4 + 4];
+            assert_eq!(
+                [px[0], px[1], px[2]],
+                [0x40, 0x3c, 0x3b],
+                "{name}（只被描边覆盖）必须是契约的描边色，实得 {px:?} —— \
+                 若这里是白的，说明描边与填充同色 ⇒ 会连成一整块"
+            );
+        }
+        // 中间：填充必须**盖住**描边 ⇒ 是纯白（不是被描边压暗的灰）。
+        for (i, name) in [(1usize, "中左"), (2, "中右")] {
+            let px = &out[i * 4..i * 4 + 4];
+            assert_eq!(
+                [px[0], px[1], px[2]],
+                [255, 255, 255],
+                "{name}（被填充覆盖）必须是**纯**填充色、不被描边压暗，实得 {px:?} —— \
+                 若这里是灰的，说明填充与描边的叠加顺序反了"
+            );
+        }
+    }
+
+    /// **判据：两遍路径的参数串与单遍那条串必须不同**（否则白跑一次 ffmpeg）。
+    ///
+    /// 这条盯的是"两遍路径根本没换参数"—— 改了代码、`cargo build` 过、
+    /// 测试全绿，而实际还是单遍那条串 ⇒ **画出来的东西一个像素都没变**。
+    /// （我第一版正是这个错法：密度从 0.921 变成 0.933，**一个数都没降**。）
+    #[test]
+    fn 两遍路径的参数串与单遍不同() {
+        let mut outlined = key("字", 20);
+        outlined.outline = true;
+
+        let single = drawtext_args(
+            &outlined,
+            &outlined.font_file,
+            Path::new("C:/fake"),
+            Path::new("t.txt"),
+        );
+        let stroke = stroke_only_args(
+            &outlined,
+            &outlined.font_file,
+            Path::new("C:/fake"),
+            Path::new("t.txt"),
+        );
+        let fill = fill_only_args(
+            &outlined,
+            &outlined.font_file,
+            Path::new("C:/fake"),
+            Path::new("t.txt"),
+        );
+
+        assert_ne!(single, stroke, "描边那一遍必须与单遍不同");
+        assert_ne!(single, fill, "填充那一遍必须与单遍不同");
+
+        let js = stroke.join(" ");
+        assert!(
+            js.contains("PrimaryColour=&HFF000000"),
+            "描边那一遍的填充必须**全透明**（ASS 的 alpha 0=不透明、255=透明）：{js}"
+        );
+        let jf = fill.join(" ");
+        assert!(
+            jf.contains("Outline=0"),
+            "填充那一遍必须**不描边**（否则并集掩码又回来了）：{jf}"
+        );
+        // ⚠️ 两遍的**字号与画布尺寸必须一致** —— 不一致会让描边层与字形层错位。
+        assert!(
+            js.contains(&format!("FontSize={}", ass_font_size(outlined.font_px, outlined.height)))
+                && jf.contains(&format!(
+                    "FontSize={}",
+                    ass_font_size(outlined.font_px, outlined.height)
+                )),
+            "两遍的 FontSize 必须相同：\n描边 {js}\n填充 {jf}"
+        );
     }
 
     /// **判据（T2 里最阴的一条）**：字号要按 libass 的虚拟画布高（288）补偿。
