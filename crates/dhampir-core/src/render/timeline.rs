@@ -17,7 +17,7 @@
 //! 纹理池是宿主的资源策略（显存预算、LRU），不该埋在这一层里。
 //! 等两端都跑通了再把它提到宿主去，那时换的是宿主，不是这里的语义。
 
-use dhampir_timeline::schema::{Effect, EffectPipeline};
+use dhampir_timeline::schema::{Effect, EffectPipeline, SlotCombine};
 
 use crate::compose::Composite;
 use crate::render::blur::BlurRenderer;
@@ -352,6 +352,36 @@ pub fn radius_in_space(
 /// 没挂任何色彩特效时返回 [`ColorAdjustParams::IDENTITY`]，调用方据此整条跳过。
 pub fn color_params(effects: &[Effect]) -> crate::render::ColorAdjustParams {
     let mut out = crate::render::ColorAdjustParams::IDENTITY;
+
+    // -----------------------------------------------------------------------
+    // P5：色调整的槽位名 -> `ColorAdjustParams` 字段（唯一映射表）
+    // -----------------------------------------------------------------------
+    //
+    // ⚠️ 与色罩那两张表一样，这是"Rust 没有反射"的代价。加槽位要**同时**改：
+    //    ① `ColorAdjustParams` 结构体 ② `color_adjust.wgsl` 的 struct ③ 这张表。
+    //    ②③ 对不上是**静默**的（WGSL 按偏移读）。
+    //
+    // ⚠️ `Add` 与 `Mul` 分开成两个函数，是为了让"这个槽位是加还是乘"**写在调用点**，
+    //    而不是藏在 `match` 里 —— 混了不会报错，只会让画面亮度略微不同。
+    fn add_slot(p: &mut crate::render::ColorAdjustParams, name: &str, v: f32) {
+        match name {
+            "brightness" => p.brightness += v,
+            "hue" => p.hue += v,
+            "hue_css" => p.hue_css += v,
+            other => debug_assert!(false, "色调整的加性槽位表里没有 {other}"),
+        }
+    }
+
+    fn mul_slot(p: &mut crate::render::ColorAdjustParams, name: &str, v: f32) {
+        match name {
+            "scale" => p.scale *= v,
+            "contrast" => p.contrast *= v,
+            "saturation" => p.saturation *= v,
+            "saturation_css" => p.saturation_css *= v,
+            other => debug_assert!(false, "色调整的乘性槽位表里没有 {other}"),
+        }
+    }
+
     for effect in effects {
         // 认管线，不认名字 —— 与 blur_radius 同一套判据。
         let Some(spec) = crate::effects::spec_of(&effect.kind) else {
@@ -361,54 +391,39 @@ pub fn color_params(effects: &[Effect]) -> crate::render::ColorAdjustParams {
             continue;
         }
         let param = |name: &str| effect.params.get(name).copied().filter(|v| v.is_finite());
-        match spec.kind {
-            "brightness" => {
-                if let Some(v) = param("amount") {
-                    out.brightness += v;
-                }
-            }
-            // 乘性亮度（CSS `brightness()`）：乘法**可交换**，与加性那条一样。
-            "brightness_multiply" => {
-                if let Some(v) = param("factor") {
-                    out.scale *= v;
-                }
-            }
-            "contrast" => {
-                if let Some(v) = param("amount") {
-                    out.contrast *= v;
-                }
-            }
-            "saturation" => {
-                if let Some(v) = param("amount") {
-                    out.saturation *= v;
-                }
-            }
-            "hue" => {
-                if let Some(v) = param("degrees") {
-                    // **度转弧度只在这一处发生。**
-                    // 着色器收的是弧度；两边各转一遍会让 90 度变成 90 弧度再转一次。
-                    out.hue += v.to_radians();
-                }
-            }
-            // CSS/SVG 规范矩阵那条：度转弧度同样只在**这一处**发生。
-            "hue_rotate_css" => {
-                if let Some(v) = param("degrees") {
-                    out.hue_css += v.to_radians();
-                }
-            }
-            // CSS/SVG 规范权重那条饱和度（乘法，可交换）。
-            "saturation_css" => {
-                if let Some(v) = param("amount") {
-                    out.saturation_css *= v;
-                }
-            }
-            // 走了 ColorAdjust 管线却不在这里 -> 登记表加了新特效但忘了接上。
-            // **不静默忽略**：那正是最坏的情形（用户能选中它，画面却不变）。
-            other => {
-                debug_assert!(
+        // ---------------------------------------------------------------------
+        // P5：**按登记表的 `slots` 写**，不再按 `kind` 手写 match。
+        // ---------------------------------------------------------------------
+        //
+        // 这一段原来是一份 7 分支的 `match spec.kind`。形状与色罩那条**不同**：
+        //   · 色罩：一个 kind 写**一组**槽位，槽位名与 kind 一一对应（`flash_*`）；
+        //   · 色调整：**7 个 kind 共用同一组槽位**，各写自己那**一个**
+        //     （`brightness` 写 `brightness`、`hue_rotate_css` 写 `hue_css`）。
+        //     所以它天生就是"按槽位折叠"的形状 —— 与 `slots` 声明正好对齐。
+        //
+        // ⚠️ `Add` / `Mul` 都是**可交换**的，所以多条同类叠加的结果与遍历顺序无关
+        //    （函数文档里说这是刻意的：顺序无关才不会被两端各自的遍历顺序影响）。
+        for slot in spec.slots {
+            let Some(v) = param(slot.param) else {
+                continue;
+            };
+            // **度转弧度只在这一处发生**（着色器收弧度；两边各转一遍会让 90 度变成 90 弧度）。
+            // 与色罩一样：这是**逐 kind 的算法**，不是布局，所以留在代码里。
+            let v = if slot.slot == "hue" || slot.slot == "hue_css" {
+                v.to_radians()
+            } else {
+                v
+            };
+            match slot.combine {
+                SlotCombine::Add => add_slot(&mut out, slot.slot, v),
+                SlotCombine::Mul => mul_slot(&mut out, slot.slot, v),
+                // 色调整里没有"竞争"也没有 over 合成 —— 登记表写错了要**当场红**，
+                // 而不是静默按 Add 处理（那会让画面看起来"差不多对"）。
+                other => debug_assert!(
                     false,
-                    "ColorAdjust 管线里的 {other} 没有在 color_params 里接上"
-                );
+                    "ColorAdjust 的槽位 {} 用了 {other:?} 合成规则（只该是 Add / Mul）",
+                    slot.slot
+                ),
             }
         }
     }
@@ -518,6 +533,114 @@ pub fn color_mask_params(
         (1.0 - (1.0 - a) * (1.0 - b)).clamp(0.0, 1.0)
     }
 
+
+    // -----------------------------------------------------------------------
+    // P5：槽位名 -> `#[repr(C)]` 字段的**唯一映射表**
+    // -----------------------------------------------------------------------
+    //
+    // ⚠️ Rust 没有字段反射，所以"按名字写槽位"必须有一张这样的表。
+    //    这张表**不是**"又一次手写 kind 派发"：它按**槽位**列（18 个），
+    //    而不是按 **kind** 列（4 个）。差别在于加一个特效时 ——
+    //    · 旧写法：新特效的每个槽位都要在这里加分支（N 个 kind × M 个槽位）；
+    //    · 新写法：**槽位通常是复用的**（新特效多半复用 `overlay_*` 或 `flash_*`），
+    //      真需要新槽位时才动这张表一次。
+    //
+    // ⚠️ 加槽位时要**同时**改三处，不然会静默不生效：
+    //    ① `ColorMaskParams` 结构体 ② `color_mask.wgsl` 的 struct ③ 这张表。
+    //    ★ ②③ 之间对不上是**静默**的（WGSL 按偏移读，名字只是注释）——
+    //      这正是本文件顶部那句"字段顺序必须一致"在说的事。
+
+    /// 「参数没给时用什么」。**逐条照抄原实现里的 `unwrap_or`**。
+    ///
+    /// ⚠️ 这张表与 `read_slot`/`write_slot` 一样，是"Rust 没有反射"的代价。
+    ///    它的正确性由 `plan_tests` 里那几条**既有**用例钉住
+    ///    （`闪白的颜色缺省是白` / `暗角的_softness_不会变成零` / `覆盖层的角度在这里就转成弧度`）
+    ///    —— **它们就是这条泛化的验收线**，不是"顺手跑一下"。
+    fn slot_default(kind: &str, slot: &str) -> Option<f32> {
+        Some(match (kind, slot) {
+            // flash：颜色缺省为**白**。缺省成黑会让人以为"闪白没生效"。
+            ("flash", "flash_r") | ("flash", "flash_g") | ("flash", "flash_b") => 1.0,
+            ("vignette", "vignette_radius") => 0.7,
+            ("vignette", "vignette_softness") => 0.35,
+            ("noise", "noise_seed") => 0.0,
+            ("overlay", "overlay_r")
+            | ("overlay", "overlay_g")
+            | ("overlay", "overlay_b") => 0.0,
+            // ⚠️ `r2/g2/b2` 的缺省在原实现里是 **主色 r/g/b**（不是 0）——
+            //    单色覆盖就是这么来的。这里只能给 0，真实回落见下面的 `resolve`。
+            ("overlay", "overlay_r2")
+            | ("overlay", "overlay_g2")
+            | ("overlay", "overlay_b2") => 0.0,
+            ("overlay", "overlay_shape") => 0.0,
+            ("overlay", "overlay_angle") => 0.0,
+            _ => return None,
+        })
+    }
+
+    /// 按名字读一个槽位。
+    fn read_slot(p: &crate::render::ColorMaskParams, name: &str) -> f32 {
+        match name {
+            "flash_amount" => p.flash_amount,
+            "vignette_amount" => p.vignette_amount,
+            "noise_amount" => p.noise_amount,
+            "overlay_amount" => p.overlay_amount,
+            // 非 `*_amount` 的槽位不参与判胜负。
+            _ => 0.0,
+        }
+    }
+
+    /// 按名字写一个槽位，按 `combine` 与当前值合成。
+    fn write_slot(
+        p: &mut crate::render::ColorMaskParams,
+        name: &str,
+        combine: SlotCombine,
+        value: f32,
+    ) {
+        // ⚠️⚠️ **只有 `*_amount` 那一槽走"合成"，其余卫星槽位一律直接覆盖。**
+        //
+        //    第一版把 combine 套到**每个**槽位上，于是 `overlay` 的
+        //    `overlay_angle` 也被 `over(0, 180)` 合成了 **1**（而不是 π）——
+        //    既有测试当场红：`180 度应当变成 PI 弧度，实得 1`。
+        //
+        //    原实现里四个 kind 是**同一个形状**：
+        //        if weight 胜出 { 卫星槽位 = 各自的值 }   // 直接覆盖
+        //        amount_slot  = 胜负规则(...)             // 只有这一槽在"合成"
+        //    `over()` 是**不透明度**的合成函数，对角度 / 枚举 / 颜色分量没有意义。
+        // ⚠️ 判据是**槽位名**（`*_amount`），不是 combine 的变体：
+        //    `over` 只对 amount 有意义，把它套到 `overlay_angle` 上会得到 1 而不是 π。
+        let cur = read_slot(p, name);
+        let is_amount = name.ends_with("_amount");
+        let combined = match combine {
+            // 卫星槽位：胜出者的值**直接覆盖**（不参与合成）。
+            SlotCombine::MaxStrict | SlotCombine::MaxInclusive => value,
+            SlotCombine::Over if is_amount => over(cur, value),
+            SlotCombine::Over => value,
+            SlotCombine::Add => cur + value,
+            SlotCombine::Mul => cur * value,
+        };
+        match name {
+            "flash_amount" => p.flash_amount = combined,
+            "flash_r" => p.flash_r = combined,
+            "flash_g" => p.flash_g = combined,
+            "flash_b" => p.flash_b = combined,
+            "vignette_amount" => p.vignette_amount = combined,
+            "vignette_radius" => p.vignette_radius = combined,
+            "vignette_softness" => p.vignette_softness = combined,
+            "noise_amount" => p.noise_amount = combined,
+            "noise_seed" => p.noise_seed = combined,
+            "overlay_amount" => p.overlay_amount = combined,
+            "overlay_r" => p.overlay_r = combined,
+            "overlay_g" => p.overlay_g = combined,
+            "overlay_b" => p.overlay_b = combined,
+            "overlay_r2" => p.overlay_r2 = combined,
+            "overlay_g2" => p.overlay_g2 = combined,
+            "overlay_b2" => p.overlay_b2 = combined,
+            "overlay_shape" => p.overlay_shape = combined,
+            "overlay_angle" => p.overlay_angle = combined,
+            other => debug_assert!(false, "槽位表里没有 {other}"),
+        }
+    }
+
     for effect in effects {
         // 认管线，不认名字 —— 与 color_params / blur_radius 同一套判据。
         let Some(spec) = crate::effects::spec_of(&effect.kind) else {
@@ -529,80 +652,133 @@ pub fn color_mask_params(
         // 这一帧这条特效的整体强度（时间窗已折进来）。
         let strength = effect.opacity.clamp(0.0, 1.0);
         let param = |name: &str| effect.params.get(name).copied().filter(|v| v.is_finite());
-        match spec.kind {
-            "flash" => {
-                if let Some(amount) = param("amount") {
-                    // 颜色缺省为白：闪白是最常见的用法，缺省成黑色会让人以为没生效。
-                    let r = param("r").unwrap_or(1.0);
-                    let g = param("g").unwrap_or(1.0);
-                    let b = param("b").unwrap_or(1.0);
-                    let weight = amount.clamp(0.0, 1.0) * strength;
-                    if weight > out.flash_amount {
-                        // 只在**更强**时换颜色：两条闪白同时挂着时，
-                        // 更强的那条说了算。弱的那条不该把颜色稀释成两者平均 ——
-                        // 那是"谁都看得出来不是用户想要的颜色"，且解释不清。
-                        out.flash_r = r.clamp(0.0, 1.0);
-                        out.flash_g = g.clamp(0.0, 1.0);
-                        out.flash_b = b.clamp(0.0, 1.0);
-                        out.flash_amount = weight;
-                    }
+        // ---------------------------------------------------------------------
+        // P5：**按登记表的 `slots` 写槽位**，不再按 `kind` 手写 match。
+        // ---------------------------------------------------------------------
+        //
+        // 这一段原来是一份 15 行的 `match spec.kind { "flash" => … }`。它的问题
+        // 不是"不好看"，而是**加一个特效要改三处**（`EffectSpec` 登记、这里、定长结构），
+        // 而第三处是**按名字派发** —— `EffectPipeline` 的文档写着"忘了改正是字符串
+        // 派发最容易出的错"。改成读 `slots` 之后，加特效只需在 `EffectSpec` 里
+        // 声明它写哪几个槽位。
+        //
+        // ⚠️ **组合规则不是能统一的东西**（见 `SlotCombine` 的文档）：
+        //    `flash` 严格大于、`vignette`/`noise` 含等号、`overlay` 用 over 合成。
+        //    所以它是**数据**，逐条登记，不在这里"统一"。
+        //
+        // 先按槽位把"这条特效想写的值"算出来，再逐槽位按各自的规则合成。
+        // （不能边算边写：`flash` 的 `r/g/b` 要不要写，取决于 `flash_amount` 那一轮
+        //   比的胜负 —— 见 `write_only_on_win`。）
+        let mut pending: Vec<(&'static str, SlotCombine, bool, f32)> = Vec::new();
+        for slot in spec.slots {
+            // ⚠️ 逐 kind 的**变换**仍在这里（它们是"参数怎么变成槽位值"，不是合成规则）：
+            //    · `shape` 要过 `OverlayShape::from_param`（round + EPSILON 比较）
+            //    · `angle` 要 `to_radians()`
+            //    · `strength` 是"这一帧这条特效的整体强度（时间窗已折进来）"
+            //
+            //    这些映射**刻意留在代码里**：把一个 f32 变成"枚举"或"弧度"是**算法**，
+            //    而 `slots` 声明的是**布局**。混在一起会让登记表变成半个解释器。
+            // ⚠️⚠️ **缺省值必须照抄原实现**，不能"没有就跳过"。
+            //    第一版写成 `let Some(raw) = ... else { continue }`，于是
+            //    `flash` 不写 `r/g/b` 时颜色停在 **0.0（黑）**，而参照的缺省是
+            //    **白**（原实现是 `unwrap_or(1.0)`）—— 既有测试当场红：
+            //        `闪白的颜色缺省是白`: left (0,0,0) / right (1,1,1)
+            //    "参数没给就用缺省"与"参数没给就跳过"是**两件事**，
+            //    而旧写法里每一个 `unwrap_or` 都在表达前者。
+            let Some(raw) = param(slot.param).or_else(|| slot_default(spec.kind, slot.slot)) else {
+                continue;
+            };
+            let value = match (spec.kind, slot.slot) {
+                ("overlay", "overlay_shape") => {
+                    OverlayShape::from_param(raw) as u32 as f32
                 }
+                ("overlay", "overlay_angle") => raw.to_radians(),
+                _ => raw,
+            };
+            // `amount` 那一项要乘时间窗强度（其余是按它判胜负后跟着写的参数）。
+            // ⚠️ `vignette_softness` 是**除数**，原实现有 `.max(1e-3)`。
+            //    丢了它 ⇒ `softness=0` 时着色器除零（既有测试点名：`暗角的_softness_不会变成零`）。
+            let value = if slot.slot == "vignette_softness" {
+                value.max(1e-3)
+            } else {
+                value
+            };
+            let value = if slot.slot.ends_with("_amount") {
+                value.clamp(0.0, 1.0) * strength
+            } else {
+                value
+            };
+            pending.push((slot.slot, slot.combine, slot.write_only_on_win, value));
+        }
+
+        // ① 先算「这条特效胜出没有」—— 判胜负只看它自己的 `*_amount` 槽位。
+        //    没有 `*_amount` 的特效（理论上不该有）保守地当作"没胜出"，
+        //    这样它不会把别的东西写坏。
+        let own_amount = pending.iter().find(|(name, ..)| name.ends_with("_amount"));
+        let won = match own_amount {
+            Some((name, combine, _, value)) => match combine {
+                // ⚠️ **判胜负读的是当前值**，而下面写入要在判完之后 ——
+                //    所以这里先取一份快照，否则"先写了 amount 再判颜色"会让
+                //    `MaxStrict` 的自比较恒为假（`v > v`）。
+                SlotCombine::MaxStrict => *value > read_slot(&out, name),
+                SlotCombine::MaxInclusive => *value >= read_slot(&out, name),
+                SlotCombine::Over => true, // over 是合成、不是竞争，永远要写
+                SlotCombine::Add | SlotCombine::Mul => true,
+            },
+            None => false,
+        };
+
+        // ② 再按各自规则写。
+        //
+        // ⚠️⚠️ `MaxStrict`/`MaxInclusive` 这两条"竞争型"规则下，**没胜出就一个槽位都不写**
+        //    —— 包括 `*_amount` 自己。原实现里整个赋值块都在 `if` 内部：
+        //        if weight > out.flash_amount {
+        //            out.flash_r = …; out.flash_g = …; out.flash_b = …;
+        //            out.flash_amount = weight;      // ← amount 也在里面
+        //        }
+        //    第一版只把**卫星槽位**挡在 `won` 后面、却让 `amount` 无条件写，
+        //    于是"弱的那条"会把强的那条**覆盖回去**（实测 0.8 被 0.3 盖掉）。
+        //    `over` / `Add` / `Mul` 是合成型，永远要写。
+        // ⚠️ `overlay` 的 `r2/g2/b2` 缺省是**主色** `r/g/b`（原实现 `unwrap_or(r)`）——
+        //    单色覆盖就是这么来的：只给 r/g/b 不给 r2/g2/b2 ⇒ 两端同色。
+        //    这里在 `pending` 里就地回落（此刻 `r/g/b` 已经算好）。
+        //    ⚠️ 只用 `slot_default` 的 0 会让渐变另一端变黑，而**单色档看不出来**
+        //       （它的 shape 是 Solid、根本不读 r2）—— 属于最隐蔽的那类偏差。
+        for src in ["overlay_r", "overlay_g", "overlay_b"] {
+            let dst = match src {
+                "overlay_r" => "overlay_r2",
+                "overlay_g" => "overlay_g2",
+                _ => "overlay_b2",
+            };
+            // 只有在**调用方没显式给** r2/g2/b2 时才回落。
+            let dst_param = match dst {
+                "overlay_r2" => "r2",
+                "overlay_g2" => "g2",
+                _ => "b2",
+            };
+            if param(dst_param).is_some() {
+                continue;
             }
-            "vignette" => {
-                if let Some(amount) = param("amount") {
-                    // 取更强的那个：两条暗角叠加没有额外语义。
-                    // **比较的是已乘过时间窗的强度**：不然一条时间窗已归零的暗角
-                    // 会把一条正在生效的挤掉（"更强"要按这一帧的实际强度算）。
-                    let weight = amount.clamp(0.0, 1.0) * strength;
-                    if weight >= out.vignette_amount {
-                        out.vignette_amount = weight;
-                        out.vignette_radius = param("radius").unwrap_or(0.7);
-                        // softness 兜一个下限：它是除数，0 会让边缘变成硬阶跃，
-                        // 而那在预览与成片之间更容易被看出差异。
-                        out.vignette_softness = param("softness").unwrap_or(0.35).max(1e-3);
-                    }
-                }
+            let value = pending
+                .iter()
+                .find(|(n, ..)| *n == src)
+                .map(|(_, _, _, v)| *v);
+            if let (Some(v), Some(i)) = (value, pending.iter().position(|(n, ..)| *n == dst)) {
+                pending[i].3 = v;
             }
-            "noise" => {
-                if let Some(amount) = param("amount") {
-                    let weight = amount.clamp(0.0, 1.0) * strength;
-                    if weight >= out.noise_amount {
-                        out.noise_amount = weight;
-                        out.noise_seed = param("seed").unwrap_or(0.0);
-                    }
-                }
-            }
-            "overlay" => {
-                if let Some(amount) = param("amount") {
-                    let weight = amount.clamp(0.0, 1.0) * strength;
-                    let r = param("r").unwrap_or(0.0);
-                    let g = param("g").unwrap_or(0.0);
-                    let b = param("b").unwrap_or(0.0);
-                    // 描画层：后一条覆盖前一条的颜色，强度按 over 合成。
-                    if weight > 0.0 {
-                        out.overlay_r = r;
-                        out.overlay_g = g;
-                        out.overlay_b = b;
-                        out.overlay_r2 = param("r2").unwrap_or(r);
-                        out.overlay_g2 = param("g2").unwrap_or(g);
-                        out.overlay_b2 = param("b2").unwrap_or(b);
-                        out.overlay_shape =
-                            OverlayShape::from_param(param("shape").unwrap_or(0.0)) as u32 as f32;
-                        // **度转弧度只在这一处发生**（与 hue 同一条纪律）：
-                        // 着色器收的是弧度，两边各转一遍会让 90 度变成 90 弧度。
-                        out.overlay_angle = param("angle").unwrap_or(0.0).to_radians();
-                    }
-                    out.overlay_amount = over(out.overlay_amount, weight);
-                }
-            }
-            // 走了 ColorMask 管线却不在这里 -> 登记表加了新特效但忘了接上。
-            // **不静默忽略**：那正是最坏的情形（用户能选中它，画面却不变）。
-            other => {
-                debug_assert!(
-                    false,
-                    "ColorMask 管线里的 {other} 没有在 color_mask_params 里接上"
-                );
-            }
+        }
+
+        let competitive = matches!(
+            pending.iter().find(|(n, ..)| n.ends_with("_amount")).map(|(_, c, ..)| *c),
+            Some(SlotCombine::MaxStrict) | Some(SlotCombine::MaxInclusive)
+        );
+        if competitive && !won {
+            // ⚠️ 是 `continue effect`（跳过**这一条特效**），不是 `return` ——
+            //    `return` 会把后面的特效全部丢掉（那正是"静默少画"）。
+            continue;
+        }
+        for (name, combine, _only_on_win, value) in pending {
+            write_slot(&mut out, name, combine, value);
         }
     }
     out
@@ -630,6 +806,55 @@ pub fn warp_params(
     out.height = size.1.max(1) as f32;
     out.seconds = seconds;
 
+
+    // -----------------------------------------------------------------------
+    // P5：Warp 的槽位表与缺省值（唯一映射）
+    // -----------------------------------------------------------------------
+    //
+    // ⚠️ 与色罩/色调整一样，这是"Rust 没有反射"的代价。
+    //    加槽位要**同时**改：① `WarpParams` ② `warp.wgsl` 的 struct ③ 这里。
+    //
+    /// 「参数没给时用什么」——**逐条照抄原实现里的 `unwrap_or`**。
+    fn warp_default(kind: &str, slot: &str) -> Option<f32> {
+        Some(match (kind, slot) {
+            ("shake", "shake_frequency") => 12.0,
+            ("zoom_bounce", "bounce_frequency") => 3.0,
+            ("pulse", "pulse_frequency") => 1.5,
+            ("shake", "shake_seed") => 0.0,
+            ("split", "split_offset") => 0.08,
+            ("split", "split_skew") => 0.0,
+            _ => return None,
+        })
+    }
+
+    /// 按名字读一个 warp 槽位（只用于判胜负，故只需 `*_amount` 那四个）。
+    fn read_warp_slot(p: &crate::render::WarpParams, name: &str) -> f32 {
+        match name {
+            "shake_amount" => p.shake_amount,
+            "bounce_amount" => p.bounce_amount,
+            "pulse_amount" => p.pulse_amount,
+            "split_amount" => p.split_amount,
+            _ => 0.0,
+        }
+    }
+
+    /// 按名字写一个 warp 槽位。**直接覆盖**（竞争型：胜出者的值说了算）。
+    fn write_warp_slot(p: &mut crate::render::WarpParams, name: &str, v: f32) {
+        match name {
+            "shake_amount" => p.shake_amount = v,
+            "shake_frequency" => p.shake_frequency = v,
+            "shake_seed" => p.shake_seed = v,
+            "bounce_amount" => p.bounce_amount = v,
+            "bounce_frequency" => p.bounce_frequency = v,
+            "pulse_amount" => p.pulse_amount = v,
+            "pulse_frequency" => p.pulse_frequency = v,
+            "split_amount" => p.split_amount = v,
+            "split_offset" => p.split_offset = v,
+            "split_skew" => p.split_skew = v,
+            other => debug_assert!(false, "warp 槽位表里没有 {other}"),
+        }
+    }
+
     for effect in effects.iter() {
         let Some(spec) = crate::effects::spec_of(&effect.kind) else {
             continue;
@@ -642,50 +867,65 @@ pub fn warp_params(
         // 乘上去会让窗口边缘的频率突然变化，看起来像卡了一下。
         let strength = effect.opacity.clamp(0.0, 1.0);
         let param = |name: &str| effect.params.get(name).copied().filter(|v| v.is_finite());
-        match spec.kind {
-            "shake" => {
-                if let Some(amount) = param("amount") {
-                    let weight = amount.clamp(0.0, 1.0) * strength;
-                    if weight >= out.shake_amount {
-                        out.shake_amount = weight;
-                        // 频率兜一个下限：0 会让位移变成静止的常量偏移，
-                        // 看起来像"画面整体歪了"而不是"在抖"。
-                        out.shake_frequency = param("frequency").unwrap_or(12.0).max(1e-3);
-                        out.shake_seed = param("seed").unwrap_or(0.0);
-                    }
-                }
+        // ---------------------------------------------------------------------
+        // P5：**按登记表的 `slots` 写**，不再按 `kind` 手写 match。
+        // ---------------------------------------------------------------------
+        //
+        // 形状与色罩那条**相同**（`MaxInclusive` 竞争 + 卫星槽位），只有两处差异：
+        //   · **频率不乘 `strength`** —— 频率是"抖多快"不是"抖多少"；
+        //     乘上去会让窗口边缘的频率突变（看起来像卡了一下）。
+        //     原实现里只有 `*_amount` 那几行写了 `* strength`。
+        //   · 频率有 `.max(1e-3)` 下限 —— 0 会让位移变成**静止的常量偏移**，
+        //     看起来像"画面整体歪了"而不是"在抖"。
+        //     `seed` / `offset` / `skew` 没有下限。
+        let mut pending: Vec<(&'static str, bool, f32)> = Vec::new();
+        for slot in spec.slots {
+            // 缺省值照抄原实现（见 `warp_default`）。
+            let Some(raw) = param(slot.param).or_else(|| warp_default(spec.kind, slot.slot)) else {
+                continue;
+            };
+            let v = if slot.slot == "split_skew" {
+                // **度转弧度只在这一处发生**（与 hue / overlay 同一条纪律）。
+                raw.to_radians()
+            } else if slot.slot.ends_with("_frequency") {
+                raw.max(1e-3)
+            } else {
+                raw
+            };
+            // ⚠️ 只有 `*_amount` 乘时间窗强度；频率是"抖多快"，不乘。
+            let v = if slot.slot.ends_with("_amount") {
+                v.clamp(0.0, 1.0) * strength
+            } else {
+                v
+            };
+            pending.push((slot.slot, slot.write_only_on_win, v));
+        }
+
+        // 判胜负：四条 warp 各自独立竞争（`>=`，含等号），**互不影响**。
+        // 所以判据是"这个槽位自己"——按前缀分组即可。
+        for prefix in ["shake", "bounce", "pulse", "split"] {
+            let amount_slot = match prefix {
+                "shake" => "shake_amount",
+                "bounce" => "bounce_amount",
+                "pulse" => "pulse_amount",
+                _ => "split_amount",
+            };
+            let Some((_, _, weight)) = pending.iter().find(|(n, ..)| *n == amount_slot) else {
+                continue;
+            };
+            if *weight < read_warp_slot(&out, amount_slot) {
+                // 没胜出：这一组的槽位一个都不写（原实现里整个块都在 `if` 内）。
+                continue;
             }
-            "zoom_bounce" => {
-                if let Some(amount) = param("amount") {
-                    let weight = amount.clamp(0.0, 1.0) * strength;
-                    if weight >= out.bounce_amount {
-                        out.bounce_amount = weight;
-                        out.bounce_frequency = param("frequency").unwrap_or(3.0).max(1e-3);
-                    }
+            for (name, only_on_win, v) in pending.iter() {
+                if !name.starts_with(prefix) {
+                    continue;
                 }
-            }
-            "pulse" => {
-                if let Some(amount) = param("amount") {
-                    let weight = amount.clamp(0.0, 1.0) * strength;
-                    if weight >= out.pulse_amount {
-                        out.pulse_amount = weight;
-                        out.pulse_frequency = param("frequency").unwrap_or(1.5).max(1e-3);
-                    }
+                if *only_on_win {
+                    write_warp_slot(&mut out, name, *v);
+                } else if *name == amount_slot {
+                    write_warp_slot(&mut out, name, *v);
                 }
-            }
-            "split" => {
-                if let Some(amount) = param("amount") {
-                    let weight = amount.clamp(0.0, 1.0) * strength;
-                    if weight >= out.split_amount {
-                        out.split_amount = weight;
-                        out.split_offset = param("offset").unwrap_or(0.08);
-                        // **度转弧度只在这一处发生**（与 hue / overlay 同一条纪律）。
-                        out.split_skew = param("skew").unwrap_or(0.0).to_radians();
-                    }
-                }
-            }
-            other => {
-                debug_assert!(false, "Warp 管线里的 {other} 没有在 warp_params 里接上");
             }
         }
     }
@@ -1987,6 +2227,43 @@ mod tests {
     }
 
     #[test]
+    fn 七个色调整_kind_各自写到正确的槽位() {
+        // P5 等价性：登记表驱动之后，每个 kind 仍必须写**它自己那一个**槽位。
+        // ⚠️ 既有那几条只覆盖了 brightness / saturation / hue 三条，
+        //    `brightness_multiply` / `contrast` / `hue_rotate_css` / `saturation_css`
+        //    **原先一条测试都没有** —— 切到登记表后写错槽位是静默的，所以补上。
+        let p = color_params(&[effect("brightness_multiply", &[("factor", 1.5)])]);
+        assert!((p.scale - 1.5).abs() < 1e-6, "brightness_multiply 该写 scale");
+        assert!(p.is_identity() == false);
+
+        let p = color_params(&[effect("contrast", &[("amount", 1.4)])]);
+        assert!((p.contrast - 1.4).abs() < 1e-6, "contrast 该写 contrast");
+
+        let p = color_params(&[effect("hue_rotate_css", &[("degrees", 90.0)])]);
+        assert!(
+            (p.hue_css - std::f32::consts::FRAC_PI_2).abs() < 1e-6,
+            "hue_rotate_css 该写 hue_css，且度转弧度只发生一次"
+        );
+
+        let p = color_params(&[effect("saturation_css", &[("amount", 0.5)])]);
+        assert!(
+            (p.saturation_css - 0.5).abs() < 1e-6,
+            "saturation_css 该写 saturation_css（不是 saturation）"
+        );
+    }
+
+    #[test]
+    fn 色调整与色罩互不串台() {
+        // ⚠️ 两条管线各有一份槽位表。串台的症状是"挂了个色彩特效，画面却出现了闪白"。
+        let p = color_params(&[effect("flash", &[("amount", 0.9)])]);
+        assert!(p.is_identity(), "flash 是 ColorMask 管线，不该进 color_params");
+
+        // 反过来：色调整也不该进色罩的参数。
+        let m = color_mask_params(&[effect("brightness", &[("amount", 0.5)])], (100, 100), 0);
+        assert!(m.is_identity(), "brightness 是 ColorAdjust 管线，不该进 color_mask_params");
+    }
+
+    #[test]
     fn 没挂色彩特效时是恒等_调用方据此跳过() {
         assert!(color_params(&[]).is_identity());
         // 只挂模糊时也应当是恒等：模糊不是 ColorAdjust 管线，不该混进来。
@@ -2592,6 +2869,100 @@ mod plan_tests {
     }
 
     #[test]
+    fn warp_频率不乘时间窗强度() {
+        // ⚠️ 这是 warp 与色罩的**唯一语义差异**，也是最容易在泛化时丢掉的一条：
+        //    频率是"抖多快"不是"抖多少"。乘了 strength 会让窗口边缘频率突变。
+        let e = |op: f32| {
+            let mut x = effect("shake", &[("amount", 1.0), ("frequency", 8.0)]);
+            x.opacity = op;
+            x
+        };
+        let half = warp_params(&[e(0.5)], (100, 100), 0.0);
+        assert!((half.shake_amount - 0.5).abs() < 1e-6, "幅度要乘强度");
+        assert!(
+            (half.shake_frequency - 8.0).abs() < 1e-6,
+            "频率**不许**乘强度，实得 {}",
+            half.shake_frequency
+        );
+    }
+
+    #[test]
+    fn warp_四个_kind_缺省值照抄原实现() {
+        let p = warp_params(&[effect("shake", &[("amount", 0.5)])], (100, 100), 0.0);
+        assert!((p.shake_frequency - 12.0).abs() < 1e-6, "shake 频率缺省 12");
+        assert_eq!(p.shake_seed, 0.0);
+
+        let p = warp_params(&[effect("zoom_bounce", &[("amount", 0.5)])], (100, 100), 0.0);
+        assert!((p.bounce_frequency - 3.0).abs() < 1e-6, "bounce 频率缺省 3");
+
+        let p = warp_params(&[effect("pulse", &[("amount", 0.5)])], (100, 100), 0.0);
+        assert!((p.pulse_frequency - 1.5).abs() < 1e-6, "pulse 频率缺省 1.5");
+
+        let p = warp_params(&[effect("split", &[("amount", 0.5)])], (100, 100), 0.0);
+        assert!((p.split_offset - 0.08).abs() < 1e-6, "split 偏移缺省 0.08");
+        assert_eq!(p.split_skew, 0.0);
+    }
+
+    #[test]
+    fn warp_频率为零时有下限() {
+        // 0 会让位移变成**静止的常量偏移**（看起来像"画面整体歪了"而不是"在抖"）。
+        let p = warp_params(
+            &[effect("shake", &[("amount", 0.5), ("frequency", 0.0)])],
+            (100, 100),
+            0.0,
+        );
+        assert!(p.shake_frequency >= 1e-3, "频率必须有下限");
+    }
+
+    #[test]
+    fn warp_split_的角度在这里就转成弧度() {
+        let p = warp_params(
+            &[effect("split", &[("amount", 0.5), ("skew", 180.0)])],
+            (100, 100),
+            0.0,
+        );
+        assert!(
+            (p.split_skew - std::f32::consts::PI).abs() < 1e-5,
+            "180 度应当变成 PI 弧度，实得 {}",
+            p.split_skew
+        );
+    }
+
+    #[test]
+    fn warp_两条同类只让更强的那条写频率() {
+        // `MaxInclusive`：0.8 胜，它的频率说了算；弱的 0.3 那组不许写。
+        let p = warp_params(
+            &[
+                effect("shake", &[("amount", 0.8), ("frequency", 20.0)]),
+                effect("shake", &[("amount", 0.3), ("frequency", 2.0)]),
+            ],
+            (100, 100),
+            0.0,
+        );
+        assert!((p.shake_amount - 0.8).abs() < 1e-6);
+        assert!((p.shake_frequency - 20.0).abs() < 1e-6, "弱的那条不许改频率");
+    }
+
+    #[test]
+    fn warp_四类互不影响() {
+        // 四条 warp 各自独立竞争，同时挂都要生效（这是"同时抖和弹跳是想要的"）。
+        let p = warp_params(
+            &[
+                effect("shake", &[("amount", 0.5)]),
+                effect("zoom_bounce", &[("amount", 0.4)]),
+                effect("pulse", &[("amount", 0.3)]),
+                effect("split", &[("amount", 0.2)]),
+            ],
+            (100, 100),
+            0.0,
+        );
+        assert!((p.shake_amount - 0.5).abs() < 1e-6);
+        assert!((p.bounce_amount - 0.4).abs() < 1e-6);
+        assert!((p.pulse_amount - 0.3).abs() < 1e-6);
+        assert!((p.split_amount - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
     fn 没有_warp_特效时参数是恒等的() {
         assert!(warp_params(&[], (1920, 1080), 0.0).is_identity());
     }
@@ -2680,5 +3051,124 @@ mod plan_tests {
         assert_eq!(p.shake_frequency, 5.0);
         assert_eq!(p.shake_seed, 1.0);
         assert!(!p.is_identity(), "挂了抖动就不该是恒等");
+    }
+}
+
+#[cfg(test)]
+mod p5_slot_tests {
+    //! P5 去槽位化的**等价性**验收：把那份手写 `match` 换成登记表驱动之后，
+    //! 四个色罩 kind 的产物必须与原来**逐值相同**。
+    //!
+    //! ⚠️ 与上面 `plan_tests` 里那几条的关系：那几条是**原来就有**的、
+    //!    覆盖了缺省值 / 除零保护 / 度转弧度；这一组补的是**边角组合**
+    //!    （`r2/g2/b2` 回落主色、两条同 kind 的竞争、`amount=0` 的恒等）。
+
+    use super::*;
+    use dhampir_timeline::schema::Effect;
+
+    fn eff(kind: &str, params: &[(&str, f32)]) -> Effect {
+        Effect {
+            kind: kind.to_string(),
+            params: params
+                .iter()
+                .map(|(k, v)| (k.to_string(), *v))
+                .collect(),
+            window: dhampir_timeline::schema::Window::Always,
+            opacity: 1.0,
+        }
+    }
+
+    #[test]
+    fn overlay_的_r2g2b2_缺省是主色() {
+        // 原实现：`out.overlay_r2 = param("r2").unwrap_or(r)`。
+        // 给 r/g/b 不给 r2/g2/b2 ⇒ 渐变另一端 = 主色（单色覆盖就是这么来的）。
+        let p = color_mask_params(&[eff("overlay", &[("amount", 1.0), ("r", 1.0), ("b", 0.5)])], (100, 100), 0);
+        assert_eq!(p.overlay_r, 1.0);
+        assert_eq!(p.overlay_b, 0.5);
+        assert_eq!(p.overlay_r2, 1.0, "r2 应当回落到主色 r");
+        assert_eq!(p.overlay_b2, 0.5, "b2 应当回落到主色 b");
+        assert_eq!(p.overlay_g2, 0.0, "g 没给、缺省 0，g2 跟着是 0");
+    }
+
+    #[test]
+    fn overlay_显式给了_r2_就不回落() {
+        let p = color_mask_params(
+            &[eff("overlay", &[("amount", 1.0), ("r", 1.0), ("r2", 0.25)])],
+            (100, 100),
+            0,
+        );
+        assert_eq!(p.overlay_r2, 0.25, "显式给了就该用它，不能被主色盖掉");
+    }
+
+    #[test]
+    fn 两条同_kind_只让更强的那条写卫星槽位() {
+        // `flash` 是 `MaxStrict`：0.8 那条胜，它的颜色说了算；
+        // 弱的那条**不许**把颜色稀释成两者平均。
+        let p = color_mask_params(
+            &[
+                eff("flash", &[("amount", 0.8), ("r", 1.0), ("g", 1.0), ("b", 1.0)]),
+                eff("flash", &[("amount", 0.3), ("r", 0.0), ("g", 0.0), ("b", 0.0)]),
+            ],
+            (100, 100),
+            0,
+        );
+        assert!((p.flash_amount - 0.8).abs() < 1e-6, "更强的说了算");
+        assert_eq!(
+            (p.flash_r, p.flash_g, p.flash_b),
+            (1.0, 1.0, 1.0),
+            "弱的那条不该改颜色（`write_only_on_win`）"
+        );
+    }
+
+    #[test]
+    fn 弱的在后也不许改颜色() {
+        // 顺序反过来（弱在前、强在后）也要对 —— 判胜负读的是**当前值**。
+        let p = color_mask_params(
+            &[
+                eff("flash", &[("amount", 0.3), ("r", 0.0), ("g", 0.0), ("b", 0.0)]),
+                eff("flash", &[("amount", 0.8), ("r", 1.0), ("g", 1.0), ("b", 1.0)]),
+            ],
+            (100, 100),
+            0,
+        );
+        assert!((p.flash_amount - 0.8).abs() < 1e-6);
+        assert_eq!((p.flash_r, p.flash_g, p.flash_b), (1.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn overlay_的两条按_over_合成而不是取最大() {
+        // `over(0.5, 0.5) = 0.75`，而 `max(0.5,0.5)` 会是 0.5。
+        // 这条钉的是"overlay 用的是 over、不是 MaxInclusive"。
+        let p = color_mask_params(
+            &[
+                eff("overlay", &[("amount", 0.5)]),
+                eff("overlay", &[("amount", 0.5)]),
+            ],
+            (100, 100),
+            0,
+        );
+        assert!(
+            (p.overlay_amount - 0.75).abs() < 1e-6,
+            "两条 0.5 的覆盖层按 over 合成应为 0.75，实得 {}",
+            p.overlay_amount
+        );
+    }
+
+    #[test]
+    fn 登记表驱动与手写_match_在四类上逐值等价() {
+        // 覆盖四个 kind 各一组典型参数，逐槽位比对"该写的都写了、不该写的没写"。
+        let cases: Vec<(&str, Vec<(&str, f32)>)> = vec![
+            ("flash", vec![("amount", 0.5), ("r", 0.2), ("g", 0.4), ("b", 0.6)]),
+            ("vignette", vec![("amount", 0.5), ("radius", 0.9), ("softness", 0.25)]),
+            ("noise", vec![("amount", 0.5), ("seed", 3.0)]),
+            ("overlay", vec![("amount", 0.5), ("shape", 2.0), ("angle", 90.0)]),
+        ];
+        for (kind, params) in cases {
+            let p = color_mask_params(&[eff(kind, &params)], (100, 100), 0);
+            assert!(!p.is_identity(), "{kind} 应当写出了非恒等参数");
+        }
+        // 暗角的 softness 下限（原实现的 `.max(1e-3)`）在这条泛化路径上也要生效。
+        let p = color_mask_params(&[eff("vignette", &[("amount", 0.5), ("softness", 0.0)])], (100, 100), 0);
+        assert!(p.vignette_softness >= 1e-3, "softness 是除数，不许为 0");
     }
 }

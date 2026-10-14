@@ -4,7 +4,9 @@
 //! 分成两份的话，UI 上控件的取值范围和后端实际接受的取值范围迟早对不上——
 //! 而那种不一致表现为"用户能拖到某个值，导出时才报错"。
 
-use dhampir_timeline::schema::{EffectPipeline, EffectSpace, EffectSpec, WindowDefault};
+use dhampir_timeline::schema::{
+    EffectPipeline, EffectSlot, EffectSpace, EffectSpec, SlotCombine, WindowDefault,
+};
 
 /// 高斯模糊。radius 是像素半径。
 ///
@@ -43,6 +45,8 @@ pub const GAUSSIAN_BLUR: EffectSpec = EffectSpec {
         hold: 3,
         release: 5,
     }),
+    // 不走定长槽位（各管线有专名 uniform / 共享槽位由 kind 选写）。
+    slots: &[],
 };
 
 /// 四个逐像素色彩调整。**同一条管线**，所以这里登记四次、渲染只写一次。
@@ -62,6 +66,9 @@ pub const BRIGHTNESS: EffectSpec = EffectSpec {
     space: EffectSpace::Source,
     pipeline: EffectPipeline::ColorAdjust,
     window_default: None,
+    // 7 个色调整 kind 共用同一组槽位，各写自己那一个。
+    // `Add` 是**可交换**的：多条同类叠加的结果与顺序无关。
+    slots: &[EffectSlot { param: "amount", slot: "brightness", combine: SlotCombine::Add, write_only_on_win: false }],
 };
 /// 亮度（**乘性**）：CSS 的 `brightness()` 就是这一条。
 ///
@@ -75,6 +82,9 @@ pub const BRIGHTNESS_MULTIPLY: EffectSpec = EffectSpec {
     space: EffectSpace::Source,
     pipeline: EffectPipeline::ColorAdjust,
     window_default: None,
+    // 7 个色调整 kind 共用同一组槽位，各写自己那一个。
+    // `Mul` 是**可交换**的：多条同类叠加的结果与顺序无关。
+    slots: &[EffectSlot { param: "factor", slot: "scale", combine: SlotCombine::Mul, write_only_on_win: false }],
 };
 
 /// 对比度：绕 0.5 中灰缩放。1.0 = 不变。
@@ -84,6 +94,9 @@ pub const CONTRAST: EffectSpec = EffectSpec {
     space: EffectSpace::Source,
     pipeline: EffectPipeline::ColorAdjust,
     window_default: None,
+    // 7 个色调整 kind 共用同一组槽位，各写自己那一个。
+    // `Mul` 是**可交换**的：多条同类叠加的结果与顺序无关。
+    slots: &[EffectSlot { param: "amount", slot: "contrast", combine: SlotCombine::Mul, write_only_on_win: false }],
 };
 /// 饱和度：向亮度插值。1.0 = 不变，0.0 = 完全灰度。
 pub const SATURATION: EffectSpec = EffectSpec {
@@ -92,6 +105,9 @@ pub const SATURATION: EffectSpec = EffectSpec {
     space: EffectSpace::Source,
     pipeline: EffectPipeline::ColorAdjust,
     window_default: None,
+    // 7 个色调整 kind 共用同一组槽位，各写自己那一个。
+    // `Mul` 是**可交换**的：多条同类叠加的结果与顺序无关。
+    slots: &[EffectSlot { param: "amount", slot: "saturation", combine: SlotCombine::Mul, write_only_on_win: false }],
 };
 /// 色调：色相旋转，单位**度**（不是弧度）。
 ///
@@ -104,6 +120,10 @@ pub const HUE: EffectSpec = EffectSpec {
     space: EffectSpace::Source,
     pipeline: EffectPipeline::ColorAdjust,
     window_default: None,
+    // 7 个色调整 kind 共用同一组槽位，各写自己那一个。
+    // `Add` 是**可交换**的：多条同类叠加的结果与顺序无关。
+    // **度转弧度只在这一处发生**（着色器收弧度）。
+    slots: &[EffectSlot { param: "degrees", slot: "hue", combine: SlotCombine::Add, write_only_on_win: false }],
 };
 /// 色相旋转（**CSS / SVG 规范矩阵**）：CSS 的 `hue-rotate(θ)` 就是这一条。
 ///
@@ -124,6 +144,10 @@ pub const HUE_ROTATE_CSS: EffectSpec = EffectSpec {
     space: EffectSpace::Source,
     pipeline: EffectPipeline::ColorAdjust,
     window_default: None,
+    // 7 个色调整 kind 共用同一组槽位，各写自己那一个。
+    // `Add` 是**可交换**的：多条同类叠加的结果与顺序无关。
+    // **度转弧度只在这一处发生**（着色器收弧度）。
+    slots: &[EffectSlot { param: "degrees", slot: "hue_css", combine: SlotCombine::Add, write_only_on_win: false }],
 };
 
 /// 饱和度（**CSS / SVG 规范权重**）：CSS 的 `saturate(k)` 就是这一条。
@@ -139,6 +163,9 @@ pub const SATURATION_CSS: EffectSpec = EffectSpec {
     space: EffectSpace::Source,
     pipeline: EffectPipeline::ColorAdjust,
     window_default: None,
+    // 7 个色调整 kind 共用同一组槽位，各写自己那一个。
+    // `Mul` 是**可交换**的：多条同类叠加的结果与顺序无关。
+    slots: &[EffectSlot { param: "amount", slot: "saturation_css", combine: SlotCombine::Mul, write_only_on_win: false }],
 };
 
 /// 全部已登记的特效。
@@ -193,6 +220,15 @@ pub const FLASH: EffectSpec = EffectSpec {
         hold: 1,
         release: 4,
     }),
+    slots: &[
+        // 原实现 `render/timeline.rs:547`：`if weight > out.flash_amount { 写颜色 + 写 amount }`。
+        // ⚠️ 颜色三个槽位是 `write_only_on_win` —— 弱的那条不许把颜色稀释成两者平均。
+        EffectSlot { param: "amount", slot: "flash_amount", combine: SlotCombine::MaxStrict, write_only_on_win: false },
+        EffectSlot { param: "r", slot: "flash_r", combine: SlotCombine::MaxStrict, write_only_on_win: true },
+        EffectSlot { param: "g", slot: "flash_g", combine: SlotCombine::MaxStrict, write_only_on_win: true },
+        EffectSlot { param: "b", slot: "flash_b", combine: SlotCombine::MaxStrict, write_only_on_win: true },
+    ],
+    
 };
 
 /// 暗角：从中心到边缘逐渐压暗。`amount` 是边缘处的压暗量。
@@ -210,6 +246,14 @@ pub const VIGNETTE: EffectSpec = EffectSpec {
         hold: 4,
         release: 6,
     }),
+    slots: &[
+        // 原实现 `render/timeline.rs:558`：`if weight >= out.vignette_amount`（**含等号**）。
+        // softness 有 `.max(1e-3)` 的下限 —— 除零保护，泛化时别丢。
+        EffectSlot { param: "amount", slot: "vignette_amount", combine: SlotCombine::MaxInclusive, write_only_on_win: false },
+        EffectSlot { param: "radius", slot: "vignette_radius", combine: SlotCombine::MaxInclusive, write_only_on_win: true },
+        EffectSlot { param: "softness", slot: "vignette_softness", combine: SlotCombine::MaxInclusive, write_only_on_win: true },
+    ],
+    
 };
 
 /// 噪声。`amount` 是叠加强度，`seed` 决定这一份噪声长什么样（**可复现**）。
@@ -226,6 +270,12 @@ pub const NOISE: EffectSpec = EffectSpec {
         hold: 4,
         release: 4,
     }),
+    slots: &[
+        // 原实现 `render/timeline.rs:570`：`if weight >= out.noise_amount`。
+        EffectSlot { param: "amount", slot: "noise_amount", combine: SlotCombine::MaxInclusive, write_only_on_win: false },
+        EffectSlot { param: "seed", slot: "noise_seed", combine: SlotCombine::MaxInclusive, write_only_on_win: true },
+    ],
+    
 };
 
 /// 纯色/渐变覆盖层。`shape` 0=纯色 1=线性渐变 2=径向渐变。
@@ -247,6 +297,22 @@ pub const OVERLAY: EffectSpec = EffectSpec {
     space: EffectSpace::Document,
     pipeline: EffectPipeline::ColorMask,
     window_default: None,
+    slots: &[
+        // 原实现 `render/timeline.rs:595`：`out.overlay_amount = over(out.overlay_amount, weight)` ——
+        // **唯一一条用 over 合成的**（1-(1-a)(1-b) clamp），不是 max。
+        EffectSlot { param: "amount", slot: "overlay_amount", combine: SlotCombine::Over, write_only_on_win: false },
+        EffectSlot { param: "r", slot: "overlay_r", combine: SlotCombine::Over, write_only_on_win: false },
+        EffectSlot { param: "g", slot: "overlay_g", combine: SlotCombine::Over, write_only_on_win: false },
+        EffectSlot { param: "b", slot: "overlay_b", combine: SlotCombine::Over, write_only_on_win: false },
+        EffectSlot { param: "r2", slot: "overlay_r2", combine: SlotCombine::Over, write_only_on_win: false },
+        EffectSlot { param: "g2", slot: "overlay_g2", combine: SlotCombine::Over, write_only_on_win: false },
+        EffectSlot { param: "b2", slot: "overlay_b2", combine: SlotCombine::Over, write_only_on_win: false },
+        // ⚠️ shape 要过 `OverlayShape::from_param`（round + EPSILON 比较）；angle 要 `to_radians()`。
+        // 这两条是**逐 kind 的变换**，泛化时不能当成"直接写数"。
+        EffectSlot { param: "shape", slot: "overlay_shape", combine: SlotCombine::Over, write_only_on_win: false },
+        EffectSlot { param: "angle", slot: "overlay_angle", combine: SlotCombine::Over, write_only_on_win: false },
+    ],
+    
 };
 
 // ===== Warp 管线（T11）：坐标重映射 =====
@@ -270,6 +336,15 @@ pub const SHAKE: EffectSpec = EffectSpec {
         hold: 4,
         release: 4,
     }),
+    // 与色罩同形：`amount` 走竞争，卫星槽位只在胜出时写。
+    // ⚠️ **频率不乘时间窗强度** —— 频率是"抖多快"不是"抖多少"，
+    //    乘上去会让窗口边缘的频率突变（看起来像卡了一下）。
+    //    这条差异必须留在代码里（`warp_params` 里那个 `strength` 只乘 amount）。
+    slots: &[
+        EffectSlot { param: "amount", slot: "shake_amount", combine: SlotCombine::MaxInclusive, write_only_on_win: false },
+        EffectSlot { param: "frequency", slot: "shake_frequency", combine: SlotCombine::MaxInclusive, write_only_on_win: true },
+        EffectSlot { param: "seed", slot: "shake_seed", combine: SlotCombine::MaxInclusive, write_only_on_win: true },
+    ],
 };
 
 /// 缩放弹跳：`amount` 是最大放大倍数（0.1 = 放大 10%）。
@@ -283,6 +358,14 @@ pub const ZOOM_BOUNCE: EffectSpec = EffectSpec {
         hold: 4,
         release: 6,
     }),
+    // 与色罩同形：`amount` 走竞争，卫星槽位只在胜出时写。
+    // ⚠️ **频率不乘时间窗强度** —— 频率是"抖多快"不是"抖多少"，
+    //    乘上去会让窗口边缘的频率突变（看起来像卡了一下）。
+    //    这条差异必须留在代码里（`warp_params` 里那个 `strength` 只乘 amount）。
+    slots: &[
+        EffectSlot { param: "amount", slot: "bounce_amount", combine: SlotCombine::MaxInclusive, write_only_on_win: false },
+        EffectSlot { param: "frequency", slot: "bounce_frequency", combine: SlotCombine::MaxInclusive, write_only_on_win: true },
+    ],
 };
 
 /// 脉冲：低频呼吸式缩放，比 zoom_bounce 缓和。
@@ -296,6 +379,14 @@ pub const PULSE: EffectSpec = EffectSpec {
         hold: 4,
         release: 5,
     }),
+    // 与色罩同形：`amount` 走竞争，卫星槽位只在胜出时写。
+    // ⚠️ **频率不乘时间窗强度** —— 频率是"抖多快"不是"抖多少"，
+    //    乘上去会让窗口边缘的频率突变（看起来像卡了一下）。
+    //    这条差异必须留在代码里（`warp_params` 里那个 `strength` 只乘 amount）。
+    slots: &[
+        EffectSlot { param: "amount", slot: "pulse_amount", combine: SlotCombine::MaxInclusive, write_only_on_win: false },
+        EffectSlot { param: "frequency", slot: "pulse_frequency", combine: SlotCombine::MaxInclusive, write_only_on_win: true },
+    ],
 };
 
 /// 分屏：把画面沿中线切成两半，各自横移并倾斜。
@@ -315,6 +406,15 @@ pub const SPLIT: EffectSpec = EffectSpec {
         hold: 4,
         release: 4,
     }),
+    // 与色罩同形：`amount` 走竞争，卫星槽位只在胜出时写。
+    // ⚠️ **频率不乘时间窗强度** —— 频率是"抖多快"不是"抖多少"，
+    //    乘上去会让窗口边缘的频率突变（看起来像卡了一下）。
+    //    这条差异必须留在代码里（`warp_params` 里那个 `strength` 只乘 amount）。
+    slots: &[
+        EffectSlot { param: "amount", slot: "split_amount", combine: SlotCombine::MaxInclusive, write_only_on_win: false },
+        EffectSlot { param: "offset", slot: "split_offset", combine: SlotCombine::MaxInclusive, write_only_on_win: true },
+        EffectSlot { param: "skew", slot: "split_skew", combine: SlotCombine::MaxInclusive, write_only_on_win: true },
+    ],
 };
 
 /// 按类型串查登记项。
@@ -596,11 +696,240 @@ mod tests {
         // 报出来的范围必须与登记表一致，否则用户按提示改还是错。
         // 上界**从登记表推**，不写死：写死的话改一次上界就要改一次测试，
         // 而「改测试让它过」正是这类断言最容易退化的方式。
-        let bound = spec_of("gaussian_blur").expect("应当登记了").params[0].2;
+         let bound = spec_of("gaussian_blur").expect("应当登记了").params[0].2;
         assert!(
             issues[0].message.contains(&bound.to_string()),
             "提示里要带上真实上界 {bound}：{}",
             issues[0].message
         );
+    }
+
+    // ===== P5 去槽位化：`slots` 声明必须与原实现**逐条对齐** =====
+    //
+    // ⚠️ 为什么必须有这条：`slots` 是"把 `render/timeline.rs` 里那份手写 `match`
+    //    改写成数据"的**中间态**。声明写错了**不会报任何错** —— 因为这一刻
+    //    渲染器还在读老那份 `match`，`slots` 只是"没人用的新数据"。
+    //    等下一个人真的切过去时才会发现某条特效少了/多了一个槽位，
+    //    而那时**已经分不清是哪一次改动引入的**。
+    //
+    // ⇒ 所以这一步（只加声明、不改行为）就必须有判据把它钉在实现上。
+    //    本仓（YekiTrim）P2/P4 的教训：这类"看着对、其实错"的错，
+    //    只有**逐值/逐条**的判据抓得住。
+
+    /// 一个 kind 声明的槽位名（去重、已排序）。
+    fn declared_slots(kind: &str) -> Vec<&'static str> {
+        let mut v: Vec<&'static str> = spec_of(kind)
+            .unwrap_or_else(|| panic!("应当登记了 {kind}"))
+            .slots
+            .iter()
+            .map(|s| s.slot)
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    #[test]
+    fn 槽位声明与色罩实现逐条一致() {
+        // 这四个 kind 的槽位来自 `render/timeline.rs:532` 那处 match。
+        // ⚠️ 期望值是**照着那份实现抄下来的**，不是照着 `slots` 抄的 ——
+        //    两边都从同一处抄就没有意义了。改实现就要同步改这里。
+        let cases: [(&str, &[&str]); 4] = [
+            ("flash", &["flash_amount", "flash_b", "flash_g", "flash_r"]),
+            (
+                "vignette",
+                &["vignette_amount", "vignette_radius", "vignette_softness"],
+            ),
+            ("noise", &["noise_amount", "noise_seed"]),
+            (
+                "overlay",
+                &[
+                    "overlay_amount",
+                    "overlay_angle",
+                    "overlay_b",
+                    "overlay_b2",
+                    "overlay_g",
+                    "overlay_g2",
+                    "overlay_r",
+                    "overlay_r2",
+                    "overlay_shape",
+                ],
+            ),
+        ];
+        for (kind, want) in cases {
+            let mut want: Vec<&str> = want.to_vec();
+            want.sort_unstable();
+            assert_eq!(
+                declared_slots(kind),
+                want,
+                "`{kind}` 的 `slots` 声明与 `render/timeline.rs` 的实现对不上 —— \
+                 去槽位化切过去之后，这个槽位就会静默不写（或写错地方）"
+            );
+        }
+    }
+
+    #[test]
+    fn 色罩四个_kind_合计槽位正好覆盖结构体里那十八个() {
+        // 18 = `ColorMaskParams` 里除 `width`/`height`/`frame` 之外的全部槽位。
+        // ⚠️ 写死 18 是**刻意的**：它防的是"某个 kind 悄悄少声明一个槽位"。
+        let total: usize = ["flash", "vignette", "noise", "overlay"]
+            .iter()
+            .map(|k| declared_slots(k).len())
+            .sum();
+        assert_eq!(
+            total, 18,
+            "色罩四个 kind 声明的槽位合计应为 18（4+3+2+9）—— \
+             少一个就是某个特效某一路参数进不了成片"
+        );
+    }
+
+    #[test]
+    fn 不走定长槽位的_effect_必须声明空槽位() {
+        // 反向判据：模糊 / Warp 这些既不是色罩、也不是色调整，
+        // 它们走各自管线的专名 uniform，声明槽位会让"加一个槽位"变成两处真相。
+        //
+        // ⚠️ 本用例在 P5 步 3 之后**收窄了**：`brightness`/`hue` 等 7 个色调整
+        //    kind 原先在这里（当时它们的 `slots` 是空的），切到登记表驱动之后
+        //    它们**必须**有槽位 —— 见下面那条 `色调整七个_kind_各写一个槽位`。
+        //    收窄而不是删掉：模糊/Warp 那几条仍然要钉住。
+        // ⚠️ 本条在 P5 步 3 中**两次收窄**：
+        //    色调整 7 个 kind 先移出（它们切到了槽位表），Warp 4 个再移出。
+        //    现在只剩**真正不走槽位表**的那些 —— 模糊（专名 uniform）。
+        //    收窄而不是删掉：这条钉的是"别把专名 uniform 也塞进槽位表"。
+        for kind in ["gaussian_blur"] {
+            assert!(
+                declared_slots(kind).is_empty(),
+                "`{kind}` 不该声明定长槽位（它走自己管线的专名 uniform，不是槽位表）"
+            );
+        }
+        // 反向：三条管线（色罩 / 色调整 / Warp）现在**都**该有槽位声明。
+        for kind in [
+            "flash", "vignette", "noise", "overlay",
+            "brightness", "contrast", "saturation", "hue",
+            "shake", "zoom_bounce", "pulse", "split",
+        ] {
+            assert!(
+                !declared_slots(kind).is_empty(),
+                "`{kind}` 走槽位表，必须有 `slots` 声明（否则等于没接上）"
+            );
+        }
+    }
+
+    #[test]
+    fn warp_四个_kind_合计十个槽位且不重复() {
+        // `WarpParams` 有 13 个字段，其中 `width`/`height`/`seconds` 是几何量
+        // （由 `warp_params` 的入参直接填），剩 10 个归这四个 kind。
+        let mut all: Vec<&str> = ["shake", "zoom_bounce", "pulse", "split"]
+            .iter()
+            .flat_map(|k| declared_slots(k))
+            .collect();
+        let n = all.len();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(n, 10, "Warp 四个 kind 合计应有 10 个槽位");
+        assert_eq!(all.len(), n, "Warp 槽位不该有重复：{all:?}");
+        let mut want = vec![
+            "shake_amount", "shake_frequency", "shake_seed",
+            "bounce_amount", "bounce_frequency",
+            "pulse_amount", "pulse_frequency",
+            "split_amount", "split_offset", "split_skew",
+        ];
+        want.sort_unstable();
+        assert_eq!(all, want);
+    }
+
+    #[test]
+    fn 色调整七个_kind_各写一个槽位() {
+        // 7 个色调整 kind **共用同一组**槽位，各写自己那**一个**（与色罩的形状不同）。
+        // 期望值照着 `color_params` 原来的那份 match 抄。
+        let cases: [(&str, &str, SlotCombine); 7] = [
+            ("brightness", "brightness", SlotCombine::Add),
+            ("brightness_multiply", "scale", SlotCombine::Mul),
+            ("contrast", "contrast", SlotCombine::Mul),
+            ("saturation", "saturation", SlotCombine::Mul),
+            ("hue", "hue", SlotCombine::Add),
+            ("hue_rotate_css", "hue_css", SlotCombine::Add),
+            ("saturation_css", "saturation_css", SlotCombine::Mul),
+        ];
+        for (kind, slot, combine) in cases {
+            let spec = spec_of(kind).unwrap_or_else(|| panic!("应当登记了 {kind}"));
+            assert_eq!(spec.slots.len(), 1, "`{kind}` 应当恰好写一个槽位");
+            assert_eq!(spec.slots[0].slot, slot, "`{kind}` 该写 {slot}");
+            assert_eq!(spec.slots[0].combine, combine, "`{kind}` 的合成规则");
+        }
+    }
+
+    #[test]
+    fn 色调整的槽位合起来不重复且覆盖七个字段() {
+        // ⚠️ 防的是"两个 kind 写同一个槽位"—— 那会让其中一个静默失效。
+        let mut all: Vec<&str> = [
+            "brightness",
+            "brightness_multiply",
+            "contrast",
+            "saturation",
+            "hue",
+            "hue_rotate_css",
+            "saturation_css",
+        ]
+        .iter()
+        .map(|k| declared_slots(k)[0])
+        .collect();
+        let n = all.len();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), n, "色调整的 7 个槽位不该有重复：{all:?}");
+        let mut want = vec![
+            "brightness",
+            "contrast",
+            "hue",
+            "hue_css",
+            "saturation",
+            "saturation_css",
+            "scale",
+        ];
+        want.sort_unstable();
+        assert_eq!(all, want, "色调整的槽位应正好覆盖 `ColorAdjustParams` 那 7 个字段");
+    }
+
+    #[test]
+    fn 合成规则不许被统一成一种() {
+        // ⚠️ 这条钉的是**语义差异**：`flash` 严格大于、`vignette`/`noise` 含等号、
+        //    `overlay` 用 over 合成。三者混用不会报错，只会让"同时挂两条"时的
+        //    画面轻微不同 —— 而那正是最难归因的一类差异。
+        let combine_of = |kind: &str, slot: &str| {
+            spec_of(kind)
+                .expect("登记了")
+                .slots
+                .iter()
+                .find(|s| s.slot == slot)
+                .unwrap_or_else(|| panic!("{kind} 没声明 {slot}"))
+                .combine
+        };
+        assert_eq!(combine_of("flash", "flash_amount"), SlotCombine::MaxStrict);
+        assert_eq!(
+            combine_of("vignette", "vignette_amount"),
+            SlotCombine::MaxInclusive
+        );
+        assert_eq!(
+            combine_of("noise", "noise_amount"),
+            SlotCombine::MaxInclusive
+        );
+        assert_eq!(combine_of("overlay", "overlay_amount"), SlotCombine::Over);
+    }
+
+    #[test]
+    fn 闪白的颜色只在胜出时写() {
+        // 原实现（`render/timeline.rs:547`）里，`flash_r/g/b` **写在 `if weight >` 内部** ——
+        // 弱的那条不许把颜色稀释成两者平均。`write_only_on_win` 就是这条语义，
+        // 而 `flash_amount` 本身不是（它正是用来判胜负的那个）。
+        let flash = spec_of("flash").expect("登记了");
+        for s in flash.slots {
+            let expect_only_on_win = s.slot != "flash_amount";
+            assert_eq!(
+                s.write_only_on_win, expect_only_on_win,
+                "`flash.{}` 的 `write_only_on_win` 应为 {expect_only_on_win}",
+                s.slot
+            );
+        }
     }
 }

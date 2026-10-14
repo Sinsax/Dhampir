@@ -639,6 +639,67 @@ pub struct EffectSpec {
     /// 放在 `EffectSpec` 里而不是让 UI 自己写一张表：UI 那张表一定会与
     /// 渲染侧对"这特效是不是瞬时的"的判断漂开，而漂了没有任何东西会红。
     pub window_default: Option<WindowDefault>,
+    /// **这个特效往哪些 uniform 槽位写、用哪条合成规则**（P5 去槽位化）。
+    ///
+    /// `&[]` = 这个 kind 不走"定长槽位"那条路（模糊 / Warp 各自有专名 uniform，
+    /// ColorAdjust 的 7 个槽位是**共享**的、由 `kind` 决定写哪个 —— 见 §下方注释）。
+    ///
+    /// # 为什么要有这一列
+    ///
+    /// 加特效原来要改**三处**：`EffectSpec` 登记、`timeline.rs` 里那份
+    /// `match spec.kind`、以及对应的定长结构。而第三条 `match` 是**按名字派发**的 ——
+    /// 正是 [`EffectPipeline`] 的文档说"最容易漏改"的那一种。
+    ///
+    /// 收进这一列之后，"加一个落在既有管线内的特效" = 加一条 `EffectSpec`
+    /// **+ 声明它写哪几个槽位**，渲染主路径不用再动。
+    ///
+    /// ⚠️ 组合规则**不是**能统一的：几条本来就不同的创作语义
+    /// （"更强的闪白说了算" vs "两条暗角叠加无意义" vs "覆盖层按 over 合成"）。
+    /// 所以它是**数据**（[`SlotCombine`]），不是"大家都乘个系数"。
+    pub slots: &'static [EffectSlot],
+}
+
+/// 一个特效往某个 uniform 槽位写的规则（P5 去槽位化）。
+///
+/// `param` 与 `slot` **刻意分开**：参数名是**外部契约**（`Effect.params` 里的键），
+/// 槽位名是**内部实现**（`#[repr(C)]` 结构里的字段）。两者同名是巧合、不是约定 ——
+/// 例如 `flash` 的参数叫 `amount`，而它写的槽位叫 `flash_amount`
+/// （另外三个槽位 `flash_r/g/b` 来自参数 `r/g/b`，是**不同名**的）。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EffectSlot {
+    /// 外部参数名（`Effect.params` 的键）。
+    pub param: &'static str,
+    /// 内部槽位名（`#[repr(C)]` 结构里的字段名）。
+    pub slot: &'static str,
+    /// 与同一槽位的**其它**特效竞争时怎么合成。
+    pub combine: SlotCombine,
+    /// `false` = 只有 `combine` 判定**胜出**时才写这个槽位。
+    ///
+    /// ⚠️ `flash` 就是这条：它的 `r/g/b` **只在 `amount` 更强时才换**
+    /// （两条闪白同时挂着时，弱的那条不该把颜色稀释成两者平均 ——
+    /// 那是"谁都看得出来不是用户想要的颜色"，且解释不清）。
+    /// 把"写参数"与"判胜负"合成一步会让**输的那次也改颜色**。
+    pub write_only_on_win: bool,
+}
+
+/// 同一槽位上多条特效的合成规则（P5 去槽位化）。
+///
+/// 每一种都是**刻意的创作语义**，有对应的注释与原实现位置；
+/// 去槽位化时**必须原样带过去**，不许"统一"成一个式子。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotCombine {
+    /// 严格更大者胜（`> `）。原实现：`flash`（`render/timeline.rs:547`）。
+    MaxStrict,
+    /// 大于等于者胜（`>=`）。原实现：`vignette` / `noise`（`:558` / `:570`）。
+    MaxInclusive,
+    /// 按 **over** 合成：`1-(1-a)(1-b)`，结果夹到 `[0,1]`。原实现：`overlay`（`:595`）。
+    Over,
+    /// 相加（可交换）。原实现：`brightness` / `hue` 等色调整（`:364` 段）。
+    Add,
+    /// 相乘（可交换）。原实现：`scale` / `contrast` / `saturation` 等（`:364` 段）。
+    Mul,
 }
 
 impl EffectSpec {
@@ -1217,6 +1278,7 @@ mod tests {
         space: EffectSpace::Document,
         pipeline: EffectPipeline::SeparableBlur,
         window_default: None,
+        slots: &[],
     };
 
     #[test]

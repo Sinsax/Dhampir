@@ -2910,6 +2910,7 @@ mod v2_tests {
             space: crate::schema::EffectSpace::Document,
             pipeline,
             window_default: None,
+            slots: &[],
         }
     }
 
@@ -3203,6 +3204,7 @@ mod v2_tests {
             space: crate::schema::EffectSpace::Source,
             pipeline: crate::schema::EffectPipeline::SeparableBlur,
             window_default: None,
+            slots: &[],
         }];
         let issues = validate_timeline_v2(&backdrop, &specs);
         assert!(issues.is_empty(), "契约应当接受它，得到 {issues:?}");
