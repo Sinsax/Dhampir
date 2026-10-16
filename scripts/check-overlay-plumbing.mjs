@@ -243,6 +243,41 @@ export function overlayProblems(files) {
     }
   }
 
+  // 8. **样式载荷要覆盖宿主读的每一个键**（2026-10-16 加 —— 它是真事故的教训）。
+  //
+  //    `web/engine.js` 的字形栅格化读 `style.*`（颜色 / 描边 / 字重 / 阴影 / 白环…），
+  //    而那份 `style` 是 wasm 的 `text_style_json` 发过来的。**宿主读了、wasm 没发** 的症状是
+  //    "某一层永远不出现"，而且**没有任何测试会红**：实测就是它 —— 宿主 2026-10-16 加了白环的
+  //    绘制、`text_style_json` 却没发 `outer_stroke_px/color` ⇒ **成片两层描边、预览只有一层**
+  //    （用户报的原文）。像素判据也抓不到它：两端各自都比对得上。
+  //
+  //    方向是**单向包含**：宿主读的键 ⊆ wasm 发的键。反向不要求 —— wasm 多发几个留给后续/
+  //    别的宿主是允许的。
+  if (engine !== null) {
+    const wasm = files[WASM_HOST] === undefined ? '' : files[WASM_HOST];
+    const readStart = engine.indexOf('function rasterKey(');
+    const readEnd = engine.indexOf('function drawShadow(');
+    const readSlice = readStart >= 0 && readEnd > readStart ? engine.slice(readStart, readEnd) : '';
+    const jsonStart = wasm.indexOf('fn text_style_json(');
+    const jsonEnd = jsonStart >= 0 ? wasm.indexOf(String.fromCharCode(10) + '}' + String.fromCharCode(10), jsonStart) : -1;
+    const jsonSlice = jsonStart >= 0 && jsonEnd > jsonStart ? wasm.slice(jsonStart, jsonEnd) : '';
+    if (readSlice === '' || jsonSlice === '') {
+      problems.push('样式载荷规则找不到锚点：' + ENGINE + ' 的 `rasterKey(`…`drawShadow(` 之间或 ' +
+        WASM_HOST + ' 的 `fn text_style_json(` 取不到（改名了就把这条规则一起改，别删）');
+    } else {
+      const read = new Set();
+      for (const m of readSlice.matchAll(/\bstyle\.([a-z_][a-z0-9_]*)/g)) read.add(m[1]);
+      const sent = new Set();
+      for (const m of jsonSlice.matchAll(/"([a-z_][a-z0-9_]*)"\s*:/g)) sent.add(m[1]);
+      const missing = [...read].filter((k) => !sent.has(k));
+      if (missing.length > 0) {
+        problems.push('宿主读的样式键 wasm 没发：' + JSON.stringify(missing) + ' —— ' +
+          '症状是"那一层永远不出现"（成片两层描边、预览只有一层就是它），而两端各自看都正常。' +
+          '要么在 ' + WASM_HOST + ' 的 `text_style_json` 里补发，要么宿主别读它');
+      }
+    }
+  }
+
   const app = text(APP);
   if (app !== null) {
     if (!app.includes('textManifest')) {
@@ -330,6 +365,19 @@ function runSelfTest() {
     'use dhampir_core::overlay::{SubtitleTable, evaluate_overlay};',
     'use dhampir_core::render::{compose_overlay, ink_report};',
     'use dhampir_timeline::text_layout::place_line;',
+    // 第 8 条判据的锚点：宿主画字用的那份样式，**每个键都要在这里发出去**。
+    'fn text_style_json(style: &TextStyle) -> serde_json::Value {',
+    '    serde_json::json!({',
+    '        "color": style.color,',
+    '        "outline": style.outline,',
+    '        "stroke_px": style.stroke_px,',
+    '        "stroke_color": style.stroke_color,',
+    '        "outer_stroke_px": style.outer_stroke_px,',
+    '        "outer_stroke_color": style.outer_stroke_color,',
+    '        "family": style.family,',
+    '        "weight": style.weight,',
+    '    })',
+    '}',
     'fn text_lines(doc: &ProjectDoc, frame: i64, target: (u32, u32)) -> Vec<TextLineSpec> {',
     '    let Some(overlay) = evaluate_overlay(&doc.timeline, frame, doc.sequence_size(), Some(subtitles)) else {',
     '        return Vec::new();',
@@ -359,6 +407,17 @@ function runSelfTest() {
   const okEngine = [
     // 两条判据：**两类样式各传各的**（`manifest.subtitle_style` / `manifest.danmaku_style`）、
     // 且栅格化的入参是**一套样式**而不是散开的 `color, outline`。
+    
+    // ⚠️ 第 8 条判据（样式载荷覆盖）要求这里出现 `function rasterKey(` 与 `function drawShadow(`
+    // 两个锚点，且两者之间读的 `style.*` 键都能在 `okHost` 的 `text_style_json` 里找到。
+    // 夹具里读的键**故意与 okHost 发的那一组逐字对应** —— 这样"删掉一个键"的变异才抓得住。
+    'function rasterKey(line, style) {',
+    '  return [style.color, style.outline, style.stroke_px, style.stroke_color,',
+    '    style.outer_stroke_px, style.outer_stroke_color, style.family, style.weight].join("|");',
+    '}',
+    'function drawShadow(ctx, shadow, text, x, y) {',
+    '  ctx.fillText(text, x, y);',
+    '}',
     'bitmap = await createImageBitmap(rasterizeLine(line, style), {',
     '  premultiplyAlpha: "none",',
     '});',
@@ -450,6 +509,18 @@ function runSelfTest() {
   const appNoManifest = base();
   appNoManifest[APP] = 'const lines = engine.lines;\n';
   expect('页面没有读 textManifest -> 必须红', false, appNoManifest, '没有读 textManifest');
+
+  // ★ 第 8 条判据的变异：**wasm 少发一个宿主读着的键** —— 这一条就是 2026-10-16 的真事故
+  //   （`text_style_json` 没发 `outer_stroke_px` ⇒ 成片两层描边、预览只有一层，没有任何测试红）。
+  const noOuter = base();
+  noOuter[WASM_HOST] = okHost.replace('        "outer_stroke_px": style.outer_stroke_px,\n', '');
+  expect('wasm 少发宿主读的样式键 -> 必须红', false, noOuter, '宿主读的样式键 wasm 没发');
+
+  // ★ 反向那一半：宿主读一个 wasm 从没发过的键（合成的，证明规则认的是"读的键"，不是特例名单）。
+  const readsUnsent = base();
+  readsUnsent[ENGINE] = okEngine.replace('    style.outer_stroke_px, style.outer_stroke_color, style.family, style.weight].join("|");',
+    '    style.outer_stroke_px, style.outer_stroke_color, style.family, style.weight, style.not_sent_by_wasm].join("|");');
+  expect('宿主读了 wasm 没发的键 -> 必须红', false, readsUnsent, '宿主读的样式键 wasm 没发');
 
   const empty = base();
   for (const path of Object.keys(empty)) if (path.endsWith('.rs')) delete empty[path];

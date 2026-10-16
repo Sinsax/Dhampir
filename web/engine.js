@@ -156,6 +156,14 @@ function rasterizeLineUncached(line, style) {
   const strokePx = style.stroke_px > 0
     ? Math.round(style.stroke_px * scaled)
     : Math.round(line.border_px * scaled);
+  // **外圈（白环）厚度**（2026-10-16）：与内圈同一个换算（契约给的是"向外多少"）。
+  // 契约的 `outer_stroke_px` 来自 `SubtitleStyle.outer_stroke.ratio × 目标高`（与 CLI 同源），
+  // 而 CLI 那条腿画的是「圆盘膨胀 − 字形」⇒ 外缘 = 内圈外缘 + outer_stroke_px。
+  // ⚠️ 以前**这两个键根本没从 wasm 发过来** ⇒ 预览里只有一层描边，而用户报的正是
+  //    「底座预览没有实现双描边」。
+  const outerPx = (typeof style.outer_stroke_px === "number" && style.outer_stroke_px > 0)
+    ? Math.round(style.outer_stroke_px * scaled)
+    : 0;
 
   // 这一套样式的文字阴影（`null` = 不画）。判据与 CLI 侧
   // `text_overlay::shadow_spec` **逐条相同**：颜色给了、且 alpha 不为 0。
@@ -186,6 +194,13 @@ function rasterizeLineUncached(line, style) {
       const part = line.parts[i];
       // **先阴影、后文字** —— 与 CLI 侧同一个顺序（那边是先贴阴影位图）。
       if (shadow !== null) drawShadow(ctx, shadow, part.text, sx, y);
+      // **白环在彩色描边之前**：`strokeText` 是覆盖式绘制，后画的压先画的。
+      // 顺序反了整行字会变成一片白 —— 而"字变白了"看起来像字体/颜色坏了，不像描边。
+      if (outerPx > 0 && style.outline === true && strokePx > 0) {
+        ctx.lineWidth = (strokePx + outerPx) * 2;
+        ctx.strokeStyle = cssColor(style.outer_stroke_color || [255, 255, 255, 255]);
+        ctx.strokeText(part.text, sx, y);
+      }
       if (style.outline === true && strokePx > 0) {
         ctx.lineWidth = strokePx * 2;
         ctx.strokeStyle = strokeColorCss(line, style);
@@ -201,6 +216,12 @@ function rasterizeLineUncached(line, style) {
   }
 
   if (shadow !== null) drawShadow(ctx, shadow, line.text, x, y);
+  // **白环先画**（见上面 `outerPx` 与逐段那条路的同一句理由）。
+  if (outerPx > 0 && style.outline === true && strokePx > 0) {
+    ctx.lineWidth = (strokePx + outerPx) * 2;
+    ctx.strokeStyle = cssColor(style.outer_stroke_color || [255, 255, 255, 255]);
+    ctx.strokeText(line.text, x, y);
+  }
   if (style.outline === true && strokePx > 0) {
     // 边宽取两倍：drawtext 的 borderw 是**向外**扩一圈，而 canvas 的描边压在字上。
     // 先描边后填字，内半边被字盖掉，剩下的外半边就是那一圈。
@@ -460,6 +481,14 @@ export class Engine {
 
   /** 载入并校验一份工程。失败时 Rust 侧**保留上一份可用工程**（UI 不该因为一次非法编辑就崩）。 */
   open(project) {
+    // ⚠️ **调试钩子**（2026-10-17）：**只在 URL 带 `?dhampir-debug=1` 时**把引擎挂到 window。
+    //
+    // 用途：像素/清单级验收。探针要读**应用自己**这个引擎实例（它才是 `attach` 过、跑过
+    // `begin_frame` 的那一个）；在页面外复刻 `open()` 那串初始化走不通 —— 复刻版少一步 `attach`，
+    // wasm 直接 `RuntimeError: memory access out of bounds`（实测）。
+    //
+    // 正常路径**零影响**：不带那个查询参数时这一行什么都不做（不写全局、不改行为）。
+    if (new URLSearchParams(location.search).get("dhampir-debug") === "1") window.__dhampirEngine = this;
     const json = typeof project === "string" ? project : JSON.stringify(project);
     const result = JSON.parse(this.mod.dhampir_project_open(json));
     if (result.parsed === true && result.ok === true) {
@@ -1270,6 +1299,11 @@ export class Engine {
     }
     for (let index = 0; index < placements.length; index += 1) {
       const line = placements[index];
+      // ⚠️⚠️ **这一条自己的轨道样式优先**（2026-10-16 修的真事故，见 Rust `TextLineSpec::style`）：
+      //    帧级那份 `style` 是 `overlay.items.first()` 的 —— 同一份工程里有"文字元素"轨时，
+      //    它属于**元素** ⇒ 拿它画字幕 = 「字幕的描边颜色被文字层带偏」（用户报的原文，不需要重叠）。
+      //    老清单（旧 wasm）没有 `style` 键 ⇒ 回退帧级那份，行为与改造前一致（R4）。
+      const lineStyle = line.style || style;
       // 全是空白字符的行**不做位图**：宿主不判它（栅格化出来本来就是空的），
       // 硬塞一张空的进去只会让"这一行没有位图"那条判据失去意义。
       if (line.visible !== true) continue;
@@ -1284,7 +1318,7 @@ export class Engine {
       //
       // 为什么值得这么绕：实测（clip-25，2 行字幕）这段占 3.3ms/帧；宿主侧的栅格化缓存
       // 双跑只省掉其中 11% —— 大头正是**每帧无条件重建纹理 + 重传**，而那份重传由这一句决定。
-      const key = rasterKey(line, style);
+      const key = rasterKey(line, lineStyle);
       if (memo.keys.get(index) === key) continue;
       memo.keys.set(index, key);
 
@@ -1296,7 +1330,7 @@ export class Engine {
         //
         // `rasterizeLine` 内部走栅格化缓存（见 `RASTER_CACHE` 的说明）：
         // **canvas 可以跨帧复用，`ImageBitmap` 不可以**（wasm 换掉旧位图时会 close 它）。
-        bitmap = await createImageBitmap(rasterizeLine(line, style), {
+        bitmap = await createImageBitmap(rasterizeLine(line, lineStyle), {
           premultiplyAlpha: "none",
         });
       } catch (error) {

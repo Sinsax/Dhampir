@@ -202,6 +202,14 @@ pub struct TextRasterKey {
     pub stroke_px: u32,
     /// 描边颜色。参照实现 字幕是 `#403c3b`、弹幕是 `#000`。
     pub stroke_color: [u8; 4],
+    /// **外圈描边**宽度（**目标像素**；0 = 不画）。
+    ///
+    /// 与 `stroke_px` 同一口径（外侧宽）。语义是「在 `stroke_px` 那一圈**之外**再扩多少」
+    /// ⇒ 白环那一遍的 `Outline` = `stroke_px + outer_stroke_px`（见 `stroke_only_args_with`）。
+    /// **进键**：宽度变了整张位图要重画（同 `stroke_px`）。
+    pub outer_stroke_px: u32,
+    /// 外圈颜色（RGBA）。`outer_stroke_px == 0` 时被忽略。
+    pub outer_stroke_color: [u8; 4],
     /// **这一张是不是"阴影"那一张**（`Some` = 是，颜色就是它）。
     ///
     /// `None` = 文本位图本身，也就是**老路**：命令行参数与画出来的像素都必须逐字节不变。
@@ -593,6 +601,8 @@ pub fn drawtext_args(
         // 白色 = RRGGBB FFFFFF → `&H00FFFFFF`。
         "&H00FFFFFF"
     );
+    // **居中**（见 [`CENTER_IN_BITMAP`] 的实测记录）：不加这句，字贴底、下边缘被裁。
+    style.push_str(CENTER_IN_BITMAP);
 
     if key.shadow_color.is_some() {
         // **阴影那一张：只有填充，不带描边。**
@@ -658,8 +668,27 @@ pub fn drawtext_args(
 ///
 /// `PrimaryColour=&HFF000000`：ASS 的 alpha 是 **0 = 不透明、255 = 全透明**，
 /// 所以 `FF` 前缀 = 填充完全透明。`OutlineColour` 仍是白（覆盖度必须可恢复）。
+/// ⚠️ **2026-10-16 起生产路径不再用它**（描边改成「圆盘膨胀 − 字形」，见
+/// [`dilate_disc`]）：libass 的 `Outline=` 给的是**字形路径填实后的整块**（连字腔一起填）
+/// ⇒ 汉字糊成一块实心黑板。这个构造器留在判据里，是为了钉住那条历史与参数形状。
+#[cfg(test)]
 fn stroke_only_args(
     key: &TextRasterKey,
+    font_file: &Path,
+    font_dir: &Path,
+    subtitle_file: &Path,
+) -> Vec<String> {
+    stroke_only_args_with(key, 0, font_file, font_dir, subtitle_file)
+}
+
+/// 同一个构造器，但**把描边再加宽 `extra_px`**（外圈那一遍用）。
+///
+/// `extra_px == 0` 时输出与 [`stroke_only_args`] **逐字符相同** ——
+/// 冻结串那条判据（不画阴影时参数串逐字符与冻结串相同）钉的就是它，别在这里多写一个空格。
+#[cfg(test)]
+fn stroke_only_args_with(
+    key: &TextRasterKey,
+    extra_px: u32,
     font_file: &Path,
     font_dir: &Path,
     subtitle_file: &Path,
@@ -673,13 +702,21 @@ fn stroke_only_args(
     let family = font_family_name(key, font_file);
     // ⚠️ 宽度与第一遍走**同一个**判断（`stroke_px > 0` 用契约值、否则按字号推），
     //    再经过**同一个** `ass_outline_px` 换算到虚拟画布。
-    let stroke_px = if key.stroke_px > 0 {
+    // ⚠️ **内圈宽度**：开了描边才谈得上「内圈」—— `outline` 为假时是 **0**。
+    //    写成 `border_px(font_px)`（老路径的兜底）会让外圈那一遍的环带**内边离字一圈空**
+    //    （宽环 − 字形 多减不掉那圈按字号推的边），看起来像「白边和黑边中间隔了一条缝」。
+    let inner_px = if !key.outline {
+        0
+    } else if key.stroke_px > 0 {
         key.stroke_px
     } else {
         border_px(key.font_px)
     };
+    let stroke_px = inner_px + extra_px;
     let style = format!(
         // `&HFF000000`：ASS 的 alpha 是 **0 = 不透明、255 = 全透明** ⇒ 填充全透明。
+        // ⚠️ 这一支**只在判据里**（生产路径已改成「圆盘膨胀 − 字形」）：它**不跟**
+        //    `CENTER_IN_BITMAP` —— 留住它当年的参数形状，正是这条判据的意义。
         "FontName={family},FontSize={},PrimaryColour=&HFF000000,Outline={},OutlineColour={WHITE_INK}",
         ass_font_size(key.font_px, key.height),
         ass_outline_px(stroke_px, key.height),
@@ -691,6 +728,40 @@ fn stroke_only_args(
 /// 与 [`coverage_from_libass`]：libass 的 alpha 恒为 0、颜色提前合成进 RGB，
 /// 所以只有"全是白墨"时覆盖度才恢复得出来。
 pub const WHITE_INK: &str = "&H00FFFFFF";
+
+/// **把这一行在位图里居中**的那几个 ASS 键（`force_style` 的一部分）。
+///
+/// ⚠️⚠️ **少了它，字会被画在位图底部、下边缘被裁**（2026-10-16 实测抓到的默认路径缺陷）：
+/// 底座把一行渲成位图走的是「单条 SRT + `subtitles=`」—— **SRT 不带样式**，
+/// libass 于是用**默认样式**，而默认是 `Alignment=2`（**贴底**）+ 默认 `MarginV`。
+/// 而 `text_overlay` 的绘制契约是「**位图的中心对准行盒的中心**」（`place_line`），
+/// 它要求"栅格化时文字在位图里居中" —— 默认样式并不满足这条契约。
+///
+/// 实测（1920×156 的位图，字号 72 的一行「wgpu 原生渲染效果参考」）：
+///
+/// ```text
+/// 改前：墨迹 y 65..155（上留 65 / 下留 0）—— 贴底、下边缘被裁
+///       而墨迹只有 90px 高、位图 156px ⇒ **装得下**，纯粹是"没居中"
+/// 改后：应当接近 33 / 33（同一个 dump 开关 `DHAMPIR_DUMP_RASTER` 可复验）
+/// ```
+///
+/// `MarginL/R/V=0` 一起写：位图本来就等于"行盒 + 上下留白"，任何外边距
+/// 都会把居中重新推歪。⚠️ `stroke_only_args_with`（只在判据里）**不跟** ——
+/// 它留作那条历史与参数形状的记录。
+///
+/// ⚠️⚠️ **为什么是 `10` 而不是 `5`**（实测踩过，别再改回 5）：我们的输入是 **SRT**，
+/// libass 把它转成的是 **SSA v4 旧编号**的脚本 —— 那一套里 `5` = **左上**、`10` = **中-中**；
+/// 而 ASS 的"小键盘编号"里 `5` 才是中-中。实测：
+///
+/// ```text
+/// 不写 Alignment             ：墨迹 y 65..155（下留 0，贴底被裁）
+/// Alignment=5（按 ASS 理解） ：墨迹 y 5..97、x 0..787（**左上角** —— 说明走的是旧编号）
+/// Alignment=10（旧编号中-中）：墨迹 y 38..130（上留 38 / 下留 25）、x 561..1356（居中）✔
+/// ```
+///
+/// 判据是**底座自己的终态报告**：同一份工程里那 3 条 `subtitle_ink_clipped` 消失、
+/// 进程退出码从 1 变 0。
+pub const CENTER_IN_BITMAP: &str = ",Alignment=10,MarginL=0,MarginR=0,MarginV=0";
 
 /// `subtitles=` 那一段滤镜串（**不含**后面可能追加的 `gblur`）。
 ///
@@ -1141,11 +1212,43 @@ pub fn rasterize_line(key: &TextRasterKey) -> Result<TextBitmap, String> {
     //    一次渲染给不出"描边另一种颜色"，因为 libass 那条路必须把填充与描边
     //    都画成白墨，底座拿到的是一张并集掩码。
     //    没开描边时行为**逐字节不变**（单次渲染，走原来的 `run_ffmpeg`）。
-    let result = if key.outline && key.shadow_color.is_none() {
+    // ⚠️ 条件里加 `outer_stroke_px > 0`：**没开内圈描边、只加外圈**也是一条合法配置，
+    //    那时同样要走多遍那条路（单遍给不出「两种颜色」）。
+    let result = if (key.outline || key.outer_stroke_px > 0) && key.shadow_color.is_none() {
         rasterize_with_stroke(key, font.path(), dir.path(), &subtitle_file)
     } else {
         run_ffmpeg(key, font.path(), dir.path(), &subtitle_file)
     };
+    // ⚠️ **临时调试开关**（2026-10-16 查描边几何时加的）：`DHAMPIR_DUMP_RASTER=<目录>`
+    //    时把这一张位图写成 PPM，用来**直接看栅格化结果里有几种颜色** ——
+    //    "描边没了/糊成一块"这类问题在下游（叠加/编码）里看不出来。
+    if let Ok(dir_path) = std::env::var("DHAMPIR_DUMP_RASTER") {
+        if let Ok(bm) = &result {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_micros())
+                .unwrap_or(0);
+            let path = std::path::Path::new(&dir_path).join(format!("raster-{stamp}.ppm"));
+            let mut bytes = format!("P6\n{} {}\n255\n", bm.width, bm.height).into_bytes();
+            for px in bm.pixels.chunks_exact(4) {
+                bytes.extend_from_slice(&px[0..3]);
+            }
+            let sidecar = path.with_extension("txt");
+            let _ = std::fs::write(
+                sidecar,
+                format!(
+                    "outline={} stroke_px={} outer_px={} stroke_color={:?} outer_color={:?} multi_pass={}\n",
+                    key.outline,
+                    key.stroke_px,
+                    key.outer_stroke_px,
+                    key.stroke_color,
+                    key.outer_stroke_color,
+                    (key.outline || key.outer_stroke_px > 0) && key.shadow_color.is_none(),
+                ),
+            );
+            let _ = std::fs::write(path, bytes);
+        }
+    }
     // 字幕临时文件用完就删，成功失败都删：一次出片几百行，留一地文件是在给下次查问题挖坑。
     // （字体那份由 `font` 的 Drop 删，连提前 return 都覆盖得到。）
     let _ = std::fs::remove_file(&subtitle_file);
@@ -1196,8 +1299,10 @@ fn fill_only_args(
     );
     let family = font_family_name(key, font_file);
     // `Outline=0` ⇒ 不描边；`PrimaryColour` 白 ⇒ 覆盖度可恢复。
+    // ⚠️ `{CENTER_IN_BITMAP}` **必须有**：这一遍就是"开了描边"时的字形掩码，
+    //    不居中的话字贴在位图底部、下边缘被裁（实测上留 65 / 下留 0 —— 见 [`CENTER_IN_BITMAP`]）。
     let style = format!(
-        "FontName={family},FontSize={},PrimaryColour={WHITE_INK},Outline=0",
+        "FontName={family},FontSize={},PrimaryColour={WHITE_INK},Outline=0{CENTER_IN_BITMAP}",
         ass_font_size(key.font_px, key.height),
     );
     rawvideo_args(source, subtitles_filter(subtitle_file, font_dir, &style))
@@ -1279,26 +1384,167 @@ fn run_ffmpeg(
 ///
 /// * `描边是另一种颜色而不是与填充连成一块` —— 覆盖率密度必须降回字形量级
 /// * `两次渲染的字形与单次渲染逐像素一致` —— 填充那一遍不能被描边改动
+/// # 2026-10-16：**不再走 libass 的描边**，改成对字形覆盖度做膨胀
+///
+/// 上面那一段描述的是旧几何的后果（并集 = 实心块）。现在只栅格化**一遍**（字形），
+/// 描边与白环分别由 [`dilate_disc`] 膨胀相减得到 —— 字腔不动、笔画面不再糊，
+/// 而且**少起一次 ffmpeg**（一行少一次 fork/exec）。
+/// 判据：`描边是字形外侧的环带而不是实心块`。
 fn rasterize_with_stroke(
     key: &TextRasterKey,
     font_file: &Path,
     font_dir: &Path,
     subtitle_file: &Path,
 ) -> Result<TextBitmap, String> {
-    // 描边那一遍：填充全透明、只留描边（白墨，覆盖度可恢复）。
-    let stroke_args = stroke_only_args(key, font_file, font_dir, subtitle_file);
-    let stroke_layer = run_ffmpeg_raw(key, &stroke_args, "描边")?;
-    // 填充那一遍：`Outline=0`，纯字形。
+    // **只栅格化一遍**：字形本身（`Outline=0`）。描边与外圈都由它**膨胀**出来。
+    //
+    // ⚠️ 2026-10-16 改：以前描边走 libass 的 `Outline=`（`stroke_only_args`），
+    //    它给的是**字形路径填实后的整块**（连字腔一起填）—— 汉字笔画间隙只有 4–8px，
+    //    两侧描边一盖就成一块实心黑板（实测密度 0.921，正常字形 0.363），
+    //    而 `lines_drawn` / `failed` / `issues` 全都正常 ⇒ 只能靠看图发现。
+    //    现在的几何只有一条：**描边 = dilate(字形, N) − 字形**（外侧宽 N，字腔不动）；
+    //    白环 = dilate(字形, 内圈+外圈) − dilate(字形, 内圈)。
     let fill_args = fill_only_args(key, font_file, font_dir, subtitle_file);
     let fill_layer = run_ffmpeg_raw(key, &fill_args, "填充")?;
-
-    let stroke_cov = coverage_from_libass(&stroke_layer);
     let fill_cov = coverage_from_libass(&fill_layer);
+    // ⚠️ 膨胀与环带都在**单通道覆盖度平面**上做（`fill_cov` 是预乘 RGBA，4 字节/像素）。
+    let fill_plane = coverage_plane(&fill_cov);
+    let width = key.width as usize;
+    let height = key.height as usize;
+    // 内圈宽度：开了描边才有；契约给 0 时按字号推（老路径的兜底，与 `drawtext_args` 同一判断）。
+    let inner_px = if !key.outline {
+        0
+    } else if key.stroke_px > 0 {
+        key.stroke_px
+    } else {
+        border_px(key.font_px)
+    };
 
-    // 先把描边染成契约色铺满，再把填充染成样式色盖上去。
-    let pixels = compose_stroke_and_fill(&stroke_cov, &fill_cov, key.stroke_color, key.color);
+    // ---------------------------------------------------------------------
+    // **外圈（白环）先垫底**：它必须落在内圈描边**之外**，否则整圈字被白墨糊住。
+    // ---------------------------------------------------------------------
+    let mut pixels = if key.outer_stroke_px > 0 {
+        let wide = dilate_disc(&fill_plane, width, height, inner_px + key.outer_stroke_px);
+        let base = if inner_px > 0 {
+            dilate_disc(&fill_plane, width, height, inner_px)
+        } else {
+            fill_plane.clone()
+        };
+        tint(
+            &plane_to_premultiplied(&ring_of(&wide, &base)),
+            key.outer_stroke_color,
+        )
+    } else {
+        Vec::new()
+    };
+
+    // 内圈描边 + 填充（没开描边时就是纯填充）。
+    let inner = if inner_px > 0 {
+        let band = ring_of(
+            &dilate_disc(&fill_plane, width, height, inner_px),
+            &fill_plane,
+        );
+        let mut layer = tint(&plane_to_premultiplied(&band), key.stroke_color);
+        let fill_tinted = tint(&fill_cov, key.color);
+        overlay(&mut layer, &fill_tinted);
+        layer
+    } else {
+        tint(&fill_cov, key.color)
+    };
+    if pixels.is_empty() {
+        pixels = inner;
+    } else {
+        overlay(&mut pixels, &inner);
+    }
 
     TextBitmap::new(key.width, key.height, pixels)
+}
+
+/// 预乘 RGBA（[`coverage_from_libass`] 的输出）→ **单通道覆盖度平面**（1 字节/像素）。
+///
+/// ⚠️⚠️ 这两个平面**不能混用索引**：拿 4 字节/像素的缓冲当 1 字节/像素遍历，
+/// 只会走到缓冲的前四分之一、算出来的"膨胀/环带"全是空的 —— 而不会报任何错。
+/// 实测症状：描边与白环都不见了，只剩填充色（`fill_nz = 像素数 × 4` 就是那条铁证）。
+fn coverage_plane(premultiplied: &[u8]) -> Vec<u8> {
+    premultiplied.chunks_exact(4).map(|px| px[0]).collect()
+}
+
+/// 单通道覆盖度平面 → 预乘 RGBA（喂给 [`tint`] 的形态）。
+fn plane_to_premultiplied(plane: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(plane.len() * 4);
+    for &coverage in plane {
+        out.extend_from_slice(&[coverage, coverage, coverage, coverage]);
+    }
+    out
+}
+
+/// 半径 `r` 的**圆盘**结构元（逐点判 `dx² + dy² ≤ r²`）。
+///
+/// 现算而不存表：一行字最多几万着墨像素、`r` 也就十几 ⇒ 这点开销看不见。
+fn disc_offsets(r: u32) -> Vec<(i32, i32)> {
+    let r = r as i32;
+    let mut offsets = Vec::new();
+    for dy in -r..=r {
+        for dx in -r..=r {
+            if dx * dx + dy * dy <= r * r {
+                offsets.push((dx, dy));
+            }
+        }
+    }
+    offsets
+}
+
+/// **圆盘膨胀**（形态学 dilate）：`out[p] = max(cov[p + o])`，`o` 遍历半径 `r` 的圆盘。
+///
+/// # 它现在是**描边几何的唯一实现**（2026-10-16）
+///
+/// `描边 = dilate(字形, N) − 字形`、`白环 = dilate(字形, 内圈+外圈) − dilate(字形, 内圈)`。
+/// 以前描边走 libass 的 `Outline=`，拿到的是**字形路径填实后的整块**（连字腔一起填）——
+/// 汉字糊成一块实心黑板，而报告里 `lines_drawn` / `issues` 全正常。
+///
+/// ⚠️ 用**圆盘**而不是方框：描边要像 CSS 的 `-webkit-text-stroke` 那样绕字形一圈，
+/// 方框在 45° 拐角会多出一块（`r = 6` 时约 2.5px）。
+///
+/// ⚠️ 稀疏实现（只遍历**有墨**的像素）：一行字着墨约两万像素、`r = 8` 时圆盘 197 个偏移
+/// ⇒ 每次栅格化几百万次比较，而位图是按行缓存的（同一行只算一次）。
+fn dilate_disc(cov: &[u8], width: usize, height: usize, r: u32) -> Vec<u8> {
+    if r == 0 {
+        return cov.to_vec();
+    }
+    let offsets = disc_offsets(r);
+    let mut out = vec![0u8; cov.len()];
+    for y in 0..height {
+        for x in 0..width {
+            let value = cov[y * width + x];
+            if value == 0 {
+                continue;
+            }
+            for (dx, dy) in &offsets {
+                let nx = x as i32 + dx;
+                let ny = y as i32 + dy;
+                if nx < 0 || ny < 0 || nx >= width as i32 || ny >= height as i32 {
+                    continue;
+                }
+                let index = ny as usize * width + nx as usize;
+                if out[index] < value {
+                    out[index] = value;
+                }
+            }
+        }
+    }
+    out
+}
+/// **环带**：外圈覆盖度减去内圈覆盖度（逐像素**饱和**相减）。
+///
+/// ⚠️ 必须饱和：两边各自都带抗锯齿的半覆盖像素，宽环在内侧边缘上可能**小于**内圈
+/// （同一像素在两遍里的量化差）—— `u8` 直接相减会在这条缝上回绕成 255，
+/// 症状是环带内侧出现一圈**亮白噪点**。
+fn ring_of(outer: &[u8], inner: &[u8]) -> Vec<u8> {
+    outer
+        .iter()
+        .zip(inner.iter())
+        .map(|(o, i)| o.saturating_sub(*i))
+        .collect()
 }
 
 /// **把描边层与填充层合成一张**：先铺描边、再把填充盖上去。
@@ -1848,6 +2094,99 @@ impl TextRasterizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// **真起 ffmpeg**：三色探针（填充品红 / 内圈青 / 外圈绿）—— 钉住"描边与白环真的画出来了"。
+    ///
+    /// ⚠️ 这条是 2026-10-16 换几何时唯一能**直接看到位图里有几种颜色**的判据：
+    /// 底盘那种"描边没了/糊成一块"只有数位图颜色才分得清。
+    /// 跑法：`cargo test -p dhampir-worker --lib -- --ignored --nocapture 三色探针`。
+    #[test]
+    #[ignore = "真起 ffmpeg：需要 PATH 上有 ffmpeg 与一个系统字体"]
+    fn 真起_ffmpeg_三色探针_描边与白环都要在位图里() {
+        let font = test_font();
+        let font_px = 48u32;
+        let (width, height) = bitmap_size(640, font_px as f32 * 1.2, font_px);
+        let key = TextRasterKey {
+            x_offset: 0,
+            text: "口".to_string(),
+            font_px,
+            color: [255, 0, 255, 255],
+            outline: true,
+            stroke_px: 6,
+            stroke_color: [0, 255, 255, 255],
+            outer_stroke_px: 4,
+            outer_stroke_color: [0, 255, 0, 255],
+            shadow_color: None,
+            shadow_blur_px: 0,
+            shadow_dx_px: 0,
+            shadow_dy_px: 0,
+            shadow_pad: 0,
+            font_file: font.clone(),
+            font_family: None,
+            font_dir: None,
+            width,
+            height,
+        };
+        let bitmap = rasterize_line(&key).expect("真起 ffmpeg 应当能画出这一行");
+        let mut mag = 0usize;
+        let mut cyan = 0usize;
+        let mut green = 0usize;
+        for px in bitmap.pixels.chunks_exact(4) {
+            if px[3] < 128 {
+                continue;
+            }
+            if px[0] > 150 && px[2] > 150 && px[1] < 110 {
+                mag += 1;
+            } else if px[1] > 150 && px[2] > 150 && px[0] < 110 {
+                cyan += 1;
+            } else if px[1] > 150 && px[0] < 110 && px[2] < 110 {
+                green += 1;
+            }
+        }
+        println!("三色探针：填充 {mag} / 内圈 {cyan} / 外圈 {green}（位图 {width}x{height}）");
+        assert!(mag > 50, "填充色没画出来（{mag} 像素）");
+        assert!(cyan > 20, "内圈描边没画出来（{cyan} 像素）—— 见 dilate_disc 那条几何");
+        assert!(green > 20, "外圈白环没画出来（{green} 像素）");
+    }
+    /// ★ **描边 = 圆盘膨胀 − 字形**（2026-10-16）：字腔（字形内部）绝不能被填成描边色。
+    ///
+    /// 旧几何（libass 的 `Outline=`）给的是**字形路径填实后的整块** ⇒ 汉字糊成一块黑板，
+    /// 而 `lines_drawn` / `failed` / `issues` 全正常（实测密度 0.921 vs 正常 0.363）。
+    /// 这条判据钉住"字形本体不进描边带"—— 那正是黑板与描边的分界。
+    #[test]
+    fn 描边是字形外侧的环带而不是实心块() {
+        let (w, h) = (3usize, 3usize);
+        let mut cov = vec![0u8; w * h];
+        cov[w + 1] = 255; // 中心一点着墨
+
+        let d1 = dilate_disc(&cov, w, h, 1);
+        assert_eq!(
+            d1.iter().filter(|v| **v > 0).count(),
+            5,
+            "半径 1 的圆盘 = 中心 + 上下左右四格"
+        );
+        let band = ring_of(&d1, &cov);
+        assert_eq!(band[w + 1], 0, "字形本体不许进描边带（否则就是实心块）");
+        assert_eq!(band[1], 255, "上边应当是描边");
+        assert_eq!(band[0], 0, "角落不该被方框式膨胀带上（圆盘在 45° 不外扩）");
+
+        // 半径 2 铺满这张 3×3（越界的部分被裁掉）
+        let d2 = dilate_disc(&cov, w, h, 2);
+        assert_eq!(d2.iter().filter(|v| **v > 0).count(), 9, "半径 2 应当铺满 3×3");
+        assert_eq!(dilate_disc(&cov, w, h, 0), cov, "半径 0 = 原样返回");
+    }
+    /// ★ **环带 = 宽环 − 内圈**（2026-10-16 外圈描边）。
+    ///
+    /// ⚠️ 必须**饱和**相减：内圈在内侧边缘上可能比宽环大（两遍的量化差），
+    /// 直接 `u8` 相减会回绕成 255 ⇒ 环带内侧一圈亮白噪点。这条判据钉的就是它。
+    #[test]
+    fn 环带是宽环减内圈且不回绕() {
+        // 宽环 ⊃ 内圈：剩下的就是壳
+        assert_eq!(ring_of(&[10, 20, 200, 255], &[0, 5, 50, 55]), vec![10, 15, 150, 200]);
+        // 内圈比宽环大（抗锯齿量化差）：必须是 0，不许回绕成 255
+        assert_eq!(ring_of(&[100, 100], &[120, 99]), vec![0, 1]);
+        // 长度按最短那份（两遍位图尺寸同源，正常不会不等）
+        assert_eq!(ring_of(&[5, 5, 5], &[1]).len(), 1);
+    }
 
     /// 一个测试用键：只让高度变，宽度固定 —— 反向用例要盯的正是「尺寸」这一项。
     ///
@@ -1862,6 +2201,9 @@ mod tests {
             outline: false,
             stroke_px: 0,
             stroke_color: [0, 0, 0, 255],
+            // 老工程那把键：**不画外圈**（0）—— 所以参数串判据仍逐字符相同。
+            outer_stroke_px: 0,
+            outer_stroke_color: [255, 255, 255, 255],
             shadow_color: None,
             shadow_blur_px: 0,
             shadow_dx_px: 0,
@@ -1887,6 +2229,13 @@ mod tests {
     ///
     /// **它是"这一版就该长这样"的锚，不是"与历史版本相同"的锚** ——
     /// 改它必须是有意的，并且要在文件头与提交信息里说明代价。
+    ///
+    /// **第三次有意换冻结点（2026-10-16）**：`force_style` 里补了
+    /// `Alignment=10,MarginL=0,MarginR=0,MarginV=0`（见 [`CENTER_IN_BITMAP`]；注意是旧编号的 10）。
+    /// 不写它时 libass 用**默认样式**（`Alignment=2` 贴底）⇒ 字被画在位图底部、
+    /// 下边缘被裁（实测 1920×156 的位图：墨迹上留 65 / **下留 0**，而墨迹只有 90px ⇒ 装得下）。
+    /// 这是**默认路径上所有文字像素都变**的一次改动，由底座自己的终态报告自证：
+    /// 演示工程那 3 条 `subtitle_ink_clipped` 应当消失。
     fn frozen_argv(key: &TextRasterKey) -> Vec<String> {
         vec![
             "-v".to_string(),
@@ -1906,7 +2255,7 @@ mod tests {
             format!(
                 "subtitles='C\\:/tmp/dhampir-text-1.txt':fontsdir='C\\:/fake':\
                  force_style='FontName=font,\
-                 FontSize=576,PrimaryColour=&H00FFFFFF,Outline=0'"
+                 FontSize=576,PrimaryColour=&H00FFFFFF,Alignment=10,MarginL=0,MarginR=0,MarginV=0,Outline=0'"
             ),
             "-frames:v".to_string(),
             "1".to_string(),
@@ -3671,6 +4020,8 @@ mod tests {
             outline: true,
             stroke_px: 0,
             stroke_color: [0, 0, 0, 255],
+            outer_stroke_px: 0,
+            outer_stroke_color: [255, 255, 255, 255],
             shadow_color: None,
             shadow_blur_px: 0,
             shadow_dx_px: 0,
@@ -3750,6 +4101,9 @@ mod tests {
             outline: false,
             stroke_px: 0,
             stroke_color: [0, 0, 0, 255],
+            // 老工程那把键：**不画外圈**（0）—— 所以参数串判据仍逐字符相同。
+            outer_stroke_px: 0,
+            outer_stroke_color: [255, 255, 255, 255],
             shadow_color: None,
             shadow_blur_px: 0,
             shadow_dx_px: 0,
@@ -3797,6 +4151,9 @@ mod tests {
             outline: false,
             stroke_px: 0,
             stroke_color: [0, 0, 0, 255],
+            // 老工程那把键：**不画外圈**（0）—— 所以参数串判据仍逐字符相同。
+            outer_stroke_px: 0,
+            outer_stroke_color: [255, 255, 255, 255],
             shadow_color: None,
             shadow_blur_px: 0,
             shadow_dx_px: 0,

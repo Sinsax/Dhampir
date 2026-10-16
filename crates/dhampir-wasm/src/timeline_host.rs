@@ -319,6 +319,15 @@ struct TextLineSpec {
     /// （`font_ratio / style.font_ratio` 也能推，但那是靠两个字段的商，
     /// 一旦其中一个改了口径就会**静默**漂）。
     scale: f32,
+    /// **这一条自己的轨道样式** —— JS 栅格化时**必须逐条用它**。
+    ///
+    /// ⚠️⚠️ 为什么必须逐条带（2026-10-16 修的真事故）：帧级只有一份 `subtitle_style`
+    /// （= `overlay.items.first()` 的那份），而**同一份工程里可以同时有多条字幕轨**
+    /// （YekiTrim 的「文字元素」就是一条条独立轨）⇒ 只要这一帧有元素在场，`first()` 就是元素
+    /// ⇒ **整帧的字（含真正的字幕）都穿上那个元素的样式**，症状是"字幕的描边颜色被文字层带偏"
+    /// （元素 (26,26,26) vs 字幕 (64,60,59)）—— **不需要两条轨重叠**，而且只有预览那条腿会中
+    /// （成片是逐轨画的，不受影响）。
+    style: TextStyle,
 }
 
 /// 一条弹幕的身份：泳道 + 在屏帧区间（**闭**区间）。
@@ -994,6 +1003,8 @@ fn text_lines(
             danmaku: None,
             opacity: item.opacity,
             scale: item.scale,
+            // **逐条的轨道样式**（见字段注释：帧级那份只是回退，不许拿它画所有人）。
+            style: item.track_style.clone(),
         });
     }
     (Some(overlay), specs)
@@ -1038,6 +1049,7 @@ fn danmaku_placements(
             opacity: item.opacity,
             // **弹幕不缩字**（参照的弹幕路径没有缩字逻辑），恒 1。
             scale: 1.0,
+            style: item.track_style.clone(),
         });
     }
     specs
@@ -3251,6 +3263,10 @@ fn placement_json(line: &TextLineSpec) -> serde_json::Value {
     // **这一条的缩放**：描边宽度 = `border_px * scale`（参照 `swEff = sw * wrapped.scale`）。
     // 同一处曾经也没发，同理。
     value["scale"] = serde_json::json!(line.scale);
+    // ⚠️ **这一条自己的轨道样式**（2026-10-16）：以前不发 ⇒ JS 只能拿帧级那一份画所有行，
+    //    而帧级那份是 `items.first()` 的 ⇒ **同屏有元素时整帧（含字幕）都穿元素的样式**
+    //    （用户报的「字幕描边被带偏」）。形状复用 `text_style_json`，别在这里另拼一份。
+    value["style"] = text_style_json(&line.style);
     // 全是空白字符的行：栅格化出来本来就是空的，判它等于判「空格没有墨迹」。
     value["visible"] = serde_json::json!(is_visible(&line.text));
     if let Some(danmaku) = line.danmaku {
@@ -3419,6 +3435,11 @@ fn text_style_json(style: &dhampir_core::overlay::TextStyle) -> serde_json::Valu
         "outline": style.outline,
         "stroke_px": style.stroke_px,
         "stroke_color": style.stroke_color,
+        // ⚠️ **外圈（白环）也要发给 JS**（2026-10-16）：宿主 `web/engine.js` 是**自己画字**的
+        //    （canvas 2D），它照着这份样式画。以前这两个键**根本没发** ⇒ 预览里画不出白环，
+        //    而 CLI 那条腿（ffmpeg 栅格化）照画 —— 用户看到的正是「成片有两层描边、预览只有一层」。
+        "outer_stroke_px": style.outer_stroke_px,
+        "outer_stroke_color": style.outer_stroke_color,
         "family": style.family,
         "weight": style.weight,
         "shadow_color": style.shadow_color,
@@ -4231,7 +4252,8 @@ mod tests {
             danmaku: None,
             opacity: 0.5,
             scale: 0.75,
-        };
+            style: TextStyle::default(),
+    };
         let placed = placement_json(&line);
         assert_eq!(
             placed["color"],
