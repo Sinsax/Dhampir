@@ -523,6 +523,24 @@ impl Layer {
     }
 }
 
+/// **外圈描边**：在 `stroke_ratio` 那一圈**外面**再加一圈（常态白）。
+///
+/// # 为什么不是「把 `stroke_ratio` 加大一圈」
+///
+/// 那样画出来的是一圈**同色**的粗边；这里要的是**两圈不同色**（外白内深）——
+/// libass 一遍只能给一个 `Outline` 与一个 `OutlineColour`，所以要**多一遍栅格化 + 环带相减**：
+/// 见 `dhampir-worker` 的 `rasterize_with_stroke` 与 `ring_of`。
+///
+/// ⚠️ 单位与口径与 `SubtitleStyle::stroke_ratio` **完全一致**（目标高的比例、**外侧宽**），
+/// 所以契约里两个数可以直接相加（`内圈 + 外圈` 就是白环那一遍的 `Outline`）。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct OuterStroke {
+    /// 外圈宽度（目标高的比例；**外侧宽**口径）。
+    pub ratio: f32,
+    /// 外圈颜色（RGBA）。常态是白。
+    pub color: [u8; 4],
+}
 /// 字幕样式。**放在轨道级，不是元素级。**
 ///
 /// 理由：一条字幕轨 = 一个字幕素材 + 一套样式。想要两套样式就开两条轨 ——
@@ -563,6 +581,27 @@ pub struct SubtitleStyle {
     /// 否则每个老工程的样式键集都变大（R4 判据当场红）。
     #[serde(default = "one", skip_serializing_if = "is_one_f32")]
     pub anchor_bottom: f32,
+    /// **绝对盒原点**（归一化 0..1，**文字块左上角**）。None = 沿用本仓自己的锚点（现状，零回归）。
+    ///
+    /// # 与 anchor_bottom 的分工（两个都管纵向，但不是一个东西）
+    ///
+    /// * anchor_bottom：文字块**底边**贴在哪 —— 横向**仍然居中**，纵向由它推；
+    /// * origin：**整块**摆在哪 —— 给了它，横向与纵向都用它，anchor_bottom 不参与。
+    ///
+    /// # 为什么需要它（2026-10-15）
+    ///
+    /// 宿主（YekiTrim）的面板给**每个**文字元素算好了「盒左上角百分比」
+    /// （process 的 placement::Pick）—— 那是**逐事件**的自由落点。
+    /// 本仓原本只有「上/中/下 + 横向居中」这一套（anchor_bottom），**表达不出**任意一个绝对点
+    /// ⇒ 宿主那条通道发过来的位置在出片这一侧被丢掉。
+    /// 需求书与验收判据：YekiTrim 仓的 docs/plan/dhampir-text-origin-request.md。
+    ///
+    /// ⚠️ **竖排（vertical）忽略本字段** —— 与 anchor_bottom 同一条口径（竖排下纵向变成了
+    ///    **长度方向**，语义转置了；见 text_layout::layout 里那段说明）。
+    ///
+    /// ⚠️ skip_serializing_if 不能省：没写时**一个键都不许出现**（既有工程逐字节不变）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<[f32; 2]>,
     /// 最多几行（超出的行丢掉 —— 字幕不该盖住半屏）。
     #[serde(default = "subtitle_max_lines")]
     pub max_lines: u32,
@@ -593,6 +632,14 @@ pub struct SubtitleStyle {
     /// 描边颜色。`outline` 为假时忽略。
     #[serde(default = "subtitle_stroke_color")]
     pub stroke_color: [u8; 4],
+    /// **外圈描边**：在 `stroke_ratio` 那一圈**外面**再加一圈（常态白）。
+    ///
+    /// `None` = 不画（默认，既有工程**逐字节不变**）。给了它 ⇒ 渲染侧多一遍栅格化：
+    /// 白环 = 「内圈 + 外圈」那遍的覆盖度 **减去** 内圈那遍的覆盖度（见 `rasterize_with_stroke`）。
+    ///
+    /// ⚠️ 白环画在**最底下**（先白环、再内圈描边、最后填充）—— 顺序反了整圈字会糊成白色。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outer_stroke: Option<OuterStroke>,
     /// **淡入时长（毫秒）。** 0 = 硬出现。
     ///
     /// 参照实现 的入场包络：`fadeIn = 0.35`，透明度走 `pow2_out`，
@@ -850,6 +897,25 @@ pub struct SubtitleStyle {
     /// （另两个只是端点）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale_in_ms: Option<u64>,
+    /// **周期缩放曲线**（心跳，2026-10-18）：`[(毫秒, 倍率), …]`，按 `scale_cycle_ms` 循环。
+    ///
+    /// ⚠️ 为什么要**新原语**：`scale_in_*` 那条是 `back_out3` 的**单峰**、且**只在入场窗口**
+    /// （窗口之后恒 1.0）—— "放大一次、回落、再小放大、每秒来一次"这种**周期多峰**曲线
+    /// 它数学上表达不了（转译器 `heartbeat` 那一档因此长期只能退化成"单次过冲"并如实报 NOTE）。
+    ///
+    /// 语义：`local_ms % cycle_ms` 落在点列两个相邻点之间，用 `back_out3` 在
+    /// `scale_a → scale_b` 之间插值；末点之后到周期结束一律 1.0（**那就是"停顿"**）。
+    /// ⚠️ 首点必须是 `ms = 0`；点列要**按下标递增**（不递增时行为由实现决定，校验层不管）。
+    ///
+    /// `None`（默认）= 不启用 ⇒ 逐字沿用 `scale_in_*` 那条老路（**存量零回归**）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_curve: Option<Vec<crate::text_motion::ScalePoint>>,
+    /// **周期缩放的周期长度（毫秒）**（心跳）。`None` 或 0 ⇒ `scale_curve` 不生效。
+    ///
+    /// ⚠️ 与曲线分开是**有意的**：同一组脉冲点可以用在不同节奏上（1s / 1.2s），
+    /// 合成一个字段就得把点列按节奏重算，而点列是"形状"、节奏是"速度"。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_cycle_ms: Option<u32>,
     /// **抖动幅度**（T4，**文档像素**）。`None` = 0.0 = 不抖。
     ///
     /// 单位与 `rise_in_px` / `transform.x/y` 同一套（文档像素），
@@ -1007,11 +1073,16 @@ impl Default for SubtitleStyle {
             // 契约默认值的判据是"**让老工程一字不变**"（同 `subtitle_stroke_ratio`
             // 那段注释里记的坑）。
             anchor_bottom: 1.0,
+            // None = 沿用本仓自己的锚点（上/中/下 + 居中），既有工程逐字节不变 ——
+            // 同 anchor_bottom 那条注释：契约默认值的判据是「让老工程一字不变」。
+            origin: None,
             max_lines: subtitle_max_lines(),
             color: subtitle_color(),
             outline: true,
             stroke_ratio: subtitle_stroke_ratio(),
             stroke_color: subtitle_stroke_color(),
+            // None = 不画外圈（既有工程逐字节不变）—— 同 stroke_ratio 那条注释的判据。
+            outer_stroke: None,
             // **默认全 0**：既有工程的行为是"硬出现/硬消失"，
             // 默认值必须让它**逐字节不变**（`schema` 不必升版本）。
             fade_in_ms: 0,
@@ -1047,6 +1118,8 @@ impl Default for SubtitleStyle {
             scale_in_from: None,
             scale_in_peak: None,
             scale_in_ms: None,
+            scale_curve: None,
+            scale_cycle_ms: None,
             shake_px: None,
             shake_hz: None,
             shake_phase: None,

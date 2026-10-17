@@ -302,6 +302,14 @@ pub struct TextStyle {
     /// CSS 的居中描边是一半，ffmpeg 的 `borderw` 是全部 —— 契约挑了后者。
     pub stroke_px: f32,
     pub stroke_color: [u8; 4],
+    /// **外圈描边**宽度（**目标像素**；0 = 不画外圈）。
+    ///
+    /// 与 [`TextStyle::stroke_px`] 同一处、同一条理由（只有求值层知道目标尺寸）：
+    /// `SubtitleStyle::outer_stroke.ratio * 目标高`。口径是「在 `stroke_px` 那一圈**之外**
+    /// 再向外扩多少」⇒ 白环那一遍的 `Outline` = `stroke_px + outer_stroke_px`。
+    pub outer_stroke_px: f32,
+    /// 外圈颜色（RGBA）。`outer_stroke_px == 0` 时被忽略。
+    pub outer_stroke_color: [u8; 4],
     /// 字体族名。宿主**从你给的字体目录里按这个名字找**，找不到要**报出来**
     /// （不是悄悄换一个字体画）。
     pub family: Option<String>,
@@ -358,6 +366,9 @@ impl Default for TextStyle {
             outline: true,
             stroke_px: 0.0,
             stroke_color: [0, 0, 0, 255],
+            // 0 = 不画外圈（老工程逐字节不变）。
+            outer_stroke_px: 0.0,
+            outer_stroke_color: [255, 255, 255, 255],
             family: None,
             weight: 400,
             // None = 不画阴影；偏移与模糊都是 0。
@@ -494,6 +505,16 @@ pub fn evaluate_overlay(
             outline: style.outline,
             stroke_px: style.stroke_ratio * target_h,
             stroke_color: style.stroke_color,
+            // **外圈**与上面那条同一条口径、同一处落地（`ratio × 目标高`）。
+            // `None` ⇒ 0 ⇒ 渲染侧一次多遍栅格化都不做（既有工程逐字节不变）。
+            outer_stroke_px: style
+                .outer_stroke
+                .map(|outer| outer.ratio * target_h)
+                .unwrap_or(0.0),
+            outer_stroke_color: style
+                .outer_stroke
+                .map(|outer| outer.color)
+                .unwrap_or([255, 255, 255, 255]),
             family: style.font_family.clone(),
             weight: style.font_weight,
             // **阴影也在这里落地**：契约给的是比例（`shadow_blur_ratio`），
@@ -541,6 +562,16 @@ pub fn evaluate_overlay(
                 scale_peak,
                 scale_ms,
             );
+            // **周期缩放（心跳，2026-10-18）优先**：启用（`scale_curve` + `scale_cycle_ms`
+            // 都给了）时它**完全接管**缩放 —— `scale_in_*` 那条是 `back_out3` 的**单峰**、
+            // 且只在入场窗口里，表达不了"放大→回落→再小放大、每秒来一次"。
+            // 缺省（老工程 / 其它档）⇒ 原样用上面算出来的 `enter_scale`（**零回归**）。
+            let enter_scale = match dhampir_timeline::text_motion::scale_curve_params(style) {
+                Some((points, cycle)) => {
+                    dhampir_timeline::text_motion::scale_curve_at(local_ms, cycle, points)
+                }
+                None => enter_scale,
+            };
             // **抖动（T4）**：纯 `local_ms` 的函数 —— 顺序播放与 `seek` 同源。
             //
             // 相位默认给 0；"同屏多条要错开"由宿主显式写 `shake_phase` 决定
@@ -723,6 +754,10 @@ pub fn evaluate_overlay(
             outline: spec.outline,
             stroke_px: spec.stroke_ratio * target_h,
             stroke_color: spec.stroke_color,
+            // **弹幕没有外圈描边**：`DanmakuSpec` 里没有这个字段（用户口径只提了
+            // 字幕与文字元素）。如实给「不画」，而不是跟着字幕走 —— 同阴影那条。
+            outer_stroke_px: 0.0,
+            outer_stroke_color: [255, 255, 255, 255],
             family: spec.font_family.clone(),
             weight: spec.font_weight,
             // **弹幕恒不画阴影**：`DanmakuSpec` 没有阴影字段（加一个就要动契约，

@@ -193,6 +193,61 @@ pub fn scale_in_params(style: &SubtitleStyle) -> (f32, f32, u64) {
     )
 }
 
+/// 周期缩放曲线上的一个点：`(毫秒, 倍率)`。
+///
+/// ⚠️ 单独一个结构而**不是**元组：它进的是工程文件（`.doc.json`），
+/// `[[0,1.05],[120,1.0]]` 这种位置数组在报告与排错里谁也读不出来。
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct ScalePoint {
+    /// 相对**周期起点**的毫秒。
+    pub ms: u32,
+    /// 这一点的缩放倍率（1.0 = 基线）。
+    pub scale: f32,
+}
+
+/// 从轨道样式取 `(点列, 周期毫秒)`。`None` = 不启用（走 `scale_in_*` 老路）。
+///
+/// 与 `scale_in_params` / `shake_params` 同一条理由：启用判断**只在这里出现一次** ——
+/// 散在调用点就会有一处漏掉，而漏掉的那处在"字段写了但没生效"之前**没有任何症状**。
+pub fn scale_curve_params(style: &SubtitleStyle) -> Option<(&[ScalePoint], u32)> {
+    let cycle = style.scale_cycle_ms?;
+    let points = style.scale_curve.as_deref()?;
+    // < 2 个点画不出"上去再回来"；周期 0 没法取模。两者都当"不启用"（不 panic、不猜）。
+    if cycle == 0 || points.len() < 2 {
+        return None;
+    }
+    Some((points, cycle))
+}
+
+/// **周期缩放曲线**在 `local_ms` 处的倍率（心跳）。见 `SubtitleStyle::scale_curve`。
+///
+/// 语义：取 `local_ms % cycle_ms`，落在相邻两点之间就用 `back_out3` 插值
+/// （每段各自起落 —— 于是"冲上去"和"弹回来"两端都带一点过冲，手感就是心跳）。
+/// 末点之后到周期结束返回 1.0（**停顿**；没有停顿就成抖动不是心跳）。
+///
+/// ⚠️ **纯函数**（只吃 `local_ms`，无累积状态）—— 与 T4 抖动同纪律：
+/// 预览要能任意 `seek`，带状态的曲线一 seek 就与成片分叉。
+pub fn scale_curve_at(local_ms: u64, cycle_ms: u32, points: &[ScalePoint]) -> f32 {
+    if cycle_ms == 0 || points.len() < 2 {
+        return 1.0;
+    }
+    let t = (local_ms % cycle_ms as u64) as u32;
+    let mut prev = points[0];
+    for p in &points[1..] {
+        if t <= p.ms {
+            let span = p.ms.saturating_sub(prev.ms);
+            if span == 0 {
+                return p.scale;
+            }
+            let u = (t.saturating_sub(prev.ms)) as f32 / span as f32;
+            return prev.scale + (p.scale - prev.scale) * back_out3(u);
+        }
+        prev = *p;
+    }
+    // 末点之后 ⇒ 本周期剩余时间**停在基线**（这就是"停顿"）。
+    1.0
+}
+
 /// 从轨道样式取"这一帧的抖动参数"，`None` 落到（0.0, 18.0, 0.0）。
 ///
 /// 与 [`scale_in_params`] 同一条理由：`unwrap_or` 只在这里出现一次。
@@ -207,6 +262,73 @@ pub fn shake_params(style: &SubtitleStyle) -> (f32, f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+// =====================================================================
+    // 周期缩放（心跳，2026-10-18）
+    // =====================================================================
+
+    fn heartbeat_points() -> Vec<ScalePoint> {
+        vec![
+            // ⚠️ **首点是基线（1.0）而不是峰值**：曲线的语义是"从上一个点过渡到下一个点"，
+            //    写 `1.05 → 1.0` 就成了"一开始就最大、然后缩小"（那是收尾，不是心跳）。
+            ScalePoint { ms: 0, scale: 1.0 },
+            ScalePoint { ms: 60, scale: 1.05 },
+            ScalePoint { ms: 140, scale: 1.0 },
+            ScalePoint { ms: 220, scale: 1.02 },
+            ScalePoint { ms: 320, scale: 1.0 },
+        ]
+    }
+
+    /// 形状：主峰起、回落、小峰起、回落、然后停顿到周期末尾。
+    ///
+    /// 变异自证：把末点之后那句 1.0 改成"返回最后一点的 scale" ⇒ 停顿那条断言红
+    /// （停顿消失、读起来就成抖动了）。
+    #[test]
+    fn scale_curve_shape_is_two_peaks_then_a_pause() {
+        let pts = heartbeat_points();
+        let cyc = 1000u32;
+        let at = |ms: u64| scale_curve_at(ms, cyc, &pts);
+        assert!((at(0) - 1.0).abs() < 1e-6, "t=0 应当是基线，实际 {}", at(0));
+        assert!((at(60) - 1.05).abs() < 1e-6, "t=60 是主峰，实际 {}", at(60));
+        assert!((at(140) - 1.0).abs() < 1e-6, "t=140 回到基线，实际 {}", at(140));
+        assert!((at(220) - 1.02).abs() < 1e-6, "t=220 是小峰，实际 {}", at(220));
+        assert!(at(30) > 1.0, "主峰之前应当在往上走，实际 {}", at(30));
+        for t in [320u64, 500, 700, 999] {
+            assert!((at(t) - 1.0).abs() < 1e-6, "t={t} 应当停在基线，实际 {}", at(t));
+        }
+    }
+
+    /// 周期性：t 与 t+cycle 逐值相同；非法参数一律 1.0（不 panic、不猜）。
+    #[test]
+    fn scale_curve_is_cyclic_and_safe() {
+        let pts = heartbeat_points();
+        for t in [0u64, 60, 120, 250, 700] {
+            assert_eq!(scale_curve_at(t, 1000, &pts), scale_curve_at(t + 1000, 1000, &pts));
+            assert_eq!(scale_curve_at(t, 1000, &pts), scale_curve_at(t + 3000, 1000, &pts));
+        }
+        assert_eq!(scale_curve_at(100, 0, &pts), 1.0, "周期 0 就不启用");
+        assert_eq!(scale_curve_at(100, 1000, &[]), 1.0, "没有点就不启用");
+        assert_eq!(
+            scale_curve_at(100, 1000, &[ScalePoint { ms: 0, scale: 1.5 }]),
+            1.0,
+            "只有一个点画不出上去再回来"
+        );
+    }
+
+    /// scale_curve_params：缺一个字段就不启用 —— 启用判断只在这里出现一次。
+    #[test]
+    fn scale_curve_params_requires_both_fields() {
+        let mut style = SubtitleStyle::default();
+        assert!(scale_curve_params(&style).is_none(), "两个都没写就不启用");
+        style.scale_curve = Some(heartbeat_points());
+        assert!(scale_curve_params(&style).is_none(), "只有点列、没有周期，仍不启用");
+        style.scale_cycle_ms = Some(1000);
+        let (pts, cyc) = scale_curve_params(&style).expect("两个都有才启用");
+        assert_eq!(cyc, 1000);
+        assert_eq!(pts.len(), 5);
+        style.scale_cycle_ms = Some(0);
+        assert!(scale_curve_params(&style).is_none(), "周期 0 就不启用");
+    }
 
     // =====================================================================
     // T1 弹入
