@@ -416,6 +416,24 @@ pub fn layout_transforms_at(
         .collect()
 }
 
+/// [`layout_transforms_at`] 的**出场版**：窗口锚在出点、进度反着走（逐字变小）。
+///
+/// 长度同样与 `layout.cells` 一一对应（下游按 `zip` 画）。求值见
+/// [`char_transform_at_out`]；**何时切到这条由宿主决定**（`dhampir-core/src/overlay.rs`，
+/// 判据是 `local >= span - out - 错峰跨度` —— 无条件切会把入场整个盖掉）。
+pub fn layout_transforms_at_out(
+    spec: &PerCharSpec,
+    layout: &CharLayout,
+    local_frame: i64,
+    span_frames: i64,
+    out_frames: i64,
+) -> Vec<CharTransform> {
+    let count = layout.cells.len();
+    (0..count)
+        .map(|i| char_transform_at_out(spec, i, count, local_frame, span_frames, out_frames))
+        .collect()
+}
+
 /// 把求出来的变换**写回**格子（渲染侧要的就是这个）。
 ///
 /// ⚠️ 原地改 `cells` 而**不是**返回新 `Vec<CharCell>`：`CharCell` 里的

@@ -613,9 +613,42 @@ pub fn evaluate_overlay(
                             let local = frame.saturating_sub(element.start);
                             let mut layout =
                                 dhampir_timeline::text_perchar::CharLayout::of(&line.text);
-                            let transforms = dhampir_timeline::text_perchar_anim::layout_transforms_at(
-                                spec, &layout, local,
-                            );
+                            // **逐字出场窗口**（2026-10-18，用户口径「固定为入场逐字变大、
+                            // 出场逐字变小」）：落在出点前 `out_frames`（含逐字错峰）之内就
+                            // 走"反着走"那条 —— 同一条 `from/to`、进度倒过来。
+                            //
+                            // ⚠️ 判据必须**在窗口内**才切：出场那条在窗口之前返回的是"终止值"
+                            //    （正常大小），无条件切过去会把入场动画整个盖掉。
+                            // ⚠️ 窗口按**帧**算：`span_ms` 经时基换成帧（`num/den` 就是帧率）。
+                            //    时基非法（num/den 为 0）⇒ `span_frames = 0` ⇒ 退回入场那条
+                            //    （不猜、不 panic —— 契约层输入来自外部）。
+                            let count = layout.cells.len();
+                            let out_frames = style.per_char_out_frames.unwrap_or(0) as i64;
+                            let span_frames = {
+                                let fps = if timebase.den > 0 && timebase.num > 0 {
+                                    timebase.num as f64 / timebase.den as f64
+                                } else {
+                                    0.0
+                                };
+                                if fps > 0.0 {
+                                    (span_ms as f64 * fps / 1000.0).round() as i64
+                                } else {
+                                    0
+                                }
+                            };
+                            let stagger_span = spec.stagger_frames.max(0) * count.saturating_sub(1) as i64;
+                            let in_exit = out_frames > 0
+                                && span_frames > 0
+                                && local >= span_frames - out_frames - stagger_span;
+                            let transforms = if in_exit {
+                                dhampir_timeline::text_perchar_anim::layout_transforms_at_out(
+                                    spec, &layout, local, span_frames, out_frames,
+                                )
+                            } else {
+                                dhampir_timeline::text_perchar_anim::layout_transforms_at(
+                                    spec, &layout, local,
+                                )
+                            };
                             dhampir_timeline::text_perchar_anim::apply_transforms(
                                 &mut layout.cells,
                                 &transforms,
