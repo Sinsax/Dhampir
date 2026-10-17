@@ -348,6 +348,58 @@ pub fn char_transform_at(
     }
 }
 
+/// **出场版**的 [`char_transform_at`]：同一条 `from/to`，但**反着走**（`to → from`），
+/// 窗口**锚在出点**（用户口径 2026-10-18：「逐字变化…固定为入场逐字变大，出场逐字变小」）。
+///
+/// # 为什么是这样实现的（**没有**再抄一份 `mix`）
+///
+/// 入场那条的进度是 `t = (local - start_i) / per_char_frames`，`start_i` 由
+/// [`PerCharSpec::start_frame_for`] 给（逐字错峰）。
+/// ⇒ 想要 `t = 1 - u`（`u` = 出场进度）**只需要喂一个换算过的 `local`**：
+///
+/// ```text
+/// X = start_i + per_char_frames * (1 - u)
+/// ```
+///
+/// 于是曲线、缓动、`rank`、`spread_*` 一个字节都不用重写（抄一份必然漂，
+/// 而漂的表现是"入场的字变大、出场的字却在旋转"）。
+///
+/// # 边界（与入场同一条纪律：**不许回到恒等**）
+///
+/// * 还没轮到（`local < start_out`）⇒ **终止值**（`t = 1`，即正常大小）；
+/// * 已经收完（`local >= start_out + out_frames`）⇒ **起始值**（`t = 0`，即缩到最小）——
+///   给恒等会让字在消失前"弹回原大小"，那一下很显眼但极难归因。
+///
+/// `out_frames <= 0` 或 `span_frames <= 0` ⇒ 恒等（**缺省不启用 = 老工程零回归**）。
+pub fn char_transform_at_out(
+    spec: &PerCharSpec,
+    index: usize,
+    count: usize,
+    local_frame: i64,
+    span_frames: i64,
+    out_frames: i64,
+) -> CharTransform {
+    if !spec.is_active() || span_frames <= 0 || out_frames <= 0 || spec.per_char_frames <= 0 {
+        return CharTransform::default();
+    }
+    // 逐字错峰沿用入场那一套偏移，但**整段往左挪 out_frames**（锚在出点）。
+    let off = spec.start_frame_for(index, count);
+    let start_out = span_frames - out_frames - off;
+    let dur = spec.per_char_frames;
+    let elapsed = local_frame - start_out;
+    if elapsed < 0 {
+        // 还没轮到 —— 停在终止值（正常大小）。
+        return char_transform_at(spec, index, count, off + dur);
+    }
+    if elapsed >= out_frames {
+        // 已经收完 —— 停在起始值（最小），不许弹回去。
+        return char_transform_at(spec, index, count, off);
+    }
+    let u = elapsed as f32 / out_frames as f32;
+    let x = off as f32 + dur as f32 * (1.0 - u);
+    char_transform_at(spec, index, count, x.round() as i64)
+}
+
 /// 把一行的**全部字**在某一帧上的变换求出来。
 ///
 /// 返回的 `Vec` 与 `layout.cells` **一一对应**（同长度、同序）。
@@ -935,5 +987,55 @@ mod tests {
         let a = char_transform_at(&s, 0, 1, 0);
         assert!((a.scale - 1.0).abs() < 1e-6 && (a.rotation_deg + 30.0).abs() < 1e-5);
         assert!((a.offset_x_em + 1.0).abs() < 1e-6 && (a.offset_y_em - 0.5).abs() < 1e-6);
+    }
+}
+
+
+#[cfg(test)]
+mod out_window_tests {
+    use super::*;
+
+    fn spec() -> PerCharSpec {
+        PerCharSpec {
+            name: Some("perchar_big".to_string()),
+            scale_from: 0.2,
+            scale_to: 1.0,
+            per_char_frames: 10,
+            stagger_frames: 0,
+            easing: "linear".to_string(),
+            ..PerCharSpec::default()
+        }
+    }
+
+    /// 出场窗口：逐字变小（to -> from），窗口锚在出点；
+    /// 窗口前停在终止值、窗口后停在起始值（不许弹回恒等 —— 弹一下极显眼又难归因）。
+    ///
+    /// 变异自证：把 char_transform_at_out 里那句 1.0 - u 改成 u
+    /// 则第二条断言红（出场变成越来越大）。
+    #[test]
+    fn out_window_shrinks_each_char_and_never_bounces_back() {
+        let s = spec();
+        let (span, out) = (100i64, 20i64);
+        assert!(
+            (char_transform_at_out(&s, 0, 1, 60, span, out).scale - 1.0).abs() < 1e-6,
+            "窗口之前应当停在正常大小"
+        );
+        let mid = char_transform_at_out(&s, 0, 1, 90, span, out).scale;
+        assert!((mid - 0.6).abs() < 1e-6, "出场半程应当 0.6，实际 {mid}");
+        assert!((char_transform_at_out(&s, 0, 1, 100, span, out).scale - 0.2).abs() < 1e-6);
+        let mut prev = f32::MAX;
+        for f in 60..=100 {
+            let sc = char_transform_at_out(&s, 0, 1, f, span, out).scale;
+            assert!(sc <= prev + 1e-6, "缩放在 f={f} 反弹：{prev} -> {sc}");
+            prev = sc;
+        }
+    }
+
+    /// 缺省不启用（out_frames 或 span_frames <= 0）则恒等 —— 老工程零回归那条。
+    #[test]
+    fn out_window_is_off_by_default() {
+        let s = spec();
+        assert!(char_transform_at_out(&s, 0, 1, 50, 100, 0).is_identity());
+        assert!(char_transform_at_out(&s, 0, 1, 50, 0, 20).is_identity());
     }
 }

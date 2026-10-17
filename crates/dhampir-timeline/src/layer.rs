@@ -958,6 +958,17 @@ pub struct SubtitleStyle {
     /// 为假时**整条逐字路径都不进**（老路的栅格化缓存仍然有效）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub per_char: Option<crate::text_perchar_anim::PerCharSpec>,
+    /// **逐字出场窗口（帧）**（2026-10-18）：窗口**锚在出点**，逐字错峰沿用
+    /// `per_char` 那份，进度**反着走**（`to → from`）⇒ "出场逐字变小"。
+    ///
+    /// ⚠️ 与 `per_char` **分开一个字段**（而不是塞进 `PerCharSpec`）：那个结构的文档写着
+    /// "由转译器从 `anim` 档名展开而来、没有"用户写没写"这一说"，而这里是**轨级**的、
+    /// 与"这一档的入场形状"无关（同一个 `per_char` 配不同的出场时长是合法的）。
+    ///
+    /// `None` / 0 ⇒ 不做出场（**老工程零回归**）。求值见
+    /// [`crate::text_perchar_anim::char_transform_at_out`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_char_out_frames: Option<u32>,
     /// **竖排**（E 组 3 档）。`None` / `false` = 横排（既有行为）。
     ///
     /// # 为什么是 `Option<bool>` 而不是 `bool`
@@ -1125,6 +1136,7 @@ impl Default for SubtitleStyle {
             shake_phase: None,
             // 逐字动效默认**关**：老工程求值结果与改动前逐字节相同。
             per_char: None,
+            per_char_out_frames: None,
             // ⚠️ 手动 Default 里也必须写这一行 —— 这个结构体的 Default 是**手写的**
             //    （不是 derive），漏一个字段是**编译错**（正是我们要的：
             //    漏了会被编译器抓住，而不是悄悄取到 bool 的零值）。
