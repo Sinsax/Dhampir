@@ -1604,8 +1604,15 @@ fn overlay(base: &mut [u8], top: &[u8]) {
             continue;
         }
         for i in 0..3 {
-            let sc = u32::from(src[i]);
-            let dc = u32::from(dst[i]);
+            // ⚠️⚠️ **两份输入都是 [`tint`] 吐出来的「直排」RGB**（颜色没有乘 alpha），
+            //    而这里走的是**预乘**合成 —— 所以必须先按各自的 alpha 预乘回去。
+            //    少了这一步：暗描边与亮填充在**部分覆盖**的像素上相加、再除 out_a
+            //    **冲过 255 被夹住** ⇒ 每个字沿着抗锯齿边多出一圈 **1px 白线**，
+            //    而那一圈本身就是 1px 台阶 ⇒ 成片里看着正是「内侧锯齿」。
+            //    实测（填充覆盖 96/255）：合成出 (255,255,255)，正确值 (141,123,109)，差 146 级。
+            //    判据：描边压填充的抗锯齿边不许冲成白色。
+            let sc = u32::from(src[i]) * sa / 255;
+            let dc = u32::from(dst[i]) * da / 255;
             // 预乘合成：`src + dst * (1 - src_a/255)`，最后再按 out_a 归一。
             let v = sc + dc * (255 - sa) / 255;
             dst[i] = (v * 255 / out_a).min(255) as u8;
@@ -2213,6 +2220,48 @@ mod tests {
         assert_eq!(ring_of(&[100, 100], &[120, 99]), vec![0, 1]);
         // 长度按最短那份（两遍位图尺寸同源，正常不会不等）
         assert_eq!(ring_of(&[5, 5, 5], &[1]).len(), 1);
+    }
+
+    /// ★ **描边压在填充上的那圈抗锯齿边不许冲成白**（2026-10-18）。
+    ///
+    /// 用户报「文字内侧有一条白线，白线有锯齿；去掉白环之后外侧好了、内侧还在」。
+    /// 根因就在这条链上：[`tint`] 吐的是**直排** RGB（颜色没乘 alpha），而 [`overlay`]
+    /// 走的是**预乘**合成 —— 少一步预乘，暗描边与亮填充在部分覆盖的像素上相加后
+    /// 除 `out_a` 会**冲过 255 被夹住**，于是每个字的内侧边缘多出一圈 1px 白线；
+    /// 那一圈本身就是 1px 台阶 ⇒ 肉眼看到的正是「锯齿」。
+    ///
+    /// 实测（改动前）：填充覆盖 96/255 时合成出 `(255,255,255)`，正确值 `(141,123,109)`，
+    /// **差 146 级**；改动后最大偏差 ≤ 3 级（只剩整数舍入）。
+    #[test]
+    fn 描边压填充的抗锯齿边不许冲成白色() {
+        let stroke = [64u8, 60, 59, 255];
+        let fill = [220u8, 189, 160, 255];
+        let mut worst = 0i32;
+        for c in 1..255u32 {
+            // 字形边缘那一像素：填充覆盖 c、描边带覆盖 255-c（ring_of(dilate, fill) 的值）。
+            let layer = tint(&vec![(255 - c) as u8; 4], stroke);
+            let fill_tinted = tint(&vec![c as u8; 4], fill);
+            let mut got = layer.clone();
+            overlay(&mut got, &fill_tinted);
+            let a_s = (255 - c) as f32 / 255.0;
+            let a_f = c as f32 / 255.0;
+            let out_a = a_f + a_s * (1.0 - a_f);
+            for i in 0..3 {
+                let want =
+                    (f32::from(fill[i]) * a_f + f32::from(stroke[i]) * a_s * (1.0 - a_f)) / out_a;
+                let diff = (f32::from(got[i]) - want).abs().round() as i32;
+                if diff > worst {
+                    worst = diff;
+                }
+                assert!(
+                    diff <= 4,
+                    "覆盖度 {c} 的第 {i} 通道合成出 {}，正确值 {:.0}（差 {diff} 级）—— 冲到 255 就是用户看到的那条白线",
+                    got[i],
+                    want
+                );
+            }
+        }
+        assert!(worst <= 4, "最大偏差 {worst} 级");
     }
 
     /// 一个测试用键：只让高度变，宽度固定 —— 反向用例要盯的正是「尺寸」这一项。
