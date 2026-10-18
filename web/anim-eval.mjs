@@ -47,7 +47,9 @@ export function parseEasing(text) {
   if (bezierArgs !== null) return bezier(parseBezierArgs(trimmed, bezierArgs));
   const stepsArgs = functionArgs(lower, 'steps');
   if (stepsArgs !== null) return parseStepsArgs(trimmed, stepsArgs);
-  if (functionArgs(lower, 'linear') !== null) throw new Error('这一版不支持 linear() 断点表：' + trimmed);
+  // `linear()` 断点表（与 easing.rs 的 parse_linear 同一套语义，第 80 轮补上）。
+  const linearArgs = functionArgs(lower, 'linear');
+  if (linearArgs !== null) return parseLinearArgs(trimmed, linearArgs);
   throw new Error('不认识的缓动：' + trimmed);
 }
 
@@ -96,6 +98,79 @@ function parseStepsArgs(original, args) {
   return { kind: 'steps', count, position };
 }
 
+/**
+ * CSS `linear()` 的断点表 —— **与 easing.rs 的 parse_linear 逐条同语义**：
+ *
+ * 1. 只写值的断点：位置**均匀分布在相邻两个写明了位置的断点之间**；
+ * 2. 第一个缺省 `0%`、最后一个缺省 `100%`；
+ * 3. 位置必须**非递减**（相等 = 瞬跳，取值取后一个）；值允许在 [0,1] 之外（过冲）。
+ */
+function parseLinearArgs(original, args) {
+  const parts = args.split(',').map((part) => part.trim());
+  if (parts.length < 2) throw new Error('linear() 至少要两个断点：' + original);
+  const values = [];
+  const positions = [];
+  for (const part of parts) {
+    const bits = part.split(/\s+/).filter((bit) => bit !== '');
+    if (bits.length === 0 || bits.length > 2) throw new Error('linear() 的每一段是「值」或「值 位置%」：' + original);
+    const value = Number(bits[0]);
+    if (!Number.isFinite(value)) throw new Error('linear() 的值不是有限数：' + original);
+    let position = null;
+    if (bits.length === 2) {
+      if (!bits[1].endsWith('%')) throw new Error('linear() 的位置要写百分比：' + original);
+      const parsed = Number(bits[1].slice(0, -1));
+      if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) throw new Error('linear() 的位置要在 0..100% 之间：' + original);
+      position = parsed / 100;
+    }
+    values.push(value);
+    positions.push(position);
+  }
+  const last = positions.length - 1;
+  if (positions[0] === null) positions[0] = 0;
+  if (positions[last] === null) positions[last] = 1;
+  let index = 0;
+  while (index <= last) {
+    if (positions[index] !== null) {
+      index += 1;
+      continue;
+    }
+    // 找下一个写明了位置的断点，把中间这些均匀铺开。
+    let next = index;
+    while (positions[next] === null) next += 1;
+    const start = positions[index - 1] === null ? 0 : positions[index - 1];
+    const end = positions[next] === null ? 1 : positions[next];
+    const count = next - index + 1;
+    for (let offset = 0; offset < next - index; offset += 1) {
+      positions[index + offset] = start + ((end - start) * (offset + 1)) / count;
+    }
+    index = next + 1;
+  }
+  const stops = [];
+  let previous = -Infinity;
+  for (let i = 0; i < values.length; i += 1) {
+    const position = positions[i];
+    if (position < previous) throw new Error('linear() 的位置必须非递减：' + original);
+    previous = position;
+    stops.push([position, values[i]]);
+  }
+  return { kind: 'linearStops', stops };
+}
+
+/** 断点表在 `t` 处的值：找所在那一段线性插值；位置相等（瞬跳）取**后一个**的值。 */
+function linearStopsAt(stops, t) {
+  if (stops.length === 0) return t;
+  if (t <= stops[0][0]) return stops[0][1];
+  for (let i = 0; i + 1 < stops.length; i += 1) {
+    const [p0, v0] = stops[i];
+    const [p1, v1] = stops[i + 1];
+    if (t <= p1) {
+      if (p1 <= p0) return v1;
+      return v0 + (v1 - v0) * ((t - p0) / (p1 - p0));
+    }
+  }
+  return stops[stops.length - 1][1];
+}
+
 /** [0,1] 上的映射。输入夹到 [0,1]；**输出不夹**（过冲是回弹的全部意义）。 */
 export function easeValue(form, t) {
   const x = Math.min(1, Math.max(0, t));
@@ -111,6 +186,7 @@ export function easeValue(form, t) {
     }
     case 'cubicBezier': return cubicBezierAt(x, form.x1, form.y1, form.x2, form.y2);
     case 'steps': return stepsAt(x, form.count, form.position);
+    case 'linearStops': return linearStopsAt(form.stops, x);
     default: throw new Error('未实现的缓动形式：' + form.kind);
   }
 }

@@ -91,7 +91,10 @@ fn drawtext_args_97c3d8e(
         "-i".to_string(),
         source,
         "-vf".to_string(),
-        drawtext,
+        // 源是 lavfi 造出来的 RGB（没有 YUV 解码这一步），但仓库的口径是**任何把裸帧
+        // 接出来的 ffmpeg 都必须显式声明色彩矩阵**（`check-sequential-decode` 盯着）。
+        // RGB→RGB 时 swscale 不做矩阵变换，加这一截不改变像素。
+        format!("{drawtext},scale=out_color_matrix=bt709"),
         "-frames:v".to_string(),
         "1".to_string(),
         "-f".to_string(),

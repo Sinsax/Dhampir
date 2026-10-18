@@ -13,7 +13,17 @@
 //   R3 证据里的每个路径**必须真的存在**（证据不能指向不存在的文件）；
 //   R4 DOM 宿主源码里出现的受管 CSS 能力，**必须登记**（用了没登记 = 设计债不可见）；
 //   R5 理由/说明不许是占位符；
-//   R6 id 唯一。
+//   R6 id 唯一；
+//   R7 partial / needs-primitive 必须指一条**真的存在**的出处（设计节 / defects 条目 / 仓库文件）；
+//   R8 测量的读数只许住在 plan/web-engine-measurements.md —— 本表**不许复述**它
+//      （第 80 轮加：实测推翻了 geometry.corner-radius 笔记里那句「引擎用 1 目标像素线性斜坡」，
+//        而那条笔记**有出处**，错在复述读数 —— 所以 R7 与 R8 治的是两种不同的病）。
+//
+// # R8 治不了什么（**诚实地说清楚**）
+//
+// 它只禁「测量的单位词」与「讲了实测却不指台账」。**笔记把论断写成事实**这件事
+// 它抓不到（"斜坡是 1 目标像素宽"里没有小数、也没有出处错误）—— 那只能靠
+// 登记表**不复述读数**这条规矩：要写就读台账。做判据时别把 R8 当成真值检查。
 //
 // # 为什么只扫 web/dom-host.mjs
 //
@@ -54,6 +64,12 @@ function readDesignHeadings() {
   return headings;
 }
 
+
+/** defects 台账里的条目 id（`- [D22] status=…`）。R7 认 id 时两个命名空间都算数。 */
+function readLedgerIds(path = 'plan/defects.md') {
+  const text = readFileSync(join(REPO_ROOT, path), 'utf8');
+  return new Set([...text.matchAll(/^- \[([DA][0-9]+)\] status=/gm)].map((match) => match[1]));
+}
 
 /// 扫哪些文件找用例名。**显式列举**而不是全仓递归：
 /// 判据要能一眼看懂它扫了什么，也要够快（这条规矩每次跑都会读这些文件）。
@@ -103,6 +119,7 @@ export function judgeCapabilities(
   domSource,
   exists = (path) => existsSync(join(REPO_ROOT, path)),
   designHeadings = readDesignHeadings(),
+  ledgerIds = readLedgerIds(),
   readText = (path) => {
     try {
       return readFileSync(join(REPO_ROOT, path), 'utf8');
@@ -121,6 +138,9 @@ export function judgeCapabilities(
   const ids = new Set();
   for (const item of list) {
     const at = item.id === undefined ? '(没有 id 的一条)' : item.id;
+    // note 在下面好几处判据里都要用（R8、实测指向、占位符），所以**先取**，别在中间声明 ——
+    // 同一个块里 `const` 有 TDZ，先用的地方会直接 ReferenceError。
+    const note = String(item.note === undefined ? '' : item.note).trim();
     if (item.id === undefined || item.id === '') problems.push('有一条没有 id');
     else if (ids.has(item.id)) problems.push('id 重复：' + item.id);
     else ids.add(item.id);
@@ -226,9 +246,39 @@ export function judgeCapabilities(
     //
     // 数字都在 `plan/web-engine-measurements.md` 里，而读登记表的人得能找到它 ——
     // 与差异台账那条"每个 section 都要在别处被引用"同一个精神：没人读的台账迟早烂。
-    if (item.status === 'supported' && /实测|GPU 用例|手算|逐值|机器口径/.test(String(item.evidence === undefined ? '' : item.evidence)) &&
-        !String(item.evidence === undefined ? '' : item.evidence).includes('web-engine-measurements')) {
-      problems.push(at + ' 的 evidence 讲了实测但没指向 `plan/web-engine-measurements.md` —— 数在那里，读表的人得找得到');
+    // **note 也算数**（第 80 轮扩）：讲"逐值等价 / 实测"的地方常写在 note 里，
+    // 只盯 evidence 会让这些句子绕过台账。
+    const measuredText = String(item.evidence === undefined ? '' : item.evidence) + ' ' + note;
+    if (/实测|GPU 用例|手算|逐值|机器口径/.test(measuredText) && !measuredText.includes('web-engine-measurements')) {
+      problems.push(at + ' 讲了实测但没指向 `plan/web-engine-measurements.md` —— 数在那里，读表的人得找得到');
+    }
+
+    // **R8：测量单位不许出现在 note 里。**
+    //
+    // 第 80 轮抓到的实例：`geometry.corner-radius` 的 note 把「引擎用 **1 目标像素**线性斜坡」
+    // 当事实写着，而第 52 轮实测是 ≈0.22 目标像素 —— **读数是会变的，设计口径不会**。
+    // 所以这条规矩是：要写就读 `plan/web-engine-measurements.md`，本表只引用。
+    if (note.includes('目标像素')) {
+      problems.push(at + ' 的 note 里出现测量单位「目标像素」—— 读数只许住在 `plan/web-engine-measurements.md`，本表只引用它');
+    }
+
+    // **R7：partial / needs-primitive 必须指一条真的存在的出处。**
+    //
+    // 这两种状态最容易"话说到一半"：说"有，但差一点"，却不说差在哪份设计/哪条判据里。
+    if (item.status === 'partial' || item.status === 'needs-primitive') {
+      const fields = [item.note, item.gap, item.design].map((value) => String(value === undefined ? '' : value)).join(' ');
+      const paths = [...fields.matchAll(/(?:plan|scripts|docs|web|crates|records|fixtures|schema)\/[A-Za-z0-9_./-]+/g)]
+        .map((match) => match[0]);
+      const missingPaths = paths.filter((path) => !exists(path));
+      for (const path of missingPaths) {
+        problems.push(at + ' 引用了一个**不存在**的文件：' + path);
+      }
+      const citedIds = [...fields.matchAll(/(^|[^A-Za-z0-9])([DA][0-9]+)(?![0-9])/g)].map((match) => match[2]);
+      const hasId = citedIds.some((id) => designHeadings.has(id) || ledgerIds.has(id));
+      if (paths.length === missingPaths.length && !hasId) {
+        problems.push(at + ' 是 ' + item.status + '，但没指向任何**存在**的出处' +
+          '（设计节 D<n> / defects 条目 / 仓库文件）—— 「差一点」也必须说得出差在哪一份文档里');
+      }
     }
 
     // 「要新原语」不许只是一句话欠着：必须指向 criteria 里**真的存在**的设计节（D12 / D13 …）。
@@ -240,7 +290,6 @@ export function judgeCapabilities(
         problems.push(at + ' 指向的设计节 ' + design + ' 在 plan/web-animation-criteria.md 里不存在');
       }
     }
-    const note = String(item.note === undefined ? '' : item.note).trim();
     if (PLACEHOLDER.includes(note)) problems.push(at + ' 的说明是占位符');
     if (item.status === 'supported') {
       if (String(item.dhampir === undefined ? '' : item.dhampir).trim() === '') {
@@ -309,6 +358,24 @@ function selfTest(registry, domSource) {
     ['supported 的判据路径全是文档', (r) => {
       const item = r.capabilities.find((c) => c.status === 'supported');
       item.evidence_paths = ['plan/web-animation-criteria.md'];
+    }],
+    // 第 80 轮加的 R7/R8 —— 它们治的是本会话真抓到的两种死法：
+    // ①「有，但差一点」却不说差在哪份文档里；② 把**测量读数**从台账抄进登记表（读数会变）。
+    ['partial 没指任何出处', (r) => {
+      const item = r.capabilities.find((c) => c.status === 'partial');
+      item.gap = '有，但差一点 —— 至于差在哪份文档里，没说。';
+    }],
+    ['partial 引用了不存在的文件', (r) => {
+      const item = r.capabilities.find((c) => c.status === 'partial');
+      item.gap = '差在那份 plan/这个文件不存在.md 里。';
+    }],
+    ['note 复述测量读数（带测量单位）', (r) => {
+      const item = r.capabilities.find((c) => c.status === 'supported');
+      item.note = '抗锯齿用的是 1 目标像素宽的线性斜坡';
+    }],
+    ['note 讲实测却不指台账', (r) => {
+      const item = r.capabilities.find((c) => c.status === 'supported');
+      item.note = '这条是实测出来的（但没说数住在哪份文件里）';
     }],
   ];
   let caught = 0;

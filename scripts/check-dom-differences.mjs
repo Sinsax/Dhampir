@@ -140,16 +140,38 @@ function selfTest(sections, references) {
     process.exit(1);
   }
   const clone = () => new Map([...sections].map(([name, keys]) => [name, new Map(keys)]));
+  // **每个变异都要自带前置状态**（第 83 轮修）：这几条原本假定台账里某几节仍是
+  // 「未实测 / 没有数字」—— 而第 83 轮把三条量成了「已实测」之后，变异 2/3/7 与 4 就
+  // **碰不到要测的那条规则**了（"视而不见"其实是"变异没生效"）。判据本身没问题，
+  // 是自检用例依赖了台账的当时状态：这种用例会随台账一起腐烂。
   const mutations = [
     ['status 不在三档里', (s) => { s.get('geometry.edge_antialias').set('status', 'maybe'); }],
-    ['未实测却带着数字', (s) => { s.get('geometry.edge_antialias').set('edge_max_diff_max', '2'); }],
-    ['未实测却没写量法', (s) => { s.get('geometry.edge_antialias').delete('method'); }],
-    ['已实测却没有数字', (s) => { s.get('blend.add_plus_lighter').set('status', '已实测'); }],
+    ['未实测却带着数字', (s) => {
+      const entry = s.get('geometry.edge_antialias');
+      entry.set('status', '未实测');
+      entry.set('edge_max_diff_max', '2');
+      if (String(entry.get('method') ?? '').trim() === '') entry.set('method', '量边缘那一圈');
+    }],
+    ['未实测却没写量法', (s) => {
+      const entry = s.get('geometry.edge_antialias');
+      entry.set('status', '未实测');
+      entry.delete('method');
+    }],
+    ['已实测却没有数字', (s) => {
+      const entry = s.get('blend.add_plus_lighter');
+      entry.set('status', '已实测');
+      entry.delete('max_abs_diff_max');
+    }],
     ['不认识的键', (s) => { s.get('lottie.vector').set('tolerance', '0.01'); }],
     ['说明太短', (s) => { s.get('lottie.vector').set('note', '无'); }],
     ['量法点了一个不存在的脚本', (s) => {
       // 注意用**ASCII 脚本名**：规则的正则只认这种（真实脚本名都是 ASCII）。
-      s.get('geometry.edge_antialias').set('method', '用 scripts/no-such-script.mjs 去量这一圈边缘');
+      // 而且要**先拨回未实测**并拿掉数字 —— 否则先红的是"未实测却带着数字"，
+      // 这条用例就变成了"碰巧红"，测的不是它自己那条规则。
+      const entry = s.get('geometry.edge_antialias');
+      entry.set('status', '未实测');
+      entry.delete('edge_max_diff_max');
+      entry.set('method', '用 scripts/no-such-script.mjs 去量这一圈边缘');
     }],
   ];
   let caught = 0;

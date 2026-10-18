@@ -77,7 +77,15 @@
     'steps(4,start)',
     'steps(4,end)',
     'steps(4,jump-none)',
-    'steps(4,jump-both)'
+    'steps(4,jump-both)',
+    /* 第 83 轮补：第 37 轮给引擎加了 CSS `linear()` 断点表，而**这一页的名单没跟上** ——
+     * 于是参考数据里这三条**根本不存在**（不是错，是缺；对着数据本身永远看不出来）。
+     * 是 scripts/easing-reference.mjs 里那份**独立**的 REQUIRED_EASINGS 抓到的：
+     * 它俩不一致就红，而不是留下"以谁为准"这种说不清的状态。
+     * 这三条与引擎侧的三条用例（check-anim-eval）同一个形状：写位置的、只写值的、允许过冲的。 */
+    'linear(0, 0.25 75%, 1)',
+    'linear(0, 0.5, 1)',
+    'linear(0, 1.2 50%, 1)'
   ];
   var POINTS = 21;          // t = 0.00, 0.05, … 1.00
   var DURATION_MS = 1000;   // 1 秒：t 就是"动画进度的百分比"，读起来不用换算

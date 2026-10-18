@@ -297,6 +297,13 @@ export function layerMask(mask, assets) {
   if (mask.invert === true) notes.push({ kind: 'mask', why: '反相在 CSS 的 mask-image 里表达不了（要靠 mask-composite 换图）—— 这一版**没有把反相画上去**' });
   return {
     css: 'url("' + uri + '")',
+    // **尺寸这两个属性必须一起给**（第 83 轮量测时发现）：引擎的掩码口径是
+    // 「**拉伸填满**这一层」（v1 只做拉伸 + 环绕/钳边），而 CSS 的默认是
+    // `mask-size: auto` + `mask-repeat: repeat` —— 掩码素材比元素小的时候，
+    // 浏览器会**平铺**它。两边说的就不是同一件事了（不是"差一点"，是两种画法）。
+    // 所以这里把尺寸与平铺一并交给宿主写上去。
+    size: '100% 100%',
+    repeat: 'no-repeat',
     exactness: 'unmeasured',
     why: 'DOM 这一版不做素材解码：这条只把 CSS 写上，**未实测**',
     notes,

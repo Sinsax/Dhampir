@@ -128,7 +128,7 @@
         "scripts/check-waapi2doc.mjs"
       ],
       "note": "1..64 的整数次；**每一遍都展开**（早期版本只展开一遍且层长按一遍算 —— 那是个静默少渲染，已修，现在有「层长没按遍数算」这条自检变异盯着）。同向重播的跳变限制见 timing.direction",
-      "gap": "契约里**没有 `iterations` 字段**：转译器把它**展开成多遍关键帧**（求值端看到的是纯关键帧）。同向重播（normal/reverse）且首尾值不同时的跳变**明确不支持**（报出来，不近似）。"
+      "gap": "契约里**没有 `iterations` 字段**：转译器把它**展开成多遍关键帧**（求值端看到的是纯关键帧）。同向重播（normal/reverse）且首尾值不同时的跳变**明确不支持**（报出来，不近似）。口径与「何时翻案」见 `plan/web-animation-criteria.md` 的 D3 与 D7。"
     },
     {
       "id": "timing.direction",
@@ -159,7 +159,7 @@
         "scripts/check-waapi2doc.mjs"
       ],
       "note": "fill=none 表达不了「不进画面」，按 fill=both 处理并报警告",
-      "gap": "`fill: none` 表达不了「这一遍不进画面」—— 按 `fill: both` 处理并**报警告**（作者看得见，不静默）。"
+      "gap": "`fill: none` 表达不了「这一遍不进画面」—— 按 `fill: both` 处理并**报警告**（作者看得见，不静默）。口径见 `plan/web-animation-criteria.md` 的 D3（`iterations / direction / fill`）。"
     },
     {
       "id": "timing.iterationStart",
@@ -189,7 +189,7 @@
         "scripts/waapi2doc.mjs",
         "scripts/check-waapi2doc.mjs"
       ],
-      "note": "**已对账**：CSS 的 blur(R) 参数就是 σ，本仓 radius 是核半径且 σ = radius/2 ⇒ **radius = 2R**（同一像素空间）。上界 radius ≤ 16 ⇒ CSS σ 上界 8（1:1 时，更大要加抽头）。**还没钉的一半**：转译器这一版还没有滤镜，所以「把 R 乘 2 写进工程」那一步还没有判据 —— 转译器学会滤镜时必须在同一次改动里补一条。；**转译器侧已学会**（第 15 轮）：WAAPI 快照里的 `filter:` / `mix-blend-mode` / `border-radius` 会按 D5/D6/D9/D10 的口径转成工程里的声明式数据，不等价的**明说并跳过整条动画**；参数还能**随关键帧变**（`effect.<i>.<param>` 通道 —— 引擎本来就有，第 18 轮转译器才接上）"
+      "note": "**已对账**：CSS 的 blur(R) 参数就是 σ，本仓 radius 是核半径且 σ = radius/2 ⇒ **radius = 2R**（同一像素空间）。上界 radius ≤ 16 ⇒ CSS σ 上界 8（1:1 时，更大要加抽头）。**判据在哪**：转译器第 15 轮起就会翻 `filter:`，`radius = 2R` 这条由 `scripts/check-waapi2doc.mjs` 的既定答案钉住（`blur(4px) → radius 8`，配一条「没乘 2」的自检变异）；同一像素空间的口径见 criteria 的 D5/D6。；**转译器侧已学会**（第 15 轮）：WAAPI 快照里的 `filter:` / `mix-blend-mode` / `border-radius` 会按 D5/D6/D9/D10 的口径转成工程里的声明式数据，不等价的**明说并跳过整条动画**；参数还能**随关键帧变**（`effect.<i>.<param>` 通道 —— 引擎本来就有，第 18 轮转译器才接上）"
     },
     {
       "id": "filter.contrast",
@@ -205,7 +205,7 @@
         "scripts/waapi2doc.mjs",
         "scripts/check-waapi2doc.mjs"
       ],
-      "note": "**CSS ↔ 本仓：amount = k**（CSS 的 100% → 1.0）。这是四条里唯一逐值等价的；**转译器侧已学会**（第 15 轮）：WAAPI 快照里的 `filter:` / `mix-blend-mode` / `border-radius` 会按 D5/D6/D9/D10 的口径转成工程里的声明式数据，不等价的**明说并跳过整条动画**；参数还能**随关键帧变**（`effect.<i>.<param>` 通道 —— 引擎本来就有，第 18 轮转译器才接上）"
+      "note": "**CSS ↔ 本仓：amount = k**（CSS 的 100% → 1.0）。这是四条里唯一逐值等价的（逐值口径与读数见 `plan/web-engine-measurements.md`）；**转译器侧已学会**（第 15 轮）：WAAPI 快照里的 `filter:` / `mix-blend-mode` / `border-radius` 会按 D5/D6/D9/D10 的口径转成工程里的声明式数据，不等价的**明说并跳过整条动画**；参数还能**随关键帧变**（`effect.<i>.<param>` 通道 —— 引擎本来就有，第 18 轮转译器才接上）"
     },
     {
       "id": "filter.saturation",
@@ -316,7 +316,7 @@
       "stage": "have",
       "dhampir": "`Layer.corner_radius`（文档像素，缺省 0 且为 0 不写进文件）；合成着色器里的**无分支**圆角椭圆 SDF（`length(max(q,0)) + min(max(q.x,q.y),0) - r`），覆盖度用一条 1 目标像素宽的线性斜坡",
       "dom": "`border-radius: Rpx`（与引擎同一个形状概念；**抗锯齿不会逐像素相同** —— 容差另记）",
-      "evidence": "GPU 用例「圆角只切四个角_半径为零时一个像素都不动」（32×32：半径 8 时四角 α≤8、四条边中点与中心仍是红；半径 0 时四角也是红）；半径 0 的工程出片 sha256 与改动前基线**一字不差**（8b7d9e18a7320ee7）；WGSL 允许表 40 条全部申报、禁词 0 次；**边缘抗锯齿实测**（第 52 轮）：把圆角层转 30° 逼出真抗锯齿后，半透明像素 28 个 / 边缘总长 128 ⇒ **斜坡 ≈ 0.22 目标像素宽**（α ∈ [133, 236]）。台账 `geometry.edge_antialias` 里原先那句「1 目标像素宽的线性斜坡」是**论断**，被这次实测推翻（实际更窄）；实测值与机器口径见 `plan/web-engine-measurements.md`（含 GPU 用例索引）",
+      "evidence": "GPU 用例「圆角只切四个角_半径为零时一个像素都不动」（32×32：半径 8 时四角 α≤8、四条边中点与中心仍是红；半径 0 时四角也是红）；半径 0 的工程出片与改动前基线**逐字节一致**（可复现口径：`scripts/check-old-project-baseline.mjs` —— out/effects-demo 那 14 帧，当次构建 vs 已发布产物；**别再引用没有工程与命令的裸哈希**）；WGSL 允许表 40 条全部申报、禁词 0 次；**边缘抗锯齿实测**（第 52 轮）：把圆角层转 30° 逼出真抗锯齿后，半透明像素 28 个 / 边缘总长 128 ⇒ **斜坡 ≈ 0.22 目标像素宽**（α ∈ [133, 236]）。台账 `geometry.edge_antialias` 里原先那句「1 目标像素宽的线性斜坡」是**论断**，被这次实测推翻（实际更窄）；实测值与机器口径见 `plan/web-engine-measurements.md`（含 GPU 用例索引）",
       "evidence_paths": [
         "crates/dhampir-core/src/shaders/compose.wgsl",
         "crates/dhampir-core/src/render/compose.rs",
@@ -327,7 +327,7 @@
         "scripts/check-waapi2doc.mjs",
         "crates/dhampir-worker/tests/timeline.rs"
       ],
-      "note": "**已实现**（契约 → 引擎 → DOM 三步都落地）。半径是**文档像素**：换算到源像素只差一个 `1/scale`（`pixel_scale` 正好约掉），所以同一个圆角在不同导出尺寸下形状一样。抗锯齿：引擎用 1 目标像素线性斜坡，CSS 用自己的 —— 两端差异写进容差表，不改通过线（与浏览器的差异登记在 scripts/dom-parity-differences.toml 的 geometry.edge_antialias）；**转译器侧已学会**（第 15 轮）：WAAPI 快照里的 `filter:` / `mix-blend-mode` / `border-radius` 会按 D5/D6/D9/D10 的口径转成工程里的声明式数据，不等价的**明说并跳过整条动画**",
+      "note": "**已实现**（契约 → 引擎 → DOM 三步都落地）。半径是**文档像素**：换算到源像素只差一个 `1/scale`（`pixel_scale` 正好约掉），所以同一个圆角在不同导出尺寸下形状一样。抗锯齿：引擎与 CSS **各用各的**（斜坡宽度是**实测**出来的，不是论断）—— 读数与机器口径只住在 `plan/web-engine-measurements.md`，本表**不复述**它（第 52 轮实测就推翻了这条笔记原先那句把宽度写成整数的论断）；两端差异写进容差表，不改通过线（与浏览器的差异登记在 scripts/dom-parity-differences.toml 的 geometry.edge_antialias）；**转译器侧已学会**（第 15 轮）：WAAPI 快照里的 `filter:` / `mix-blend-mode` / `border-radius` 会按 D5/D6/D9/D10 的口径转成工程里的声明式数据，不等价的**明说并跳过整条动画**",
       "tolerance": "geometry.edge_antialias"
     },
     {
@@ -355,7 +355,7 @@
       "status": "partial",
       "stage": "have",
       "dhampir": "**合成器已经会画**（第 21 轮）：bind group 第三项绑掩码纹理（没有掩码时绑 1×1 兜底图，`mask_a.x=0` 旁路掉）+ 自己写的**双线性**采样 + alpha/亮度(Rec.709) 通道 + 反相；**第 46/47 轮加了程序化渐变**（`MaskSpec.gradient`：角度 + 断点，与 `asset_id` 二选一；在**这一层自己的尺寸**上栅格化 —— 因为掩码按图层局部坐标采样，而 CSS 的轴长规矩是相对元素自己的盒子算的）",
-      "dom": "CSS `mask-image` —— **但只在素材 uri 能直接取到时才写**（`http:`/`blob:`/`data:`）；相对文件名**刻意不设**（浏览器取不到遮罩会把整个元素遮没，那比画不出掩码更坏），并把这件事实报出来。**这一版不做素材解码**，所以标「未实测」；反相在 CSS 里表达不了，也报出来",
+      "dom": "CSS `mask-image` —— **但只在素材 uri 能直接取到时才写**（`http:`/`blob:`/`data:`）；相对文件名**刻意不设**（浏览器取不到遮罩会把整个元素遮没，那比画不出掩码更坏），并把这件事实报出来。**这一版不做素材解码**（宿主画的是占位方块）；**掩码的插值核两边已经量过**（第 83 轮，一键量法 `node scripts/measure-dom-parity.mjs`，读数与容差在 `scripts/dom-parity-differences.toml` 的 `mask.interpolation_kernel`）；反相在 CSS 里表达不了，也报出来",
       "evidence": "GPU 用例「掩码按图层矩形铺开_四象限与反相与通道都对」（2×2 掩码铺 32×32：四象限、反相后反过来、alpha 与亮度两种通道）；没有掩码时出片 sha256 与基线一字不差（8b7d9e18a7320ee7）；WGSL 允许表 40 条全申报；第 46 轮的手算单测（0°/90° 方向、断点插值 191）+ 第 47 轮 GPU 用例「渐变遮罩按层自己的尺寸铺开_左右与反相都对」；实测值与机器口径见 `plan/web-engine-measurements.md`（含 GPU 用例索引）",
       "evidence_paths": [
         "crates/dhampir-core/src/shaders/compose.wgsl",
@@ -379,7 +379,7 @@
         "crates/dhampir-core/src/effects.rs"
       ],
       "note": "色彩空间（sRGB vs 线性）要写死，否则两端对同一个词的解释会分叉",
-      "gap": "两端必须在**同一个色彩空间**里插值并写死；现在两端各自按 sRGB 直接插，差别会出现在高饱和过渡上（**尚未逐值对表**）。"
+      "gap": "两端必须在**同一个色彩空间**里插值并写死；现在两端各自按 sRGB 直接插，差别会出现在高饱和过渡上（**尚未逐值对表**）。对齐方案见 `plan/web-animation-parity.md` §7 第 3/4 条与 §11 第 3 条（色彩口径由约定转强制）。"
     },
     {
       "id": "text",
@@ -393,7 +393,7 @@
         "crates/dhampir-timeline/src/text_layout.rs"
       ],
       "note": "两端字体度量不同源；禁则 / 连字 / 字距明确不做",
-      "gap": "两端**字体度量不同源**；禁则 / 连字 / 字距**明确不做**（不是待办，是不在范围内）。"
+      "gap": "两端**字体度量不同源**；禁则 / 连字 / 字距**明确不做**（不是待办，是不在范围内）。代价见 `crates/dhampir-timeline/src/text_layout.rs` 的模块头；要一致得走 `plan/web-animation-parity.md` §7 第 7 条 / §11 第 7 条的**共享预栅格化**。"
     },
     {
       "id": "gradient-fill",
@@ -407,7 +407,7 @@
         "crates/dhampir-core/src/effects.rs"
       ],
       "note": "几何原语（圆角 / 裁剪 / 多边形 / 路径 / 掩码）**都已就位**；剩下的是「渐变相对哪个盒子」这条坐标口径",
-      "gap": "几何原语已经齐了（圆角 / 裁剪 / 多边形 / 路径 / 掩码），差的是**按形状的渐变坐标**：引擎走特效管线、DOM 走 `background-image` —— 两端对「渐变相对哪个盒子」的解释还没统一。"
+      "gap": "几何原语已经齐了（圆角 / 裁剪 / 多边形 / 路径 / 掩码），差的是**按形状的渐变坐标**：引擎走特效管线、DOM 走 `background-image` —— 两端对「渐变相对哪个盒子」的解释还没统一。收尾时机与迁移顺序见 `plan/web-animation-parity.md` 的阶段 5（能力逐条迁移）。"
     },
     {
       "id": "layout",

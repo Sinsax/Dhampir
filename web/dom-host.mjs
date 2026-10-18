@@ -190,6 +190,14 @@ export function createDomHost(options) {
       const mask = layerMask(source2 === undefined ? undefined : source2.mask, Object.fromEntries(assetsById));
       node.style.maskImage = mask.css;
       node.style.webkitMaskImage = mask.css;
+      // 尺寸与平铺跟着一起写（掩码口径是「拉伸填满」，CSS 默认是 auto + repeat）。
+      // 掩码为空时也必须清掉 —— 否则上一层留下的样式会套在下一层上。
+      const maskSize = mask.css === '' ? '' : (mask.size === undefined ? '100% 100%' : mask.size);
+      node.style.maskSize = maskSize;
+      node.style.webkitMaskSize = maskSize;
+      const maskRepeat = mask.css === '' ? '' : (mask.repeat === undefined ? 'no-repeat' : mask.repeat);
+      node.style.maskRepeat = maskRepeat;
+      node.style.webkitMaskRepeat = maskRepeat;
       if (mask.refused !== undefined) refused.push(mask.refused);
       for (const note of mask.notes === undefined ? [] : mask.notes) refused.push(note);
       if (corner.engine === 'missing' && corner.css !== '') {

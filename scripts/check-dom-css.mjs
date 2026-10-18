@@ -170,6 +170,15 @@ export function checkMaskCases(mapper) {
     problems.push('能直接取的 uri 应当写成 url(…)，得到 ' + JSON.stringify(remote.css));
   }
   if (remote.exactness !== 'unmeasured') problems.push('这条必须自报**未实测**（DOM 不做素材解码）');
+  // 尺寸与平铺（第 83 轮量测时发现）：引擎的口径是**拉伸填满**这一层，而 CSS 默认
+  // `mask-size: auto` + `mask-repeat: repeat` 会**平铺** —— 掩码比元素小的时候，
+  // 两边画的就不是同一件事。所以这两个值得跟着 mask-image 一起出来。
+  if (remote.size !== '100% 100%') {
+    problems.push('掩码必须带上 mask-size = 100% 100%（引擎口径是拉伸填满，CSS 默认是 auto 会平铺），得到 ' + JSON.stringify(remote.size));
+  }
+  if (remote.repeat !== 'no-repeat') {
+    problems.push('掩码必须带上 mask-repeat = no-repeat（否则会平铺），得到 ' + JSON.stringify(remote.repeat));
+  }
   const relative = mapper({ asset_id: 'm.png' }, assets);
   if (relative.css !== '') {
     problems.push('uri 取不到时**不该设** mask-image（浏览器取不到会把整个元素遮没），得到 ' + JSON.stringify(relative.css));

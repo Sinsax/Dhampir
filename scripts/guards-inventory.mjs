@@ -9,43 +9,27 @@
 // 手写一张"谁有几个变异"的表一定会过期 —— 所以这里**逐个跑 `--self-test`**，
 // 从它们自己的输出里读数字。表因此永远等于现实。
 //
-// 顺带报出每条守卫**现在**是否通过（跑不动的那种要写明是环境问题）。
+// # 清单也是**读**来的，不是抄的（第 80 轮修）
+//
+// 这里原来是一份**手抄的 26 条**名单，而 `run-guards.mjs` 已经 27 条
+// （漏了 `check-frame-pacing.mjs`）—— 于是这张表少一行、少一行**永远看不出来**。
+// 现在直接 `import` 那份唯一清单（`run-guards.mjs` 的入口守卫保证 import 不会顺手跑全套）。
+//
+// # 三态，不是两态
+//
+// `正检` 与 `自检` 各有三态：green / red / **起不来**。
+// "起不来"（spawn 失败、拿到 null 退出码）**不许**并进 red，也不许并进"没有自检" ——
+// 本会话就吃过这个读数：整套守卫在沙箱里起不了子进程，这张表把 27 条全报成
+// "正检红 + 零自检"。那是**环境**的读数，不是仓库的结论。
 
 import { spawnSync } from 'node:child_process';
+import { closeSync, mkdirSync, openSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+import { GUARDS, DEPS, IN_CI } from './run-guards.mjs';
 
-// 与 scripts/run-guards.mjs 同一份清单（那边跑正检、这边跑自检）。
-const GUARDS = [
-  'check-core-purity.mjs',
-  'check-dep-graph.mjs',
-  'check-text-hygiene.mjs',
-  'check-linux-portability.mjs',
-  'check-sequential-decode.mjs',
-  'check-web-invariants.mjs',
-  'check-waapi2doc.mjs',
-  'check-anim-eval.mjs',
-  'check-host-parity.mjs',
-  'check-capabilities.mjs',
-  'check-dom-css.mjs',
-  'check-dom-differences.mjs',
-  'check-backend-seam.mjs',
-  'check-defects.mjs',
-  'check-preview-parity.mjs',
-  'check-overlay-plumbing.mjs',
-  'check-m1-record.mjs',
-  'check-m2-record.mjs',
-  'check-media-status.mjs',
-  'check-effect-registry.mjs',
-  'check-local-backend.mjs',
-  'check-same-origin-proxy.mjs',
-  'api-surface.mjs',
-  'timeline-contract.mjs',
-  'check-cli.mjs',
-  'check-dual-end.mjs',
-];
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** 从守卫的自检输出里读"几个变异/几个错误映射器"。读不到就返回 null（= 它没有自检）。 */
 // **别只认一种说法。** 本仓各守卫的措辞五花八门：`N 个变异全部被抓住`、`N 条断言`、
@@ -61,28 +45,73 @@ function mutatedFrom(text) {
   return numbers.reduce((sum, value) => sum + value, 0);
 }
 
-const rows = [];
-for (const guard of GUARDS) {
-  const passed = spawnSync('node', [join(REPO_ROOT, 'scripts', guard)], { encoding: 'utf8', cwd: REPO_ROOT });
-  const selfTest = spawnSync('node', [join(REPO_ROOT, 'scripts', guard), '--self-test'], { encoding: 'utf8', cwd: REPO_ROOT });
-  const combined = String(selfTest.stdout || '') + String(selfTest.stderr || '');
-  const mutated = mutatedFrom(combined);
-  rows.push({
-    guard,
-    ok: passed.status === 0,
-    selfTestOk: selfTest.status === 0,
-    mutated,
+/** 跑一次。三态：green / red / 起不来（spawn 出错拿不到退出码）。 */
+//
+// 输出走**文件重定向**而不是管道：受限环境里建不出命名管道，`stdio: 'pipe'`
+// 会直接 EPERM，把环境问题读成"27 条全红"。见 run-guards.mjs 里 runOne 的说明。
+function runOnce(script, args, logDir = join(REPO_ROOT, 'target', 'guards-log')) {
+  mkdirSync(logDir, { recursive: true });
+  const outPath = join(logDir, 'inventory-' + script + '.out');
+  const errPath = join(logDir, 'inventory-' + script + '.err');
+  const outFd = openSync(outPath, 'w');
+  const errFd = openSync(errPath, 'w');
+  const result = spawnSync(process.execPath, [join(REPO_ROOT, 'scripts', script), ...args], {
+    cwd: REPO_ROOT,
+    windowsHide: true,
+    maxBuffer: 1 << 28,
+    stdio: ['ignore', outFd, errFd],
   });
+  closeSync(outFd);
+  closeSync(errFd);
+  if (result.error) return { state: '起不来', detail: String(result.error.message), text: '' };
+  let text = '';
+  for (const path of [outPath, errPath]) {
+    try {
+      text += readFileSync(path, 'utf8');
+    } catch {
+      // 读不到就是没输出
+    }
+  }
+  return { state: result.status === 0 ? 'green' : 'red', detail: null, text };
 }
 
-console.log('| 守卫 | 正检 | 自检 | 自检几个变异 |');
-console.log('|---|---|---|---|');
-for (const row of rows) {
-  const mutated = row.mutated === null ? '**没有自检**' : String(row.mutated) + ' 个';
-  console.log('| `' + row.guard + '` | ' + (row.ok ? 'green' : 'red') + ' | ' + (row.selfTestOk ? 'green' : 'red') + ' | ' + mutated + ' |');
+const rows = [];
+for (const guard of GUARDS) {
+  const selfTest = runOnce(guard.script, ['--self-test']);
+  const plain = runOnce(guard.script, guard.args);
+  const mutated = selfTest.state === '起不来' ? null : mutatedFrom(selfTest.text);
+  rows.push({ guard, selfTest, plain, mutated });
 }
+
+console.log('| 守卫 | 依赖档 | 正检 | 自检 | 自检几个变异 |');
+console.log('|---|---|---|---|---|');
+for (const row of rows) {
+  // **"读不出来"与"没有"是两件事**：起不来的那条不许印成"没有自检"。
+  const mutated = row.selfTest.state === '起不来'
+    ? '读不出来（起不来）'
+    : (row.mutated === null ? '**没有自检**' : String(row.mutated) + ' 个');
+  console.log('| `' + row.guard.script + '` | `' + row.guard.deps + '` | ' + row.plain.state + ' | ' +
+    row.selfTest.state + ' | ' + mutated + ' |');
+}
+
+const unspawnable = rows.filter((row) => row.plain.state === '起不来' || row.selfTest.state === '起不来');
 const withSelfTest = rows.filter((row) => row.mutated !== null).length;
 const totalMutations = rows.reduce((sum, row) => sum + (row.mutated === null ? 0 : row.mutated), 0);
+
 console.log('');
-console.log(rows.length + ' 条守卫里 ' + withSelfTest + ' 条带自检，共 ' + totalMutations + ' 个变异。');
-console.log('没有自检的那几条，靠的是\\"正检本身够具体\\"—— 要不要补，看它们的失效模式。');
+if (unspawnable.length === rows.length) {
+  console.log('**一条都没跑起来** —— 自检家底这次读不出来。不印数字：把"读不到"印成"0 个变异"就是撒谎。');
+} else {
+  console.log(rows.length + ' 条守卫里 ' + withSelfTest + ' 条带自检，共 ' + totalMutations + ' 个变异。');
+}
+if (unspawnable.length > 0) {
+  console.log('');
+  console.log('⚠️ 有 ' + unspawnable.length + ' 条**起不来**（spawn 失败）：' +
+    unspawnable.map((row) => row.guard.script).join(' '));
+  console.log('   这是**环境**的读数，不是仓库的结论 —— 换普通终端复跑再下结论。');
+  console.log('   签名示例：' + (unspawnable[0].plain.detail === null ? unspawnable[0].selfTest.detail : unspawnable[0].plain.detail));
+} else {
+  console.log('没有自检的那几条，靠的是"正检本身够具体"—— 要不要补，看它们的失效模式。');
+}
+console.log('依赖档：' + DEPS.join(' / ') + '；CI 该覆盖：' + IN_CI.join(' / ') +
+  '（`node scripts/run-guards.mjs --only-deps ' + IN_CI.join(',') + '`）');

@@ -75,7 +75,7 @@
 //   node scripts/run-guards.mjs --self-test     只跑本文件的自检
 
 import { spawnSync } from 'node:child_process';
-import { readdirSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -103,27 +103,40 @@ export const RED_TAIL_LINES = 14;
  * `args` 是**正跑**时要带的参数（自检一律只有 `--self-test`）。
  */
 export const GUARDS = [
-  { script: 'check-core-purity.mjs', args: [] },
-  { script: 'check-dep-graph.mjs', args: [] },
-  { script: 'check-text-hygiene.mjs', args: [] },
-  { script: 'check-linux-portability.mjs', args: [] },
-  { script: 'check-sequential-decode.mjs', args: [] },
-  { script: 'check-web-invariants.mjs', args: [] },
+  // `deps` = 这条守卫要什么才能跑（见下面的 DEPS 词表）。**它不是注释，是判据**：
+  // `scripts/check-ci-guards.mjs` 拿它对着 ci.yml 核，CI 该跑哪几档由 IN_CI 说了算。
+  // CI 覆盖对表（第 80 轮）：ci.yml 该跑哪几档，由这里的 deps / IN_CI 说了算。
+  // 它自己是 static 档 —— 所以"它也得在 CI 里跑"这件事由它自己判。
+  { script: 'check-ci-guards.mjs', args: [], deps: 'static' },
+  { script: 'check-core-purity.mjs', args: [], deps: 'static' },
+  { script: 'check-dep-graph.mjs', args: [], deps: 'static' },
+  { script: 'check-text-hygiene.mjs', args: [], deps: 'static' },
+  { script: 'check-linux-portability.mjs', args: [], deps: 'static' },
+  { script: 'check-sequential-decode.mjs', args: [], deps: 'static' },
+  { script: 'check-web-invariants.mjs', args: [], deps: 'wasm-pkg' },
   // 网页动画 → 工程文件的转译器（阶段 2）：只吃 fixtures 里的样本快照 + 纯数据判据，
   // 不碰 GPU / ffmpeg / 浏览器，所以放前面。
-  { script: 'check-waapi2doc.mjs', args: [] },
+  { script: 'check-waapi2doc.mjs', args: [], deps: 'static' },
   // 网页那份求值（第二实现）与 core 的逐帧数值对照：它漂了必须红。
-  { script: 'check-anim-eval.mjs', args: [] },
+  { script: 'check-anim-eval.mjs', args: [], deps: 'cargo' },
   // 两个宿主的形状对表（DOM 接口 ↔ 承诺过的 wasm 导出名）：只读两个文件，最轻。
-  { script: 'check-host-parity.mjs', args: [] },
+  { script: 'check-host-parity.mjs', args: [], deps: 'static' },
   // 能力登记表（web/capabilities.json）：supported 必须有原语与判据，DOM 用了的必须登记。
-  { script: 'check-capabilities.mjs', args: [] },
+  { script: 'check-capabilities.mjs', args: [], deps: 'static' },
   // DOM 侧的特效 → CSS 映射（口径 D5/D6），以及宿主有没有真的用上它。
-  { script: 'check-dom-css.mjs', args: [] },
+  { script: 'check-dom-css.mjs', args: [], deps: 'static' },
   // 「允许的差异」台账：未实测的不许写成数，每条都要被引用。
-  { script: 'check-dom-differences.mjs', args: [] },
-  { script: 'check-backend-seam.mjs', args: [] },
-  { script: 'check-defects.mjs', args: [] },
+  { script: 'check-dom-differences.mjs', args: [], deps: 'static' },
+  // **不登记 `scripts/measure-dom-parity.mjs`（第 83 轮那三条 DOM 差异的量测工具）** —— 它是
+  // `measure-*` 那一族（与 measure-render / measure-decode 同类）：**量数**，不判红。守卫的门槛是
+  // "能被证明会红"，而它只出读数（判在台账的容差上，判据是 check-dom-differences）。
+  // 它的 `--self-test`（28 条）随时可跑，就是不进这份清单 —— 登记了反而会被"清点"判成找不到
+  // （`GUARD_FILE_RE` 只认 check-* 那一族），第 83 轮当场吃过这一下。
+  // 预览那条腿（canvas）与 CLI 出图的对照（第 83 轮，G2）。要浏览器 + wasm pkg + dhampir，
+  // 三样里最稀缺的是浏览器 ⇒ 归 `browser` 档；前置写在它自己的头部。
+  { script: 'check-preview-path.mjs', args: [], deps: 'browser' },
+  { script: 'check-backend-seam.mjs', args: [], deps: 'static' },
+  { script: 'check-defects.mjs', args: [], deps: 'static' },
   // 取帧节奏（D24）：亮度斜坡量出"请求第 i 帧实际拿到源的哪一帧"。
   //
   // 它**需要构建产物 + ffmpeg**，比别的静态检查重。放这里是因为它盯的东西没有别处能盯：
@@ -132,22 +145,80 @@ export const GUARDS = [
   //
   // 注意它的**退出码约定**（D24 未修期间）：漂移形状与台账一致 ⇒ exit 0，但明确说清
   // "这仍是缺陷，不是通过"；形状**变了**（好了或坏了）⇒ exit 1。详见文件头。
-  { script: 'check-frame-pacing.mjs', args: [] },
-  { script: 'check-preview-parity.mjs', args: [] },
-  { script: 'check-overlay-plumbing.mjs', args: [] },
-  { script: 'check-m1-record.mjs', args: ['--record', 'records/m1'] },
-  { script: 'check-m2-record.mjs', args: ['--record', 'records/m2'] },
-  { script: 'check-media-status.mjs', args: [] },
-  { script: 'check-effect-registry.mjs', args: [] },
-  { script: 'check-local-backend.mjs', args: [] },
+  { script: 'check-frame-pacing.mjs', args: [], deps: 'ffmpeg' },
+  { script: 'check-preview-parity.mjs', args: [], deps: 'static' },
+  { script: 'check-overlay-plumbing.mjs', args: [], deps: 'static' },
+  { script: 'check-m1-record.mjs', args: ['--record', 'records/m1'], deps: 'records' },
+  { script: 'check-m2-record.mjs', args: ['--record', 'records/m2'], deps: 'records' },
+  { script: 'check-media-status.mjs', args: [], deps: 'static' },
+  { script: 'check-effect-registry.mjs', args: [], deps: 'static' },
+  { script: 'check-local-backend.mjs', args: [], deps: 'cli' },
   // 同源代理那条路：它坏了不会有别的守卫变红（check-local-backend 直接打后端，
   // 不经过转发），而产品路径的最后一跳正是从它上面走的。
-  { script: 'check-same-origin-proxy.mjs', args: [] },
-  { script: 'api-surface.mjs', args: [] },
-  { script: 'timeline-contract.mjs', args: [] },
-  { script: 'check-cli.mjs', args: [] },
-  { script: 'check-dual-end.mjs', args: [] },
+  { script: 'check-same-origin-proxy.mjs', args: [], deps: 'static' },
+  { script: 'api-surface.mjs', args: [], deps: 'static' },
+  { script: 'timeline-contract.mjs', args: [], deps: 'cargo' },
+  { script: 'check-cli.mjs', args: [], deps: 'cli' },
+  // 老工程逐字节不变（第 80 轮）：这台机器上要比对**已发布产物**渲染同一批帧。
+  // 它要 GPU 出片 + dist/ 里的历史产物 + out/effects-demo 那份带素材的工程，
+  // 所以是 `cli` 档（CI 上跑不了，也不该假装能跑）。
+  { script: 'check-old-project-baseline.mjs', args: [], deps: 'cli' },
+  { script: 'check-dual-end.mjs', args: [], deps: 'browser' },
 ];
+
+/**
+ * 依赖档词表。**一条守卫只能属于一档**，档决定它在哪跑：
+ *
+ * | 档 | 要什么 | 例 |
+ * |---|---|---|
+ * | `static` | 只读仓库文件（+ 起 node 子进程，输出走文件重定向） | 能力登记表、宿主对表、waapi2doc |
+ * | `records` | `records/` 里的取证存档（在仓库里） | m1 / m2 记录复核 |
+ * | `cargo` | 本机 `cargo`（会现编一个 example） | timeline-contract、check-anim-eval |
+ * | `wasm-pkg` | `crates/dhampir-wasm/www/pkg` 已构建 | check-web-invariants |
+ * | `ffmpeg` | 本机 ffmpeg | check-frame-pacing |
+ * | `cli` | 已构建的 `dhampir` 可执行文件（+ ffmpeg） | check-cli、check-local-backend |
+ * | `browser` | 真浏览器（无头 + CDP） | check-dual-end |
+ *
+ * **判据**：这七档必须覆盖全部守卫，且 `IN_CI` 那几档必须真的在 ci.yml 里被跑到
+ * —— 见 `scripts/check-ci-guards.mjs`。
+ */
+export const DEPS = ['static', 'records', 'cargo', 'wasm-pkg', 'ffmpeg', 'cli', 'browser'];
+
+/**
+ * CI 该覆盖的档。**挪动这里的每一个字都要有理由**：
+ * `static` / `records` 只依赖仓库里的字节；`cargo` 那两条本来就是契约判据，
+ * runner 上有 rust 却没有 ffmpeg / GPU / 浏览器 / 已构建产物。
+ */
+export const IN_CI = ['static', 'records', 'cargo'];
+
+/** 取 `--only-deps a,b` 或 `--only-deps=a,b` 的值；没给返回 null。 */
+export function onlyDepsArg(argv) {
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === '--only-deps') return argv[i + 1] === undefined ? '' : argv[i + 1];
+    if (arg.startsWith('--only-deps=')) return arg.slice('--only-deps='.length);
+  }
+  return null;
+}
+
+/** 解析依赖档清单。**认不出来的一律报错**（少跑一档不能被当成"全绿"）。 */
+export function parseDeps(text) {
+  const problems = [];
+  const tokens = String(text).split(',').map((token) => token.trim()).filter((token) => token !== '');
+  if (tokens.length === 0) {
+    problems.push('--only-deps 后面要跟依赖档，例：--only-deps static,records');
+  }
+  for (const token of tokens) {
+    if (!DEPS.includes(token)) problems.push('认不出的依赖档 ' + token + '（可用：' + DEPS.join(' / ') + '）');
+  }
+  return { tokens, problems };
+}
+
+/** 按依赖档选守卫（返回的一定是 GUARDS 里的对象）。 */
+export function guardsForDeps(tokens) {
+  const wanted = new Set(tokens);
+  return GUARDS.filter((guard) => wanted.has(guard.deps));
+}
 
 /** `scripts/` 里**实际存在**的守卫文件名（已排序）。 */
 export function presentGuards(dir = join(REPO_ROOT, 'scripts')) {
@@ -181,15 +252,36 @@ export function inventoryProblems(present, registered) {
 }
 
 /** 起一条守卫。fail-closed：拿不到退出码一律当红。 */
-export function runOne(script, args) {
+export function runOne(script, args, logDir = join(REPO_ROOT, 'target', 'guards-log')) {
+  // **捕获子进程输出走文件，不走管道**（第 80 轮改）。
+  //
+  // 为什么：受限环境（沙箱、某些 CI 与 Windows 策略）里**建不出命名管道**，
+  // 于是 `stdio: 'pipe'` 的 spawn 直接 EPERM —— 本会话就是这样，27 条守卫
+  // 全被读成"起不来"，而那是**环境**的读数，不是仓库的。stdin 早就 `'ignore'`
+  // 了（同一条道理），stdout/stderr 换成文件重定向之后，这条路径在两边都能走。
+  //
+  // 它**不是垫片**：真起不来时照样 `result.error` ⇒ code=-1 ⇒ 红。
+  mkdirSync(logDir, { recursive: true });
+  const outPath = join(logDir, script + '.out');
+  const errPath = join(logDir, script + '.err');
+  const outFd = openSync(outPath, 'w');
+  const errFd = openSync(errPath, 'w');
   const result = spawnSync(process.execPath, [join(REPO_ROOT, 'scripts', script), ...args], {
     cwd: REPO_ROOT,
-    encoding: 'utf8',
+    windowsHide: true,
     maxBuffer: 1 << 28,
-    // stdin 显式 ignore：本机 node 给子进程开 stdin 管道会 EBUSY（见文件头的说明）。
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['ignore', outFd, errFd],
   });
-  const text = (result.stdout || '') + (result.stderr || '');
+  closeSync(outFd);
+  closeSync(errFd);
+  let text = '';
+  for (const path of [outPath, errPath]) {
+    try {
+      text += readFileSync(path, 'utf8');
+    } catch {
+      // 读不到就当它没输出 —— 退出码才是结论。
+    }
+  }
   const lines = text.split(/\r?\n/).filter((line) => line.trim() !== '');
   const code = result.error ? -1 : result.status;
   return { code, lines, spawnError: result.error ? String(result.error.message) : null };
@@ -202,15 +294,36 @@ const SELF_TEST_CASES = [
   { name: '两边都错 -> 两条都要报', present: ['check-new.mjs'], registered: ['check-gone.mjs'], expect: 2 },
 ];
 
-export function selfTestFailures() {
+/** 自检：返回 { failures, checks }。`checks` 由这里自己数，印出来的数字不会漂。 */
+export function selfTestReport() {
   const failures = [];
+  let checks = 0;
+  const check = (name, ok, detail) => {
+    checks += 1;
+    if (!ok) failures.push('自检「' + name + '」不成立' + (detail === undefined ? '' : '：' + detail));
+  };
   for (const testCase of SELF_TEST_CASES) {
     const got = inventoryProblems(testCase.present, testCase.registered).length;
-    if (got !== testCase.expect) {
-      failures.push('自检「' + testCase.name + '」期望 ' + testCase.expect + ' 条，实际 ' + got + ' 条');
-    }
+    check(testCase.name + '（期望 ' + testCase.expect + ' 条）', got === testCase.expect, '实得 ' + got + ' 条');
   }
-  return failures;
+  // 依赖档那几条：**认不出来必须报**，否则"少跑一档"会伪装成"全绿"。
+  check('认不出的依赖档要报', parseDeps('static,nope').problems.length === 1);
+  check('空的 --only-deps 要报', parseDeps('').problems.length === 1);
+  check('--only-deps=a,b 的等号写法要认', onlyDepsArg(['--only-deps=cargo']) === 'cargo');
+  check('--only-deps a,b 的空格写法要认', onlyDepsArg(['--only-deps', 'cargo']) === 'cargo');
+  const staticOnly = guardsForDeps(['static']);
+  check('只选 static 选出来的必须都是 static', staticOnly.length > 0 && staticOnly.every((guard) => guard.deps === 'static'));
+  check('所有依赖档加起来 = 全部守卫', guardsForDeps(DEPS).length === GUARDS.length);
+  const noDeps = GUARDS.filter((guard) => !DEPS.includes(guard.deps));
+  check('每条守卫都要有合法依赖档', noDeps.length === 0, noDeps.map((guard) => guard.script).join(' '));
+  const ciUnknown = IN_CI.filter((dep) => !DEPS.includes(dep));
+  check('IN_CI 里不许有认不出的档', ciUnknown.length === 0, ciUnknown.join(' '));
+  return { failures, checks };
+}
+
+/** 老接口：只要失败列表（自检用例数见 {@link selfTestReport}）。 */
+export function selfTestFailures() {
+  return selfTestReport().failures;
 }
 
 function main() {
@@ -220,14 +333,14 @@ function main() {
     return 0;
   }
 
-  const failures = selfTestFailures();
-  if (failures.length > 0) {
+  const report = selfTestReport();
+  if (report.failures.length > 0) {
     console.error('守卫目录自检失败 —— 先修它，别信它的结论：');
-    for (const failure of failures) console.error('  - ' + failure);
+    for (const failure of report.failures) console.error('  - ' + failure);
     return 2;
   }
   if (argv.includes('--self-test')) {
-    console.log('✓ 守卫目录自检通过（' + SELF_TEST_CASES.length + ' 条用例）');
+    console.log('✓ 守卫目录自检通过（' + report.checks + ' 条用例）');
     return 0;
   }
 
@@ -241,17 +354,38 @@ function main() {
     return 1;
   }
 
-  if (argv.includes('--list')) {
-    console.log('共 ' + GUARDS.length + ' 条守卫（与 scripts/ 对表一致）：');
-    for (const guard of GUARDS) {
-      console.log('  ' + guard.script + (guard.args.length > 0 ? ' ' + guard.args.join(' ') : ''));
+  // `--only-deps`：CI 用（那边没有 ffmpeg / GPU / 浏览器 / 已构建产物）。
+  // **认不出来就退 2，不许悄悄跑全部** —— 悄悄跑全部在 CI 上必红，那会让"环境"看起来像"回归"。
+  const only = onlyDepsArg(argv);
+  let selected = GUARDS;
+  if (only !== null) {
+    const { tokens, problems: depProblems } = parseDeps(only);
+    if (depProblems.length > 0) {
+      for (const problem of depProblems) console.error('  - ' + problem);
+      return 2;
     }
+    selected = guardsForDeps(tokens);
+    if (selected.length === 0) {
+      console.error('--only-deps ' + only + ' 一条守卫都没选中 —— 空文件集不算通过');
+      return 2;
+    }
+  }
+
+  if (argv.includes('--list')) {
+    console.log('共 ' + GUARDS.length + ' 条守卫（与 scripts/ 对表一致；依赖档见 deps）：');
+    for (const guard of GUARDS) {
+      console.log('  ' + guard.script +
+        (guard.args.length > 0 ? ' ' + guard.args.join(' ') : '') +
+        '   [deps=' + guard.deps + ']');
+    }
+    console.log('CI 该覆盖的档（IN_CI）：' + IN_CI.join(' / '));
+    console.log('只跑某几档：node scripts/run-guards.mjs --only-deps ' + IN_CI.join(','));
     return 0;
   }
 
   let bad = 0;
   const reds = [];
-  for (const guard of GUARDS) {
+  for (const guard of selected) {
     const selfTest = runOne(guard.script, ['--self-test']);
     const plain = runOne(guard.script, guard.args);
     const ok = selfTest.code === 0 && plain.code === 0;
@@ -268,9 +402,10 @@ function main() {
   }
 
   console.log('');
+  const scope = only === null ? '全部守卫' : '依赖档 ' + only;
   console.log(bad === 0
-    ? GUARDS.length + ' / ' + GUARDS.length + ' 条守卫全绿'
-    : (GUARDS.length - bad) + ' / ' + GUARDS.length + ' 条全绿，红的是：' + reds.join(' '));
+    ? selected.length + ' / ' + selected.length + ' 条守卫全绿（' + scope + '）'
+    : (selected.length - bad) + ' / ' + selected.length + ' 条全绿（' + scope + '），红的是：' + reds.join(' '));
   if (bad > 0) {
     console.log('红的这几条通常不是坏代码 —— 先按文件头那两类（甲：环境不给开 stdin 管道；' +
       '乙：安全删除按 turn 计数）逐条核过再下结论。');
@@ -278,7 +413,12 @@ function main() {
   return bad === 0 ? 0 : 1;
 }
 
-// 只设 process.exitCode，不调 process.exit()——见 scripts/wasm-test-node-exit-shim.cjs 里的说明：
-// 在本机 Node/Windows 上真正执行的 process.exit() 可能撞 libuv 断言，退出码变成负数，
-// 而退出码是这份报告唯一的结论。
-process.exitCode = main();
+// 入口守卫（与 scripts/timeline-contract.mjs 同一条规矩）：
+// **被 import 时不许执行 CLI** —— scripts/guards-inventory.mjs 要直接复用这份清单，
+// 没有这道闸的话，它 import 一下就会跑掉整套守卫。
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  // 只设 process.exitCode，不调 process.exit()——见 scripts/wasm-test-node-exit-shim.cjs 里的说明：
+  // 在本机 Node/Windows 上真正执行的 process.exit() 可能撞 libuv 断言，退出码变成负数，
+  // 而退出码是这份报告唯一的结论。
+  process.exitCode = main();
+}

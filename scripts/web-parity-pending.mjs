@@ -16,6 +16,13 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// 守卫清单与依赖档**只从那一处读**（第 80 轮修：这里原来手写着"26 条"，
+// 而清单已经 27 条 —— 手写的数字一定会漂，漂了还没人红）。
+import { GUARDS, DEPS, IN_CI } from './run-guards.mjs';
+
+/** 本机（agent 沙箱）里跑不了的那些守卫：不在 IN_CI 那几档里的。 */
+const ENV_BOUND = GUARDS.filter((guard) => !IN_CI.includes(guard.deps));
+
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** 台账的极简解析：只认 `[节]` / `status = "…"` / `method = """…"""` / `note = "…"`。 */
@@ -163,8 +170,10 @@ console.log('二、环境判据（我这边跑不动，你那边一条命令）'
 console.log('');
 console.log('  1. wasm 重建（会让 check-web-invariants 转绿）');
 console.log('     cd crates/dhampir-wasm && wasm-pack build --dev --target web --out-dir www/pkg');
-console.log('  2. 管道类判据（timeline-contract / check-local-backend / check-cli）：在普通终端里直接跑');
-console.log('     node scripts/run-guards.mjs     ← 一次跑全 26 条');
+console.log('  2. 管道类判据：在普通终端里直接跑');
+console.log('     node scripts/run-guards.mjs     ← 一次跑全 ' + GUARDS.length + ' 条（自检 + 正跑）');
+console.log('     或只跑那几档：node scripts/run-guards.mjs --only-deps ' + IN_CI.join(',') +
+  '   ← CI 覆盖的档，本地也够用');
 console.log('  3. 双端那条（check-dual-end）：要先有第 1 步的 wasm pkg，再让它跑');
 console.log('  4. 浏览器逐值缓动对照（19 条，含 3 条 linear()）');
 console.log('     node scripts/easing-reference.mjs && cargo test -p dhampir-timeline --lib -- --ignored');
@@ -174,7 +183,11 @@ console.log('三、等你拍板的两件（不是量测问题，是取舍）');
 console.log('');
   console.log('  A.（已不必你拍板，第 70 轮）同向重播的跳变 / 非整数相位：保持"明说不支持"。');
   console.log('     代价已算清（badge 4→37 键 = +825%；2 秒 5 通道约 +52 KB），三个选项与"何时翻案"写在 criteria 的 D7。');
-console.log('  B. crates/dhampir-worker 里那 2 条既有红（asset.uri 的书写形态判定）修不修？');
-console.log('     （要修得同时改 scripts/dhampir-local.mjs 的 isAbsoluteUri）');
+console.log('  B.（**第 80 轮复核后已不必拍**）crates/dhampir-worker 里那 2 条既有红（asset.uri 的书写形态判定）：');
+console.log('     现在 cargo test --workspace 是 912 passed / 0 failed —— 那 2 条已经不在，这条作废。');
 console.log('');
-console.log('跑完第一、二段之后，5 条环境红应当全部转绿；台账那 ' + pending.length + ' 条可以据此从"未实测"改成"已实测"。');
+// 这一段也**算**出来：`IN_CI` 之外的档 = 在这台机器（agent 沙箱）上跑不了的守卫。
+console.log('跑完第一、二段之后，' + ENV_BOUND.length + ' 条环境红应当全部转绿（' +
+  ENV_BOUND.map((guard) => guard.script).join(' / ') + '）；台账那 ' + pending.length +
+  ' 条可以据此从"未实测"改成"已实测"。');
+console.log('依赖档：' + DEPS.join(' / ') + '。');

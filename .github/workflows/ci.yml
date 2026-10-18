@@ -4,7 +4,7 @@
 #
 #   check-native   双编译之一：native + 全量测试 + fmt/clippy      ← Win + Linux
 #   check-wasm     双编译之二：wasm32 + 跨运行时等值测试
-#   guard          守卫脚本（18 个里不依赖本机资产的那 3 个：core 无 #[cfg] / 依赖方向 / 文本卫生）
+#   guard          守卫脚本的 static + records 两档（**名单不在这里写** —— 见下面 guard job 的说明）
 #
 # 四点刻意的设计：
 #
@@ -90,6 +90,17 @@ jobs:
       - name: native 全量测试
         run: cargo test --workspace
 
+      # 要 cargo 的那一档守卫（第 80 轮加）。
+      #
+      # 它们此前**只在开发机上跑过**：timeline-contract（schema/ 与 Rust 类型同步）
+      # 与 check-anim-eval（网页那份求值 vs core 的逐帧逐通道对照）都是契约判据，
+      # 恰恰最该在每个 PR 上跑。两条只要 rust，不要 GPU / ffmpeg / 浏览器。
+      #
+      # 档位从 scripts/run-guards.mjs 的 deps 派生，**名字不在这里抄**
+      # （抄一定会漂）。漏档/多档由 scripts/check-ci-guards.mjs 判红。
+      - name: 契约与逐帧对照类守卫（要 cargo）
+        run: node scripts/run-guards.mjs --only-deps cargo
+
   check-wasm:
     name: check-wasm + 跨运行时等值
     runs-on: ubuntu-latest
@@ -134,35 +145,30 @@ jobs:
           if-no-files-found: error
 
   guard:
-    name: guard（守卫脚本 4 / 26）
+    name: guard（static + records 两档，名单从 deps 派生）
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
-      # 26 个守卫里只有这 4 个能在这台 runner 上跑：其余的要 ffmpeg、真 GPU、
-      # 真实浏览器或 records/ 里的取证存档。**这不是"少验一点"** —— 那些在
-      # 开发机上跑，判据一条不少；放进 CI 只会让"环境没装好"长得像"代码回归"。
-      # 名单以 `node scripts/run-guards.mjs --list` 为准，不从文档抄（抄一定会漂）。
+      # **这里不写守卫名单。** 名单的唯一出处是 `scripts/run-guards.mjs` 里
+      # 每条守卫的 `deps` 加上那里的 `IN_CI`：
+      #
+      #   static  只读仓库文件（+ 起 node 子进程）            -> 这台 runner 能跑
+      #   records `records/` 里的取证存档（就在仓库里）        -> 这台 runner 能跑
+      #   cargo   要本机 rust                                 -> 放 check-native job
+      #   wasm-pkg / ffmpeg / cli / browser                   -> **不在这台机器上跑**
+      #
+      # 最后那一档不是"少验一点"：那些判据要 ffmpeg、真 GPU、真实浏览器或已构建产物，
+      # 放进 CI 只会让"环境没装好"长得像"代码回归"——它们在开发机上跑，判据一条不少。
+      #
+      # 漏档/多档由 `node scripts/check-ci-guards.mjs` 判红（它自己也在 static 档里）。
 
-      - name: core 无 #[cfg] / cfg!
-        run: |
-          set -euo pipefail
-          node scripts/check-core-purity.mjs --self-test
-          node scripts/check-core-purity.mjs
+      - name: 守卫目录自检（清单与 scripts/ 对表）
+        # 少一条守卫比一条守卫报红严重得多 —— "全绿"会变成一句不负责任的话。
+        run: node scripts/run-guards.mjs --self-test
 
-      - name: crate 依赖方向单向无环
-        run: |
-          set -euo pipefail
-          node scripts/check-dep-graph.mjs --self-test
-          node scripts/check-dep-graph.mjs
-
-      - name: 全仓 LF + 无 BOM + 合法 UTF-8
-        # 这条在别的机器上有历史误报风险（git 按 CRLF 检出），
-        # 仓库层面已经用 .gitattributes 的 `* text=auto eol=lf` 钉死。
-        run: |
-          set -euo pipefail
-          node scripts/check-text-hygiene.mjs --self-test
-          node scripts/check-text-hygiene.mjs
+      - name: 静态档 + 记录档守卫（每条先自检再正跑）
+        run: node scripts/run-guards.mjs --only-deps static,records
 
       - name: 第三方许可清单与 crate 里的 LICENSE
         # **2026-10-08 才加进来** —— 此前它不在 CI 里，于是从发布 tag 起就是红的没人知道：

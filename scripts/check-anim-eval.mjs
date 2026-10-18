@@ -106,6 +106,31 @@ function coreFrames(docPath, from, to) {
   return { status: result.status, error: result.error === undefined ? null : result.error.message, stdout, stderr };
 }
 
+/** 用仓库里那份样本快照生成一份工程（输出重定向到文件，不走管道）。 */
+function generateDoc(docPath) {
+  mkdirSync(LOG_DIR, { recursive: true });
+  mkdirSync(dirname(docPath), { recursive: true });
+  const outPath = join(LOG_DIR, 'anim-eval-gen.out');
+  const errPath = join(LOG_DIR, 'anim-eval-gen.err');
+  const outFd = openSync(outPath, 'w');
+  const errFd = openSync(errPath, 'w');
+  const result = spawnSync(
+    process.execPath,
+    [join(REPO_ROOT, 'scripts', 'waapi2doc.mjs'), join(REPO_ROOT, 'fixtures', 'waapi-snapshot.sample.json'), docPath],
+    { cwd: REPO_ROOT, windowsHide: true, stdio: ['ignore', outFd, errFd] },
+  );
+  closeSync(outFd);
+  closeSync(errFd);
+  if (result.error !== undefined && result.error !== null) {
+    console.error('  生成器起不来：' + String(result.error.message));
+    return -1;
+  }
+  if (result.status !== 0 && existsSync(errPath)) {
+    console.error('  生成器输出：' + readFileSync(errPath, 'utf8').slice(-800));
+  }
+  return typeof result.status === 'number' ? result.status : -1;
+}
+
 function main() {
   const argv = process.argv.slice(2);
   if (argv.includes('--self-test')) {
@@ -117,9 +142,18 @@ function main() {
   const to = files[2] === undefined ? 30 : Number(files[2]);
 
   if (!existsSync(docPath)) {
-    console.error('✗ 找不到工程文件：' + docPath);
-    console.error('  先跑：node scripts/waapi2doc.mjs fixtures/waapi-snapshot.sample.json ' + docPath);
-    process.exit(1);
+    // 工程不存在就**自己生成**（第 80 轮改）。
+    //
+    // 原来这里只打印一句"先跑 waapi2doc" —— 那让这条判据**依赖一个手工前置**：
+    // 一次 `target/` 清理就把它变成红的，而红的原因与契约无关（本会话就遇到了：
+    // 22 条里它红着，红在"找不到工程文件"，而不是哪条缓动算错了）。
+    // 判据要能一条命令跑到底：缺输入就按仓库里那份样本快照造一个。
+    console.log('（工程不存在，先用 fixtures/waapi-snapshot.sample.json 生成：' + docPath + '）');
+    const generated = generateDoc(docPath);
+    if (generated !== 0) {
+      console.error('✗ 自动生成工程失败（退出码 ' + String(generated) + '）—— 空文件集不算通过');
+      process.exit(1);
+    }
   }
 
   const doc = JSON.parse(readFileSync(docPath, 'utf8'));
@@ -224,7 +258,10 @@ function selfTest() {
     caught += 1;
   }
   // 缓动那几条也得会拒绝：认不出的串必须抛，而不是当线性算。
-  for (const bad of ['bounce', 'linear(0, 1)', 'cubic-bezier(2,0,0,1)', 'steps(0)']) {
+  //
+  // ⚠️ `linear(0, 1)` **不在这张表里了**：第 80 轮起 `linear()` 断点表是**支持的**
+  //    （它一度是"认不出的串"的样本 —— 补上 linear() 之后自检当场红了，正是这条自检在干活）。
+  for (const bad of ['bounce', 'spring(1, 2)', 'linear(0)', 'cubic-bezier(2,0,0,1)', 'steps(0)']) {
     let threw = false;
     try { parseEasing(bad); } catch { threw = true; }
     if (!threw) {
@@ -232,6 +269,21 @@ function selfTest() {
       process.exit(1);
     }
     caught += 1;
+  }
+  // `linear()` 断点表的三条语义（与 easing.rs 的 parse_linear 同源）：
+  // 写明位置的断点取该值 / 只写值的断点均匀铺开 / 允许尖峰与过冲 —— 每条都要能红。
+  const linearCases = [
+    ['linear(0, 0.25 75%, 1)', 0.75, 0.25, '写明位置的断点取该值'],
+    ['linear(0, 0.5, 1)', 0.25, 0.25, '只写值的断点均匀铺开'],
+    ['linear(0, 1 25%, 0)', 0.25, 1, '尖峰'],
+    ['linear(0, 1.2 50%, 1)', 0.5, 1.2, '值允许过冲'],
+  ];
+  for (const [text, at, want, why] of linearCases) {
+    const got = easeValue(parseEasing(text), at);
+    if (Math.abs(got - want) > 1e-9) {
+      console.error('  - 自检失败：' + text + ' 在 ' + at + ' 处应为 ' + want + '（' + why + '），得到 ' + got);
+      process.exit(1);
+    }
   }
   // 端点归位 + 过冲保留 + 下划线/连字符是两条曲线
   if (Math.abs(easeValue(parseEasing('linear'), 0.5) - 0.5) > 1e-9) {
