@@ -1317,10 +1317,17 @@ pub fn encoder_args(width: u32, height: u32, fps: f64, output: &Path) -> Vec<OsS
         "-".into(),
         "-c:v".into(),
         "libx264".into(),
+        // ⚠️ **2026-10-18：为文字清晰度调参**（用户报「成片文字锯齿感强烈」）。
+        //    实测（同一帧 lossless PNG ↔ 解码帧）：`veryfast/crf20` 下裁剪区 **MAE 3.83 / max 51**，
+        //    损伤**全部集中在字形边缘**且带 4:2:0 的色度污渍 —— 而渲染侧已经是 1px 抗锯齿
+        //    （描边外缘扫描线 3~4px 平滑过渡）⇒ 剩下的差距全在编码。
+        //    `slow` + `crf17` 让 x264 把更多码率分给高频边缘。代价：编码时间约 +1.5~2×、体积约 +50~80%。
+        //    ⚠️ **只动这两个值**：`-c:v` / `-pix_fmt yuv420p` / `+faststart` 都不动
+        //      （444 会破坏播放器与硬解兼容性）。
         "-preset".into(),
-        "veryfast".into(),
+        "slow".into(),
         "-crf".into(),
-        "20".into(),
+        "17".into(),
         "-pix_fmt".into(),
         "yuv420p".into(),
         "-movflags".into(),
@@ -2804,6 +2811,11 @@ mod tests {
         // 这句话就靠它成立：argv 一样、输入一样、编码器一样，产物就一样。
         // 它红了的唯一合理原因是**你故意改了视频编码参数** ——
         // 那时请连同这条一起改，并想清楚"已经出过的片子要不要重出"。
+        //
+        // ⚠️ **2026-10-18 就是那次「故意」**：`veryfast/crf20` → `slow/crf17`，
+        //    理由是文字边缘在 `veryfast/crf20` 下有明显损伤（同帧 lossless ↔ 解码：MAE 3.83 / max 51，
+        //    损伤全在字形边缘）。**只动了这两项**，其余（`libx264` / `yuv420p` / `+faststart`）逐项未变 ——
+        //    这条冻结测试的价值就在于"变了哪两项一眼可见"。已经出过的片子不会自己变好，需要重出。
         let args = encoder_args(1920, 1080, 30.0, Path::new("out.mp4"));
         let text: Vec<String> = args
             .iter()
@@ -2827,9 +2839,9 @@ mod tests {
                 "-c:v",
                 "libx264",
                 "-preset",
-                "veryfast",
+                "slow",
                 "-crf",
-                "20",
+                "17",
                 "-pix_fmt",
                 "yuv420p",
                 "-movflags",
