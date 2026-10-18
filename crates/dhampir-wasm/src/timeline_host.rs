@@ -4271,11 +4271,15 @@ mod tests {
             rect,
             opacity: 0.5,
             dy_px: 3.0,
+            dx_px: 0.0,
             color: [1, 2, 3, 4],
             font_ratio: 0.055,
             scale: 0.75,
             parts: Vec::new(),
             cells: Vec::new(),
+            track_style: TextStyle::default(),
+            rotation_deg: 0.0,
+            scale_y: 1.0,
         };
         let value = text_item_json(&item);
         // 逐字段同名是**契约**，不是巧合：CLI 的 `cmd_subtitle` 发的是同一组键。
