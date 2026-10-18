@@ -362,7 +362,9 @@ fn ink(image: &Rgba8Image, baseline: &Rgba8Image) -> Option<(u32, u32, u32, u32,
             let at = ((y * image.width + x) * 4) as usize;
             let a = &image.pixels[at..at + 4];
             let b = &baseline.pixels[at..at + 4];
-            let delta: u32 = (0..3).map(|i| (a[i] as i32 - b[i] as i32).unsigned_abs()).sum();
+            let delta: u32 = (0..3)
+                .map(|i| (a[i] as i32 - b[i] as i32).unsigned_abs())
+                .sum();
             if delta > INK_DELTA {
                 count += 1;
                 sx += x as f64;
@@ -377,14 +379,7 @@ fn ink(image: &Rgba8Image, baseline: &Rgba8Image) -> Option<(u32, u32, u32, u32,
     if count == 0 {
         return None;
     }
-    Some((
-        x0,
-        y0,
-        x1,
-        y1,
-        sx / count as f64,
-        sy / count as f64,
-    ))
+    Some((x0, y0, x1, y1, sx / count as f64, sy / count as f64))
 }
 
 fn width_of(bounds: (u32, u32, u32, u32, f64, f64)) -> u32 {
@@ -569,7 +564,8 @@ fn 全部缺省时逐字节等于老工程() {
 
     for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
         assert_eq!(
-            x.image.pixels, y.image.pixels,
+            x.image.pixels,
+            y.image.pixels,
             "第 {} 帧：缺省与显式单位值必须给出同一份像素（存量零回归）",
             from + i as Frame
         );

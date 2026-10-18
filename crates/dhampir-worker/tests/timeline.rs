@@ -920,7 +920,6 @@ fn 调整图层的_noise_是逐像素可复现的黑白噪声() {
         "挂上 noise 后画面没变 —— Document space + ColorMask 那一趟没跑到"
     );
 
-
     // ② 逐像素核对：**三通道加的是同一个标量**（= 黑白），且增量落在
     //    `(n - 0.5) * 255 * amount` 的**可能区间**内。
     //
@@ -964,8 +963,7 @@ fn 调整图层的_noise_是逐像素可复现的黑白噪声() {
             let mut d = None;
             for c in 0..3 {
                 let raw = got[c] - b[c];
-                let interior =
-                    b[c] > 0.01 && b[c] < 0.99 && got[c] > 0.01 && got[c] < 0.99;
+                let interior = b[c] > 0.01 && b[c] < 0.99 && got[c] > 0.01 && got[c] < 0.99;
                 if interior && raw.abs() > 1e-6 {
                     d = Some(raw);
                     break;
@@ -1008,7 +1006,8 @@ fn 调整图层的_noise_是逐像素可复现的黑白噪声() {
                 assert!(
                     (got[c] - want).abs() <= 1.0,
                     "像素({x},{y}) 通道{c}：实得 {} 期望 {want}（基准 {}，标量增量 {d}）                     —— 三通道对不上同一个标量增量，那说明它是**彩色**噪声",
-                    got[c], b[c]
+                    got[c],
+                    b[c]
                 );
             }
             deltas.push(d);
@@ -1040,7 +1039,7 @@ fn 调整图层的_noise_是逐像素可复现的黑白噪声() {
     //      * 下界取 `0.2 * bound` —— 证明**确实有像素真的动了**，
     //        而不是"根本没跑到"（那正是本条要区分的另一种失败）。
     //    两端都由同一条数学式子给出，不依赖任何观测值 ⇒ 不会随实现漂移而失效。
-    let want = 0.5 * NOISE_FULL_SCALE * AMOUNT;      // ±0.04
+    let want = 0.5 * NOISE_FULL_SCALE * AMOUNT; // ±0.04
     assert!(
         max_abs > 0.2 * want,
         "最大增量只有 {max_abs}（契约上界 {want}）—— 噪声没有真的改变像素"
@@ -1069,7 +1068,10 @@ fn 调整图层的_noise_是逐像素可复现的黑白噪声() {
             layers: vec![bottom.clone(), adjustment.clone()],
         },
     );
-    assert_eq!(with, again, "同一帧两次渲染不同 —— 噪声用了系统随机，预览与成片会对不上");
+    assert_eq!(
+        with, again,
+        "同一帧两次渲染不同 —— 噪声用了系统随机，预览与成片会对不上"
+    );
 
     // ⑤ **随帧变化**：第 1 帧必须与第 0 帧不同（否则它是静态纹理、不是噪声）。
     let frame1 = render(
@@ -1080,7 +1082,10 @@ fn 调整图层的_noise_是逐像素可复现的黑白噪声() {
             layers: vec![bottom, adjustment],
         },
     );
-    assert_ne!(with, frame1, "第 0 帧与第 1 帧的噪声相同 —— 它不是帧号的函数");
+    assert_ne!(
+        with, frame1,
+        "第 0 帧与第 1 帧的噪声相同 —— 它不是帧号的函数"
+    );
 }
 
 /// 提供源 + **可选掩码**的解析器：`mask = None` 就是"宿主还没接掩码通路"那种宿主。

@@ -73,7 +73,10 @@ fn drawtext_args_97c3d8e(
                 border_color_value(stroke_color)
             ));
         } else {
-            drawtext.push_str(&format!(":borderw={}:bordercolor=black", border_px(font_px)));
+            drawtext.push_str(&format!(
+                ":borderw={}:bordercolor=black",
+                border_px(font_px)
+            ));
         }
     }
     vec![
@@ -158,10 +161,18 @@ fn bbox(cov: &[u8], width: u32, height: u32, threshold: u8) -> Option<(u32, u32,
         for x in 0..width {
             if cov[(y * width + x) as usize] > threshold {
                 any = true;
-                if x < x0 { x0 = x; }
-                if y < y0 { y0 = y; }
-                if x > x1 { x1 = x; }
-                if y > y1 { y1 = y; }
+                if x < x0 {
+                    x0 = x;
+                }
+                if y < y0 {
+                    y0 = y;
+                }
+                if x > x1 {
+                    x1 = x;
+                }
+                if y > y1 {
+                    y1 = y;
+                }
             }
         }
     }
@@ -169,7 +180,9 @@ fn bbox(cov: &[u8], width: u32, height: u32, threshold: u8) -> Option<(u32, u32,
 }
 
 fn median(sorted: &[u32]) -> f64 {
-    if sorted.is_empty() { return 0.0; }
+    if sorted.is_empty() {
+        return 0.0;
+    }
     let middle = sorted.len() / 2;
     if sorted.len() % 2 == 1 {
         f64::from(sorted[middle])
@@ -179,11 +192,19 @@ fn median(sorted: &[u32]) -> f64 {
 }
 
 fn pct(n: usize, d: usize) -> f64 {
-    if d == 0 { 0.0 } else { ((n as f64 / d as f64) * 10000.0).round() / 100.0 }
+    if d == 0 {
+        0.0
+    } else {
+        ((n as f64 / d as f64) * 10000.0).round() / 100.0
+    }
 }
 
 fn ratio(a: f64, b: f64) -> f64 {
-    if b == 0.0 { 0.0 } else { ((a / b) * 10000.0).round() / 10000.0 }
+    if b == 0.0 {
+        0.0
+    } else {
+        ((a / b) * 10000.0).round() / 10000.0
+    }
 }
 
 fn analyze(cov: &[u8], width: u32, height: u32) -> Stats {
@@ -216,18 +237,30 @@ fn analyze(cov: &[u8], width: u32, height: u32) -> Stats {
     let mut boundary = 0usize;
     for y in 0..h {
         for x in 0..w {
-            if cov[y * w + x] <= t { continue; }
+            if cov[y * w + x] <= t {
+                continue;
+            }
             area += 1;
             let mut edge = false;
             if x == 0 || y == 0 || x + 1 == w || y + 1 == h {
                 edge = true;
             } else {
-                if cov[y * w + x + 1] <= t { edge = true; }
-                if cov[y * w + x - 1] <= t { edge = true; }
-                if cov[(y + 1) * w + x] <= t { edge = true; }
-                if cov[(y - 1) * w + x] <= t { edge = true; }
+                if cov[y * w + x + 1] <= t {
+                    edge = true;
+                }
+                if cov[y * w + x - 1] <= t {
+                    edge = true;
+                }
+                if cov[(y + 1) * w + x] <= t {
+                    edge = true;
+                }
+                if cov[(y - 1) * w + x] <= t {
+                    edge = true;
+                }
             }
-            if edge { boundary += 1; }
+            if edge {
+                boundary += 1;
+            }
         }
     }
     let ramp_px = cov.iter().filter(|&&c| c > 0 && c < 255).count();
@@ -240,7 +273,9 @@ fn analyze(cov: &[u8], width: u32, height: u32) -> Stats {
         let mut r: Option<usize> = None;
         for x in 0..w {
             if cov[y * w + x] > t {
-                if l.is_none() { l = Some(x); }
+                if l.is_none() {
+                    l = Some(x);
+                }
                 r = Some(x);
             }
         }
@@ -252,11 +287,15 @@ fn analyze(cov: &[u8], width: u32, height: u32) -> Stats {
     for k in 0..h.saturating_sub(1) {
         if let (Some(a), Some(b)) = (left[k], left[k + 1]) {
             row_pairs += 1;
-            if a.abs_diff(b) >= 2 { jump_rows += 1; }
+            if a.abs_diff(b) >= 2 {
+                jump_rows += 1;
+            }
         }
         if let (Some(a), Some(b)) = (right[k], right[k + 1]) {
             row_pairs += 1;
-            if a.abs_diff(b) >= 2 { jump_rows += 1; }
+            if a.abs_diff(b) >= 2 {
+                jump_rows += 1;
+            }
         }
     }
 
@@ -371,19 +410,47 @@ fn parse_args(argv: Vec<String>) -> Result<Args, String> {
         let flag = argv[index].clone();
         let value = |index: &mut usize, name: &str| -> Result<String, String> {
             *index += 1;
-            argv.get(*index).cloned().ok_or_else(|| format!("{name} 后面缺一个值"))
+            argv.get(*index)
+                .cloned()
+                .ok_or_else(|| format!("{name} 后面缺一个值"))
         };
         match flag.as_str() {
             "--font-file" => font_file = Some(PathBuf::from(value(&mut index, "--font-file")?)),
             "--font-family" => font_family = Some(value(&mut index, "--font-family")?),
             "--font-dir" => font_dir = Some(PathBuf::from(value(&mut index, "--font-dir")?)),
             "--out-dir" => out_dir = PathBuf::from(value(&mut index, "--out-dir")?),
-            "--font-px" => font_px = value(&mut index, "--font-px")?.parse().map_err(|_| "font-px 要整数".to_string())?,
-            "--old-font-px" => old_font_px = Some(value(&mut index, "--old-font-px")?.parse().map_err(|_| "old-font-px 要整数".to_string())?),
-            "--width" => width = value(&mut index, "--width")?.parse().map_err(|_| "width 要整数".to_string())?,
-            "--height" => target_height = value(&mut index, "--height")?.parse().map_err(|_| "height 要整数".to_string())?,
-            "--stroke-px" => stroke_px = value(&mut index, "--stroke-px")?.parse().map_err(|_| "stroke-px 要整数".to_string())?,
-            "--outer-stroke-px" => outer_stroke_px = value(&mut index, "--outer-stroke-px")?.parse().map_err(|_| "outer-stroke-px 要整数".to_string())?,
+            "--font-px" => {
+                font_px = value(&mut index, "--font-px")?
+                    .parse()
+                    .map_err(|_| "font-px 要整数".to_string())?
+            }
+            "--old-font-px" => {
+                old_font_px = Some(
+                    value(&mut index, "--old-font-px")?
+                        .parse()
+                        .map_err(|_| "old-font-px 要整数".to_string())?,
+                )
+            }
+            "--width" => {
+                width = value(&mut index, "--width")?
+                    .parse()
+                    .map_err(|_| "width 要整数".to_string())?
+            }
+            "--height" => {
+                target_height = value(&mut index, "--height")?
+                    .parse()
+                    .map_err(|_| "height 要整数".to_string())?
+            }
+            "--stroke-px" => {
+                stroke_px = value(&mut index, "--stroke-px")?
+                    .parse()
+                    .map_err(|_| "stroke-px 要整数".to_string())?
+            }
+            "--outer-stroke-px" => {
+                outer_stroke_px = value(&mut index, "--outer-stroke-px")?
+                    .parse()
+                    .map_err(|_| "outer-stroke-px 要整数".to_string())?
+            }
             other => return Err(format!("不认识参数 {other}")),
         }
         index += 1;
@@ -409,7 +476,9 @@ fn parse_args(argv: Vec<String>) -> Result<Args, String> {
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.iter().any(|a| a == "--help" || a == "-h") {
-        println!("jag_ab --font-file <ttf> [--font-family <族名>] [--font-dir <目录>] [--out-dir <目录>]");
+        println!(
+            "jag_ab --font-file <ttf> [--font-family <族名>] [--font-dir <目录>] [--out-dir <目录>]"
+        );
         return;
     }
     if let Err(message) = run(parse_args(argv)) {
@@ -505,7 +574,10 @@ fn run(args: Result<Args, String>) -> Result<(), String> {
         if let Ok(dir) = std::env::var("JAG_AB_DUMP_RAW") {
             let mut bytes = format!("P5\n{} {}\n255\n", bitmap.width, bitmap.height).into_bytes();
             bytes.extend(bitmap.pixels.chunks_exact(4).map(|px| px[0]));
-            let _ = std::fs::write(std::path::Path::new(&dir).join(format!("{tag}-new-raw.pgm")), bytes);
+            let _ = std::fs::write(
+                std::path::Path::new(&dir).join(format!("{tag}-new-raw.pgm")),
+                bytes,
+            );
         }
         let cov_new = coverage_new(&bitmap.pixels);
 
@@ -541,8 +613,14 @@ fn run(args: Result<Args, String>) -> Result<(), String> {
         let sn = stats_new.ok_or_else(|| "新路没有统计".to_string())?;
 
         let dims = |s: &Stats| -> (u64, u64, u64, u64) {
-            let d0 = s.ink0.map(|b| ((b.2 - b.0 + 1) as u64, (b.3 - b.1 + 1) as u64)).unwrap_or((0, 0));
-            let d1 = s.ink128.map(|b| ((b.2 - b.0 + 1) as u64, (b.3 - b.1 + 1) as u64)).unwrap_or((0, 0));
+            let d0 = s
+                .ink0
+                .map(|b| ((b.2 - b.0 + 1) as u64, (b.3 - b.1 + 1) as u64))
+                .unwrap_or((0, 0));
+            let d1 = s
+                .ink128
+                .map(|b| ((b.2 - b.0 + 1) as u64, (b.3 - b.1 + 1) as u64))
+                .unwrap_or((0, 0));
             (d0.0, d0.1, d1.0, d1.1)
         };
         let (ow0, oh0, ow1, oh1) = dims(&so);
@@ -594,7 +672,9 @@ fn run(args: Result<Args, String>) -> Result<(), String> {
         entries.push(format!("{tag}: old/new"));
     }
 
-    println!("{}", serde_json::json!({ "event": "done", "entries": entries }));
+    println!(
+        "{}",
+        serde_json::json!({ "event": "done", "entries": entries })
+    );
     Ok(())
 }
-

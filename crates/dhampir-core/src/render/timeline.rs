@@ -533,7 +533,6 @@ pub fn color_mask_params(
         (1.0 - (1.0 - a) * (1.0 - b)).clamp(0.0, 1.0)
     }
 
-
     // -----------------------------------------------------------------------
     // P5：槽位名 -> `#[repr(C)]` 字段的**唯一映射表**
     // -----------------------------------------------------------------------
@@ -563,14 +562,12 @@ pub fn color_mask_params(
             ("vignette", "vignette_radius") => 0.7,
             ("vignette", "vignette_softness") => 0.35,
             ("noise", "noise_seed") => 0.0,
-            ("overlay", "overlay_r")
-            | ("overlay", "overlay_g")
-            | ("overlay", "overlay_b") => 0.0,
+            ("overlay", "overlay_r") | ("overlay", "overlay_g") | ("overlay", "overlay_b") => 0.0,
             // ⚠️ `r2/g2/b2` 的缺省在原实现里是 **主色 r/g/b**（不是 0）——
             //    单色覆盖就是这么来的。这里只能给 0，真实回落见下面的 `resolve`。
-            ("overlay", "overlay_r2")
-            | ("overlay", "overlay_g2")
-            | ("overlay", "overlay_b2") => 0.0,
+            ("overlay", "overlay_r2") | ("overlay", "overlay_g2") | ("overlay", "overlay_b2") => {
+                0.0
+            }
             ("overlay", "overlay_shape") => 0.0,
             ("overlay", "overlay_angle") => 0.0,
             _ => return None,
@@ -689,9 +686,7 @@ pub fn color_mask_params(
                 continue;
             };
             let value = match (spec.kind, slot.slot) {
-                ("overlay", "overlay_shape") => {
-                    OverlayShape::from_param(raw) as u32 as f32
-                }
+                ("overlay", "overlay_shape") => OverlayShape::from_param(raw) as u32 as f32,
                 ("overlay", "overlay_angle") => raw.to_radians(),
                 _ => raw,
             };
@@ -769,7 +764,10 @@ pub fn color_mask_params(
         }
 
         let competitive = matches!(
-            pending.iter().find(|(n, ..)| n.ends_with("_amount")).map(|(_, c, ..)| *c),
+            pending
+                .iter()
+                .find(|(n, ..)| n.ends_with("_amount"))
+                .map(|(_, c, ..)| *c),
             Some(SlotCombine::MaxStrict) | Some(SlotCombine::MaxInclusive)
         );
         if competitive && !won {
@@ -805,7 +803,6 @@ pub fn warp_params(
     out.width = size.0.max(1) as f32;
     out.height = size.1.max(1) as f32;
     out.seconds = seconds;
-
 
     // -----------------------------------------------------------------------
     // P5：Warp 的槽位表与缺省值（唯一映射）
@@ -2233,7 +2230,10 @@ mod tests {
         //    `brightness_multiply` / `contrast` / `hue_rotate_css` / `saturation_css`
         //    **原先一条测试都没有** —— 切到登记表后写错槽位是静默的，所以补上。
         let p = color_params(&[effect("brightness_multiply", &[("factor", 1.5)])]);
-        assert!((p.scale - 1.5).abs() < 1e-6, "brightness_multiply 该写 scale");
+        assert!(
+            (p.scale - 1.5).abs() < 1e-6,
+            "brightness_multiply 该写 scale"
+        );
         assert!(p.is_identity() == false);
 
         let p = color_params(&[effect("contrast", &[("amount", 1.4)])]);
@@ -2256,11 +2256,17 @@ mod tests {
     fn 色调整与色罩互不串台() {
         // ⚠️ 两条管线各有一份槽位表。串台的症状是"挂了个色彩特效，画面却出现了闪白"。
         let p = color_params(&[effect("flash", &[("amount", 0.9)])]);
-        assert!(p.is_identity(), "flash 是 ColorMask 管线，不该进 color_params");
+        assert!(
+            p.is_identity(),
+            "flash 是 ColorMask 管线，不该进 color_params"
+        );
 
         // 反过来：色调整也不该进色罩的参数。
         let m = color_mask_params(&[effect("brightness", &[("amount", 0.5)])], (100, 100), 0);
-        assert!(m.is_identity(), "brightness 是 ColorAdjust 管线，不该进 color_mask_params");
+        assert!(
+            m.is_identity(),
+            "brightness 是 ColorAdjust 管线，不该进 color_mask_params"
+        );
     }
 
     #[test]
@@ -2892,7 +2898,11 @@ mod plan_tests {
         assert!((p.shake_frequency - 12.0).abs() < 1e-6, "shake 频率缺省 12");
         assert_eq!(p.shake_seed, 0.0);
 
-        let p = warp_params(&[effect("zoom_bounce", &[("amount", 0.5)])], (100, 100), 0.0);
+        let p = warp_params(
+            &[effect("zoom_bounce", &[("amount", 0.5)])],
+            (100, 100),
+            0.0,
+        );
         assert!((p.bounce_frequency - 3.0).abs() < 1e-6, "bounce 频率缺省 3");
 
         let p = warp_params(&[effect("pulse", &[("amount", 0.5)])], (100, 100), 0.0);
@@ -2940,7 +2950,10 @@ mod plan_tests {
             0.0,
         );
         assert!((p.shake_amount - 0.8).abs() < 1e-6);
-        assert!((p.shake_frequency - 20.0).abs() < 1e-6, "弱的那条不许改频率");
+        assert!(
+            (p.shake_frequency - 20.0).abs() < 1e-6,
+            "弱的那条不许改频率"
+        );
     }
 
     #[test]
@@ -3069,10 +3082,7 @@ mod p5_slot_tests {
     fn eff(kind: &str, params: &[(&str, f32)]) -> Effect {
         Effect {
             kind: kind.to_string(),
-            params: params
-                .iter()
-                .map(|(k, v)| (k.to_string(), *v))
-                .collect(),
+            params: params.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
             window: dhampir_timeline::schema::Window::Always,
             opacity: 1.0,
         }
@@ -3082,7 +3092,11 @@ mod p5_slot_tests {
     fn overlay_的_r2g2b2_缺省是主色() {
         // 原实现：`out.overlay_r2 = param("r2").unwrap_or(r)`。
         // 给 r/g/b 不给 r2/g2/b2 ⇒ 渐变另一端 = 主色（单色覆盖就是这么来的）。
-        let p = color_mask_params(&[eff("overlay", &[("amount", 1.0), ("r", 1.0), ("b", 0.5)])], (100, 100), 0);
+        let p = color_mask_params(
+            &[eff("overlay", &[("amount", 1.0), ("r", 1.0), ("b", 0.5)])],
+            (100, 100),
+            0,
+        );
         assert_eq!(p.overlay_r, 1.0);
         assert_eq!(p.overlay_b, 0.5);
         assert_eq!(p.overlay_r2, 1.0, "r2 应当回落到主色 r");
@@ -3106,8 +3120,14 @@ mod p5_slot_tests {
         // 弱的那条**不许**把颜色稀释成两者平均。
         let p = color_mask_params(
             &[
-                eff("flash", &[("amount", 0.8), ("r", 1.0), ("g", 1.0), ("b", 1.0)]),
-                eff("flash", &[("amount", 0.3), ("r", 0.0), ("g", 0.0), ("b", 0.0)]),
+                eff(
+                    "flash",
+                    &[("amount", 0.8), ("r", 1.0), ("g", 1.0), ("b", 1.0)],
+                ),
+                eff(
+                    "flash",
+                    &[("amount", 0.3), ("r", 0.0), ("g", 0.0), ("b", 0.0)],
+                ),
             ],
             (100, 100),
             0,
@@ -3125,8 +3145,14 @@ mod p5_slot_tests {
         // 顺序反过来（弱在前、强在后）也要对 —— 判胜负读的是**当前值**。
         let p = color_mask_params(
             &[
-                eff("flash", &[("amount", 0.3), ("r", 0.0), ("g", 0.0), ("b", 0.0)]),
-                eff("flash", &[("amount", 0.8), ("r", 1.0), ("g", 1.0), ("b", 1.0)]),
+                eff(
+                    "flash",
+                    &[("amount", 0.3), ("r", 0.0), ("g", 0.0), ("b", 0.0)],
+                ),
+                eff(
+                    "flash",
+                    &[("amount", 0.8), ("r", 1.0), ("g", 1.0), ("b", 1.0)],
+                ),
             ],
             (100, 100),
             0,
@@ -3158,17 +3184,30 @@ mod p5_slot_tests {
     fn 登记表驱动与手写_match_在四类上逐值等价() {
         // 覆盖四个 kind 各一组典型参数，逐槽位比对"该写的都写了、不该写的没写"。
         let cases: Vec<(&str, Vec<(&str, f32)>)> = vec![
-            ("flash", vec![("amount", 0.5), ("r", 0.2), ("g", 0.4), ("b", 0.6)]),
-            ("vignette", vec![("amount", 0.5), ("radius", 0.9), ("softness", 0.25)]),
+            (
+                "flash",
+                vec![("amount", 0.5), ("r", 0.2), ("g", 0.4), ("b", 0.6)],
+            ),
+            (
+                "vignette",
+                vec![("amount", 0.5), ("radius", 0.9), ("softness", 0.25)],
+            ),
             ("noise", vec![("amount", 0.5), ("seed", 3.0)]),
-            ("overlay", vec![("amount", 0.5), ("shape", 2.0), ("angle", 90.0)]),
+            (
+                "overlay",
+                vec![("amount", 0.5), ("shape", 2.0), ("angle", 90.0)],
+            ),
         ];
         for (kind, params) in cases {
             let p = color_mask_params(&[eff(kind, &params)], (100, 100), 0);
             assert!(!p.is_identity(), "{kind} 应当写出了非恒等参数");
         }
         // 暗角的 softness 下限（原实现的 `.max(1e-3)`）在这条泛化路径上也要生效。
-        let p = color_mask_params(&[eff("vignette", &[("amount", 0.5), ("softness", 0.0)])], (100, 100), 0);
+        let p = color_mask_params(
+            &[eff("vignette", &[("amount", 0.5), ("softness", 0.0)])],
+            (100, 100),
+            0,
+        );
         assert!(p.vignette_softness >= 1e-3, "softness 是除数，不许为 0");
     }
 }

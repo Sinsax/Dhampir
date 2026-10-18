@@ -623,7 +623,8 @@ pub fn layout(text: &str, style: &SubtitleStyle, sequence: (u32, u32)) -> TextLa
                 continue;
             }
             // 这一列在横向的位置：第一列靠右，依次向左。
-            let col_center = 0.5 + (total_cols - 1.0) / 2.0 * col_step_norm - col_index as f32 * col_step_norm;
+            let col_center =
+                0.5 + (total_cols - 1.0) / 2.0 * col_step_norm - col_index as f32 * col_step_norm;
             // 整列纵向居中：竖排忽略 `anchor_bottom`（见上面 `safe_h` 的说明）。
             let col_len_norm = chars.len() as f32 * line_height_norm;
             let col_top = 0.5 - col_len_norm / 2.0;
@@ -1436,7 +1437,11 @@ mod tests {
         );
         // ② 折行结果**一模一样** —— 左右安全宽没被牵连
         //    （解耦没做对的话，抬纵向会把 max_width 压小 ⇒ 行数变多）
-        assert_eq!(top.lines.len(), bottom.lines.len(), "抬纵向不该改变折行结果");
+        assert_eq!(
+            top.lines.len(),
+            bottom.lines.len(),
+            "抬纵向不该改变折行结果"
+        );
         // ③ 每行的宽度与字号都不变（同一条：没被牵连）
         for (a, b) in top.lines.iter().zip(bottom.lines.iter()) {
             assert_eq!(a.font_ratio, b.font_ratio, "字号不该变");
@@ -1461,8 +1466,9 @@ mod tests {
             assert_eq!(x.rect.width, y.rect.width);
         }
         // 且块顶必须**不是** new-style 的 1.0（那会贴到最底、与老行为差一个 bottom_margin）
-        let expected_top =
-            1.0 - SubtitleStyle::default().bottom_margin - a.lines.len() as f32 * a.lines[0].rect.height;
+        let expected_top = 1.0
+            - SubtitleStyle::default().bottom_margin
+            - a.lines.len() as f32 * a.lines[0].rect.height;
         let got_top = a.lines[0].rect.y;
         assert!(
             (got_top - expected_top).abs() < 1e-5,
@@ -1540,7 +1546,12 @@ mod tests {
         let chars: String = v.lines.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(chars, text, "竖排不该丢字或改序：{chars}");
         for l in &v.lines {
-            assert_eq!(l.text.chars().count(), 1, "竖排的每一行只能有一个字：{:?}", l.text);
+            assert_eq!(
+                l.text.chars().count(),
+                1,
+                "竖排的每一行只能有一个字：{:?}",
+                l.text
+            );
         }
     }
 
@@ -1566,13 +1577,14 @@ mod tests {
         //    退化成横排的实现只给 1 行，下面那些 `for i in 1..ys.len()`
         //    一次都不进循环，于是**全过**。（实测：加这句之前，
         //    「忽略 vertical」的变异体在本条上**没有被打红**。）
-        assert_eq!(v.lines.len(), 4, "竖排必须是四行（退化实现只有一行 ⇒ 下面全空转）");
+        assert_eq!(
+            v.lines.len(),
+            4,
+            "竖排必须是四行（退化实现只有一行 ⇒ 下面全空转）"
+        );
         // y **严格递增**（逐字往下走）
         for i in 1..ys.len() {
-            assert!(
-                ys[i] > ys[i - 1],
-                "竖排各字必须沿 y 逐字下行：{ys:?}"
-            );
+            assert!(ys[i] > ys[i - 1], "竖排各字必须沿 y 逐字下行：{ys:?}");
         }
         // x **全部相同**（一个字一列，列内横向不动）
         let first = xs[0];
@@ -1605,11 +1617,18 @@ mod tests {
         // 按列分组（同一列里 x 相同）
         let mut cols: Vec<f32> = Vec::new();
         for l in &v.lines {
-            if cols.last().map(|c| (c - l.rect.x).abs() > 1e-6).unwrap_or(true) {
+            if cols
+                .last()
+                .map(|c| (c - l.rect.x).abs() > 1e-6)
+                .unwrap_or(true)
+            {
                 cols.push(l.rect.x);
             }
         }
-        assert!(cols.len() >= 2, "字号 0.5 + 安全宽 0.3 应当断成多列：{cols:?}");
+        assert!(
+            cols.len() >= 2,
+            "字号 0.5 + 安全宽 0.3 应当断成多列：{cols:?}"
+        );
         for i in 1..cols.len() {
             assert!(
                 cols[i] < cols[i - 1],
@@ -1705,10 +1724,21 @@ mod tests {
             ..style()
         };
         let l = layout("逐字散开测试", &st, SEQUENCE);
-        assert_eq!(l.lines.len(), 4, "留 2 列 × 每列 2 字 = 4 行（实得 {}）", l.lines.len());
-        assert_eq!(l.dropped_lines, 1, "6 字 3 列、留 2 列 ⇒ **丢 1 列**（不是丢 2 个字）");
+        assert_eq!(
+            l.lines.len(),
+            4,
+            "留 2 列 × 每列 2 字 = 4 行（实得 {}）",
+            l.lines.len()
+        );
+        assert_eq!(
+            l.dropped_lines, 1,
+            "6 字 3 列、留 2 列 ⇒ **丢 1 列**（不是丢 2 个字）"
+        );
         let got: String = l.lines.iter().map(|x| x.text.as_str()).collect();
-        assert_eq!(got, "逐字散开", "竖排截断后剩的应当是**最靠前的两列**：{got}");
+        assert_eq!(
+            got, "逐字散开",
+            "竖排截断后剩的应当是**最靠前的两列**：{got}"
+        );
     }
 
     /// 数一条竖排布局里有几列（同一列里各字 x 相同）。

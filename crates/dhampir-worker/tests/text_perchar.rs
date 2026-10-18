@@ -54,9 +54,7 @@ use dhampir_core::readback::Rgba8Image;
 use dhampir_core::timeline::layer::{AssetTimebases, TimelineV2};
 use dhampir_core::timeline::schema::{Frame, TimebaseDto};
 use dhampir_core::timeline::subtitle::parse_srt;
-use dhampir_worker::pipeline::{
-    AudioMode, FramePng, RenderPlan, SourceTable, render_frames_png,
-};
+use dhampir_worker::pipeline::{AudioMode, FramePng, RenderPlan, SourceTable, render_frames_png};
 
 const TARGET: (u32, u32) = (640, 360);
 const BACKGROUND_ASSET: &str = "bg.png";
@@ -466,7 +464,12 @@ fn 逐字散开真的在字间造出空隙() {
         return;
     }
     let fixture = Fixture::new("spread");
-    let baseline = fixture.render_at("base", &background_only_timeline(), &SubtitleTable::new(), STEADY_FRAME);
+    let baseline = fixture.render_at(
+        "base",
+        &background_only_timeline(),
+        &SubtitleTable::new(),
+        STEADY_FRAME,
+    );
 
     // 逐字横向散开：每个字往前一个字的位置再挪 0.4em。
     // ⚠️ `per_char_frames = 20`（不是 0）+ `stagger = 4`：要真的跑完再看稳态。
@@ -560,7 +563,12 @@ fn 逐字放大只让那个字变宽() {
         return;
     }
     let fixture = Fixture::new("grow");
-    let baseline = fixture.render_at("base", &background_only_timeline(), &SubtitleTable::new(), STEADY_FRAME);
+    let baseline = fixture.render_at(
+        "base",
+        &background_only_timeline(),
+        &SubtitleTable::new(),
+        STEADY_FRAME,
+    );
 
     // 全部字 `1.0 → 1.0`（不变），但**错峰**让只有第一个字先长大又停住 ——
     // 不行，那会一起变大。改成：**`scale_to = 2.0` 且 `reverse`**，
@@ -635,7 +643,12 @@ fn 逐字旋转真的倾斜了那个字() {
         return;
     }
     let fixture = Fixture::new("rotate");
-    let baseline = fixture.render_at("base", &background_only_timeline(), &SubtitleTable::new(), STEADY_FRAME);
+    let baseline = fixture.render_at(
+        "base",
+        &background_only_timeline(),
+        &SubtitleTable::new(),
+        STEADY_FRAME,
+    );
 
     // 每个字都转、错峰 —— 取"第一个字已经转到位、最后一个还没转"的那一帧。
     let rotate = r#"{
@@ -647,7 +660,12 @@ fn 逐字旋转真的倾斜了那个字() {
         "easing": "linear"
     }"#;
     let mid: Frame = 26;
-    let rendered = fixture.render_at("rotate", &timeline_with_per_char(rotate), &table(&srt()), mid);
+    let rendered = fixture.render_at(
+        "rotate",
+        &timeline_with_per_char(rotate),
+        &table(&srt()),
+        mid,
+    );
     let s = ink(&rendered.image, &baseline.image);
 
     let plain = fixture.render_at(

@@ -149,7 +149,10 @@ mod tests {
     //    而逐字与整行**各自看都正常**。
 
     fn last_end(l: &CharLayout) -> f32 {
-        l.cells.last().map(|c| c.offset_em + c.advance_em).unwrap_or(0.0)
+        l.cells
+            .last()
+            .map(|c| c.offset_em + c.advance_em)
+            .unwrap_or(0.0)
     }
 
     #[test]

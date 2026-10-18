@@ -636,13 +636,18 @@ pub fn evaluate_overlay(
                                     0
                                 }
                             };
-                            let stagger_span = spec.stagger_frames.max(0) * count.saturating_sub(1) as i64;
+                            let stagger_span =
+                                spec.stagger_frames.max(0) * count.saturating_sub(1) as i64;
                             let in_exit = out_frames > 0
                                 && span_frames > 0
                                 && local >= span_frames - out_frames - stagger_span;
                             let transforms = if in_exit {
                                 dhampir_timeline::text_perchar_anim::layout_transforms_at_out(
-                                    spec, &layout, local, span_frames, out_frames,
+                                    spec,
+                                    &layout,
+                                    local,
+                                    span_frames,
+                                    out_frames,
                                 )
                             } else {
                                 dhampir_timeline::text_perchar_anim::layout_transforms_at(
@@ -1195,10 +1200,7 @@ mod tests {
         let none_fr = none[0].font_ratio;
 
         // `None` = 1.0（老工程逐字节不变的那条路）。
-        assert_eq!(
-            none[0].scale, 1.0,
-            "`cue.scale = None` 必须完全等价于 1.0"
-        );
+        assert_eq!(none[0].scale, 1.0, "`cue.scale = None` 必须完全等价于 1.0");
 
         let x2 = at(&table_with_cue_scale(Some(2.0)), 0);
         assert!(
@@ -1316,8 +1318,7 @@ mod tests {
         let mut seen_dy = false;
         let mut vals = std::collections::BTreeSet::new();
         for frame in 0_i64..60 {
-            let items =
-                evaluate_overlay(&on, frame, SEQUENCE, Some(&table())).expect("要有覆盖层");
+            let items = evaluate_overlay(&on, frame, SEQUENCE, Some(&table())).expect("要有覆盖层");
             let it = &items.items[0];
             if it.dx_px.abs() > 1e-4 {
                 seen_dx = true;
@@ -1483,7 +1484,11 @@ mod tests {
         // 第 60 帧（30fps ⇒ 2s）：`per_char_frames = 10` 早跑完 ⇒ 全部到位。
         let overlay = evaluate_overlay(&line, 60, SEQUENCE, Some(&table())).expect("有字幕");
         let item = &overlay.items[0];
-        assert_eq!(item.cells.len(), item.text.chars().count(), "格子数必须等于字数");
+        assert_eq!(
+            item.cells.len(),
+            item.text.chars().count(),
+            "格子数必须等于字数"
+        );
         // 每个字都应当已经被挪到 0.4em（全部错峰为 0 ⇒ 同时动完）
         for (i, c) in item.cells.iter().enumerate() {
             assert!(
@@ -1498,8 +1503,8 @@ mod tests {
     /// **没配逐字动效时 `cells` 必须是空的**（R4：走老路、缓存不碎）。
     #[test]
     fn 没配逐字动效时格子是空的() {
-        let overlay = evaluate_overlay(&subtitle_timeline(), 15, SEQUENCE, Some(&table()))
-            .expect("有字幕");
+        let overlay =
+            evaluate_overlay(&subtitle_timeline(), 15, SEQUENCE, Some(&table())).expect("有字幕");
         assert!(
             overlay.items.iter().all(|i| i.cells.is_empty()),
             "没配 `per_char` 时 `cells` 必须为空，否则所有字幕都被迫走逐字路"
@@ -1728,7 +1733,10 @@ mod tests {
         assert_eq!(style.color, [255, 240, 200, 255]);
         assert_eq!(style.font_ratio, 0.055);
         assert!(!style.outline);
-        assert_eq!(style.stroke_px, 0.0, "没写 stroke_ratio ⇒ 0（既有工程不变）");
+        assert_eq!(
+            style.stroke_px, 0.0,
+            "没写 stroke_ratio ⇒ 0（既有工程不变）"
+        );
         // 描边色的默认不是纯黑 —— 是 `subtitle_stroke_color()` 的 `[0x40,0x3c,0x3b]`。
         // （我第一版按"想当然"写了 `[0,0,0,255]` 被这条测试当场抓住；
         //   这里照 `dhampir_timeline::layer` 的实际默认值写。）
@@ -1836,7 +1844,10 @@ mod tests {
     fn 字幕配了阴影弹幕也不画() {
         let overlay = evaluate_overlay(&shadow_timeline(), 15, SEQUENCE, Some(&both_table()))
             .expect("这一帧应当有字");
-        assert_eq!(overlay.items[0].track_style.shadow_color, Some([0, 0, 0, 102]));
+        assert_eq!(
+            overlay.items[0].track_style.shadow_color,
+            Some([0, 0, 0, 102])
+        );
         assert_eq!(
             overlay.danmaku[0].track_style.shadow_color, None,
             "弹幕不该继承字幕的阴影"
@@ -2357,7 +2368,10 @@ mod tests {
     fn 没写旋转与纵向倍数时是老行为() {
         let tl = subtitle_timeline();
         let overlay = evaluate_overlay(&tl, 0, SEQUENCE, Some(&table())).expect("要有覆盖层");
-        assert!(!overlay.items.is_empty(), "夹具本身要有字幕，否则这条判据是空转");
+        assert!(
+            !overlay.items.is_empty(),
+            "夹具本身要有字幕，否则这条判据是空转"
+        );
         for item in &overlay.items {
             assert_eq!(item.rotation_deg, 0.0, "没写 ⇒ 0°（不转）");
             assert_eq!(item.scale_y, 1.0, "没写 ⇒ 1.0（纵向跟随 scale = 等比）");
@@ -2410,8 +2424,8 @@ mod tests {
     fn 旋转关键帧逐帧求值() {
         let tl = sway_timeline();
         let at = |frame| {
-            let overlay = evaluate_overlay(&tl, frame, SEQUENCE, Some(&table()))
-                .expect("每一帧都要有覆盖层");
+            let overlay =
+                evaluate_overlay(&tl, frame, SEQUENCE, Some(&table())).expect("每一帧都要有覆盖层");
             overlay.items.first().expect("至少一条字幕").rotation_deg
         };
 
@@ -2433,10 +2447,13 @@ mod tests {
         // 静态 12°，**不带 keyframes**。
         let tl = tilted_timeline(12.0, 1.0);
         for frame in [0, 15, 30, 60, 119] {
-            let overlay = evaluate_overlay(&tl, frame, SEQUENCE, Some(&table()))
-                .expect("每一帧都要有覆盖层");
+            let overlay =
+                evaluate_overlay(&tl, frame, SEQUENCE, Some(&table())).expect("每一帧都要有覆盖层");
             for item in &overlay.items {
-                assert_eq!(item.rotation_deg, 12.0, "第 {frame} 帧：没写键就该恒用静态值 12°");
+                assert_eq!(
+                    item.rotation_deg, 12.0,
+                    "第 {frame} 帧：没写键就该恒用静态值 12°"
+                );
             }
         }
     }
@@ -2478,8 +2495,16 @@ mod tests {
                 .rotation_deg
         };
         // 元素第 30 帧才出现 ⇒ 那一刻是它的第 0 帧 ⇒ 曲线起点 −8°。
-        assert_eq!(at(30), -8.0, "元素自己的第 0 帧 = 时间线第 30 帧，应取曲线起点");
-        assert_eq!(at(60), 8.0, "元素自己的第 30 帧 = 时间线第 60 帧，应取曲线终点");
+        assert_eq!(
+            at(30),
+            -8.0,
+            "元素自己的第 0 帧 = 时间线第 30 帧，应取曲线起点"
+        );
+        assert_eq!(
+            at(60),
+            8.0,
+            "元素自己的第 30 帧 = 时间线第 60 帧，应取曲线终点"
+        );
     }
 
     /// ⚠️ **形变是「条级」的，不是轨级**：两条字幕轨各写各的，互不污染。
@@ -2516,15 +2541,23 @@ mod tests {
                 ]
             }"#,
         );
-        let overlay =
-            evaluate_overlay(&tl, 0, SEQUENCE, Some(&table())).expect("要有覆盖层");
+        let overlay = evaluate_overlay(&tl, 0, SEQUENCE, Some(&table())).expect("要有覆盖层");
         // 两条轨各出一条（cue 文本相同，靠角度区分是哪条轨的）
         let angles: Vec<f32> = overlay.items.iter().map(|i| i.rotation_deg).collect();
-        assert!(angles.contains(&10.0), "第一条轨的 10° 必须还在，实际：{angles:?}");
-        assert!(angles.contains(&30.0), "第二条轨的 30° 必须也在，实际：{angles:?}");
+        assert!(
+            angles.contains(&10.0),
+            "第一条轨的 10° 必须还在，实际：{angles:?}"
+        );
+        assert!(
+            angles.contains(&30.0),
+            "第二条轨的 30° 必须也在，实际：{angles:?}"
+        );
         assert_eq!(angles.len(), 2, "两条轨各一条，不许被后一条吃掉");
         let ys: Vec<f32> = overlay.items.iter().map(|i| i.scale_y).collect();
-        assert!(ys.contains(&1.0) && ys.contains(&0.5), "纵向倍数同样各归各：{ys:?}");
+        assert!(
+            ys.contains(&1.0) && ys.contains(&0.5),
+            "纵向倍数同样各归各：{ys:?}"
+        );
     }
 
     /// ⚠️ **关键帧尚未连接** —— 这条把"已知限制"钉成判据，防止有人误以为已经支持。

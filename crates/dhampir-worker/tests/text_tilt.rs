@@ -51,9 +51,7 @@ use dhampir_core::readback::Rgba8Image;
 use dhampir_core::timeline::layer::{AssetTimebases, TimelineV2};
 use dhampir_core::timeline::schema::{Frame, TimebaseDto};
 use dhampir_core::timeline::subtitle::parse_srt;
-use dhampir_worker::pipeline::{
-    AudioMode, FramePng, RenderPlan, SourceTable, render_frames_png,
-};
+use dhampir_worker::pipeline::{AudioMode, FramePng, RenderPlan, SourceTable, render_frames_png};
 
 const TARGET: (u32, u32) = (640, 360);
 const BACKGROUND_ASSET: &str = "bg.png";
@@ -195,12 +193,7 @@ impl Fixture {
     }
 
     /// 渲染**一帧**（稳态那帧）。
-    fn render(
-        &self,
-        out: &str,
-        line: &TimelineV2,
-        subtitles: &SubtitleTable,
-    ) -> Rendered {
+    fn render(&self, out: &str, line: &TimelineV2, subtitles: &SubtitleTable) -> Rendered {
         self.render_at(out, line, subtitles, STEADY_FRAME)
     }
 
@@ -492,8 +485,7 @@ fn stats(image: &Rgba8Image, baseline: &Rgba8Image) -> Option<Stats> {
 
 /// 恒等 transform。**显式写全**（含新键 `scale_y`），与 `LEGACY` 分开 ——
 /// 两条路都要求逐字节相同。
-const IDENTITY: &str =
-    r#"{ "x": 0.0, "y": 0.0, "scale": 1.0, "rotation": 0.0, "scale_y": 1.0 }"#;
+const IDENTITY: &str = r#"{ "x": 0.0, "y": 0.0, "scale": 1.0, "rotation": 0.0, "scale_y": 1.0 }"#;
 
 /// **老工程**：`transform` 里**没有** `scale_y` 这个键。
 ///
@@ -636,7 +628,10 @@ fn t5_压扁真的落进像素() {
         base_ink.height(),
         got.height()
     );
-    assert!(ratio > 0.30, "高度比 {ratio:.3} 过小 —— 压得太狠或量到了别的东西");
+    assert!(
+        ratio > 0.30,
+        "高度比 {ratio:.3} 过小 —— 压得太狠或量到了别的东西"
+    );
 
     // ② 宽度**基本不变**：这是"非等比"（而非整体缩小）的**唯一**判据。
     //    ⚠️ 少了它，"压扁"与"整条等比变小"分不开 —— 后者是另一个效果（`scale`）。

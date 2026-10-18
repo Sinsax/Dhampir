@@ -267,7 +267,10 @@ fn fixture_timeline(plate: &str) -> TimelineV2 {
 fn plate_fragment() -> String {
     format!(
         r#","plate_color":[{},{},{},{}],"plate_pad_px":{pad}"#,
-        PLATE_COLOR[0], PLATE_COLOR[1], PLATE_COLOR[2], PLATE_COLOR[3],
+        PLATE_COLOR[0],
+        PLATE_COLOR[1],
+        PLATE_COLOR[2],
+        PLATE_COLOR[3],
         pad = PLATE_PAD_PX
     )
 }
@@ -309,7 +312,9 @@ fn count_color(image: &Rgba8Image, color: [u8; 4]) -> usize {
     image
         .pixels
         .chunks_exact(4)
-        .filter(|px| px[0] == color[0] && px[1] == color[1] && px[2] == color[2] && px[3] == color[3])
+        .filter(|px| {
+            px[0] == color[0] && px[1] == color[1] && px[2] == color[2] && px[3] == color[3]
+        })
         .count()
 }
 
@@ -482,19 +487,11 @@ fn 两条字幕轨并存时配了底衬的那条轨仍然铺底衬() {
 
     // ① 双轨：`elements`（配底衬）+ `srt`（**排在后面**、没有底衬）——
     //    这正是"覆盖者"的位置。
-    let both = fixture.render(
-        "two-tracks",
-        &two_track_timeline(false),
-        &two_track_table(),
-    );
+    let both = fixture.render("two-tracks", &two_track_timeline(false), &two_track_table());
     let red_both = count_color(&both.image, plate_red);
 
     // ② 对照：**只删掉后面那条轨**，其余一字不改。
-    let only = fixture.render(
-        "one-track",
-        &two_track_timeline(true),
-        &two_track_table(),
-    );
+    let only = fixture.render("one-track", &two_track_timeline(true), &two_track_table());
     let red_only = count_color(&only.image, plate_red);
 
     // ③ ★ 核心判据：**两条轨都在时，底衬照样画出来**。
@@ -659,10 +656,7 @@ fn 两条弹幕轨并存时前面那条轨的描边仍然画得出来() {
         "单轨对照一个弹幕像素都没画出来 —— 前提不成立（先查夹具/字体/帧号）"
     );
     // ② 对照组确实"有描边" ⇒ 至少该有个能被比较的量。
-    assert!(
-        ink_both > 0,
-        "双轨下弹幕像素为 0 —— 夹具或渲染路径有问题"
-    );
+    assert!(ink_both > 0, "双轨下弹幕像素为 0 —— 夹具或渲染路径有问题");
 
     // ③ ★ 核心判据：轨 A **仍然带着描边**（字更胖）⇒ 双轨的墨迹
     //    必须**不少于**单轨的。共享槽被覆盖时轨 A 的 outline 丢掉，
@@ -744,11 +738,7 @@ fn two_danmaku_timeline(drop_second: bool, a_outline: bool) -> TimelineV2 {
 }
 
 /// 同上，但可以**只留轨 B**（`b_only`）—— 用来量轨 B 自己贡献了多少墨。
-fn two_danmaku_timeline_full(
-    drop_second: bool,
-    drop_first: bool,
-    a_outline: bool,
-) -> TimelineV2 {
+fn two_danmaku_timeline_full(drop_second: bool, drop_first: bool, a_outline: bool) -> TimelineV2 {
     // 轨 A 自己带前导逗号（它永远跟在背景轨后面）。
     // 轨 A 自己带前导逗号（它永远跟在背景轨后面；`drop_first` 时才整条消失）。
     let a_track = if drop_first {
@@ -830,9 +820,13 @@ fn two_danmaku_timeline_full(
         end = CLIP.1,
         background = BACKGROUND_ASSET,
     );
-    if std::env::var("DUMP_JSON").is_ok() { eprintln!("===JSON===
+    if std::env::var("DUMP_JSON").is_ok() {
+        eprintln!(
+            "===JSON===
 {text}
-===END==="); }
+===END==="
+        );
+    }
     serde_json::from_str(&text).expect("双弹幕轨夹具时间线必须能反序列化")
 }
 

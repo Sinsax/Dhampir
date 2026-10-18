@@ -623,8 +623,12 @@ fn paint_parts(
         let blitted = if transform.is_identity() {
             blit_scaled(image, &bitmap, text_origin.0, text_origin.1, alpha)
         } else {
-            let written = crate::text_transform::blit_affine(image, &bitmap, text_origin, transform, alpha);
-            Ok(BlitReport { written: written as u64, skipped: 0 })
+            let written =
+                crate::text_transform::blit_affine(image, &bitmap, text_origin, transform, alpha);
+            Ok(BlitReport {
+                written: written as u64,
+                skipped: 0,
+            })
         };
         let report = match blitted {
             Ok(report) => report,
@@ -709,7 +713,8 @@ fn paint_per_char(
     //    而文字在整行位图里是**居中**的（栅格化那侧的规矩）
     //    ⇒ 文字左端 = 位图中心 − 整行文字宽 / 2。用 `placement.x` 的结果是
     //      每个字都偏右（整行宽的一半那么远），而且**行越长偏得越多**。
-    let row_left = placement.x as f32 + placement.bitmap_width as f32 / 2.0 - total_em * font_px / 2.0;
+    let row_left =
+        placement.x as f32 + placement.bitmap_width as f32 / 2.0 - total_em * font_px / 2.0;
     // 行盒的垂直中心（逐字纵向位移相对于它）。
     let row_center_y = placement.y as f32 + placement.bitmap_height as f32 / 2.0;
 
@@ -739,7 +744,8 @@ fn paint_per_char(
         //    ⇒ 左上角 = 中心 − 位图宽/2。这里若用"字的宽/2"回推，
         //      字会随缩放**平移**（看着像"放大时飘走"）。
         let x = (cell_center_x + offset_x as f32).round() as i32 - half_w;
-        let y = (row_center_y + cell.offset_y_em * font_px + offset_y as f32).round() as i32 - half_h;
+        let y =
+            (row_center_y + cell.offset_y_em * font_px + offset_y as f32).round() as i32 - half_h;
 
         let key = TextRasterKey {
             text: cell.ch.to_string(),
@@ -798,9 +804,17 @@ fn paint_per_char(
         let blitted = if cell_transform.is_identity() {
             blit_scaled(image, &bitmap, text_origin.0, text_origin.1, alpha)
         } else {
-            let written =
-                crate::text_transform::blit_affine(image, &bitmap, text_origin, cell_transform, alpha);
-            Ok(BlitReport { written: written as u64, skipped: 0 })
+            let written = crate::text_transform::blit_affine(
+                image,
+                &bitmap,
+                text_origin,
+                cell_transform,
+                alpha,
+            );
+            Ok(BlitReport {
+                written: written as u64,
+                skipped: 0,
+            })
         };
         if let Err(error) = blitted {
             log.record("subtitle_blit_failed", &path, error);
@@ -955,11 +969,7 @@ impl PlateRect {
     /// `bitmap.ink_bounds()` 给位图内的**闭区间**墨迹盒，把它平移到帧坐标即可
     /// （位图左上角就是 `placement.x/y`，再加上这一帧的偏移）。
     /// 空位图（没有墨）给 `None` ⇒ 没有可围的东西，**不铺**。
-    fn from_ink(
-        ink: (u32, u32, u32, u32),
-        placement: (i32, i32),
-        pad_px: f32,
-    ) -> Self {
+    fn from_ink(ink: (u32, u32, u32, u32), placement: (i32, i32), pad_px: f32) -> Self {
         // 墨迹是**闭区间** ⇒ 右/下边要 `+1` 才是半开区间的边界。
         // 除了"多铺一列像素"，更实际的理由：`ink_bounds` 是闭区间而底衬的
         // `paint` 走半开区间，不 +1 会让右侧/下侧**少整整一列**。
@@ -1324,8 +1334,12 @@ fn paint_one(
     let blitted = if transform.is_identity() {
         blit_scaled(image, &bitmap, text_origin.0, text_origin.1, alpha)
     } else {
-        let written = crate::text_transform::blit_affine(image, &bitmap, text_origin, transform, alpha);
-        Ok(BlitReport { written: written as u64, skipped: 0 })
+        let written =
+            crate::text_transform::blit_affine(image, &bitmap, text_origin, transform, alpha);
+        Ok(BlitReport {
+            written: written as u64,
+            skipped: 0,
+        })
     };
     let report = match blitted {
         Ok(report) => report,
@@ -2074,7 +2088,10 @@ mod tests {
         let mut log = IssueLog::new();
         let mut painter = OverlayPainter::new(Some(Path::new("C:/fake/font.ttf")));
         let lines = overlay(&[("一", rect)], 0);
-        assert_eq!(lines.items[0].track_style.shadow_color, None, "夹具就是老样式");
+        assert_eq!(
+            lines.items[0].track_style.shadow_color, None,
+            "夹具就是老样式"
+        );
         paint_lines(
             &mut |key| fake_rasterizer(&mut calls)(key),
             &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
@@ -2126,7 +2143,9 @@ mod tests {
         let mut calls = 0usize;
         let mut painter = OverlayPainter::new(Some(Path::new("C:/fake/font.ttf")));
         let mut lines = overlay(&[("一", rect)], 0);
-        set_track_style(&mut lines, |style| style.shadow_color = Some([0, 0, 0, 255]));
+        set_track_style(&mut lines, |style| {
+            style.shadow_color = Some([0, 0, 0, 255])
+        });
         // 只留垂直偏移（不用模糊）：**阴影的落点=文字落点+(0,20)**，于是
         // 两块墨在纵向完全错开，"偏移生效了没有"一眼可判。
         set_track_style(&mut lines, |style| {

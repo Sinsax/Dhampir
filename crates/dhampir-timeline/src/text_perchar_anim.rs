@@ -480,7 +480,10 @@ mod tests {
             per_char_frames: 30,
             ..Default::default()
         };
-        assert!(!flat.is_active(), "端点全相等 ⇒ 什么都不会动，不该进逐字路径");
+        assert!(
+            !flat.is_active(),
+            "端点全相等 ⇒ 什么都不会动，不该进逐字路径"
+        );
 
         // 有运动但时长为 0
         let zero_dur = PerCharSpec {
@@ -496,10 +499,22 @@ mod tests {
 
         // 四个通道**各自**都要能单独把 is_active 打开
         for one in [
-            PerCharSpec { scale_from: 0.5, ..pop() },
-            PerCharSpec { rotation_from: -20.0, ..pop() },
-            PerCharSpec { offset_x_from: -0.5, ..pop() },
-            PerCharSpec { offset_y_from: 0.8, ..pop() },
+            PerCharSpec {
+                scale_from: 0.5,
+                ..pop()
+            },
+            PerCharSpec {
+                rotation_from: -20.0,
+                ..pop()
+            },
+            PerCharSpec {
+                offset_x_from: -0.5,
+                ..pop()
+            },
+            PerCharSpec {
+                offset_y_from: 0.8,
+                ..pop()
+            },
         ] {
             assert!(one.is_active(), "单独一个通道也要能生效：{one:?}");
         }
@@ -565,7 +580,10 @@ mod tests {
         let s = pop();
         // 第 0 个字：0..10 帧
         assert!((char_transform_at(&s, 0, 5, 0).scale - 0.0).abs() < 1e-6);
-        assert!((char_transform_at(&s, 0, 5, 5).scale - 0.5).abs() < 1e-6, "线性曲线中点");
+        assert!(
+            (char_transform_at(&s, 0, 5, 5).scale - 0.5).abs() < 1e-6,
+            "线性曲线中点"
+        );
         assert!((char_transform_at(&s, 0, 5, 10).scale - 1.0).abs() < 1e-6);
     }
 
@@ -630,10 +648,18 @@ mod tests {
     fn 写回格子只动变换四个字段() {
         let s = pop();
         let mut layout = CharLayout::of("abc");
-        let before: Vec<_> = layout.cells.iter().map(|c| (c.ch, c.offset_em, c.advance_em)).collect();
+        let before: Vec<_> = layout
+            .cells
+            .iter()
+            .map(|c| (c.ch, c.offset_em, c.advance_em))
+            .collect();
         let ts = layout_transforms_at(&s, &layout, 4);
         apply_transforms(&mut layout.cells, &ts);
-        let after: Vec<_> = layout.cells.iter().map(|c| (c.ch, c.offset_em, c.advance_em)).collect();
+        let after: Vec<_> = layout
+            .cells
+            .iter()
+            .map(|c| (c.ch, c.offset_em, c.advance_em))
+            .collect();
         assert_eq!(before, after, "位置与字不能被写回改掉（那是布局的产物）");
         // 而变换确实写进去了
         assert!(layout.has_transform(), "写回之后行级判据必须翻面");
@@ -729,7 +755,11 @@ mod tests {
             .map(|i| char_transform_at(&fan, i, n, 10).offset_x_em)
             .collect();
         assert!((ts[0] - 0.0).abs() < 1e-6, "第一个字不该挪：{}", ts[0]);
-        assert!((ts[n - 1] - 2.0).abs() < 1e-6, "最后一个字挪满 2em：{}", ts[n - 1]);
+        assert!(
+            (ts[n - 1] - 2.0).abs() < 1e-6,
+            "最后一个字挪满 2em：{}",
+            ts[n - 1]
+        );
         // 相邻间隔 = 2.0 / 7（线性）
         let step = 2.0 / 7.0;
         for w in ts.windows(2) {
@@ -775,7 +805,10 @@ mod tests {
             .map(|i| char_transform_at(&fan, i, n, 10).offset_x_em)
             .collect();
         assert!((ts[0] - 2.0).abs() < 1e-5, "反向时**第一个**字挪满：{ts:?}");
-        assert!((ts[n - 1] - 0.0).abs() < 1e-5, "反向时**最后一个**字不动：{ts:?}");
+        assert!(
+            (ts[n - 1] - 0.0).abs() < 1e-5,
+            "反向时**最后一个**字不动：{ts:?}"
+        );
     }
 
     #[test]
@@ -925,9 +958,7 @@ mod tests {
         };
         spec.reverse = true;
         let n = 5;
-        let ts: Vec<_> = (0..n)
-            .map(|i| char_transform_at(&spec, i, n, 10))
-            .collect();
+        let ts: Vec<_> = (0..n).map(|i| char_transform_at(&spec, i, n, 10)).collect();
         // 反向：index 0 的 rank 最大 ⇒ 字号最大、位移最多
         assert!(
             ts[0].scale > ts[n - 1].scale,
@@ -1007,7 +1038,6 @@ mod tests {
         assert!((a.offset_x_em + 1.0).abs() < 1e-6 && (a.offset_y_em - 0.5).abs() < 1e-6);
     }
 }
-
 
 #[cfg(test)]
 mod out_window_tests {

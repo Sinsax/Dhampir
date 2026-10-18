@@ -1256,17 +1256,15 @@ pub fn rasterize_line(key: &TextRasterKey) -> Result<TextBitmap, String> {
 }
 
 /// 跑一次 ffmpeg 拿**原始 RGBA 字节**（不染色），供两次渲染各自取覆盖度用。
-fn run_ffmpeg_raw(
-    key: &TextRasterKey,
-    args: &[String],
-    what: &str,
-) -> Result<Vec<u8>, String> {
+fn run_ffmpeg_raw(key: &TextRasterKey, args: &[String], what: &str) -> Result<Vec<u8>, String> {
     let output = Command::new("ffmpeg")
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .map_err(|error| format!("起不了 ffmpeg（{what}那一遍）：{error}（PATH 里有 ffmpeg 吗？）"))?;
+        .map_err(|error| {
+            format!("起不了 ffmpeg（{what}那一遍）：{error}（PATH 里有 ffmpeg 吗？）")
+        })?;
     if !output.status.success() {
         return Err(format!(
             "ffmpeg 画不出这一行的{what}（退出码 {:?}）：{}",
@@ -1495,7 +1493,11 @@ fn dilate_aa(cov: &[u8], width: usize, height: usize, r: u32) -> Vec<u8> {
     let mut out = Vec::with_capacity(cov.len());
     for (i, &c) in cov.iter().enumerate() {
         let ramp = ((radius + 0.5 - dist[i]) * 255.0).clamp(0.0, 255.0);
-        let v = if f32::from(c) > ramp { f32::from(c) } else { ramp };
+        let v = if f32::from(c) > ramp {
+            f32::from(c)
+        } else {
+            ramp
+        };
         out.push(v.round() as u8);
     }
     out
@@ -1530,10 +1532,7 @@ fn coverage_distance(cov: &[u8], width: usize, height: usize) -> Vec<f32> {
     if width == 0 || height == 0 {
         return Vec::new();
     }
-    let mut grid: Vec<f32> = cov
-        .iter()
-        .map(|&c| if c > 0 { 0.0 } else { FAR })
-        .collect();
+    let mut grid: Vec<f32> = cov.iter().map(|&c| if c > 0 { 0.0 } else { FAR }).collect();
     let n = width.max(height);
     let mut line = vec![0.0f32; n];
     let mut out = vec![0.0f32; n];
@@ -2223,7 +2222,10 @@ mod tests {
         }
         println!("三色探针：填充 {mag} / 内圈 {cyan} / 外圈 {green}（位图 {width}x{height}）");
         assert!(mag > 50, "填充色没画出来（{mag} 像素）");
-        assert!(cyan > 20, "内圈描边没画出来（{cyan} 像素）—— 见 dilate_disc 那条几何");
+        assert!(
+            cyan > 20,
+            "内圈描边没画出来（{cyan} 像素）—— 见 dilate_disc 那条几何"
+        );
         assert!(green > 20, "外圈白环没画出来（{green} 像素）");
     }
     /// ★ **描边 = 圆盘膨胀 − 字形**（2026-10-16）：字腔（字形内部）绝不能被填成描边色。
@@ -2260,7 +2262,11 @@ mod tests {
 
         // 半径 2 铺满这张 3×3（越界的部分被裁掉）
         let d2 = dilate_aa(&cov, w, h, 2);
-        assert_eq!(d2.iter().filter(|v| **v > 0).count(), 9, "半径 2 应当铺满 3×3");
+        assert_eq!(
+            d2.iter().filter(|v| **v > 0).count(),
+            9,
+            "半径 2 应当铺满 3×3"
+        );
         assert_eq!(dilate_aa(&cov, w, h, 0), cov, "半径 0 = 原样返回");
     }
     /// ★ **到墨迹的距离必须是精确定义的欧氏距离**（2026-10-19）。
@@ -2273,7 +2279,14 @@ mod tests {
         let w = 37usize;
         let h = 29usize;
         let mut cov = vec![0u8; w * h];
-        for &(x, y) in &[(3usize, 4usize), (30, 3), (18, 14), (5, 25), (35, 27), (12, 7)] {
+        for &(x, y) in &[
+            (3usize, 4usize),
+            (30, 3),
+            (18, 14),
+            (5, 25),
+            (35, 27),
+            (12, 7),
+        ] {
             cov[y * w + x] = 255;
         }
         let got = coverage_distance(&cov, w, h);
@@ -2352,7 +2365,10 @@ mod tests {
     #[test]
     fn 环带是宽环减内圈且不回绕() {
         // 宽环 ⊃ 内圈：剩下的就是壳
-        assert_eq!(ring_of(&[10, 20, 200, 255], &[0, 5, 50, 55]), vec![10, 15, 150, 200]);
+        assert_eq!(
+            ring_of(&[10, 20, 200, 255], &[0, 5, 50, 55]),
+            vec![10, 15, 150, 200]
+        );
         // 内圈比宽环大（抗锯齿量化差）：必须是 0，不许回绕成 255
         assert_eq!(ring_of(&[100, 100], &[120, 99]), vec![0, 1]);
         // 长度按最短那份（两遍位图尺寸同源，正常不会不等）
@@ -3984,11 +4000,13 @@ mod tests {
         );
         // ⚠️ 两遍的**字号与画布尺寸必须一致** —— 不一致会让描边层与字形层错位。
         assert!(
-            js.contains(&format!("FontSize={}", ass_font_size(outlined.font_px, outlined.height)))
-                && jf.contains(&format!(
-                    "FontSize={}",
-                    ass_font_size(outlined.font_px, outlined.height)
-                )),
+            js.contains(&format!(
+                "FontSize={}",
+                ass_font_size(outlined.font_px, outlined.height)
+            )) && jf.contains(&format!(
+                "FontSize={}",
+                ass_font_size(outlined.font_px, outlined.height)
+            )),
             "两遍的 FontSize 必须相同：\n描边 {js}\n填充 {jf}"
         );
     }
@@ -4462,7 +4480,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod aa_dilation_tests {
     use super::*;
@@ -4500,4 +4517,3 @@ mod aa_dilation_tests {
         assert_eq!(dilate_aa(&cov, w, h, 0), cov);
     }
 }
-

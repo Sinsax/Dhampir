@@ -263,7 +263,7 @@ pub fn shake_params(style: &SubtitleStyle) -> (f32, f32, f32) {
 mod tests {
     use super::*;
 
-// =====================================================================
+    // =====================================================================
     // 周期缩放（心跳，2026-10-18）
     // =====================================================================
 
@@ -272,10 +272,22 @@ mod tests {
             // ⚠️ **首点是基线（1.0）而不是峰值**：曲线的语义是"从上一个点过渡到下一个点"，
             //    写 `1.05 → 1.0` 就成了"一开始就最大、然后缩小"（那是收尾，不是心跳）。
             ScalePoint { ms: 0, scale: 1.0 },
-            ScalePoint { ms: 60, scale: 1.05 },
-            ScalePoint { ms: 140, scale: 1.0 },
-            ScalePoint { ms: 220, scale: 1.02 },
-            ScalePoint { ms: 320, scale: 1.0 },
+            ScalePoint {
+                ms: 60,
+                scale: 1.05,
+            },
+            ScalePoint {
+                ms: 140,
+                scale: 1.0,
+            },
+            ScalePoint {
+                ms: 220,
+                scale: 1.02,
+            },
+            ScalePoint {
+                ms: 320,
+                scale: 1.0,
+            },
         ]
     }
 
@@ -290,11 +302,23 @@ mod tests {
         let at = |ms: u64| scale_curve_at(ms, cyc, &pts);
         assert!((at(0) - 1.0).abs() < 1e-6, "t=0 应当是基线，实际 {}", at(0));
         assert!((at(60) - 1.05).abs() < 1e-6, "t=60 是主峰，实际 {}", at(60));
-        assert!((at(140) - 1.0).abs() < 1e-6, "t=140 回到基线，实际 {}", at(140));
-        assert!((at(220) - 1.02).abs() < 1e-6, "t=220 是小峰，实际 {}", at(220));
+        assert!(
+            (at(140) - 1.0).abs() < 1e-6,
+            "t=140 回到基线，实际 {}",
+            at(140)
+        );
+        assert!(
+            (at(220) - 1.02).abs() < 1e-6,
+            "t=220 是小峰，实际 {}",
+            at(220)
+        );
         assert!(at(30) > 1.0, "主峰之前应当在往上走，实际 {}", at(30));
         for t in [320u64, 500, 700, 999] {
-            assert!((at(t) - 1.0).abs() < 1e-6, "t={t} 应当停在基线，实际 {}", at(t));
+            assert!(
+                (at(t) - 1.0).abs() < 1e-6,
+                "t={t} 应当停在基线，实际 {}",
+                at(t)
+            );
         }
     }
 
@@ -303,8 +327,14 @@ mod tests {
     fn scale_curve_is_cyclic_and_safe() {
         let pts = heartbeat_points();
         for t in [0u64, 60, 120, 250, 700] {
-            assert_eq!(scale_curve_at(t, 1000, &pts), scale_curve_at(t + 1000, 1000, &pts));
-            assert_eq!(scale_curve_at(t, 1000, &pts), scale_curve_at(t + 3000, 1000, &pts));
+            assert_eq!(
+                scale_curve_at(t, 1000, &pts),
+                scale_curve_at(t + 1000, 1000, &pts)
+            );
+            assert_eq!(
+                scale_curve_at(t, 1000, &pts),
+                scale_curve_at(t + 3000, 1000, &pts)
+            );
         }
         assert_eq!(scale_curve_at(100, 0, &pts), 1.0, "周期 0 就不启用");
         assert_eq!(scale_curve_at(100, 1000, &[]), 1.0, "没有点就不启用");
@@ -321,7 +351,10 @@ mod tests {
         let mut style = SubtitleStyle::default();
         assert!(scale_curve_params(&style).is_none(), "两个都没写就不启用");
         style.scale_curve = Some(heartbeat_points());
-        assert!(scale_curve_params(&style).is_none(), "只有点列、没有周期，仍不启用");
+        assert!(
+            scale_curve_params(&style).is_none(),
+            "只有点列、没有周期，仍不启用"
+        );
         style.scale_cycle_ms = Some(1000);
         let (pts, cyc) = scale_curve_params(&style).expect("两个都有才启用");
         assert_eq!(cyc, 1000);
@@ -343,7 +376,10 @@ mod tests {
     fn 弹入窗口内先小后过冲再回落() {
         // p = 0 时应当**恰好**是 from（起点，没有过冲）。
         let (_, _, at0) = text_envelope_scaled(0, 1000, 0, 0, 0.0, 0.0, FROM, PEAK, MS);
-        assert!((at0 - FROM).abs() < 1e-5, "p=0 应当是起点 {FROM}，实际 {at0}");
+        assert!(
+            (at0 - FROM).abs() < 1e-5,
+            "p=0 应当是起点 {FROM}，实际 {at0}"
+        );
 
         // 峰值必须**真的超过** 1.0 —— 这是"过冲"的定义，
         // 也是"曲线系数必须是 s=3 而不是经典 1.70158"的判据：
@@ -454,8 +490,10 @@ mod tests {
     #[test]
     fn 抖动是无状态纯函数() {
         let ts: Vec<f32> = (0..64).map(|i| i as f32 * 0.017).collect();
-        let forward: Vec<(f32, f32)> =
-            ts.iter().map(|&t| text_shake_px(t, 8.0, 18.0, 0.0)).collect();
+        let forward: Vec<(f32, f32)> = ts
+            .iter()
+            .map(|&t| text_shake_px(t, 8.0, 18.0, 0.0))
+            .collect();
         // 倒序再算一遍，必须**逐值**相同。
         let mut backward: Vec<(f32, f32)> = ts
             .iter()
@@ -544,7 +582,10 @@ mod tests {
         assert_eq!(dy_signs.len(), 2, "纵向必须正负都出现过（不然是单向漂移）");
         // 均值为 0 ≈ 不漂移。10 秒的零均值正弦，取整误差留一点余量。
         let mean = sum_dx / n as f32;
-        assert!(mean.abs() < 0.5, "横向均值应当接近 0（不漂移），实际 {mean}");
+        assert!(
+            mean.abs() < 0.5,
+            "横向均值应当接近 0（不漂移），实际 {mean}"
+        );
         // 峰值不能超过幅度上限（两条各 0.62 + 0.38 = 1.0，正好是 shake_px）。
         assert!(
             max_abs <= 6.0 + 1e-3,
@@ -574,7 +615,11 @@ mod tests {
             (0.0, 0.0),
             "t=inf"
         );
-        assert_eq!(text_shake_px(1.0, f32::NAN, 18.0, 0.0), (0.0, 0.0), "px=NaN");
+        assert_eq!(
+            text_shake_px(1.0, f32::NAN, 18.0, 0.0),
+            (0.0, 0.0),
+            "px=NaN"
+        );
         assert_eq!(text_shake_px(1.0, 8.0, f32::NAN, 0.0), (0.0, 0.0), "hz=NaN");
         // 相位非有限 ⇒ 当 0 用（**不是**给零位移：幅度与频率都合法，它在抖）
         let with_nan_phase = text_shake_px(0.3, 8.0, 18.0, f32::NAN);
@@ -645,9 +690,7 @@ mod tests {
 
         // 整条包络走一遍：任何一帧都必须是单位缩放。
         for ms_local in [0, 1, 50, 179, 180, 500, 999] {
-            let (_, _, s) = text_envelope_scaled(
-                ms_local, 1000, 0, 0, 0.0, 0.0, from, peak, ms,
-            );
+            let (_, _, s) = text_envelope_scaled(ms_local, 1000, 0, 0, 0.0, 0.0, from, peak, ms);
             assert!(
                 (s - 1.0).abs() < 1e-6,
                 "默认样式在 {ms_local}ms 处必须是 1.0，实际 {s}"

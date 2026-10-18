@@ -248,7 +248,8 @@ pub fn blit_affine(
                 // 所以这不违约束（见 `is_identity` 的用法）。
                 let inverse = 255 - alpha;
                 for channel in 0..3 {
-                    let src = (sample[channel].round().clamp(0.0, 255.0) as u32 * alpha + 127) / 255;
+                    let src =
+                        (sample[channel].round().clamp(0.0, 255.0) as u32 * alpha + 127) / 255;
                     let dst = image.pixels[destination + channel] as u32;
                     let dst = (dst * inverse + 127) / 255;
                     image.pixels[destination + channel] = (src + dst) as u8;
@@ -294,29 +295,37 @@ mod tests {
     #[test]
     fn 恒等变换被识别出来() {
         assert!(TextTransform::default().is_identity());
-        assert!(TextTransform {
-            rotation_deg: 0.0,
-            scale_x: 1.0,
-            scale_y: 1.0
-        }
-        .is_identity());
+        assert!(
+            TextTransform {
+                rotation_deg: 0.0,
+                scale_x: 1.0,
+                scale_y: 1.0
+            }
+            .is_identity()
+        );
         // 任一非恒等都不算。
-        assert!(!TextTransform {
-            rotation_deg: 90.0,
-            ..Default::default()
-        }
-        .is_identity());
-        assert!(!TextTransform {
-            scale_y: 0.5,
-            ..Default::default()
-        }
-        .is_identity());
+        assert!(
+            !TextTransform {
+                rotation_deg: 90.0,
+                ..Default::default()
+            }
+            .is_identity()
+        );
+        assert!(
+            !TextTransform {
+                scale_y: 0.5,
+                ..Default::default()
+            }
+            .is_identity()
+        );
         // ⚠️ NaN **不是**恒等（否则它会走快捷路径假装没事）。
-        assert!(!TextTransform {
-            rotation_deg: f32::NAN,
-            ..Default::default()
-        }
-        .is_identity());
+        assert!(
+            !TextTransform {
+                rotation_deg: f32::NAN,
+                ..Default::default()
+            }
+            .is_identity()
+        );
     }
 
     #[test]
@@ -685,7 +694,6 @@ mod tests {
         assert!(t.is_identity(), "兜底之后就是恒等");
     }
 
-
     // ── 阴影：跟着做同样的变换，但偏移是**屏幕空间**的 ────────────────
 
     /// 求一张实心块在帧上的**重心**（像素中心的算术平均）。
@@ -819,5 +827,4 @@ mod tests {
             );
         }
     }
-
 }

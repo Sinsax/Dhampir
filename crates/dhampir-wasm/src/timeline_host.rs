@@ -4253,7 +4253,7 @@ mod tests {
             opacity: 0.5,
             scale: 0.75,
             style: TextStyle::default(),
-    };
+        };
         let placed = placement_json(&line);
         assert_eq!(
             placed["color"],

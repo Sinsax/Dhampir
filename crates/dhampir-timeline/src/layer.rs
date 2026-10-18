@@ -2582,7 +2582,7 @@ mod tests {
             212,
             "元素挪了，标记跟着挪"
         );
-    }    // =====================================================================
+    } // =====================================================================
     // T1：`TransformV2::scale_y` —— 非等比缩放的契约表达
     // =====================================================================
 
@@ -2606,7 +2606,10 @@ mod tests {
     /// 非缺省时必须**写出来**，否则这个字段等于不存在（用户设了看不到、也存不住）。
     #[test]
     fn 非缺省的_scale_y_要写进_json() {
-        let transform = TransformV2 { scale_y: 0.6, ..TransformV2::default() };
+        let transform = TransformV2 {
+            scale_y: 0.6,
+            ..TransformV2::default()
+        };
         let json = serde_json::to_string(&transform).expect("要能序列化");
         assert!(
             json.contains("\"scale_y\":0.6"),
@@ -2634,7 +2637,11 @@ mod tests {
         let from_empty: TransformV2 =
             serde_json::from_str(r#"{"x":0.0,"y":0.0,"scale":1.0,"rotation":0.0}"#).unwrap();
         assert_eq!(from_empty.scale_y, TransformV2::default().scale_y);
-        assert_eq!(one(), TransformV2::default().scale_y, "serde 缺省函数 one() 要同值");
+        assert_eq!(
+            one(),
+            TransformV2::default().scale_y,
+            "serde 缺省函数 one() 要同值"
+        );
     }
 
     /// v1 → v2 迁移一律给 1.0：迁移后纵向倍数 = `scale × 1.0` = `scale`，
@@ -3836,5 +3843,4 @@ mod v2_tests {
         };
         assert_eq!(some.plate_pad_px.unwrap_or(default_plate_pad_px()), 30.0);
     }
-
 }
