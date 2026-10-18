@@ -202,6 +202,7 @@ pub fn scale_in_params(style: &SubtitleStyle) -> (f32, f32, u64) {
 ///
 /// ⚠️ 单独一个结构而**不是**元组：它进的是工程文件（`.doc.json`），
 /// `[[0,1.05],[120,1.0]]` 这种位置数组在报告与排错里谁也读不出来。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ScalePoint {
     /// 相对**周期起点**的毫秒。

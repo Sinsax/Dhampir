@@ -666,6 +666,33 @@
         }
       }
     },
+    "OuterStroke": {
+      "description": "**外圈描边**：在 `stroke_ratio` 那一圈**外面**再加一圈（常态白）。\n\n# 为什么不是「把 `stroke_ratio` 加大一圈」\n\n那样画出来的是一圈**同色**的粗边；这里要的是**两圈不同色**（外白内深）——\nlibass 一遍只能给一个 `Outline` 与一个 `OutlineColour`，所以要**多一遍栅格化 + 环带相减**：\n见 `dhampir-worker` 的 `rasterize_with_stroke` 与 `ring_of`。\n\n⚠️ 单位与口径与 `SubtitleStyle::stroke_ratio` **完全一致**（目标高的比例、**外侧宽**），\n所以契约里两个数可以直接相加（`内圈 + 外圈` 就是白环那一遍的 `Outline`）。",
+      "type": "object",
+      "properties": {
+        "color": {
+          "description": "外圈颜色（RGBA）。常态是白。",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0
+          },
+          "maxItems": 4,
+          "minItems": 4
+        },
+        "ratio": {
+          "description": "外圈宽度（目标高的比例；**外侧宽**口径）。",
+          "type": "number",
+          "format": "float"
+        }
+      },
+      "required": [
+        "ratio",
+        "color"
+      ]
+    },
     "PerCharSpec": {
       "description": "**一个逐字档位的参数**（对应 `polish.toml` 里 `anim` 的一档）。\n\n⚠️ 全是**裸值 + 明确的默认**（不是 `Option`）—— 与 `SubtitleStyle` 那六个\n`Option` 字段**不同的口径**，理由在这里值得写清楚：\n\n* `SubtitleStyle` 上的 `Option` 是为了**区分\"没写\"与\"写了默认值\"**，\n  因为那几个字段由用户在 toml 里手写（\"显式写了 1.0\"是用户意图）。\n* 本结构是**代码内部的中间表示**：它由转译器从 `anim` 档名**展开**而来，\n  展开完就是一个完整答案，没有\"用户写没写\"这一说。\n  ⇒ 用裸值，省掉下游每一处 `unwrap_or`。\n\n⚠️ 但 `name` 例外地是 `Option` —— 它纯诊断用（报告里点名是哪一档），\n且 `None` 有明确含义（\"这一条没配逐字效果\"）。它**不参与任何求值**。",
       "type": "object",
@@ -781,6 +808,27 @@
           "default": 0
         }
       }
+    },
+    "ScalePoint": {
+      "description": "周期缩放曲线上的一个点：`(毫秒, 倍率)`。\n\n⚠️ 单独一个结构而**不是**元组：它进的是工程文件（`.doc.json`），\n`[[0,1.05],[120,1.0]]` 这种位置数组在报告与排错里谁也读不出来。",
+      "type": "object",
+      "properties": {
+        "ms": {
+          "description": "相对**周期起点**的毫秒。",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "scale": {
+          "description": "这一点的缩放倍率（1.0 = 基线）。",
+          "type": "number",
+          "format": "float"
+        }
+      },
+      "required": [
+        "ms",
+        "scale"
+      ]
     },
     "ShadowSpec": {
       "description": "层的**投影**（`filter: drop-shadow()` 那件事）。\n\n# 为什么它不是一条 effect pipeline\n\n逐像素管线（色彩 / 遮罩 / 重映射 / 模糊）都是\"**把这一层的像素改一下**\"；\n投影不是改像素，而是**同一层多画一张**（模糊 + 染色 + 偏移，画在本层**下面**）。\n把它塞进 pipeline 会让\"一趟逐像素\"的模型出现一个例外，而例外正是最难查的那种。\n\n# 口径\n\n- 长度都是**文档像素**；\n- `blur_sigma` 是 **CSS `drop-shadow()` 的那个模糊半径（σ）** —— 引擎按下界口径\n  换算成本仓的核半径（`radius = 2σ`，见 D5）；\n- 颜色 v1 **固定黑**（要彩色再加字段，不在这里偷偷支持）；\n- `opacity` 是整张阴影的浓淡（0..1），与图层自己的 opacity 相乘。",
@@ -935,6 +983,30 @@
           "default": 2,
           "minimum": 0
         },
+        "origin": {
+          "description": "**绝对盒原点**（归一化 0..1，**文字块左上角**）。None = 沿用本仓自己的锚点（现状，零回归）。\n\n# 与 anchor_bottom 的分工（两个都管纵向，但不是一个东西）\n\n* anchor_bottom：文字块**底边**贴在哪 —— 横向**仍然居中**，纵向由它推；\n* origin：**整块**摆在哪 —— 给了它，横向与纵向都用它，anchor_bottom 不参与。\n\n# 为什么需要它（2026-10-15）\n\n宿主（YekiTrim）的面板给**每个**文字元素算好了「盒左上角百分比」\n（process 的 placement::Pick）—— 那是**逐事件**的自由落点。\n本仓原本只有「上/中/下 + 横向居中」这一套（anchor_bottom），**表达不出**任意一个绝对点\n⇒ 宿主那条通道发过来的位置在出片这一侧被丢掉。\n需求书与验收判据：YekiTrim 仓的 docs/plan/dhampir-text-origin-request.md。\n\n⚠️ **竖排（vertical）忽略本字段** —— 与 anchor_bottom 同一条口径（竖排下纵向变成了\n   **长度方向**，语义转置了；见 text_layout::layout 里那段说明）。\n\n⚠️ skip_serializing_if 不能省：没写时**一个键都不许出现**（既有工程逐字节不变）。",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number",
+            "format": "float"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "outer_stroke": {
+          "description": "**外圈描边**：在 `stroke_ratio` 那一圈**外面**再加一圈（常态白）。\n\n`None` = 不画（默认，既有工程**逐字节不变**）。给了它 ⇒ 渲染侧多一遍栅格化：\n白环 = 「内圈 + 外圈」那遍的覆盖度 **减去** 内圈那遍的覆盖度（见 `rasterize_with_stroke`）。\n\n⚠️ 白环画在**最底下**（先白环、再内圈描边、最后填充）—— 顺序反了整圈字会糊成白色。",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OuterStroke"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "outline": {
           "description": "是否加描边（压住亮背景）。",
           "type": "boolean",
@@ -950,6 +1022,15 @@
               "type": "null"
             }
           ]
+        },
+        "per_char_out_frames": {
+          "description": "**逐字出场窗口（帧）**（2026-10-18）：窗口**锚在出点**，逐字错峰沿用\n`per_char` 那份，进度**反着走**（`to → from`）⇒ \"出场逐字变小\"。\n\n⚠️ 与 `per_char` **分开一个字段**（而不是塞进 `PerCharSpec`）：那个结构的文档写着\n\"由转译器从 `anim` 档名展开而来、没有\"用户写没写\"这一说\"，而这里是**轨级**的、\n与\"这一档的入场形状\"无关（同一个 `per_char` 配不同的出场时长是合法的）。\n\n`None` / 0 ⇒ 不做出场（**老工程零回归**）。求值见\n[`crate::text_perchar_anim::char_transform_at_out`]。",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
         },
         "plate_color": {
           "description": "**底衬（plate）的颜色**。`None` = 不铺底衬（默认，既有工程逐字节不变）。\n\n半透明是常态（参照给的是黑 55%：`[0,0,0,140]`），所以四通道是 RGBA，\n`alpha` 与 `color` / `shadow_color` 一样**生效**。\n\n# 为什么不能走 libass 的 `BorderStyle=3`\n\n那是 ASS 原生的\"不透明底盒\"，看着正好是这件事 —— 但底座这条路走不通，\n两条理由**各自独立成立**：\n\n1. **传不下去**：底座走 `subtitles=…:fontsdir=…:force_style=…`，而\n   `force_style` 的拼装只写 `FontName/FontSize/PrimaryColour/Outline/OutlineColour`\n   五个键（见 `text_raster.rs::drawtext_args`）。`BorderStyle` 与 `BackColour`\n   **一个都不在里面** ⇒ 在 `.ass` 里写 `BorderStyle=3` 会被 force_style 盖掉。\n2. **与\"白墨\"那条设计正面冲突**：底座**有意**把填充与描边**都**画成\n   [`crate`] 的白墨（见 `text_raster.rs::WHITE_INK` 的注释）—— 因为 libass\n   输出的 alpha **恒为 0**、颜色提前合成进 RGB，只有\"全是白墨\"时覆盖度\n   才恢复得出来。而底衬要的是**另一种墨**，混进去覆盖度就再也分不开了。\n\n⇒ 实现改在宿主侧（`text_overlay.rs::paint_one`）：**画字之前先铺一块矩形**，\n纯几何，既不动 libass，也不碰白墨那条设计。",
@@ -991,6 +1072,25 @@
           "type": "number",
           "format": "float",
           "default": 0.0
+        },
+        "scale_curve": {
+          "description": "**周期缩放曲线**（心跳，2026-10-18）：`[(毫秒, 倍率), …]`，按 `scale_cycle_ms` 循环。\n\n⚠️ 为什么要**新原语**：`scale_in_*` 那条是 `back_out3` 的**单峰**、且**只在入场窗口**\n（窗口之后恒 1.0）—— \"放大一次、回落、再小放大、每秒来一次\"这种**周期多峰**曲线\n它数学上表达不了（转译器 `heartbeat` 那一档因此长期只能退化成\"单次过冲\"并如实报 NOTE）。\n\n语义：`local_ms % cycle_ms` 落在点列两个相邻点之间，用 `back_out3` 在\n`scale_a → scale_b` 之间插值；末点之后到周期结束一律 1.0（**那就是\"停顿\"**）。\n⚠️ 首点必须是 `ms = 0`；点列要**按下标递增**（不递增时行为由实现决定，校验层不管）。\n\n`None`（默认）= 不启用 ⇒ 逐字沿用 `scale_in_*` 那条老路（**存量零回归**）。",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ScalePoint"
+          }
+        },
+        "scale_cycle_ms": {
+          "description": "**周期缩放的周期长度（毫秒）**（心跳）。`None` 或 0 ⇒ `scale_curve` 不生效。\n\n⚠️ 与曲线分开是**有意的**：同一组脉冲点可以用在不同节奏上（1s / 1.2s），\n合成一个字段就得把点列按节奏重算，而点列是\"形状\"、节奏是\"速度\"。",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
         },
         "scale_in_from": {
           "description": "**弹入的起始缩放**（T1）。`None` = 1.0（不缩）。\n\n# 为什么是 `Option<f32>` 而不是裸 `f32` 默认 1.0\n\n这一组六个字段的口径**全是** `None` = 用默认行为。理由与\n`shadow_*` 那一组不同，值得写下来：这个字段的\"默认值\"**不是一个关掉的值**\n（`scale_in_from` 的默认是 `1.0`，即\"不缩\"），而 `1.0` 同时也是一个\n**用户可能显式写的合法值**。\n\n裸 `f32` + `skip_serializing_if = \"等于默认值\"` 会让\"显式写的 1.0\"\n被静默吃掉 —— 读回来仍是 1.0、渲染也一样，所以**永远不会有症状**，\n但用户的显式意图没了。而\"显式写了却读不回来\"正是本仓最恨的那类静默。\n\n`Option` 一举两得：**不写键 = 默认行为**（老工程一个键都不多），\n**写了就是写的那个值**（哪怕它恰好等于默认值）。\n\n求值处见 [`crate::text_motion::scale_in_params`]。",

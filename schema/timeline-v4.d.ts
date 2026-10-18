@@ -128,6 +128,13 @@ export interface MaskSpec {
   invert?: boolean;
 }
 
+export interface OuterStroke {
+  /** 外圈颜色（RGBA）。常态是白。 */
+  color: number[];
+  /** 外圈宽度（目标高的比例；**外侧宽**口径）。 */
+  ratio: number;
+}
+
 export interface PerCharSpec {
   /** **曲线**（`back_out` / `linear` / …），名字与 */
   easing?: string;
@@ -161,6 +168,13 @@ export interface PerCharSpec {
   spread_y_to?: number;
   /** **相邻两个字开始的间隔**（帧）。0 = 全部同时（"逐字"退化成"整行"）。 */
   stagger_frames?: number;
+}
+
+export interface ScalePoint {
+  /** 相对**周期起点**的毫秒。 */
+  ms: number;
+  /** 这一点的缩放倍率（1.0 = 基线）。 */
+  scale: number;
 }
 
 export interface ShadowSpec {
@@ -205,10 +219,16 @@ export interface SubtitleStyle {
   line_height?: number;
   /** 最多几行（超出的行丢掉 —— 字幕不该盖住半屏）。 */
   max_lines?: number;
+  /** **绝对盒原点**（归一化 0..1，**文字块左上角**）。None = 沿用本仓自己的锚点（现状，零回归）。 */
+  origin?: number[] | null;
+  /** **外圈描边**：在 `stroke_ratio` 那一圈**外面**再加一圈（常态白）。 */
+  outer_stroke?: OuterStroke | null;
   /** 是否加描边（压住亮背景）。 */
   outline?: boolean;
   /** **逐字动效**（P3，2026-10-13）：每一个字各自动、按序号错峰。 */
   per_char?: PerCharSpec | null;
+  /** **逐字出场窗口（帧）**（2026-10-18）：窗口**锚在出点**，逐字错峰沿用 */
+  per_char_out_frames?: number | null;
   /** **底衬（plate）的颜色**。`None` = 不铺底衬（默认，既有工程逐字节不变）。 */
   plate_color?: number[] | null;
   /** **底衬向四周外扩的像素数**（目标像素）。默认 12。 */
@@ -219,6 +239,10 @@ export interface SubtitleStyle {
   rise_out_px?: number;
   /** **换行安全宽**（占画布宽的比例）。默认 0 = 沿用老行为。 */
   safe_width_ratio?: number;
+  /** **周期缩放曲线**（心跳，2026-10-18）：`[(毫秒, 倍率), …]`，按 `scale_cycle_ms` 循环。 */
+  scale_curve?: ScalePoint[] | null;
+  /** **周期缩放的周期长度（毫秒）**（心跳）。`None` 或 0 ⇒ `scale_curve` 不生效。 */
+  scale_cycle_ms?: number | null;
   /** **弹入的起始缩放**（T1）。`None` = 1.0（不缩）。 */
   scale_in_from?: number | null;
   /** **弹入窗口的时长（毫秒）**（T1）。`None` = 0 = 关（**不缩**）。 */
