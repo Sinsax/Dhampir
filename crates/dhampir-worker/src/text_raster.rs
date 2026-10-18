@@ -1447,6 +1447,13 @@ fn rasterize_with_stroke(
         //    两者在"笔画内部"逐值相同，只在轮廓那一圈不同（这正是要改的那一圈）。
         let half_out = inner_px.div_ceil(2);
         let half_in = inner_px / 2;
+        // ⚠️ **2026-10-18：试过"外半边改用 libass 的轮廓描边"，A/B 后撤回**（实测更差）。
+        //    做法是再起一遍 ffmpeg：`PrimaryColour` 全透 + `Outline` 上白墨，取它的覆盖度。
+        //    实测（同一帧、同一段文字）：描边的暗像素 **1236 → 3078**，肉眼是"一团黑块贴在字后"
+        //    —— libass 的 `Outline` 并不是"从轮廓往外扩 half"那套几何（它还与 FontSize 联动、
+        //    且 `ass_outline_px` 的虚拟画布补偿会再放大一次），叠加我补的内半边 = 又粗又糊。
+        //    ⇒ **保留膨胀/腐蚀**（几何是"字形 ⊕ 圆盘"，拐角会略圆，但粗细与预览一致）。
+        //    要再试请先做 A/B，别只看"用了 libass 就一定更准"。
         let band = ring_of(
             &dilate_disc(&fill_plane, width, height, half_out),
             &erode_disc(&fill_plane, width, height, half_in),
