@@ -1440,9 +1440,16 @@ fn rasterize_with_stroke(
 
     // 内圈描边 + 填充（没开描边时就是纯填充）。
     let inner = if inner_px > 0 {
+        // ⚠️ **居中描边**（2026-10-18，与 CSS `-webkit-text-stroke` 同口径）：
+        //    外沿 = `dilate(ceil(w/2))`、内沿 = `erode(floor(w/2))` —— 宽度 `w` **跨在字形轮廓上**。
+        //    以前是 `dilate(fill, w) − fill`（**全在外侧**）⇒ 同一个宽度成片比预览粗一倍。
+        //    ⚠️ 内沿那份以前直接用 `fill_plane`（= 字形的抗锯齿斜坡），现在用腐蚀过的 ——
+        //    两者在"笔画内部"逐值相同，只在轮廓那一圈不同（这正是要改的那一圈）。
+        let half_out = inner_px.div_ceil(2);
+        let half_in = inner_px / 2;
         let band = ring_of(
-            &dilate_disc(&fill_plane, width, height, inner_px),
-            &fill_plane,
+            &dilate_disc(&fill_plane, width, height, half_out),
+            &erode_disc(&fill_plane, width, height, half_in),
         );
         let mut layer = tint(&plane_to_premultiplied(&band), key.stroke_color);
         let fill_tinted = tint(&fill_cov, key.color);
@@ -1539,6 +1546,46 @@ fn dilate_disc(cov: &[u8], width: usize, height: usize, r: u32) -> Vec<u8> {
 /// ⚠️ 必须饱和：两边各自都带抗锯齿的半覆盖像素，宽环在内侧边缘上可能**小于**内圈
 /// （同一像素在两遍里的量化差）—— `u8` 直接相减会在这条缝上回绕成 255，
 /// 症状是环带内侧出现一圈**亮白噪点**。
+/// **腐蚀**（`dilate_disc` 的镜像）：每个像素取圆盘邻域内的**最小**覆盖度。
+///
+/// ⚠️ 为什么需要它（2026-10-18 用户报「导出的描边比预览粗」）：
+///   CSS 的 `-webkit-text-stroke` 是**居中**描边 —— 宽度 `w` 里 `w/2` 在字形外、`w/2` 在字形内；
+///   而本仓以前只有「`dilate(fill, r) − fill`」= **全部在外侧**。
+///   ⇒ 同一个 `12px`，成片的墨比预览**整整多一倍**（外扩 12 而不是 6）。
+///   ⇒ 现在描边的外沿 = `dilate(fill, ceil(w/2))`、内沿 = `erode(fill, floor(w/2))`，
+///     与 CSS 同口径（**跨在字形轮廓上**）。
+///
+/// 与 [`dilate_disc`] 同一条稀疏实现与同一条边界规则：
+/// `r = 0` 原样返回；越界的那一边**不参与**取最小（否则位图边缘会被自己吃成 0）。
+fn erode_disc(cov: &[u8], width: usize, height: usize, r: u32) -> Vec<u8> {
+    if r == 0 {
+        return cov.to_vec();
+    }
+    let offsets = disc_offsets(r);
+    // 初值 = 满墨：只有"邻域里全都有墨"的像素才会被压下来。
+    let mut out = vec![255u8; cov.len()];
+    for y in 0..height {
+        for x in 0..width {
+            let mut value = 255u8;
+            for (dx, dy) in &offsets {
+                let nx = x as i32 + dx;
+                let ny = y as i32 + dy;
+                if nx < 0 || ny < 0 || nx >= width as i32 || ny >= height as i32 {
+                    // ⚠️ 越界**不算墨**？算 —— 不算的话位图最外那一圈会被吃成 0，
+                    //    症状是"贴着位图边缘的笔画少一圈"。这里按"界外即界内"处理。
+                    continue;
+                }
+                let v = cov[ny as usize * width + nx as usize];
+                if v < value {
+                    value = v;
+                }
+            }
+            out[y * width + x] = value;
+        }
+    }
+    out
+}
+
 fn ring_of(outer: &[u8], inner: &[u8]) -> Vec<u8> {
     outer
         .iter()
@@ -4246,5 +4293,66 @@ mod tests {
             }
         }
         panic!("本机一个候选字体都没有：{CANDIDATES:?} —— 这条测试要真字体才跑得起来");
+    }
+}
+
+
+#[cfg(test)]
+mod centered_stroke_tests {
+    use super::*;
+
+    fn square(w: usize, h: usize, x0: usize, y0: usize, s: usize) -> Vec<u8> {
+        let mut p = vec![0u8; w * h];
+        for y in y0..(y0 + s).min(h) {
+            for x in x0..(x0 + s).min(w) {
+                p[y * w + x] = 255;
+            }
+        }
+        p
+    }
+
+    fn bbox(p: &[u8], w: usize, h: usize) -> (usize, usize, usize, usize) {
+        let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0usize, 0usize);
+        for y in 0..h {
+            for x in 0..w {
+                if p[y * w + x] > 128 {
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x);
+                    y1 = y1.max(y);
+                }
+            }
+        }
+        (x0, y0, x1, y1)
+    }
+
+    /// 居中描边：宽度 8 的描边必须跨在字形轮廓上（外扩 4、内缩 4），
+    /// 而不是 2026-10-18 之前那样全部在外侧（外扩 8、内不缩）。
+    ///
+    /// 变异自证：把 half_out 换成 inner_px（旧口径）则第一条断言红（外沿 16 变 12）。
+    #[test]
+    fn stroke_straddles_the_outline_like_css() {
+        let (w, h) = (64usize, 64usize);
+        let fill = square(w, h, 20, 20, 20);
+        let inner_px = 8u32;
+        let half_out = inner_px.div_ceil(2);
+        let half_in = inner_px / 2;
+        let outer = dilate_disc(&fill, w, h, half_out);
+        let inner = erode_disc(&fill, w, h, half_in);
+        assert_eq!(bbox(&fill, w, h), (20, 20, 39, 39), "底样是 20..39 的方块");
+        assert_eq!(bbox(&outer, w, h), (16, 16, 43, 43), "外沿只许外扩 4");
+        assert_eq!(bbox(&inner, w, h), (24, 24, 35, 35), "内沿必须内缩 4");
+        let band = ring_of(&outer, &inner);
+        assert_eq!(bbox(&band, w, h), (16, 16, 43, 43), "环带的外包就是外沿");
+        assert!(band[20 * w + 18] > 128, "轮廓外侧 2px 处应当有墨");
+        assert_eq!(band[30 * w + 30], 0, "字形深处不该有描边墨");
+    }
+
+    /// 半径 0 两条都是恒等（腐蚀不许把整张图吃成 0）。
+    #[test]
+    fn zero_radius_is_identity_for_both() {
+        let fill = square(32, 32, 8, 8, 8);
+        assert_eq!(dilate_disc(&fill, 32, 32, 0), fill);
+        assert_eq!(erode_disc(&fill, 32, 32, 0), fill);
     }
 }
