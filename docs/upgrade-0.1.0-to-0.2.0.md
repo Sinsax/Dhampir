@@ -1,341 +1,82 @@
 # 0.1.0 → 0.2.0 下游对接说明
 
-**给下游宿主（V-Trim）**。写于 `2c55e78`，产物 `dhampir-0.2.0-win32-x64.zip`。
-
-这份文件只回答一件事：**从 0.1.0 换到 0.2.0，你那边要改什么、要重做什么、什么不用动。**
-
----
+**给下游宿主（V-Trim）**。产物 `dhampir-0.2.0-win32-x64.zip`。
 
 ## 0. 一句话
 
-**契约号一个都没动**（`project_schema = 1`、`host_api = 6`），**但你拿到的字节变了** ——
-字幕栅格化器从 `drawtext` 换成了 libass，所以**老工程的字幕像素会变**。
-
-这意味着：**你的契约校验会全绿，而画面会变。** 没有任何自动提示，只能靠这份文件知道。
-
----
+契约号未动（`project_schema = 1`、`host_api = 6`），**但字幕像素变了**：栅格化从 `drawtext` 换成 libass。
 
 ## 1. 必须做的三件事
 
 | # | 做什么 | 为什么 |
 |---|---|---|
-| **1** | **重拍视觉基线**（凡是有字幕的截图回归 / SSIM / PSNR 基线） | 字幕每帧像素都变了。口径不用改，**基线的图要重拍**，否则会全红 |
-| **2** | **ffmpeg 必须带 `--enable-libass`**（**运行时**要求，见下） | 0.2.0 起是硬前置。没编不会静默出错（会响亮失败），但会在出片那一刻才炸 |
-| **3** | **给字体改成走 `font_family` + `--font-dir`**（若你还在只给 `--font-file`） | 这是 0.2.0 的新正路；且**缺字回退**要靠它才能生效 |
+| 1 | 重拍含字幕的视觉基线（截图回归 / SSIM / PSNR） | 字幕每帧像素都变 |
+| 2 | ffmpeg 带 `--enable-libass`（**运行时**要求） | 0.2.0 起的硬前置，出片那一刻才失败 |
+| 3 | 字体改走 `font_family` + `--font-dir` | 缺字回退要靠它 |
 
-**第 2 条是运行时要求，不是打包期检查。** 两种下游形态都要注意，做法不同：
-
-| 你的形态 | 该怎么做 |
-|---|---|
-| **你不打包 ffmpeg**（用用户机器上的，例如 YekiTrim 就是这种） | **没有编译期前置可做**。要在 **doctor / 启动自检**里跑下面那条命令，拿不到就**明确告诉用户装带 libass 的 ffmpeg**，别等出片才炸 |
-| 你随应用打包 ffmpeg | 打包时确认一次，或直接选一个带 `--enable-libass` 的构建 |
-
-自检命令（两种形态都用同一条）：
-
-```bash
-ffmpeg -filters | grep subtitles      # 有输出 = 带了 libass
-```
-
----
+自检 `ffmpeg -filters | grep subtitles`（有输出 = 带了 libass）。不打包 ffmpeg 的形态：在 doctor / 启动自检里跑它，缺了就明确告诉用户装带 libass 的 ffmpeg；随应用打包的形态：打包时确认一次。
 
 ## 2. 破坏性变更：字幕像素会变
 
-**范围**：只有**含文字层（字幕 / 弹幕）**的工程受影响。**无字幕工程一个像素都不差** ——
-实测 `fixtures/sample-project.doc.json` 第 15 帧的 sha256 在整轮改造前后**逐字节相同**
-（`91ac70187a5d3fdd7d01a568effa7f7df7463783c0623b583bd6a8aeca3ceff2`）。
+只影响含文字层（字幕 / 弹幕）的工程；无字幕工程整帧不变。判定口径（SSIM / PSNR / 边缘口径）不用改：边缘抗锯齿斜坡 0.63 ~ 1.43 px → 1.63 ~ 3.17 px（更柔），字距每字推进 40 px → ~38 px（有漂移）。
 
-> ⚠️ **这条是"读数"，不是"守卫"**（第 9 节也记了）：那个 hash **不在任何代码或守卫里**，
-> 所以它**改坏了不会自动变红**。判定方式是"改动前后各跑一次 `frame` 比 sha256"。
-> 我在这里说清楚，是因为上面那句话很容易被读成"有自动判据在守" —— 那是两回事。
-
-**变了两处**（都实测过）：
-
-| 差异 | 0.1.0（`drawtext`） | 0.2.0（libass） |
-|---|---|---|
-| 边缘抗锯齿 | 斜坡 0.63 ~ 1.43 px | **斜坡 1.63 ~ 3.17 px（更柔）** |
-| 字距 | 每字推进 40 px | **每字推进 ~38 px（有漂移）** |
-
-两边都仍在"窄抗锯齿"口径内（模糊会是十几像素），所以**判定口径（SSIM/PSNR/边缘口径）不用改**，
-但**字确实会比 0.1.0 略柔、略紧**。四个字全部同向，不是偶发。
-
-**你不用做的**：不用改契约校验、不用改工程文件、不用改 API 调用。
-
----
+不用做：改契约校验、改工程文件、改 API 调用。
 
 ## 3. 契约面：没动，但是"加了一堆能用"
 
-### 导出面：**零变化**
-
-```
-host_api = 6        （0.1.0 = 6，没动）
-```
-
-我逐符号 diff 过：0 个导出新增、0 个删除。`dhampir_host_api_version()` 仍返 6，
-所以你现有的版本校验**不需要任何改动**。
-
-### 工程文件 schema：**纯新增，0 删除**
-
-`project_schema = 1` 没动（旧工程照读），但你能**写**的东西变多了：
+`host_api = 6` 未动：`dhampir_host_api_version()` 仍返 6，导出面零变化（0 新增 / 0 删除）。`project_schema = 1` 未动，schema 纯新增：
 
 | 能力 | 新字段 |
 |---|---|
-| **裁剪形状** | `clip`、`kind`（circle / ellipse / inset）、`center`、`radius`、`radius_x`、`radius_y`、`corner_radius`、`left`/`top`/`right`/`bottom` |
-| **渐变** | `gradient`、`stops`、`angle_deg`、`offset_x`、`offset_y` |
-| **遮罩 / 蒙版** | `mask`、`coverage`、`invert`、`channel` |
-| **模糊** | `blur_sigma` |
-| **阴影** | `shadow` |
-| **路径 / 点** | `points`、`at`、`data` |
-| **背景特效** | `backdrop_effects` |
-| **画布底色** | `background` —— **只在 `doc-v1`**，见下 |
+| 裁剪形状 | `clip`、`kind`（circle / ellipse / inset）、`center`、`radius`、`radius_x`、`radius_y`、`corner_radius`、`left`/`top`/`right`/`bottom` |
+| 渐变 | `gradient`、`stops`、`angle_deg`、`offset_x`、`offset_y` |
+| 遮罩 / 蒙版 | `mask`、`coverage`、`invert`、`channel` |
+| 模糊 / 阴影 / 路径 | `blur_sigma`、`shadow`、`points`、`at`、`data` |
+| 背景 | `backdrop_effects`、`background`（**只在 `doc-v1`**，即 `render_hints.background`） |
 
-### 还有一处"字段没变、能用的值变多了"：混合模式 4 → 9
-
-`blend` 字段 **0.1.0 就有**，所以它**不在**上面那张新增表里 —— 但**能用的值从 4 个变成 9 个**：
-
-| | 0.1.0 可用 | 0.2.0 可用 |
-|---|---|---|
-| `blend` 的取值 | 4 个：`normal` / `add` / `multiply` / `screen` | **9 个**（上面 4 个 + `darken` / `lighten` / `overlay` / `soft_light` / `difference`） |
-
-0.1.0 里后 5 个是**枚举占位**（`is_implemented()` 返回 false，渲染器不实现）；
-0.2.0 全部实现了。这条**在契约校验上完全看不出来**（schema 没动），
-所以如果你那边按 `is_implemented()` / 能力清单挡过这几个值，现在可以放开了。
-
-> ⚠️ `clip` 只支持 **circle / ellipse / inset（圆角矩形）** 三种 —— 一共用一套无分支 SDF 表达式。
-> **`polygon()` 与 `path()` 明确不做**（需要一般多边形求交或掩码纹理）。别在下游 UI 里放开这两个。
-
-**两条 schema 的新增集合不完全一样**，别当成同一份：
-
-| schema | 新增字段数 | 差异 |
-|---|---|---|
-| `timeline-v4` | **25** | — |
-| `doc-v1` | **26** | 多一个 `background`（只 `doc-v1` 有） |
-
-`background` 是**文档级画布底色**（`render_hints.background`），所以它只在 `doc-v1`；
-timeline schema 里没有这个字段是正确的，不是漏了。
-
----
+`blend` 字段没变，可用值 4 → 9（+ `darken` / `lighten` / `overlay` / `soft_light` / `difference`；0.1.0 里这 5 个是枚举占位，`is_implemented()` 返 false）。新增字段数：`timeline-v4` 25、`doc-v1` 26（多 `background`）。`clip` 只支持 circle / ellipse / inset（圆角矩形），**`polygon()` 与 `path()` 明确不做**。
 
 ## 4. 字体：这是 0.2.0 最需要你配合的一块
 
-### 0.1.0 的问题
-
-`drawtext` **不会做字形回退**：字体缺某个字形就直接画成 `.notdef` **空心方框，且退出码为 0**。
-实测：乐米波波体缺 `靥 U+9765`，「笑靥如花」渲染成「笑☒如花」—— **静默出错**。
-
-### 0.2.0 的做法
-
-libass **逐字形回退**：哪个字缺就换一份有它的字体补上。
-
-```
-0.1.0:  drawtext  → 缺字 = 方框
-0.2.0:  libass    → 缺字 = 从别的字体补（逐字形）
-```
-
-### 你要改的：字体定位从"给文件"变成"给名字"
+0.1.0 的 `drawtext` 不回退字形（缺字画成 `.notdef` 方框、退出码仍 0）；0.2.0 的 libass **逐字形回退**。
 
 | | 0.1.0 | 0.2.0 |
 |---|---|---|
-| 主路 | `--font-file <文件>` | 工程里 `subtitle.font_family` = **族名** + `--font-dir <目录>` |
+| 主路 | `--font-file <文件>` | 工程 `subtitle.font_family` = **族名** + `--font-dir <目录>` |
 | 兜底 | — | `--font-file` |
 
-**两个坑，都会静默出错**：
-
-1. **`font_family` 必须是字体内部的真族名，不是文件名。**
-   实测四种推法里**只有真族名能命中**，其余全部**静默**解析成 `ArialMT`
-   （而 `lines_failed: 0`、`issues: []` —— 比 .notdef 还隐蔽）：
-
-   | 传给 libass 的名字 | 实际解析到 |
-   |---|---|
-   | `lemi`（文件名主干） | ❌ ArialMT |
-   | `乐米波波体（免费商用）_爱给网_aigei_com` | ❌ ArialMT |
-   | `LemiBoBoTi`（英文内部名） | ❌ ArialMT |
-   | **`乐米波波体`（真族名）** | ✅ LemiBoBoTi-Regular |
-
-2. **回退落到哪份字体取决于机器上装了什么。** 实测缺字那次落到 `MicrosoftYaHeiUI`。
-   同机同目录两次出片一致，但**换机器/平台，缺字那几个字可能换一副字形**。
-
-### 回退字体集合由谁提供 —— **下游已答复（2026-10-08）**
-
-> 原先记为"未定"。下游（YekiTrim）已给出答复，**照录**如下（不是本仓的假设）：
->
-> **由下游提供，走其已有字体库**。其字体库本来就是"随应用附带 + 一个目录"的形态，
-> 天然就是 `--font-dir` 的候选；打包时把整个字体库目录传给底座。
-> 回退集合 = 库里所有非 emoji 字体（当前 4 支，含 `NotoSansSC-Regular`，**有** U+9765）。
-
-**由此暴露的一条真实风险，下游要自己兜住**：其 `default_text_family()` 返回的是
-**内部族名**（正确，libass 才认），但**老工程里存的是 id 形态的值** ——
-`乐米波波体` 恰好新旧同名所以能命中，而 `gen-jyuu-gothic-bold-37f0009cd7ef`
-这类 **slug 形态的值会静默落到 ArialMT**。
-
-> 底座侧的对应事实（本仓实测）：`font_family` 给的**不是真族名**时，
-> libass 不报错，只是静默解析成 `ArialMT`，而 `lines_failed: 0`、`issues: []`。
-> 底座**无法**判断"这个名字是不是有意的" —— 所以把 slug 转成族名是**下游的活**。
-
----
+两个坑都静默：`font_family` 必须是字体内部的真族名（文件名主干 / 英文内部名都会解析成 `ArialMT`，且 `lines_failed: 0`、`issues: []`）；回退落到哪份字体取决于机器上装了什么。回退字体集合**由下游提供**（2026-10-08 已答复）：字体库目录随包分发、传给 `--font-dir`；老工程里 slug 形态的 `font_family` 要转成真族名。
 
 ## 5. 你这边的改动清单（建议顺序）
 
-1. **换产物**：`dhampir-0.2.0-win32-x64.zip` + **`.manifest.json`**（+ `.sha256.txt`；下载地址写稳定名那个）。
-   钉固流程**读 `.manifest.json`**，别抄本文档的数字 —— 见第 9 节的说明。
-2. **确认 ffmpeg 带 libass**（第 1 节的自检命令）。
-3. **字体改走 `font_family` + `--font-dir`**，族名用真族名；确认旧工程的 `font_family` 值合法。
-4. **重拍视觉基线**。
-5. **（可选）** 评估要不要放开新 schema 字段（裁剪 / 渐变 / 混合 / 遮罩）到你的 UI。
-6. **（已定）** 回退字体集合**由你那边提供**（见第 4 节）：把字体库目录随包分发、传给 `--font-dir`。
-   **另外记得把老工程里 slug 形态的 `font_family` 转成真族名**，否则会静默落 `ArialMT`。
-7. **（可选，新增）画面/音轨变速**：`source.source_rate`。见下面第 3.1 节。
-   **缺省就是原速，这一步不做也完全没问题** —— 不写这个键，行为与升级前一致。
-
----
-
-### 3.1 `source.source_rate`（变速，D24 / 你们的 D5）
-
-```json
-{"source": {"asset_id": "clip", "source_in": 60, "source_rate": 2.0}}
-```
-
-| 量 | 语义 |
-|---|---|
-| `end - start` | **输出帧数**（这一层在时间线上占多久） |
-| `source_rate` | 每输出 1 帧消耗**几个**源帧（`1.0` = 原速，缺省） |
-| 消耗的源帧数 | `(end - start) × source_rate`，从 `source_in` 起算 |
-
-* **缺省 `1.0`** ⇒ 老工程不用改，**画面逐字节不变**。
-* `rate <= 0` / `NaN` / `inf` ⇒ `probe` 报 **`source_rate_invalid`**。
-  **故意不静默兜底成 1.0**：`0` 是"定格"、负数是"倒放"，都不是"快慢"能表达的；
-  悄悄当原速会让你"设了但没生效"而**没有任何一处提示**。
-* `rate > 100` 明确报错；**`< 0.5` 没问题**（内部自动拆成多级 `atempo`）。
-* **音轨同步变速**（`atempo`，**不变调**），所以**不会声画分家**。
-
-#### ✅ 落点是**逐帧精确**的 —— 但判定时要注意量纲
-
-你们报的验收数是「现状 `99 → 147`，支持后应当 `100 → 198`」。
-按你们给的素材与参数（`source_in=60`、`rate=2.0`、out 30 帧）实测：
-
-```
-out[i] == ( src[60 + 2i].Y - 16 ) * 255 / 219     —— 30/30 帧吻合
-出片         97 101 104 109 112 116 … 197 202 206 209
-源第60+2i帧 100 103 106 110 113 116 … 186 190 193 196
-```
-
-**出片第 i 帧就是源第 `60+2i` 帧**，一帧不差。
-
-⚠️ **你们那个"现状 `99 → 147`"与"应当 `100 → 198`"，是拿源的 Y 当出片的 R 在比。**
-本仓解码带 `-vf scale=out_color_matrix=bt709`，会把源的 **Y（tv 范围 16..235）**
-转成 **R（全范围 0..255）** —— 两者差一个**固定的量纲换算**：
-
-```
-R = (Y − 16) × 255 / 219
-```
-
-`(100−16)×255/219 = 97.8` ⇒ 出片确实是 **97**。所以"97 而不是 100"**不是漂移**，
-是**少除了这一步**。
-
-**这条量纲差很容易被误读成时间漂移**：`R−Y` 随亮度**线性增大**（低处 −3、高处 +13），
-看着像"越走越偏"。但**真的帧漂移是阶梯**（隔一段跳一格），不是线性。
-本仓的量具也踩过这个坑，修正过程见
-[`plan/d5-frame-rate-handoff.md`](../plan/d5-frame-rate-handoff.md) §10。
-
-**建议你们把判定口径改成**：`out[i]` 对 `(src[60+2i].Y − 16) × 255 / 219`，
-或干脆比**结构**（帧数、相对变化率）而不是绝对亮度。
-
----
+1. 换产物 `dhampir-0.2.0-win32-x64.zip` + `.manifest.json`（+ `.sha256.txt`）；钉固流程读 `.manifest.json`，别抄本文档的数字。
+2. 确认 ffmpeg 带 libass（第 1 节）；字体改走 `font_family` + `--font-dir`（真族名）；重拍视觉基线。
+3. （可选）放开新 schema 字段（裁剪 / 渐变 / 混合 / 遮罩）到 UI；（已定）回退字体集合由你提供 + slug 转族名。
 
 ## 6. 怎么确认你拿到的是哪一版
 
-产物根目录有一份 `VERSION`（下面是**样例**，实际值以你手上那份为准）：
-
-```
-version=0.2.0
-project_schema=1
-host_api=6
-license=Apache-2.0
-git=<构建时的 sha>
-built_at=<构建时间>
-platform=win32-x64
-```
-
-> ⚠️ **`git` / `built_at` 这两行请以 `VERSION` 文件为准，不要抄这份文档。**
-> 每次重新打包两行都会变（它们被打进产物），而文档是手写的 —— 会漂。
-> 打包脚本的 stdout 末尾也会打印当前 zip 的 sha256，**以那里和 `.sha256.txt` 为准**。
-
-> ⚠️ **product version 没有运行时 API**。wasm 侧只有 `dhampir_host_api_version()`（返 6），
-> **没有** `dhampir_version()`。所以"我这份产物是 0.1.0 还是 0.2.0"**只能读 `VERSION` 文件**。
-> 如果你们要在运行时区分，得自己读那个文件 —— 或者告诉本仓，加一个导出（那要 `host_api` +1）。
-
----
+产物根目录的 `VERSION`：`version=0.2.0`、`project_schema=1`、`host_api=6`、`license=Apache-2.0`、`git=<构建时的 sha>`、`built_at=<构建时间>`、`platform=win32-x64`。`git` / `built_at` 以 `VERSION` 为准；**没有** `dhampir_version()`（wasm 侧只有 `dhampir_host_api_version()`，返 6），运行时只能读 `VERSION` 文件。
 
 ## 7. 0.2.0 的其他新增（可能对你有用）
 
 | 能力 | 在哪 |
 |---|---|
-| **渲染能力面**：混合模式 / 渐变 / 路径 / 多边形 | `dhampir-core` 的 `render/{blend_fn,gradient,path,polygon}.rs` + 对应 WGSL |
-| **WAAPI / CSS 动画对齐**：缓动全集 + `anim2doc` 转译器 + DOM 第二宿主 | `web/anim-eval.mjs`、`web/dom-host.mjs`、`scripts/waapi2doc.mjs` |
-| **效果演示** | `fixtures/effects-demo.json` + `web/effects-demo.html`（WASM 与 DOM 两版）+ 联络表 PNG |
+| 渲染能力面：混合 / 渐变 / 路径 / 多边形 | `dhampir-core` 的 `render/{blend_fn,gradient,path,polygon}.rs` + 对应 WGSL |
+| WAAPI / CSS 动画对齐 | `web/anim-eval.mjs`、`web/dom-host.mjs`、`scripts/waapi2doc.mjs` |
+| 效果演示 | `fixtures/effects-demo.json` + `web/effects-demo.html` |
 
-### 能力清单是**机器核对的**，别抄文档
-
-如果你要判断"某个 CSS / WAAPI 特性底座支不支持"，**真值是
-[`web/capabilities.json`](../web/capabilities.json)**（28 条，由 `scripts/check-capabilities.mjs` 核对：
-`status=supported` 必须给出底座原语与判据证据，否则守卫判红）。
-
-当前分布：**supported 15 / partial 9 / explicitly-not-doing 3 / needs-primitive 1**。
-`partial` 与 `explicitly-not-doing` 都写了理由，**要放开 UI 之前先读它**，
-不要凭印象假设某个 CSS 特性支持。
-
-### 关于"两宿主一致"的既有口径（没变，但值得知道）
-
-* **wasm ↔ native**：**同一个渲染器**（一份 core + 一份 WGSL），像素可比，有容差表。
-* **HTML ↔ wasm/native**：**不是同一个渲染器**（CSS 合成器 vs WebGPU）。HTML 侧
-  `web/anim-eval.mjs` 是**刻意的第二实现**，由 `scripts/check-anim-eval.mjs` 逐帧逐通道对照
-  （容差 1e-4，实测最大偏差 9.37e-6）—— **只保证数值一致，不承诺像素**。
-* 浏览器侧画字走 canvas `fillText`（**系统字体**），是**第三条独立路径**，
-  与 CLI 本来就不同源；判据只比结构、不比字形。这条口径 0.2.0 不变。
-
----
+特性支持的真值：[web/capabilities.json](../web/capabilities.json)（28 条，`scripts/check-capabilities.mjs` 核对）：supported 15 / partial 9 / explicitly-not-doing 3 / needs-primitive 1。
 
 ## 8. 已知边界（如实记，别当已解决）
 
 | 项 | 状态 |
 |---|---|
-| **描边颜色当前不受 `stroke_color` 控制** | 填充与描边共用一张覆盖掩码（libass 的覆盖度在 RGB、alpha 恒 0，黑描边与透明底逐字节相同，事后不可恢复）。**已用判据钉住**，拿到分层掩码时会红 |
-| **回退字体集合归属** | **已答复（2026-10-08）**：由下游字体库提供、随包分发（见第 4 节）。下游还需自己把老工程的 slug 形态 `font_family` 转成真族名 |
-| **无字幕帧 sha256 无自动守卫** | 那个 hash **不在代码/守卫里**，是读数不是断言（见第 2、9 节）。**已知缺口** |
-| **非 Windows 平台** | 全部实测都在本机 Windows + gyan.dev ffmpeg 上做的，没验过 |
-| **`1.25` / `288` 两个补偿常数** | 只测了 msyh / 乐米 / NotoSansSC 三个字体族，**是否对所有字体族成立未验** |
-| 推进宽度"差 1% 还是 5%" | 两次独立复量结论不一致，已写进代码注释标注**别引它**（判据不依赖它） |
-
----
+| 描边颜色当前不受 `stroke_color` 控制 | 填充与描边共用一张覆盖掩码；已用判据钉住 |
+| 回退字体集合归属 | 已答复（2026-10-08）：由下游字体库提供，slug 要自己转族名 |
+| 无字幕帧 sha256 无自动守卫 | 该 hash 不在代码 / 守卫里，是读数不是断言 |
+| 非 Windows 平台 | 全部实测都在 Windows + gyan.dev ffmpeg 上做的，没验过 |
+| `1.25` / `288` 补偿常数 | 只测过 msyh / 乐米 / NotoSansSC 三个字体族 |
 
 ## 9. 本版的验证读数（可复算）
 
-| 项 | 读数 |
-|---|---|
-| `cargo test --workspace` | **766 passed / 0 failed** |
-| `cargo check --all-targets` | **0 warning** |
-| `node scripts/run-guards.mjs` | **26 / 26 全绿**（含各自 `--self-test`） |
-| 真机测试（真起 ffmpeg、逐像素量） | **9 / 9 全绿** |
-| `node scripts/licenses.mjs --check` | EXIT=0 |
-| 打包产物 | `dist/dhampir-0.2.0-win32-x64.zip` —— **sha256 以 `.sha256.txt` 侧车为准**（见下） |
-| 打包产物里的 exe 端到端复跑 | 缺字仍正确回退（「笑靥如花」，非透明像素 1099） |
-| 无字幕工程帧 sha256 | **读数**：`91ac70187a5d3fdd7…`（**当前没有自动守卫**，见下） |
-
-> ⚠️ **这张表里的 sha256 不写死。** 每次重新打包都会变（`Cargo.toml` / `Cargo.lock` /
-> `THIRD-PARTY-LICENSES.md` 都会被打进产物，改其中任何一个都会换 sha），
-> 而手写进文档的数字**必然漂** —— 这份文档第一版就写错过一次（记的是上一轮构建的 sha，
-> 下游拿去校验会"校验失败"，然后先怀疑自己下错了）。
->
-> **校验用产物自带的三处**（都不会漂，且互相一致 —— 打包时会一起写出来）：
->
-> | 文件 | 内容 |
-> |---|---|
-> | `dhampir-0.2.0-win32-x64.zip.manifest.json` | **机器可读**：version / schema / host_api / git / built_at / zip_sha256 |
-> | `dhampir-0.2.0-win32-x64.zip.sha256.txt` | 与 zip 同目录的侧车，惯例同 V-Trim |
-> | 产物内 `VERSION` | 同一批数（`git` / `built_at`） |
->
-> 建议直接在钉固流程里读 `*.manifest.json`，**别再抄文档**。
->
-> ⚠️ **「无字幕帧整轮未变」是记录下来的读数，不是被钉住的断言。**
-> 我全仓 grep 过：那个 hash `91ac70187a5d3fdd7…` 在 `.rs` / `.mjs` 里**一处都没有**，
-> 所以**改坏了不会自动变红**。它当前的判定方式是「改动前后各跑一次 `frame` 命令比 sha256」
-> （命令在下面）。把它变成守卫是一个**已知缺口**，记在这里而不是假装有。
+`cargo test --workspace` 766 passed / 0 failed；`cargo check --all-targets` 0 warning；`node scripts/run-guards.mjs` 26 / 26 全绿（含 `--self-test`）；真机测试 9 / 9；`node scripts/licenses.mjs --check` EXIT=0。产物 `dist/dhampir-0.2.0-win32-x64.zip`，zip 的 sha256 / git / built_at 以 `.manifest.json` 与 `.sha256.txt` 为准。
