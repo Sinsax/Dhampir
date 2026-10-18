@@ -578,6 +578,9 @@ fn paint_parts(
             // 与老路同一条：描边要乘这一条的缩放（参照 `swEff = sw * scale`）。
             stroke_px: (style.stroke_px * scale).round() as u32,
             stroke_color: style.stroke_color,
+            // **外圈**跟着同一个 scale 走（与 stroke_px 逐字段一致）。
+            outer_stroke_px: (style.outer_stroke_px * scale).round() as u32,
+            outer_stroke_color: style.outer_stroke_color,
             // 这一张是**文字**位图（阴影是另一张，见下面的 `paint_shadow`）。
             shadow_color: None,
             shadow_blur_px: 0,
@@ -728,6 +731,8 @@ fn paint_per_char(
     for cell in cells {
         // 这个字自己的字号：**整条缩放 × 逐字缩放**（乘法关系）。
         let cell_font = font_px * cell.scale * scale;
+        // `!(x >= 1.0)` 同时挡住"小于 1"**和** NaN —— `x < 1.0` 对 NaN 是 false，会放过去。
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
         if !(cell_font >= 1.0) {
             // 缩到 0 的字**不画**（不是"画一张 0 像素的位图" ——
             // 那会在光栅化那边退化成 1px 并留下一个墨点）。
@@ -759,6 +764,9 @@ fn paint_per_char(
             // 描边跟着**这个字的**缩放走（与 `paint_parts` 的 `stroke_px * scale` 同口径）。
             stroke_px: (style.stroke_px * scale * cell.scale).round() as u32,
             stroke_color: style.stroke_color,
+            // 逐字那一路同样带上外圈（与 stroke_px 同一个 scale 因子）。
+            outer_stroke_px: (style.outer_stroke_px * scale * cell.scale).round() as u32,
+            outer_stroke_color: style.outer_stroke_color,
             shadow_color: None,
             shadow_blur_px: 0,
             shadow_dx_px: 0,
@@ -1029,6 +1037,9 @@ impl PlateRect {
                     image.pixels[at + 2] = color[2];
                     image.pixels[at + 3] = 255;
                 } else {
+                    // 同一个下标同时索引 `color`（源）与 `image.pixels`（目的）：改成迭代器要把
+                    // 两个容器绑在一起，反而更难读。
+                    #[allow(clippy::needless_range_loop)]
                     for channel in 0..3 {
                         let src = color[channel] as u32;
                         let dst = image.pixels[at + channel] as u32;
@@ -1247,6 +1258,9 @@ fn paint_one(
         // 只有描边不对，很难一眼看出来。
         stroke_px: (style.stroke_px * scale).round() as u32,
         stroke_color: style.stroke_color,
+        // **外圈**同一个 scale（与上一行逐字段一致）。
+        outer_stroke_px: (style.outer_stroke_px * scale).round() as u32,
+        outer_stroke_color: style.outer_stroke_color,
         // 这一张是**文字**位图：阴影是另一张（`paint_shadow`），
         // 两者的键在缓存里各占一格（不然会把没模糊的那张递给有模糊的）。
         shadow_color: None,
@@ -1623,6 +1637,9 @@ mod tests {
             outline: true,
             stroke_px: 0.0,
             stroke_color: [0, 0, 0, 255],
+            // 夹具走「老工程」那一档：不画外圈（2026-10-16 加的字段）。
+            outer_stroke_px: 0.0,
+            outer_stroke_color: [255, 255, 255, 255],
             family: None,
             weight: 400,
             // **不画阴影**：这是"老工程"的那套样式。
@@ -1660,6 +1677,9 @@ mod tests {
             outline: true,
             stroke_px: 0.0,
             stroke_color: [0, 0, 0, 255],
+            // 夹具走「老工程」那一档：不画外圈（2026-10-16 加的字段）。
+            outer_stroke_px: 0.0,
+            outer_stroke_color: [255, 255, 255, 255],
             family: None,
             weight: 400,
             // 弹幕恒不画阴影（`DanmakuSpec` 里没有阴影字段）。

@@ -317,6 +317,9 @@ fn text_key(font: &Path, font_px: u32, text: &str) -> TextRasterKey {
         outline: false,
         stroke_px: 0,
         stroke_color: [0, 0, 0, 255],
+        // 不画外圈（2026-10-16 加的字段；本夹具走「老工程」那一档）。
+        outer_stroke_px: 0,
+        outer_stroke_color: [255, 255, 255, 255],
         shadow_color: None,
         shadow_blur_px: 0,
         shadow_dx_px: 0,

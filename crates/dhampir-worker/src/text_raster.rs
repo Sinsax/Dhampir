@@ -1597,12 +1597,12 @@ fn edt_1d(src: &[f32], dst: &mut [f32]) {
         z[k + 1] = f32::INFINITY;
     }
     let mut k = 0usize;
-    for q in 0..n {
+    for (q, slot) in dst.iter_mut().take(n).enumerate() {
         while z[k + 1] < q as f32 {
             k += 1;
         }
         let d = q as f32 - v[k] as f32;
-        dst[q] = d * d + src[v[k]];
+        *slot = d * d + src[v[k]];
     }
 }
 
@@ -2392,8 +2392,8 @@ mod tests {
         let mut worst = 0i32;
         for c in 1..255u32 {
             // 字形边缘那一像素：填充覆盖 c、描边带覆盖 255-c（ring_of(dilate, fill) 的值）。
-            let layer = tint(&vec![(255 - c) as u8; 4], stroke);
-            let fill_tinted = tint(&vec![c as u8; 4], fill);
+            let layer = tint(&[(255 - c) as u8; 4], stroke);
+            let fill_tinted = tint(&[c as u8; 4], fill);
             let mut got = layer.clone();
             overlay(&mut got, &fill_tinted);
             let a_s = (255 - c) as f32 / 255.0;

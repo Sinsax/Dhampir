@@ -967,7 +967,10 @@ mod tests {
         //    色调整 7 个 kind 先移出（它们切到了槽位表），Warp 4 个再移出。
         //    现在只剩**真正不走槽位表**的那些 —— 模糊（专名 uniform）。
         //    收窄而不是删掉：这条钉的是"别把专名 uniform 也塞进槽位表"。
-        for kind in ["gaussian_blur"] {
+        // 用变量而不是字面量数组：留出"以后还有别的专名 uniform"的形状，
+        // 同时避开 clippy 的 single_element_loop（这条判据本身不关心循环）。
+        let special_uniform_kinds = ["gaussian_blur"];
+        for kind in special_uniform_kinds {
             assert!(
                 declared_slots(kind).is_empty(),
                 "`{kind}` 不该声明定长槽位（它走自己管线的专名 uniform，不是槽位表）"

@@ -576,7 +576,16 @@ pub fn layout(text: &str, style: &SubtitleStyle, sequence: (u32, u32)) -> TextLa
     let font_px = font_px * scale;
     let line_px = line_px * scale;
     let line_height_norm = line_px / sequence_height;
-    let block_top = block_bottom - (keep as f32) * line_height_norm;
+    // **绝对盒原点**（SubtitleStyle::origin）：给了它 ⇒ 块左上角就是它 ——
+    // 纵向不再由 block_bottom 推、横向也不再逐行居中（见下面 rect 那两行）。
+    // 夹到 [0,1]：与 anchor_bottom.clamp(0.0, 1.0) 同一口径（NaN 也一起挡掉）。
+    let origin = style
+        .origin
+        .map(|[x, y]| (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)));
+    let block_top = match origin {
+        Some((_, y)) => y,
+        None => block_bottom - (keep as f32) * line_height_norm,
+    };
 
     let mut lines = Vec::with_capacity(keep);
     if style.vertical.unwrap_or(false) {
@@ -662,8 +671,13 @@ pub fn layout(text: &str, style: &SubtitleStyle, sequence: (u32, u32)) -> TextLa
             font_ratio: style.font_ratio * scale,
             scale,
             rect: NormalizedRect {
-                // 居中：字幕的常规排法。想改就加一个对齐字段（加可选字段，不改版本）。
-                x: 0.5 - width_norm / 2.0,
+                // 默认**居中**（字幕的常规排法）；给了 origin ⇒ **左对齐**到那一列。
+                // ⚠️ 左对齐而不是「把整块居中到 origin 那一列」：宿主面板的 ev.x/y 语义
+                //    就是**盒左上角**，多一次居中换算就多一个基准（本仓吃过两次）。
+                x: match origin {
+                    Some((x, _)) => x,
+                    None => 0.5 - width_norm / 2.0,
+                },
                 y: block_top + (index as f32) * line_height_norm,
                 width: width_norm,
                 height: line_height_norm,
@@ -798,6 +812,56 @@ pub fn place_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ★ **绝对盒原点**（`SubtitleStyle::origin`）：给了它 ⇒ 第一行行盒的左上角**就是它**
+    /// （横向不再居中、纵向不再由 `block_bottom` 推）；没给 ⇒ 与老行为逐值相同。
+    ///
+    /// ⚠️ **两个方向都要钉**：只钉「给了就用」的话，把 `origin` 写死成某个常量也能过；
+    /// 只钉「没给就居中」的话，字段接没接上照样绿。
+    #[test]
+    fn origin_pins_the_block_top_left() {
+        let seq = (1920u32, 1080u32);
+        let mut style = SubtitleStyle {
+            font_ratio: 0.0667,
+            safe_width_ratio: 0.875,
+            ..Default::default()
+        };
+        // ① 没给 origin：与老行为一样 —— 横向居中、纵向由 `block_bottom` 推
+        let plain = layout("测试文字", &style, seq);
+        let p0 = plain.lines[0].rect;
+        assert!(
+            (p0.center_x() - 0.5).abs() < 1e-6,
+            "默认居中（实得 {}）",
+            p0.center_x()
+        );
+        // ② 给了 origin：行盒左上角就是它（横向**左对齐**，不再居中）
+        style.origin = Some([0.2, 0.3]);
+        let pinned = layout("测试文字", &style, seq);
+        let q0 = pinned.lines[0].rect;
+        assert!(
+            (q0.x - 0.2).abs() < 1e-6,
+            "行盒左边 = origin.x（实得 {}）",
+            q0.x
+        );
+        assert!(
+            (q0.y - 0.3).abs() < 1e-6,
+            "第一行行盒顶边 = origin.y（实得 {}）",
+            q0.y
+        );
+        // ③ 多行时逐行下移一个行高、且每行都左对齐（块的形状不变，只是整体被搬过去）
+        let two = layout("第一行很长很长很长\n第二行", &style, seq);
+        if two.lines.len() >= 2 {
+            assert!(
+                (two.lines[1].rect.y - (0.3 + two.lines[0].rect.height)).abs() < 1e-5,
+                "第二行应当正好低一个行高（实得 {}）",
+                two.lines[1].rect.y
+            );
+            assert!(
+                (two.lines[1].rect.x - 0.2).abs() < 1e-6,
+                "每一行都左对齐到 origin.x"
+            );
+        }
+    }
 
     fn style() -> SubtitleStyle {
         SubtitleStyle::default()

@@ -48,6 +48,9 @@ fn write_text_file(dir: &Path, tag: &str, text: &str) -> Result<PathBuf, String>
 }
 
 /// 旧路参数串：照 97c3d8e 的 drawtext_args 逐字符重建。
+// 8 个参数是"重建那条 ffmpeg 参数串"的天然形状（每一维都是独立的输入），
+// 拆成结构体只会把对照关系藏起来。
+#[allow(clippy::too_many_arguments)]
 fn drawtext_args_97c3d8e(
     text_file: &Path,
     font_file: &Path,

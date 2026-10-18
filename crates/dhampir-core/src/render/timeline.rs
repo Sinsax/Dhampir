@@ -918,9 +918,7 @@ pub fn warp_params(
                 if !name.starts_with(prefix) {
                     continue;
                 }
-                if *only_on_win {
-                    write_warp_slot(&mut out, name, *v);
-                } else if *name == amount_slot {
+                if *only_on_win || *name == amount_slot {
                     write_warp_slot(&mut out, name, *v);
                 }
             }
@@ -2234,7 +2232,7 @@ mod tests {
             (p.scale - 1.5).abs() < 1e-6,
             "brightness_multiply 该写 scale"
         );
-        assert!(p.is_identity() == false);
+        assert!(!p.is_identity());
 
         let p = color_params(&[effect("contrast", &[("amount", 1.4)])]);
         assert!((p.contrast - 1.4).abs() < 1e-6, "contrast 该写 contrast");

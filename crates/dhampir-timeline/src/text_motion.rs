@@ -102,9 +102,14 @@ pub fn back_out3(t: f32) -> f32 {
 /// - `shake_phase` 非有限 ⇒ 当 0 用（不把 NaN 传进 `sin` 污染整条链）。
 /// - `t_sec` 非有限 ⇒ `(0, 0)`（`NaN` 会顺着 `sin` 传染到落点上）。
 pub fn text_shake_px(t_sec: f32, shake_px: f32, shake_hz: f32, shake_phase: f32) -> (f32, f32) {
+    // ⚠️ `clippy::neg_cmp_op_on_partial_ord` 在这里**是误报，不许按它改**：
+    // `NaN <= 0.0` 是 false（NaN 会被当成"开着"放过去），而 `!(NaN > 0.0)` 是 true ——
+    // 挡掉 NaN 正是这两条的本意（见上方「三个"关"的分支都要显式挡」）。
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
     if !(shake_px > 0.0) || !shake_px.is_finite() {
         return (0.0, 0.0);
     }
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
     if !(shake_hz > 0.0) || !shake_hz.is_finite() || !t_sec.is_finite() {
         return (0.0, 0.0);
     }

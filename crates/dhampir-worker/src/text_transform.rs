@@ -247,6 +247,8 @@ pub fn blit_affine(
                 // 而"恒等时逐字节相同"那条断言要求的是**走老路径**（不是走这里），
                 // 所以这不违约束（见 `is_identity` 的用法）。
                 let inverse = 255 - alpha;
+                // 同一个下标同时索引 `sample`（源）与 `image.pixels`（目的）。
+                #[allow(clippy::needless_range_loop)]
                 for channel in 0..3 {
                     let src =
                         (sample[channel].round().clamp(0.0, 255.0) as u32 * alpha + 127) / 255;
@@ -521,7 +523,7 @@ mod tests {
         // 8x8 = 64 个源像素。转 45° 后覆盖约 8*8*sqrt(2) ≈ 90 个像素
         // （边缘抗锯齿会多一点），但**绝不该**接近"整帧"（4096）。
         assert!(
-            inked >= 60 && inked <= 160,
+            (60..=160).contains(&inked),
             "转 45° 的墨迹应约 90 像素（不 clamp ⇒ 不会拖出条纹），实得 {inked}"
         );
     }

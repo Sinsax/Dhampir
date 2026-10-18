@@ -227,6 +227,9 @@ fn run(args: Result<Args, String>) -> Result<(), String> {
                 outline: style.outline,
                 stroke_px: 0,
                 stroke_color: [0, 0, 0, 255],
+                // 这条测量路径不画外圈（2026-10-16 加的字段）。
+                outer_stroke_px: 0,
+                outer_stroke_color: [255, 255, 255, 255],
                 // 这条测量路径量的是**文字位图**：阴影那一张不在它的范围内
                 // （它要多一次 ffmpeg 调用，会把"一行字多少钱"这个数搅浑）。
                 shadow_color: None,
@@ -272,6 +275,9 @@ fn run(args: Result<Args, String>) -> Result<(), String> {
             outline: style.outline,
             stroke_px: 0,
             stroke_color: [0, 0, 0, 255],
+            // 这条测量路径不画外圈（2026-10-16 加的字段）。
+            outer_stroke_px: 0,
+            outer_stroke_color: [255, 255, 255, 255],
             shadow_color: None,
             shadow_blur_px: 0,
             shadow_dx_px: 0,
