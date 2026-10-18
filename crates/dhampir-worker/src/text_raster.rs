@@ -1424,9 +1424,11 @@ fn rasterize_with_stroke(
     // **外圈（白环）先垫底**：它必须落在内圈描边**之外**，否则整圈字被白墨糊住。
     // ---------------------------------------------------------------------
     let mut pixels = if key.outer_stroke_px > 0 {
-        let wide = dilate_disc(&fill_plane, width, height, inner_px + key.outer_stroke_px);
+        // ⚠️ 白环两条边都用 AA 版：以前是**两遍硬膨胀相减** ⇒ 内外两条边都是整像素台阶
+        //    （"白环一圈毛刺"就是这么来的）。
+        let wide = dilate_aa(&fill_plane, width, height, inner_px + key.outer_stroke_px);
         let base = if inner_px > 0 {
-            dilate_disc(&fill_plane, width, height, inner_px)
+            dilate_aa(&fill_plane, width, height, inner_px)
         } else {
             fill_plane.clone()
         };
@@ -1440,23 +1442,15 @@ fn rasterize_with_stroke(
 
     // 内圈描边 + 填充（没开描边时就是纯填充）。
     let inner = if inner_px > 0 {
-        // ⚠️ **居中描边**（2026-10-18，与 CSS `-webkit-text-stroke` 同口径）：
-        //    外沿 = `dilate(ceil(w/2))`、内沿 = `erode(floor(w/2))` —— 宽度 `w` **跨在字形轮廓上**。
-        //    以前是 `dilate(fill, w) − fill`（**全在外侧**）⇒ 同一个宽度成片比预览粗一倍。
-        //    ⚠️ 内沿那份以前直接用 `fill_plane`（= 字形的抗锯齿斜坡），现在用腐蚀过的 ——
-        //    两者在"笔画内部"逐值相同，只在轮廓那一圈不同（这正是要改的那一圈）。
-        let half_out = inner_px.div_ceil(2);
-        let half_in = inner_px / 2;
-        // ⚠️ **2026-10-18：试过"外半边改用 libass 的轮廓描边"，A/B 后撤回**（实测更差）。
-        //    做法是再起一遍 ffmpeg：`PrimaryColour` 全透 + `Outline` 上白墨，取它的覆盖度。
-        //    实测（同一帧、同一段文字）：描边的暗像素 **1236 → 3078**，肉眼是"一团黑块贴在字后"
-        //    —— libass 的 `Outline` 并不是"从轮廓往外扩 half"那套几何（它还与 FontSize 联动、
-        //    且 `ass_outline_px` 的虚拟画布补偿会再放大一次），叠加我补的内半边 = 又粗又糊。
-        //    ⇒ **保留膨胀/腐蚀**（几何是"字形 ⊕ 圆盘"，拐角会略圆，但粗细与预览一致）。
-        //    要再试请先做 A/B，别只看"用了 libass 就一定更准"。
+        // ⚠️⚠️ **2026-10-18 两轮实验都回滚了，别再走**：
+        //    ① "居中描边"（外 `ceil(w/2)` + 内 `erode(floor(w/2))`，对齐 CSS）：绕得对，
+        //       但**暗描边向内吃掉字形一圈** ⇒ 用户看到"第一层描边坏了/消失"。
+        //    ② "外半边改用 libass 轮廓":A/B 更差（暗像素 1236→3078，一团黑块）。
+        //    ⇒ 宽度语义保持原样（**从字形外扩 `inner_px`**），只把"膨胀的硬边"换成
+        //       [`dilate_aa`] —— "锯齿感强烈"的真正来源是它的**整像素台阶**。
         let band = ring_of(
-            &dilate_disc(&fill_plane, width, height, half_out),
-            &erode_disc(&fill_plane, width, height, half_in),
+            &dilate_aa(&fill_plane, width, height, inner_px),
+            &fill_plane,
         );
         let mut layer = tint(&plane_to_premultiplied(&band), key.stroke_color);
         let fill_tinted = tint(&fill_cov, key.color);
@@ -1492,105 +1486,74 @@ fn plane_to_premultiplied(plane: &[u8]) -> Vec<u8> {
     out
 }
 
-/// 半径 `r` 的**圆盘**结构元（逐点判 `dx² + dy² ≤ r²`）。
-///
-/// 现算而不存表：一行字最多几万着墨像素、`r` 也就十几 ⇒ 这点开销看不见。
-fn disc_offsets(r: u32) -> Vec<(i32, i32)> {
-    let r = r as i32;
-    let mut offsets = Vec::new();
-    for dy in -r..=r {
-        for dx in -r..=r {
-            if dx * dx + dy * dy <= r * r {
-                offsets.push((dx, dy));
-            }
-        }
+fn dilate_aa(cov: &[u8], width: usize, height: usize, r: u32) -> Vec<u8> {
+    if r == 0 {
+        return cov.to_vec();
     }
-    offsets
+    let dist = coverage_distance(cov, width, height);
+    let radius = r as f32;
+    let mut out = Vec::with_capacity(cov.len());
+    for (i, &c) in cov.iter().enumerate() {
+        let ramp = ((radius + 0.5 - dist[i]) * 255.0).clamp(0.0, 255.0);
+        let v = if f32::from(c) > ramp { f32::from(c) } else { ramp };
+        out.push(v.round() as u8);
+    }
+    out
 }
 
-/// **圆盘膨胀**（形态学 dilate）：`out[p] = max(cov[p + o])`，`o` 遍历半径 `r` 的圆盘。
+/// 到**最近墨迹像素**的欧氏距离（chamfer 3-4 两遍扫描，误差 ≤ 2%）。
 ///
-/// # 它现在是**描边几何的唯一实现**（2026-10-16）
-///
-/// `描边 = dilate(字形, N) − 字形`、`白环 = dilate(字形, 内圈+外圈) − dilate(字形, 内圈)`。
-/// 以前描边走 libass 的 `Outline=`，拿到的是**字形路径填实后的整块**（连字腔一起填）——
-/// 汉字糊成一块实心黑板，而报告里 `lines_drawn` / `issues` 全正常。
-///
-/// ⚠️ 用**圆盘**而不是方框：描边要像 CSS 的 `-webkit-text-stroke` 那样绕字形一圈，
-/// 方框在 45° 拐角会多出一块（`r = 6` 时约 2.5px）。
-///
-/// ⚠️ 稀疏实现（只遍历**有墨**的像素）：一行字着墨约两万像素、`r = 8` 时圆盘 197 个偏移
-/// ⇒ 每次栅格化几百万次比较，而位图是按行缓存的（同一行只算一次）。
-fn dilate_disc(cov: &[u8], width: usize, height: usize, r: u32) -> Vec<u8> {
-    if r == 0 {
-        return cov.to_vec();
-    }
-    let offsets = disc_offsets(r);
-    let mut out = vec![0u8; cov.len()];
-    for y in 0..height {
-        for x in 0..width {
-            let value = cov[y * width + x];
-            if value == 0 {
-                continue;
-            }
-            for (dx, dy) in &offsets {
-                let nx = x as i32 + dx;
-                let ny = y as i32 + dy;
-                if nx < 0 || ny < 0 || nx >= width as i32 || ny >= height as i32 {
+/// 墨迹判据是 `cov > 0`：用抗锯齿斜坡的外沿当字形边界，差半个像素，可接受 ——
+/// 这里要的是"边缘平滑"，不是亚像素级的几何精度。
+fn coverage_distance(cov: &[u8], width: usize, height: usize) -> Vec<f32> {
+    const INF: f32 = 1.0e9;
+    const DIAG: f32 = std::f32::consts::SQRT_2;
+    let mut d: Vec<f32> = cov
+        .iter()
+        .map(|&c| if c > 0 { 0.0 } else { INF })
+        .collect();
+    let (w, h) = (width as i64, height as i64);
+    let mut pass = |forward: bool| {
+        let ys: Vec<i64> = if forward {
+            (0..h).collect()
+        } else {
+            (0..h).rev().collect()
+        };
+        for y in ys {
+            let xs: Vec<i64> = if forward {
+                (0..w).collect()
+            } else {
+                (0..w).rev().collect()
+            };
+            for x in xs {
+                let i = (y as usize) * width + x as usize;
+                if d[i] == 0.0 {
                     continue;
                 }
-                let index = ny as usize * width + nx as usize;
-                if out[index] < value {
-                    out[index] = value;
+                let mut best = d[i];
+                let s: i64 = if forward { 1 } else { -1 };
+                for (dx, dy, wt) in [
+                    (s, 0i64, 1.0f32),
+                    (0i64, s, 1.0),
+                    (s, s, DIAG),
+                    (-s, s, DIAG),
+                ] {
+                    let (nx, ny) = (x - dx, y - dy);
+                    if nx < 0 || ny < 0 || nx >= w || ny >= h {
+                        continue;
+                    }
+                    let cand = d[(ny as usize) * width + nx as usize] + wt;
+                    if cand < best {
+                        best = cand;
+                    }
                 }
+                d[i] = best;
             }
         }
-    }
-    out
-}
-/// **环带**：外圈覆盖度减去内圈覆盖度（逐像素**饱和**相减）。
-///
-/// ⚠️ 必须饱和：两边各自都带抗锯齿的半覆盖像素，宽环在内侧边缘上可能**小于**内圈
-/// （同一像素在两遍里的量化差）—— `u8` 直接相减会在这条缝上回绕成 255，
-/// 症状是环带内侧出现一圈**亮白噪点**。
-/// **腐蚀**（`dilate_disc` 的镜像）：每个像素取圆盘邻域内的**最小**覆盖度。
-///
-/// ⚠️ 为什么需要它（2026-10-18 用户报「导出的描边比预览粗」）：
-///   CSS 的 `-webkit-text-stroke` 是**居中**描边 —— 宽度 `w` 里 `w/2` 在字形外、`w/2` 在字形内；
-///   而本仓以前只有「`dilate(fill, r) − fill`」= **全部在外侧**。
-///   ⇒ 同一个 `12px`，成片的墨比预览**整整多一倍**（外扩 12 而不是 6）。
-///   ⇒ 现在描边的外沿 = `dilate(fill, ceil(w/2))`、内沿 = `erode(fill, floor(w/2))`，
-///     与 CSS 同口径（**跨在字形轮廓上**）。
-///
-/// 与 [`dilate_disc`] 同一条稀疏实现与同一条边界规则：
-/// `r = 0` 原样返回；越界的那一边**不参与**取最小（否则位图边缘会被自己吃成 0）。
-fn erode_disc(cov: &[u8], width: usize, height: usize, r: u32) -> Vec<u8> {
-    if r == 0 {
-        return cov.to_vec();
-    }
-    let offsets = disc_offsets(r);
-    // 初值 = 满墨：只有"邻域里全都有墨"的像素才会被压下来。
-    let mut out = vec![255u8; cov.len()];
-    for y in 0..height {
-        for x in 0..width {
-            let mut value = 255u8;
-            for (dx, dy) in &offsets {
-                let nx = x as i32 + dx;
-                let ny = y as i32 + dy;
-                if nx < 0 || ny < 0 || nx >= width as i32 || ny >= height as i32 {
-                    // ⚠️ 越界**不算墨**？算 —— 不算的话位图最外那一圈会被吃成 0，
-                    //    症状是"贴着位图边缘的笔画少一圈"。这里按"界外即界内"处理。
-                    continue;
-                }
-                let v = cov[ny as usize * width + nx as usize];
-                if v < value {
-                    value = v;
-                }
-            }
-            out[y * width + x] = value;
-        }
-    }
-    out
+    };
+    pass(true);
+    pass(false);
+    d
 }
 
 fn ring_of(outer: &[u8], inner: &[u8]) -> Vec<u8> {
@@ -2212,21 +2175,31 @@ mod tests {
         let mut cov = vec![0u8; w * h];
         cov[w + 1] = 255; // 中心一点着墨
 
-        let d1 = dilate_disc(&cov, w, h, 1);
-        assert_eq!(
-            d1.iter().filter(|v| **v > 0).count(),
-            5,
-            "半径 1 的圆盘 = 中心 + 上下左右四格"
+        // ⚠️ 2026-10-18 起膨胀是**抗锯齿**的（[`dilate_aa`]：距离场斜坡），
+        //    所以"整像素几何"那几条判据换成了**语义**判据（直边满墨 / 45° 只有一点淡墨）：
+        //    角落不再是 0（AA 下那里本来就该有一点覆盖），但必须**远浅于**直边。
+        let d1 = dilate_aa(&cov, w, h, 1);
+        assert_eq!(d1[w + 1], 255, "字形本体满墨");
+        // 直边（距离 1 = 正好在半径上）⇒ 斜坡给**半覆盖**：这就是抗锯齿本身。
+        let edge = d1[1];
+        assert!(
+            edge > 60 && edge < 255,
+            "直边应当是半覆盖（抗锯齿），实得 {edge}（0/255 = 硬边 ⇒ 锯齿）"
+        );
+        // 对角（距离 √2）更浅，但**不是 0** —— AA 下那里本来就该有一点覆盖。
+        let corner = d1[0];
+        assert!(
+            corner < 60,
+            "对角只该有一点淡墨，实得 {corner}（接近满值 = 退化成方框膨胀）"
         );
         let band = ring_of(&d1, &cov);
         assert_eq!(band[w + 1], 0, "字形本体不许进描边带（否则就是实心块）");
-        assert_eq!(band[1], 255, "上边应当是描边");
-        assert_eq!(band[0], 0, "角落不该被方框式膨胀带上（圆盘在 45° 不外扩）");
+        assert!(band[1] > 60, "上边应当是描边，实得 {}", band[1]);
 
         // 半径 2 铺满这张 3×3（越界的部分被裁掉）
-        let d2 = dilate_disc(&cov, w, h, 2);
+        let d2 = dilate_aa(&cov, w, h, 2);
         assert_eq!(d2.iter().filter(|v| **v > 0).count(), 9, "半径 2 应当铺满 3×3");
-        assert_eq!(dilate_disc(&cov, w, h, 0), cov, "半径 0 = 原样返回");
+        assert_eq!(dilate_aa(&cov, w, h, 0), cov, "半径 0 = 原样返回");
     }
     /// ★ **环带 = 宽环 − 内圈**（2026-10-16 外圈描边）。
     ///
@@ -4305,7 +4278,7 @@ mod tests {
 
 
 #[cfg(test)]
-mod centered_stroke_tests {
+mod aa_dilation_tests {
     use super::*;
 
     fn square(w: usize, h: usize, x0: usize, y0: usize, s: usize) -> Vec<u8> {
@@ -4318,48 +4291,27 @@ mod centered_stroke_tests {
         p
     }
 
-    fn bbox(p: &[u8], w: usize, h: usize) -> (usize, usize, usize, usize) {
-        let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0usize, 0usize);
-        for y in 0..h {
-            for x in 0..w {
-                if p[y * w + x] > 128 {
-                    x0 = x0.min(x);
-                    y0 = y0.min(y);
-                    x1 = x1.max(x);
-                    y1 = y1.max(y);
-                }
-            }
-        }
-        (x0, y0, x1, y1)
-    }
-
-    /// 居中描边：宽度 8 的描边必须跨在字形轮廓上（外扩 4、内缩 4），
-    /// 而不是 2026-10-18 之前那样全部在外侧（外扩 8、内不缩）。
+    /// 抗锯齿膨胀：外缘必须有**中间值**（硬膨胀在那里只有 0 或 255）。
     ///
-    /// 变异自证：把 half_out 换成 inner_px（旧口径）则第一条断言红（外沿 16 变 12）。
+    /// 变异自证：把 `(radius + 0.5 - dist) * 255` 换成 `if dist <= radius { 255 } else { 0 }`
+    /// ⇒ 第二条断言当场红（用户报的"锯齿感强烈"就是那个形状）。
     #[test]
-    fn stroke_straddles_the_outline_like_css() {
+    fn dilate_aa_makes_a_soft_rim() {
         let (w, h) = (64usize, 64usize);
-        let fill = square(w, h, 20, 20, 20);
-        let inner_px = 8u32;
-        let half_out = inner_px.div_ceil(2);
-        let half_in = inner_px / 2;
-        let outer = dilate_disc(&fill, w, h, half_out);
-        let inner = erode_disc(&fill, w, h, half_in);
-        assert_eq!(bbox(&fill, w, h), (20, 20, 39, 39), "底样是 20..39 的方块");
-        assert_eq!(bbox(&outer, w, h), (16, 16, 43, 43), "外沿只许外扩 4");
-        assert_eq!(bbox(&inner, w, h), (24, 24, 35, 35), "内沿必须内缩 4");
-        let band = ring_of(&outer, &inner);
-        assert_eq!(bbox(&band, w, h), (16, 16, 43, 43), "环带的外包就是外沿");
-        assert!(band[20 * w + 18] > 128, "轮廓外侧 2px 处应当有墨");
-        assert_eq!(band[30 * w + 30], 0, "字形深处不该有描边墨");
-    }
-
-    /// 半径 0 两条都是恒等（腐蚀不许把整张图吃成 0）。
-    #[test]
-    fn zero_radius_is_identity_for_both() {
-        let fill = square(32, 32, 8, 8, 8);
-        assert_eq!(dilate_disc(&fill, 32, 32, 0), fill);
-        assert_eq!(erode_disc(&fill, 32, 32, 0), fill);
+        let cov = square(w, h, 20, 20, 20);
+        let out = dilate_aa(&cov, w, h, 4);
+        let partial = out.iter().filter(|v| **v > 0 && **v < 255).count();
+        assert!(partial > 0, "外缘没有过渡像素 ⇒ 还是硬边（锯齿）");
+        // 方块左边 x=20，半径 4 ⇒ x=16 恰好落在斜坡上（约一半覆盖）
+        let edge = out[30 * w + 16];
+        assert!(
+            edge > 0 && edge < 255,
+            "外缘应当是中间值，实得 {edge}（0/255 = 硬边）"
+        );
+        // 内部不许被削（膨胀不减细节）
+        assert_eq!(out[30 * w + 30], 255, "字形内部必须保持满墨");
+        // r = 0 是恒等
+        assert_eq!(dilate_aa(&cov, w, h, 0), cov);
     }
 }
+
