@@ -1501,59 +1501,110 @@ fn dilate_aa(cov: &[u8], width: usize, height: usize, r: u32) -> Vec<u8> {
     out
 }
 
-/// 到**最近墨迹像素**的欧氏距离（chamfer 3-4 两遍扫描，误差 ≤ 2%）。
+/// 到**最近墨迹像素**的**精确欧氏距离**（Felzenszwalb–Huttenlocher 抛物线包络，O(n)）。
 ///
-/// 墨迹判据是 `cov > 0`：用抗锯齿斜坡的外沿当字形边界，差半个像素，可接受 ——
-/// 这里要的是"边缘平滑"，不是亚像素级的几何精度。
+/// 墨迹判据是 `cov > 0`：用抗锯齿斜坡的外沿当字形边界，差半个像素 ——
+/// 这里要的是"边缘平滑"，不是亚像素级的几何精度（那条另说）。
+///
+/// # 为什么把 chamfer 3-4 换掉（2026-10-19）
+///
+/// chamfer 只在 8 邻域里传播 `(1, √2)`：斜向一步的代价是 **√2** 而不是"沿法线走一格"，
+/// 于是等值线是**八边形**，相邻像素的距离值会整格跳过 ≈1.414 个单位。
+/// 而 [`dilate_aa`] 的抗锯齿斜坡窗口在距离上只有 **1.0** 宽 —— 距离一跳 √2，斜坡就被
+/// **整格跨过去**，输出从 0 直接跳到 255：**斜边上是硬边**（用户报的"外缘轻微毛刺"）。
+///
+/// 实测（`.workbuddy/jag-cause/repro-dilate-hardedge.py`：同一份输入覆盖度、同一条斜坡
+/// 公式，只换距离度量）：
+///
+/// | 膨胀半径 | chamfer 3-4 硬跳占比 | 精确欧氏距离 |
+/// |---|---|---|
+/// | 6 px | **0.433** | 0.012 |
+/// | 12 px | **0.431** | 0.022 |
+///
+/// 判据：`到墨迹的距离是精确欧氏距离`、`斜边膨胀后不许出现硬跳`。
 fn coverage_distance(cov: &[u8], width: usize, height: usize) -> Vec<f32> {
-    const INF: f32 = 1.0e9;
-    const DIAG: f32 = std::f32::consts::SQRT_2;
-    let mut d: Vec<f32> = cov
+    // ⚠️ 这个"无穷大"必须**有限**：包络里要算 (f[q] + q²) − (f[p] + p²)，
+    //    两头都是 f32::INFINITY 会得到 NaN，整条包络静默作废 ——
+    //    而症状只是"毛刺没修好"，不报错。1e8 远大于任何真实平方距离（1080p 上限 ≈ 5e6）。
+    const FAR: f32 = 1.0e8;
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+    let mut grid: Vec<f32> = cov
         .iter()
-        .map(|&c| if c > 0 { 0.0 } else { INF })
+        .map(|&c| if c > 0 { 0.0 } else { FAR })
         .collect();
-    let (w, h) = (width as i64, height as i64);
-    let mut pass = |forward: bool| {
-        let ys: Vec<i64> = if forward {
-            (0..h).collect()
-        } else {
-            (0..h).rev().collect()
-        };
-        for y in ys {
-            let xs: Vec<i64> = if forward {
-                (0..w).collect()
-            } else {
-                (0..w).rev().collect()
-            };
-            for x in xs {
-                let i = (y as usize) * width + x as usize;
-                if d[i] == 0.0 {
-                    continue;
-                }
-                let mut best = d[i];
-                let s: i64 = if forward { 1 } else { -1 };
-                for (dx, dy, wt) in [
-                    (s, 0i64, 1.0f32),
-                    (0i64, s, 1.0),
-                    (s, s, DIAG),
-                    (-s, s, DIAG),
-                ] {
-                    let (nx, ny) = (x - dx, y - dy);
-                    if nx < 0 || ny < 0 || nx >= w || ny >= h {
-                        continue;
-                    }
-                    let cand = d[(ny as usize) * width + nx as usize] + wt;
-                    if cand < best {
-                        best = cand;
-                    }
-                }
-                d[i] = best;
-            }
+    let n = width.max(height);
+    let mut line = vec![0.0f32; n];
+    let mut out = vec![0.0f32; n];
+    // 第一趟：按列做一维平方距离变换
+    for x in 0..width {
+        for y in 0..height {
+            line[y] = grid[y * width + x];
         }
+        edt_1d(&line[..height], &mut out[..height]);
+        for y in 0..height {
+            grid[y * width + x] = out[y];
+        }
+    }
+    // 第二趟：按行，出来的是**平方**距离，最后开方
+    for y in 0..height {
+        let row = &mut grid[y * width..(y + 1) * width];
+        line[..width].copy_from_slice(row);
+        edt_1d(&line[..width], &mut out[..width]);
+        for x in 0..width {
+            row[x] = out[x].max(0.0).sqrt();
+        }
+    }
+    grid
+}
+
+/// 一维**平方**距离变换：`dst[q] = min_p ( src[p] + (q − p)² )`。
+///
+/// 抛物线包络的下沿（Felzenszwalb & Huttenlocher, *Distance Transforms of Sampled
+/// Functions*, Theory of Computing 2012），O(n)。两趟（列、行）组合即得精确的平方欧氏距离。
+fn edt_1d(src: &[f32], dst: &mut [f32]) {
+    let n = src.len();
+    if n == 0 {
+        return;
+    }
+    if n == 1 {
+        dst[0] = src[0];
+        return;
+    }
+    let mut v = vec![0usize; n];
+    let mut z = vec![0.0f32; n + 1];
+    let mut k = 0usize;
+    v[0] = 0;
+    z[0] = f32::NEG_INFINITY;
+    z[1] = f32::INFINITY;
+    let cross = |q: usize, p: usize| {
+        let qf = q as f32;
+        let pf = p as f32;
+        (src[q] + qf * qf - src[p] - pf * pf) / (2.0 * qf - 2.0 * pf)
     };
-    pass(true);
-    pass(false);
-    d
+    for q in 1..n {
+        let mut s = cross(q, v[k]);
+        while s <= z[k] {
+            if k == 0 {
+                break;
+            }
+            k -= 1;
+            s = cross(q, v[k]);
+        }
+        k += 1;
+        v[k] = q;
+        z[k] = s;
+        z[k + 1] = f32::INFINITY;
+    }
+    let mut k = 0usize;
+    for q in 0..n {
+        while z[k + 1] < q as f32 {
+            k += 1;
+        }
+        let d = q as f32 - v[k] as f32;
+        dst[q] = d * d + src[v[k]];
+    }
 }
 
 fn ring_of(outer: &[u8], inner: &[u8]) -> Vec<u8> {
@@ -2208,6 +2259,88 @@ mod tests {
         assert_eq!(d2.iter().filter(|v| **v > 0).count(), 9, "半径 2 应当铺满 3×3");
         assert_eq!(dilate_aa(&cov, w, h, 0), cov, "半径 0 = 原样返回");
     }
+    /// ★ **到墨迹的距离必须是精确定义的欧氏距离**（2026-10-19）。
+    ///
+    /// chamfer 3-4 只在 8 邻域里传播 `(1, √2)`，斜向有系统误差（半径 30 处实测 ≥ 1 px），
+    /// 而 [`dilate_aa`] 的抗锯齿斜坡窗口在距离上只有 **1.0** 宽 —— 误差够大就把斜坡整格跳过。
+    /// 这条判据拿**暴力枚举**当真值，逐像素比。
+    #[test]
+    fn 到墨迹的距离是精确欧氏距离() {
+        let w = 37usize;
+        let h = 29usize;
+        let mut cov = vec![0u8; w * h];
+        for &(x, y) in &[(3usize, 4usize), (30, 3), (18, 14), (5, 25), (35, 27), (12, 7)] {
+            cov[y * w + x] = 255;
+        }
+        let got = coverage_distance(&cov, w, h);
+        let mut worst = 0.0f32;
+        for y in 0..h {
+            for x in 0..w {
+                let mut best = f32::INFINITY;
+                for yy in 0..h {
+                    for xx in 0..w {
+                        if cov[yy * w + xx] > 0 {
+                            let dx = x as f32 - xx as f32;
+                            let dy = y as f32 - yy as f32;
+                            let d = (dx * dx + dy * dy).sqrt();
+                            if d < best {
+                                best = d;
+                            }
+                        }
+                    }
+                }
+                let diff = (got[y * w + x] - best).abs();
+                if diff > worst {
+                    worst = diff;
+                }
+            }
+        }
+        assert!(
+            worst < 0.01,
+            "最大偏差 {worst} px —— chamfer 3-4 在这张图上会差到 1 px 以上"
+        );
+    }
+
+    /// ★ **斜边膨胀之后不许出现 0→255 的硬跳**（2026-10-19，用户报的"外缘轻微毛刺"）。
+    ///
+    /// 45° 的抗锯齿边（覆盖度按到边的有符号距离线性过渡）膨胀 6 px：精确 EDT 下斜坡处处
+    /// 采得到；chamfer 3-4 下斜向整格跳过 1.414 个单位，斜坡被跨过去 ⇒ 输出 0 直接跳 255。
+    #[test]
+    fn 斜边膨胀后不许出现硬跳() {
+        let n = 160usize;
+        let mut cov = vec![0u8; n * n];
+        for y in 0..n {
+            for x in 0..n {
+                let s = ((x as f32) - (y as f32)) / std::f32::consts::SQRT_2 - 30.0;
+                cov[y * n + x] = ((0.5 - s).clamp(0.0, 1.0) * 255.0).round() as u8;
+            }
+        }
+        let out = dilate_aa(&cov, n, n, 6);
+        let (mut hard, mut soft) = (0usize, 0usize);
+        for y in 0..n {
+            for x in 0..n {
+                let mut tally = |d: i32| {
+                    if d >= 200 {
+                        hard += 1;
+                    } else if d > 8 {
+                        soft += 1;
+                    }
+                };
+                if x + 1 < n {
+                    tally((i32::from(out[y * n + x + 1]) - i32::from(out[y * n + x])).abs());
+                }
+                if y + 1 < n {
+                    tally((i32::from(out[(y + 1) * n + x]) - i32::from(out[y * n + x])).abs());
+                }
+            }
+        }
+        let ratio = hard as f32 / (hard + soft).max(1) as f32;
+        assert!(
+            ratio < 0.05,
+            "硬跳 {hard} / 软步 {soft} = 占比 {ratio:.3}（chamfer 3-4 在这里是 0.43）"
+        );
+    }
+
     /// ★ **环带 = 宽环 − 内圈**（2026-10-16 外圈描边）。
     ///
     /// ⚠️ 必须**饱和**相减：内圈在内侧边缘上可能比宽环大（两遍的量化差），
