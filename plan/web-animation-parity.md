@@ -126,7 +126,7 @@
 | 5 | **采样器** filter / address 对齐，**尽量避免非整数缩放** | 要写进口径 |
 | 6 | **AA / MSAA 相同或两端都关** | 要写进口径 |
 | 7 | **共享预栅格化**：文字/矢量/复杂静态元素 → 算一次、两端用同一份位图 | ✅ 缝已存在（`set_text_bitmap` / `set_bitmap` / `set_danmaku_bitmap`） |
-| 8 | **判据走真实预览链路**（`draw → canvas → readback` vs `dhampir render` 输出） | ❌ **未做，是 G2 的前置** |
+| 8 | **判据走真实预览链路**（`draw → canvas → readback` vs `dhampir render` 输出） | ✅ **做了**（第 83 轮）：`node scripts/check-preview-path.mjs` —— 浏览器 `engine.seek → dhampir_project_draw → canvas`（CDP 按画布矩形 1:1 截图）vs CLI `dhampir frame`，**103 层全覆盖工程 3 帧**：**max|Δ| = 1**、最差帧 SSIM **0.999903442**、PSNR **62.44 dB** ⇒ 与跨厂商那一档（1 LSB）**正好对齐**。这就是 **G2 的前置**，现在它是读数而不是一句话 |
 
 ---
 
@@ -195,8 +195,8 @@ node scripts/check-capabilities.mjs --self-test # 8 个变异，证明它会红
 | 1 | **素材取用契约未做**（按 GOP 分片；`plan/p1-p5-status.md` 未做清单第 1 条） | 远端预览 + 服务端导出走不通 | 阶段 4 之前用**纯合成（无解码）**跑通，别被素材卡住 |
 | 2 | **缓动的契约形状**：现在是单元枚举，装不下参数化缓动 | 决定后面所有代码形状 | **阶段 0 必须先拍** |
 | 3 | **色彩口径（D14）尚未强制**（只是约定） | 像素判据的对齐基线不稳 | 随 §7 第 3/4 条一起转强制 |
-| 4 | **预览缓存两条已知风险**（pre-roll 与调用方交位图冲突；`followPlayback` 下预渲染取到"当前画面"） | 缓存命中会交**错帧** | 阶段 6 切预览之前逐条关掉 |
-| 5 | **`check-dual-end` 不经过 `draw`** | "逐像素"没有度量 | 阶段 3 之前补这条判定 |
+| 4 | **预览缓存两条已知风险**（pre-roll 与调用方交位图冲突；`followPlayback` 下预渲染取到"当前画面"） | 缓存命中会交**错帧** | 阶段 6 切预览之前逐条关掉 —— ⚠️ **第 83 轮仍然没关**（第 83 轮补的是 G2 像素判据，不是这条）。处置办法写在 `docs/preview-cache.md`，两条各自的判据还没写 |
+| 5 | **`check-dual-end` 不经过 `draw`** | "逐像素"没有度量 | ✅ **第 83 轮关掉**：新增 `node scripts/check-preview-path.mjs` —— 它走的正是 `engine.seek → dhampir_project_draw → canvas` 那条**真实预览链路**（CDP 按画布矩形 1:1 截图），与 CLI `dhampir frame` 比：**max\|Δ\| = 1** / SSIM 0.999903442 / PSNR 62.44 dB（103 层全覆盖工程）。`check-dual-end` 那条离屏腿**照旧保留**（它验的是另一条路，不是替代） |
 | 6 | 浮点秒 → 整数帧（29.97 类） | 两端分叉 | 阶段 0 口径 |
 | 7 | 两端字体度量不同源 | 文字像素不可能一致 | 走 §7 第 7 条：**共享预栅格化** |
 
@@ -265,14 +265,14 @@ node scripts/check-capabilities.mjs --self-test # 8 个变异，证明它会红
 | 阶段 | 状态 | 证据 / 备注 |
 |---|---|---|
 | **0** 口径与决策 | ✅ 已完成 | [plan/web-animation-criteria.md](./web-animation-criteria.md)（D1–D4 已拍；含 D2 的实现定版与派生物代价） |
-| **1** CSS 缓动 | ✅ 已落地（浏览器逐值判据未跑） | [plan/waapi-stage1-evidence.md](./waapi-stage1-evidence.md)；**浏览器逐值对照尚未采集**（跑 `node scripts/easing-reference.mjs`） |
+| **1** CSS 缓动 | ✅ 已落地（**浏览器逐值对照已采集**，第 83 轮） | [plan/waapi-stage1-evidence.md](./waapi-stage1-evidence.md)；`node scripts/easing-reference.mjs` → **19 条缓动 × 21 点 × 两列 = 798 个点**，Rust 侧 `cargo test -p dhampir-timeline --lib -- --ignored` **逐值通过，最大偏差 4e-6**（`cubic-bezier(0.68,-0.55,0.265,1.55)` 在 t=0.75 的 unclamped 列）。**采集时抓到一个真缺口**：探针页的名单比脚本的 `REQUIRED_EASINGS` 少三条 `linear()`（第 37 轮加了能力、名单没跟上）⇒ 参考里"什么都没有"，已补齐 |
 | **2** `anim2doc` 转译器 | ✅ 已落地（第 15 轮起也搬 `filter:` / `mix-blend-mode` / `border-radius`） | [plan/waapi-stage2-evidence.md](./waapi-stage2-evidence.md)；链路端到端验过（probe 绿 + 出 PNG，底色像素证明数据走到了像素）；守卫已登记进 `run-guards.mjs` |
 | **3** HTML 宿主 | 🟡 数值一致与**形状对表**都已验，画面待你在浏览器确认 | [plan/waapi-stage3-evidence.md](./waapi-stage3-evidence.md)；`web/dom-host.{html,mjs}` + `web/anim-eval.mjs`；判据 `check-anim-eval.mjs`（31 帧 ×5 通道，实测偏差 9.37e-6，容差 1e-4 且有区分度）与 `check-host-parity.mjs`（8 接口 ↔ 35 个承诺名） |
-| **4** 设计完整度 | 🟡 已迈第一步 | 能力登记表 `web/capabilities.json` + 判据 `check-capabilities.mjs`；**DOM 宿主已能画特效与混合模式**（`web/dom-css.mjs`：只搬能证明等价的 —— 对比度/模糊/饱和度；亮度与色相**拒绝并报到页面**，口径 D8；混合模式 DOM 9/9、引擎 4/9，差额报出，口径 D9） |
+| **4** 设计完整度 | 🟡 已迈第一步（第 80 轮补了 R7/R8：`partial` 必须指出处、笔记不许复述**测量读数**） | 能力登记表 `web/capabilities.json` + 判据 `check-capabilities.mjs`；**DOM 宿主已能画特效与混合模式**（`web/dom-css.mjs`：只搬能证明等价的 —— 对比度/模糊/饱和度；亮度与色相**拒绝并报到页面**，口径 D8；混合模式 DOM 9/9、引擎 4/9，差额报出，口径 D9） |
 | **5** 能力迁移 | 🟡 已推三条线 | `filter.blur`：口径对账并**钉住**（`radius = 2 × CSS σ`，D5，反向验证过会红）。`filter.color`：拆成四条后发现**两条不等价**（brightness 乘 vs 加；hue 矩阵不同源），口径与「要真等价得新增什么」记在 D6。`timing.direction`：**能转了** —— 反向那一遍靠镜像 `E′(u)=1−E(1−u)` 表达（D7）；不可镜像的缓动与同向重播的跳变明说不支持 |
-| **6** 切预览 | ⏳ 未开始 | 前置：阶段 3 的画面确认 + wasm pkg 重建 |
+| **6** 切预览 | 🟡 **前置已全部就位**（第 83 轮） | 前置三条都清了：① 阶段 3 的画面确认（`records/web-parity/dom-host-frame0.png`）；② wasm pkg 重建（`wasm-pack build crates/dhampir-wasm --target web --out-dir www/pkg --dev`）；③ **G2**：`check-preview-path.mjs` 证明"预览那条腿 = 成片"（max|Δ| 1 / SSIM 0.999903 / PSNR 62.44 dB）。剩下的是产品决定：什么时候把画面从 HTML 切到 dhampir |
 | **几何原语** | ✅ 圆角 + ✅ 裁剪形状（circle / ellipse / inset；polygon/path 明确不做）；两者都是「每像素一个覆盖度」，判据含逐字节不变与 GPU 判别点；**转译器侧也已学会**（第 17 轮） |
-| **掩码纹理** | 🟡 契约 + 校验 + 渲染前拒绝（第 20 轮）+ **合成器已能画**（第 21 轮，GPU 用例钉住）；「素材 → 纹理」也接了（worker 复用同一条解码通路；浏览器宿主还没接 ⇒ 走默认实现 ⇒ 拒绝）。设计：**D12** |
+| **掩码纹理** | 🟡 契约 + 校验 + 渲染前拒绝（第 20 轮）+ **合成器已能画**（第 21 轮，GPU 用例钉住）；「素材 → 纹理」也接了（worker 复用同一条解码通路）。**浏览器那条通路的接法与"接没接"要说准（第 80 轮核）**：wasm 宿主有 `dhampir_project_set_mask_image`、JS 侧有 `engine.uploadMasks()` 且示范页 `web/effects-demo-wasm.html` 会调 —— **但预览应用 `web/app.js` 打开工程时还没上传掩码位图**，所以预览里走默认实现 ⇒ 拒绝。设计：**D12** |
 | **读回型 / 矢量** | 📐 **设计已定、代码未动**（第 19 轮）：D12 掩码纹理（三层决定 + 一条新坐标口径）、D13 读回型（一次投入带三批：5 条混合模式 + drop-shadow + backdrop-filter）、D14 矢量渲染器（量级不同，明确不在本轮）。判据强制：**每条 `needs-primitive` 都必须指向一个真的存在的设计节** | [criteria D10](./web-animation-criteria.md)：先把缺口分成**读回型 / 几何型 / 其他**三档；几何型里先做**圆角**（不需要新基建、契约是加法、判据可自证）。**先落文档再动渲染主路径**是硬规矩 |
 
 **环境提醒**：本机 agent 会话跑 cargo 的方式（vcvars 变量 + 输出重定向到 `target/` + `TEMP` 指到工作区）
@@ -303,8 +303,17 @@ node scripts/check-capabilities.mjs --self-test # 8 个变异，证明它会红
 
     node scripts/guards-inventory.mjs
 
-它逐个跑 26 条守卫的 `--self-test`，从它们**自己的输出**里读"自检了几个变异"，并报出正检现在是否通过。
-同样是**生成**而不是手写 —— 手写的"谁有几个变异"一定会过期。
+它逐个跑**全部守卫**（第 80 轮起是 29 条）的 `--self-test`，从它们**自己的输出**里读"自检了几个变异"，
+并报出正检现在是否通过。同样是**生成**而不是手写 —— 手写的"谁有几个变异"一定会过期。
+
+**第 80 轮修了这张表的两个隐患**（都是"表会撒谎"那一类）：
+
+1. **清单从抄改成读**：它原来是一份**手抄的 26 条**，而 `run-guards.mjs` 已经 27 条（漏了 `check-frame-pacing.mjs`）
+   —— 少一行**永远看不出来**。现在直接 `import { GUARDS } from './run-guards.mjs'`；
+   为了这一行，`run-guards.mjs` 补了入口守卫（被 import 时不许跑 CLI）。
+2. **三态而不是两态**：起不来的（spawn 失败）原来被印成"正检红 + **没有自检**" ——
+   本会话受限环境里 27 条全被那样读了一遍。"读不出来"与"没有"是两件事，现在分开印，
+   而且**一条都跑不起来时不印"0 个变异"**（把"读不到"印成 0 就是撒谎）。
 
 **第 64 轮写在这里的"发现"是错的，第 65 轮更正** ✗ → ✓：当时写着"26 条里只有 6 条带自检（72 个变异），20 条没有"——
 **真相是 26 条全都有**。错因很小、后果不小：我的解析只认 `N 个变异` / `N 个错误映射器` 两种说法，
@@ -316,3 +325,52 @@ node scripts/check-capabilities.mjs --self-test # 8 个变异，证明它会红
 
 **教训**：**"读不出来"不等于"没有"**。我把"我的正则读不到"直接当成了"那些守卫没有自检"，
 还把它当成结论写进文档 —— 这是本会话第二次"写下来的推理被复查出错"（第一次是 D7 那一堵其实不存在的墙）。
+
+---
+
+## 附三：**判据跑在哪**（第 80 轮加）—— CI 从 4 条到 23 条
+
+     node scripts/check-ci-guards.mjs
+
+**为什么加**：守卫到第 80 轮已经 29 条，而 CI 只跑 4 条。判据不上 CI 的真实后果不是"少验一点"，
+而是它会在下一次改动里**悄悄烂掉** —— 本地谁记得跑谁才知道。这一档里最要紧的几条
+（能力登记表、宿主对表、waapi2doc 的 23 个变异、anim-eval 的逐通道对照、差异台账）此前**只在开发机上跑过**。
+
+**怎么做的**（一条规矩：**名单只能有一处真相**）：
+
+* 每条守卫在 `run-guards.mjs` 的 `GUARDS` 里多了一个 `deps`：
+  `static` / `records` / `cargo` / `wasm-pkg` / `ffmpeg` / `cli` / `browser`；
+* `IN_CI` 写明哪几档该在 runner 上跑（`static` / `records` / `cargo`）；
+* `ci.yml` **不抄名字**：`node scripts/run-guards.mjs --only-deps static,records`（guard job）
+  与 `--only-deps cargo`（check-native job，要 rust 的那两条契约判据）；
+* `check-ci-guards.mjs` 判**漏档**（该跑没跑）、**多档**（跑了跑不了的）、**点名了不存在的脚本**，
+  自检 10 条断言；它自己在 `static` 档里 —— 所以"它也得在 CI 里跑"由它自己判。
+
+**第 81 轮的本地读数**（改完当场跑全套，`target/verify/guards-all-80.txt`）：**24 / 29 条绿**
+（那一轮结束时是 **30 条**：又加了 `measure-dom-parity`（量测工具，不进清点）与 `check-preview-path`（`browser` 档））。
+红的 5 条里 4 条是环境（`check-frame-pacing` / `check-local-backend` / `check-cli` 退 2 = 起不来；
+`check-dual-end` 要浏览器而本会话的 Chrome 被沙箱挡在 crashpad 上），
+剩下 1 条 `timeline-contract` 是**真实漂移**（未提交 WIP 的 4 个键，见第 80 轮（续二）第 ② 条）——
+**它以前因为"起不来"红得没有信息量，现在红得说得清是哪里不同步。**
+
+**跑不到的 6 条**（`wasm-pkg` / `ffmpeg` / `cli`（含新的老工程基线） / `browser`）**明确不进 CI**：
+runner 上没 ffmpeg / GPU / 浏览器 / 已构建产物，塞进去只会把"环境没装好"伪装成"代码回归"。
+它们的去处是开发机与 `node scripts/web-parity-pending.mjs` 那份清单。
+
+---
+
+## 附四：**老工程逐字节不变** 从"一句话"变成"一条命令"（第 80 轮）
+
+     node scripts/check-old-project-baseline.mjs
+
+**它管的不变量**是这条线的地基：老工程渲染出来不许变。此前它只有一个**复现不出来**的口径 ——
+台账里那句 `frame(plain) sha256 = 8b7d9e18a7320ee7`（没记工程、没记命令、没记帧号；第 80 轮逐条试都对不上）。
+**一条复现不出来的判据比没有更坏：它让人以为自己验过了。**
+
+现在的口径是**两份二进制**：当次构建（`target/{debug,release}` 里较新的那个）与
+`dist/` 里版本号最大的已发布产物（解压前先按 `.sha256.txt` 校验产物本身没被动过），
+渲染同一份工程、同一批帧，**逐帧比 PNG 字节**。缺工程/缺产物**退 2**（没验 ≠ 通过）。
+
+**第 80 轮的读数**：`out/effects-demo` 的 14 帧（0/45/100/135/200/250/300/350/400/450/500/550/600/650）
+在「当次构建 ↔ `dhampir-0.4.0-win32-x64`」下 **14/14 逐字节相同**；帧 0 的摘要 `7a2ce327f0a3475e`
+与第 79 轮记下的那个读数一致。

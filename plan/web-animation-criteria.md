@@ -8,6 +8,14 @@
 > 1. 老工程**逐字节不变**（既有取值原样保留、原样回写）；
 > 2. core 既有关键帧用例**一字不改继续绿**。
 
+> ⚠️ **2026-10-16 口径更新（复核时发现）**：本文件多处引用的基线 `frame(plain)` sha256
+> `8b7d9e18a7320ee7` —— **没有记工程与命令，复现不出来**（照着 fixtures 逐个试都对不上）。
+> 已换成可复现口径：`out/effects-demo/effects-demo.doc.json` + `--asset-root out/effects-demo` 取 14 帧，
+> 与 `dist/dhampir-0.3.0-win32-x64.zip` / `0.4.0` 的 `bin/dhampir.exe` **三份二进制两两比 PNG 字节 ⇒ 14/14 逐字节相同**。
+> 读数见 [plan/web-engine-measurements.md](./web-engine-measurements.md) 第一节的复核注与
+> [plan/waapi-stage3-evidence.md](./waapi-stage3-evidence.md) 第 80 轮。
+> 下面的引用**保留原文**（那是当时的过程记录），但**别再拿这个哈希当今天的判据**。
+
 ---
 
 ## 决定一览

@@ -91,3 +91,21 @@ node scripts/run-guards.mjs             # 26 条一次跑完（本会话的沙�
 - **素材掩码两端接通**：wasm 宿主有 dhampir_project_set_mask_image(asset_id, bitmap) + BoundVideos::mask_texture_for + 宿主注册表；JS 侧有 engine.uploadMasks()（open 之后 await 一次）。没交进来的掩码会让 draw **响亮报错**。
 - **签名级判据**：api-surface 现在比对文档标题里的参数名与 Rust 签名的参数名（第 74 轮那处漂移就是这样漏的，现在会被抓；已现场反向验证）。
 - **三件生成式工具**：web-parity-pending.mjs（待办 + 操作手册）、guards-inventory.mjs（判据家底）、guard-coverage.mjs（改了实现该跑哪条守卫 —— 这一条只读文件不 spawn，没有管道也能跑）。
+
+## 九、交接后的独立复核（2026-10-16）
+
+逐条读数见 [plan/waapi-stage3-evidence.md](./waapi-stage3-evidence.md) **第 80 轮**。要点：
+
+- **「老工程逐字节不变」换成了可复现口径**：`out/effects-demo/effects-demo.doc.json` + `--asset-root out/effects-demo`
+  取 14 帧，与 `dist/dhampir-0.3.0-win32-x64.zip` / `0.4.0` 里的 `bin/dhampir.exe` **三份二进制两两比 PNG 字节 ⇒ 14/14 逐字节相同**
+  （帧 0 前 16 位 `7a2ce327f0a3475e`，与第 79 轮的读数一致）。上面 §三/§七 那条 `frame(plain) = 8b7d9e18a7320ee7`
+  **没记工程与命令、复现不出来** —— 已在本轮换掉口径（哈希本身不再被引用）。
+- **判据**：27 条守卫**直接跑**（`run-guards.mjs` 在本会话起不了子进程，会报 0/27 —— **那是假读数**）
+  = **21 绿 / 6 红，自检 27/27 绿**，6 条红全是环境（wasm pkg 陈旧、ffmpeg/cargo/dhampir 起不来、要浏览器）。
+  `guards-inventory.mjs` 同样会打出"全红、零自检"的假读数，原因一样。
+- **本轮修掉的真红/真缺口**：① `docs/track-style-overwrite-fix.md` 的 228 个 CR（→ LF，内容逐字符一致）；
+  ② GPU 用例 `调整图层的_noise_是逐像素可复现的黑白噪声` 没进实测索引（29→30 条）；
+  ③ **`web/anim-eval.mjs` 缺 `linear()` 断点表** —— 转译器的镜像会产出这个形状，DOM 宿主撞上就直接抛错；已按 `easing.rs` 同语义补上，
+  判据 31 帧 ×5 通道最大偏差回到 **9.37e-6**，并做了"故意打断 ⇒ 红"的反向验证。
+- **仍未做**：wasm pkg 重建（本会话沙箱不给写 `crates/`）、`schema/` 与**未提交 WIP** 那 4 个键的对齐
+  （`node scripts/timeline-contract.mjs --write` 一条命令；改不改由 WIP 那条线拍）、浏览器侧三条（照旧要人 + 浏览器）。
