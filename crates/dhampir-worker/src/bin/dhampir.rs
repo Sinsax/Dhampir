@@ -2775,7 +2775,22 @@ mod tests {
         // 做法：造一个本测试专用的目录，往里放一个**名字像字体**的文件。
         // 这里只验 CLI 的**参数判定**、不真解析字体，所以空壳文件就够。
         let scratch = std::env::temp_dir().join(format!("dhampir-fontdir-{}", std::process::id()));
-        std::fs::create_dir_all(&scratch).expect("建临时字体目录");
+        // ⚠️ **别只认 `temp_dir()`**：受限沙箱下 %TEMP% 对测试子进程是**拒写**的
+        // （本机实测 `Os { code: 5 }`，而同一个目录从普通 shell 建得出来 —— 于是这条判据
+        //  会表现成"代码坏了"，其实是环境）。退回**仓库的 `target/tmp`**：在"只许写工作区"
+        // 的策略下它仍然可写，并且随 `/target/` 一起被 gitignore。
+        // ⚠️ 报错**要点名路径**（本仓口径）：以前只给 `Os { code: 5 }`，看到的人无从知道是哪个目录。
+        let scratch = if std::fs::create_dir_all(&scratch).is_ok() {
+            scratch
+        } else {
+            let fallback = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/tmp")
+                .join(format!("dhampir-fontdir-{}", std::process::id()));
+            if let Err(e) = std::fs::create_dir_all(&fallback) {
+                panic!("建临时字体目录失败：{}（{e}）", fallback.display());
+            }
+            fallback
+        };
         std::fs::write(scratch.join("probe.ttf"), b"not a real font").expect("放一个占位字体");
         args.font_dir = Some(scratch.to_string_lossy().to_string());
         // `resolve_font` 回的是 `--font-file` 那一份（`Option<&Path>`）；

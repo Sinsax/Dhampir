@@ -1625,6 +1625,10 @@ fn ring_of(outer: &[u8], inner: &[u8]) -> Vec<u8> {
 /// 与填充连成一块` 一开始在测试里**又抄了一遍**这两行，于是把生产代码的顺序
 /// 反过来（变异）时测试**照样绿** —— 它测的是自己抄的那份。抽出来之后
 /// 两边调的是同一个函数，变异才拦得住。
+/// ⚠️ **生产路径不用它了**（2026-10-16 起描边改成对覆盖度膨胀，见 [`rasterize_with_stroke`]）——
+/// 留着是因为判据 `描边是另一种颜色而不是与填充分成一块` 要拿它当被测对象。
+/// 挂 `#[cfg(test)]` 是为了消掉 `cargo check --all-targets` 里那条 dead_code 警告。
+#[cfg(test)]
 fn compose_stroke_and_fill(
     stroke_cov: &[u8],
     fill_cov: &[u8],
