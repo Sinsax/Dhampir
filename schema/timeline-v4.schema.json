@@ -984,7 +984,7 @@
           "minimum": 0
         },
         "origin": {
-          "description": "**绝对盒原点**（归一化 0..1，**文字块左上角**）。None = 沿用本仓自己的锚点（现状，零回归）。\n\n# 与 anchor_bottom 的分工（两个都管纵向，但不是一个东西）\n\n* anchor_bottom：文字块**底边**贴在哪 —— 横向**仍然居中**，纵向由它推；\n* origin：**整块**摆在哪 —— 给了它，横向与纵向都用它，anchor_bottom 不参与。\n\n# 为什么需要它（2026-10-15）\n\n宿主（YekiTrim）的面板给**每个**文字元素算好了「盒左上角百分比」\n（process 的 placement::Pick）—— 那是**逐事件**的自由落点。\n本仓原本只有「上/中/下 + 横向居中」这一套（anchor_bottom），**表达不出**任意一个绝对点\n⇒ 宿主那条通道发过来的位置在出片这一侧被丢掉。\n需求书与验收判据：YekiTrim 仓的 docs/plan/dhampir-text-origin-request.md。\n\n⚠️ **竖排（vertical）忽略本字段** —— 与 anchor_bottom 同一条口径（竖排下纵向变成了\n   **长度方向**，语义转置了；见 text_layout::layout 里那段说明）。\n\n⚠️ skip_serializing_if 不能省：没写时**一个键都不许出现**（既有工程逐字节不变）。",
+          "description": "**绝对盒原点**（归一化 0..1，**文字块左上角**）。None = 沿用本仓自己的锚点（现状，零回归）。\n\n# 与 anchor_bottom 的分工（两个都管纵向，但不是一个东西）\n\n* anchor_bottom：文字块**底边**贴在哪 —— 横向**仍然居中**，纵向由它推；\n* origin：**整块**摆在哪 —— 给了它，横向与纵向都用它，anchor_bottom 不参与。\n\n# 为什么需要它（2026-10-15）\n\n宿主（YekiTrim）的面板给**每个**文字元素算好了「盒左上角百分比」\n（process 的 placement::Pick）—— 那是**逐事件**的自由落点。\n本仓原本只有「上/中/下 + 横向居中」这一套（anchor_bottom），**表达不出**任意一个绝对点\n⇒ 宿主那条通道发过来的位置在出片这一侧被丢掉。\n需求书与验收判据：YekiTrim 仓的 docs/plan/dhampir-text-origin-request.md。\n\n⚠️ **竖排（vertical）也认本字段**（2026-10-20）：本字段是\"整块摆在哪\"的\n   **绝对**通道，两种排法下含义相同 —— 竖排取\"列阵左上角\"（列顶 = `y`，\n   最左那一列的盒左边 = `x`；列序仍从右往左，整块自 `x` 向右铺开）。\n   竖排**仍然忽略** `anchor_bottom`（那个才是\"纵向位置\"的字段，竖排下语义转置了）；\n   把两者混为一谈曾是\"竖排后位置被重置到画面中心\"的根因。见 text_layout::layout。\n\n⚠️ skip_serializing_if 不能省：没写时**一个键都不许出现**（既有工程逐字节不变）。",
           "type": [
             "array",
             "null"

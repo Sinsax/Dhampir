@@ -466,7 +466,12 @@ pub fn layout(text: &str, style: &SubtitleStyle, sequence: (u32, u32)) -> TextLa
     //
     // ⚠️ 竖排**忽略 `anchor_bottom`**（第一版的口径收窄）：那个字段管的是
     //    横排下的纵向位置，而竖排下纵向变成了**长度方向**，语义转置了。
-    //    第一版改为按内容居中 —— 如实写在这里，别让后人以为它是完整的转置。
+    //    没给 `origin` 时改为按内容居中 —— 如实写在这里，别让后人以为它是完整的转置。
+    //
+    // ⚠️ 但**绝对落点 `origin` 竖排必须认**（2026-10-20）：它是"整块摆在哪"，
+    //    与 `anchor_bottom`（"底边贴哪"）不是一回事 —— 前者在两种排法下都成立，
+    //    后者只在横排下有意义。竖排**跳过** `anchor_bottom` 不等于跳过 `origin`：
+    //    那正是"竖排后位置被重置到画面中心"这个缺陷的形状（见下面竖排分支）。
     let safe_h = if style.safe_width_ratio > 0.0 {
         // 复用同一个安全比例：用户配 0.875 的意图是"留出四周安全边"，
         // 横竖都该是同一个数（竖排不需要另一份配置）。
@@ -632,11 +637,22 @@ pub fn layout(text: &str, style: &SubtitleStyle, sequence: (u32, u32)) -> TextLa
                 continue;
             }
             // 这一列在横向的位置：第一列靠右，依次向左。
+            //
+            // ⚠️ 这里只算**相对骨架**（0.5 兜底的居中阵），给了 `origin` 时
+            //    整块会被下面的平移搬到 `origin.x`（见那个循环之后的说明）。
             let col_center =
                 0.5 + (total_cols - 1.0) / 2.0 * col_step_norm - col_index as f32 * col_step_norm;
-            // 整列纵向居中：竖排忽略 `anchor_bottom`（见上面 `safe_h` 的说明）。
+            // **列顶**：给了 `origin` ⇒ 就是它的 y —— 与横排那句「第一行行盒顶边
+            // = origin.y」**同义**（每列都对齐到同一条顶线，正如横排每行都对齐到
+            // 同一条左边）；没给 ⇒ 老式子：整列按内容纵向居中。
+            //
+            // ⚠️ 竖排仍**不读** `anchor_bottom`（那个字段的语义在竖排下转置了，
+            //    见上面 `safe_h` 那段）；接住"块摆在哪"的是 `origin` 这条**绝对**通道。
             let col_len_norm = chars.len() as f32 * line_height_norm;
-            let col_top = 0.5 - col_len_norm / 2.0;
+            let col_top = match origin {
+                Some((_, y)) => y,
+                None => 0.5 - col_len_norm / 2.0,
+            };
             for (ci, ch) in chars.into_iter().enumerate() {
                 let w = (measure_em(&ch.text) * font_px / sequence_width).min(1.0);
                 lines.push(TextLine {
@@ -652,6 +668,36 @@ pub fn layout(text: &str, style: &SubtitleStyle, sequence: (u32, u32)) -> TextLa
                         height: line_height_norm,
                     },
                 });
+            }
+        }
+        // -----------------------------------------------------------------
+        // **块左边 = origin.x**（竖排这一侧最后一环）
+        // -----------------------------------------------------------------
+        //
+        // 横排那句是 `x: origin.x` —— 它钉的量是**文字盒的左边**（`rect.x`），
+        // 竖排必须是**同一个量**，否则就是"两套坐标系"（本仓吃过两次的坑）。
+        //
+        // ⇒ 整块**平移**过去：把列阵的 `min(rect.x)` 搬到 `origin.x`。
+        //
+        // ⚠️⚠️ 为什么不能拿**列格左边**（`col_center - col_step_norm / 2`）当左边：
+        //    列格宽 = 行高 `line_height_norm`，而横/纵归一化的分母是**画宽/画高**
+        //    ⇒ 16:9 上单个列格在横向上比字宽得多（实测 origin=[0.12,0.18] +
+        //    字号 0.0667：差 41px）。拿列格左边当盒左边，字会**离 origin.x 差半个格**，
+        //    症状与"没接 origin"只差一点，看着仍然像"还是偏"。
+        //    平移则与横排逐值同义：盒左边 = origin.x，字的形状一点没动（只搬不量）。
+        //
+        // ⚠️ 只在**给了** origin 时搬：没给 ⇒ 上面那条 0.5 兜底**逐字节不变**（R4）。
+        if let Some((x, _)) = origin {
+            let left = lines
+                .iter()
+                .map(|line| line.rect.x)
+                .fold(f32::INFINITY, f32::min);
+            // 一个字都没排出来（`chars` 全空 / `max_lines = 0`）⇒ 没有盒子可搬。
+            if left.is_finite() {
+                let dx = x - left;
+                for line in &mut lines {
+                    line.rect.x += dx;
+                }
             }
         }
         return TextLayout {
@@ -1834,6 +1880,220 @@ mod tests {
             );
             let got: String = v.lines.iter().map(|l| l.text.as_str()).collect();
             assert_eq!(got, text, "竖排丢了字：{text} -> {got}");
+        }
+    }
+
+    // =======================================================================
+    // 竖排 ✕ origin（2026-10-20）——「竖排后位置被重置到画面中心」的判据
+    // =======================================================================
+
+    /// **块左上角**（归一化）= 所有行盒的 `min(rect.x)` / `min(rect.y)`。
+    ///
+    /// 这是 `SubtitleStyle::origin` 的契约量（"文字块左上角"），
+    /// 横排与竖排**都**要在同一个量上给出同一个数 —— 两种排法各量各的量，
+    /// 判据就会绿在"两套坐标系"上（本仓为这件事吃过两次）。
+    fn 块左上角(l: &TextLayout) -> (f32, f32) {
+        (
+            l.lines
+                .iter()
+                .map(|line| line.rect.x)
+                .fold(f32::INFINITY, f32::min),
+            l.lines
+                .iter()
+                .map(|line| line.rect.y)
+                .fold(f32::INFINITY, f32::min),
+        )
+    }
+
+    /// 竖排的样式：与 CLI 探针（`dhampir subtitle`）同一组数，老基线才对得上。
+    fn 竖排样式(origin: Option<[f32; 2]>) -> SubtitleStyle {
+        SubtitleStyle {
+            vertical: Some(true),
+            font_ratio: 0.0667,
+            safe_width_ratio: 0.875,
+            max_lines: 3,
+            keep_all_lines: true,
+            origin,
+            ..style()
+        }
+    }
+
+    /// ★ **竖排也必须认 `origin`**：块的左上角就是它，且换成另一个值必须跟着变。
+    ///
+    /// ⚠️ **两个方向都钉**：只钉"给了就用"，把 `origin` 写死成常量也能过；
+    /// 只钉"没给是居中"，字段接没接上照样绿。所以两个 origin 都要量、且要比差异。
+    #[test]
+    fn 竖排也认_origin_块左上角就是它() {
+        let text = "春夏秋冬";
+        let mut seen: Vec<(f32, f32)> = Vec::new();
+        for origin in [[0.12_f32, 0.18], [0.8, 0.8]] {
+            let v = layout(text, &竖排样式(Some(origin)), SEQUENCE);
+            // ⚠️ **先断言行数**：退化实现给 1 行时，下面的循环会一次都不进。
+            assert_eq!(v.lines.len(), 4, "竖排四个字必须是四行（逐字）");
+            let (x, y) = 块左上角(&v);
+            assert!(
+                (x - origin[0]).abs() < 1e-6,
+                "竖排块左边必须 = origin.x（origin={origin:?}，实得 {x}）"
+            );
+            assert!(
+                (y - origin[1]).abs() < 1e-6,
+                "竖排块顶边必须 = origin.y（origin={origin:?}，实得 {y}）"
+            );
+            // 平移不改形状：同一列里各字的 x 仍然全同、逐字 y 依次下行。
+            let xs: Vec<f32> = v.lines.iter().map(|l| l.rect.x).collect();
+            for xa in &xs {
+                assert!((xa - xs[0]).abs() < 1e-9, "同一列各字 x 必须相同：{xs:?}");
+            }
+            seen.push((x, y));
+        }
+        // **换成另一个 origin，结果必须跟着变**（写死常量 / 忽略字段都过不了这条）。
+        assert!(
+            (seen[0].0 - seen[1].0).abs() > 0.5 && (seen[0].1 - seen[1].1).abs() > 0.5,
+            "换 origin 必须跟着动（实得 {seen:?}）"
+        );
+    }
+
+    /// ★ **竖排多列**：整块自 `origin.x` 向右铺开（列序仍从右往左），
+    /// 每一列的**列顶**都是 `origin.y`（= 横排"每一行都对齐到同一条左边"的转置）。
+    ///
+    /// 用 5 个字 / 每列 2 字 ⇒ 三列长度 **2 / 2 / 1** —— 长短不一，
+    /// 于是"顶对齐"与"逐列各自居中"在这里给出**不同的数**（后者右边那列会低半个字）。
+    #[test]
+    fn 竖排多列的块左上角也由_origin_钉住() {
+        let style = SubtitleStyle {
+            vertical: Some(true),
+            font_ratio: 0.1,
+            safe_width_ratio: 0.2, // 每列 2 个字 ⇒ 5 个字 = 3 列（2/2/1）
+            keep_all_lines: true,
+            origin: Some([0.12, 0.18]),
+            ..style()
+        };
+        let v = layout("逐字散开测", &style, SEQUENCE);
+        assert_eq!(v.lines.len(), 5, "五个字五行");
+        let (x, y) = 块左上角(&v);
+        assert!((x - 0.12).abs() < 1e-6, "块左边 = origin.x（实得 {x}）");
+        assert!((y - 0.18).abs() < 1e-6, "块顶边 = origin.y（实得 {y}）");
+        // 每一列的**第一个字**都贴在同一条顶线上（顶对齐，不是逐列各自居中）。
+        // 按 x 变没变切列：同一列里各字 x 相同、y 依次下行。
+        let mut col_firsts: Vec<f32> = Vec::new();
+        let mut prev_x = f32::INFINITY;
+        for line in &v.lines {
+            if (line.rect.x - prev_x).abs() > 1e-6 {
+                col_firsts.push(line.rect.y);
+                prev_x = line.rect.x;
+            }
+        }
+        assert!(col_firsts.len() >= 2, "这条判据要求多列：{col_firsts:?}");
+        for top in &col_firsts {
+            assert!(
+                (top - 0.18).abs() < 1e-6,
+                "每列的列顶都必须 = origin.y（实得 {col_firsts:?}）"
+            );
+        }
+    }
+
+    /// ★ **同一条文字层开/关竖排，位置逐值不变** —— 这是用户报的那句话本身。
+    ///
+    /// 量与 `origin` 的契约量（块左上角）同一个：横排量一次、竖排量一次，必须相等。
+    #[test]
+    fn 开关竖排时块左上角逐值不变() {
+        let text = "春夏秋冬";
+        let mut horizontal = 竖排样式(Some([0.12, 0.18]));
+        horizontal.vertical = Some(false);
+        let h = layout(text, &horizontal, SEQUENCE);
+        let v = layout(text, &竖排样式(Some([0.12, 0.18])), SEQUENCE);
+        assert_eq!(h.lines.len(), 1, "横排是一行");
+        assert_eq!(v.lines.len(), 4, "竖排是四行");
+        let (hx, hy) = 块左上角(&h);
+        let (vx, vy) = 块左上角(&v);
+        assert!(
+            (hx - vx).abs() < 1e-6,
+            "开/关竖排的块左边必须逐值不变：横 {hx} vs 竖 {vx}"
+        );
+        assert!(
+            (hy - vy).abs() < 1e-6,
+            "开/关竖排的块顶边必须逐值不变：横 {hy} vs 竖 {vy}"
+        );
+    }
+
+    /// ★ **R4：没有 `origin` 的竖排 = 修复前逐位相同**（老帧基线）。
+    ///
+    /// 基线是**改动前**（2026-10-20，HEAD `70641d3`）用
+    /// `dhampir subtitle --frame 10` 从工程里逐值抄下来的，不是"照新代码再跑一遍"：
+    /// 比的是 `to_bits()`，一个 ulp 都不许动。
+    ///
+    /// 两个样本：① 四个字 / 单列（0.5 居中兜底 + 逐列纵向居中）；
+    /// ② 六个字 / 三列（列间距 = 行高，从右往左）。
+    #[test]
+    fn 竖排没有_origin_时与修复前逐位相同() {
+        let one = layout("春夏秋冬", &竖排样式(None), SEQUENCE);
+        // ⚠️ 用**位模式**写基线，不用十进制字面量：十进制抄少一位就换了 ulp，
+        //    而"逐字节不变"这条口径只认位。值 = 改动前 CLI 输出的逐值（f32）。
+        let 基线一: [(u32, u32); 4] = [
+            (0x3ef6_652c, 0x3eae_09fe), // x=0.48124063 y=0.33991998
+            (0x3ef6_652c, 0x3ed7_04ff), //        y=0.41995999
+            (0x3ef6_652c, 0x3f00_0000), //        y=0.5
+            (0x3ef6_652c, 0x3f14_7d80), //        y=0.58003998
+        ];
+        assert_eq!(one.lines.len(), 4);
+        for (line, (x, y)) in one.lines.iter().zip(基线一.iter()) {
+            assert_eq!(
+                line.rect.x.to_bits(),
+                *x,
+                "竖排单列的 x 与修复前不同：{} vs {:?}",
+                line.rect.x,
+                f32::from_bits(*x)
+            );
+            assert_eq!(
+                line.rect.y.to_bits(),
+                *y,
+                "竖排单列的 y 与修复前不同：{} vs {:?}",
+                line.rect.y,
+                f32::from_bits(*y)
+            );
+            assert_eq!(
+                line.rect.height.to_bits(),
+                0x3da3_ec03_u32,
+                "行盒高与修复前不同（= 0.080040001）"
+            );
+        }
+        let three = layout(
+            "逐字散开测试",
+            &SubtitleStyle {
+                vertical: Some(true),
+                font_ratio: 0.1,
+                safe_width_ratio: 0.2,
+                max_lines: 3,
+                keep_all_lines: true,
+                origin: None,
+                ..style()
+            },
+            SEQUENCE,
+        );
+        let 基线三: [(u32, u32); 6] = [
+            (0x3f17_851f, 0x3ec2_8f5c), // 逐 x=0.59187502 y=0.37999999
+            (0x3f17_851f, 0x3f00_0000), // 字           y=0.5
+            (0x3ef1_999a, 0x3ec2_8f5c), // 散 x=0.47187501
+            (0x3ef1_999a, 0x3f00_0000), // 开
+            (0x3eb4_28f6, 0x3ec2_8f5c), // 测 x=0.35187501
+            (0x3eb4_28f6, 0x3f00_0000), // 试
+        ];
+        assert_eq!(three.lines.len(), 6, "三列 × 每列 2 字");
+        for (line, (x, y)) in three.lines.iter().zip(基线三.iter()) {
+            assert_eq!(
+                line.rect.x.to_bits(),
+                *x,
+                "竖排多列的 x 与修复前不同：{} vs {:?}",
+                line.rect.x,
+                f32::from_bits(*x)
+            );
+            assert_eq!(
+                line.rect.y.to_bits(),
+                *y,
+                "竖排多列的 y 与修复前不同：{} vs {:?}",
+                line.rect.y,
+                f32::from_bits(*y)
+            );
         }
     }
 }

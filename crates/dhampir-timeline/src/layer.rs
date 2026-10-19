@@ -596,8 +596,11 @@ pub struct SubtitleStyle {
     /// ⇒ 宿主那条通道发过来的位置在出片这一侧被丢掉。
     /// 需求书与验收判据：YekiTrim 仓的 docs/plan/dhampir-text-origin-request.md。
     ///
-    /// ⚠️ **竖排（vertical）忽略本字段** —— 与 anchor_bottom 同一条口径（竖排下纵向变成了
-    ///    **长度方向**，语义转置了；见 text_layout::layout 里那段说明）。
+    /// ⚠️ **竖排（vertical）也认本字段**（2026-10-20）：本字段是"整块摆在哪"的
+    ///    **绝对**通道，两种排法下含义相同 —— 竖排取"列阵左上角"（列顶 = `y`，
+    ///    最左那一列的盒左边 = `x`；列序仍从右往左，整块自 `x` 向右铺开）。
+    ///    竖排**仍然忽略** `anchor_bottom`（那个才是"纵向位置"的字段，竖排下语义转置了）；
+    ///    把两者混为一谈曾是"竖排后位置被重置到画面中心"的根因。见 text_layout::layout。
     ///
     /// ⚠️ skip_serializing_if 不能省：没写时**一个键都不许出现**（既有工程逐字节不变）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
