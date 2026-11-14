@@ -8,6 +8,31 @@
 
 ---
 
+## [未发布]
+
+### 构建 / 发布
+
+- **Linux 产物容器化**：新增 `docker/Dockerfile.linux-x64`（ubuntu:24.04，glibc 2.39 基线，
+  Rust 钉 1.97.0）与 `scripts/release-local.sh`（Linux 容器内编译 + Windows cargo-xwin 交叉编译）。
+  起因与下游宿主同一条：在滚动发行版（Arch，glibc 2.44）上直编的 ELF 要求 `GLIBC_2.43`，
+  在我们要支持的所有发行版上都起不来，而构建期看不出任何问题。
+  ⚠️ 容器里用**独立 target 目录**（`target-docker/`）：宿主与本容器 rustc 同版本时指纹可复用，
+  共享 target 会让容器"编译零动作"、把宿主链接的二进制原样留下。
+- **`scripts/package.mjs` 加 glibc 门禁**：linux-x64 产物实测最高 `GLIBC_x.y`，超过 2.39
+  （`MAX_GLIBC`，与下游宿主 xtask 同一条线）拒收 —— 读的是真出来的二进制，纯字节扫描，
+  不依赖 objdump / readelf。逃生口 `--allow-host-glibc` 显式放行并留痕（只许"产物仅本机跑"）。
+- **`scripts/package.mjs` 支持预构建二进制与目标平台**：`--bin <路径>`（容器 / cargo-xwin
+  交叉编译产物，跳过本机 cargo build；wasm 半仍在宿主机出）与 `--platform`
+  （VERSION 的 `platform=`、zip 稳定名、可执行位自检跟着**目标**平台走，交叉编译时必须显式给）。
+  顺手补了 `--help`（以前任何参数都会被当成"真跑"，对一个全量构建脚本是最坏的帮助方式）。
+- ⚠️ **产物目录（`dist/dhampir-<版本>+<sha>/`）是"最后一次构建"的暂存区**：双端先后构建时，
+  目录里的 `bin/` 反映最后一次；分发以**稳定名 zip** 为准（`dhampir-<版本>-linux-x64.zip` 与
+  `dhampir-<版本>-windows-x64.zip` 各一份，各自留 sha256 侧车）。下游宿主打包时要么在同一轮
+  平台构建后立刻取目录（宿主 release-local.sh 的顺序就是"先构建底座、再打包宿主"），要么
+  显式 `--dhampir-exe` 指定平台正确的二进制。
+
+---
+
 ## [0.1.0] — 首个发布版本
 
 第一个正式发布的版本。此前所有开发都在 `0.0.1` 这个占位号下进行，**从未发布过**。

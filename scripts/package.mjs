@@ -91,6 +91,22 @@ function arg(name, fallback) {
 }
 const has = (name) => process.argv.includes(name);
 
+// ⚠️ 这个脚本以前**不认识 --help**：任何参数都照单全收、"真跑"一遍 —— 对一个会
+// 重新构建 wasm + 二进制的脚本来说，`--help` 触发一次全量构建是最坏的帮助方式。
+if (has('--help') || has('-h')) {
+  console.log([
+    '用法：node scripts/package.mjs [--out <目录>] [--clean-wasm] [--no-zip] [--bundle-licenses]',
+    '        [--bin <预构建二进制路径>] [--platform linux-x64|windows-x64] [--allow-host-glibc]',
+    '',
+    '  --bin               用预构建二进制（容器 / cargo-xwin 交叉编译），跳过本机 cargo build；',
+    '                      wasm 仍由本脚本在宿主机出（wasm-pack）。发布路径走 scripts/release-local.sh。',
+    '  --platform          产物目标平台；交叉编译时必须显式给（VERSION 的 platform=、zip 稳定名、',
+    '                      可执行位自检都跟着它走，默认按宿主推）。',
+    '  --allow-host-glibc  glibc 超基线时显式放行（只许"产物仅本机跑"，不许进发布渠道）。',
+  ].join('\n'));
+  process.exit(0);
+}
+
 const run = (cmd, args) => {
   console.log('  $ ' + cmd + ' ' + args.join(' '));
   // `DHAMPIR_GIT_SHA` 让产物能自报"是哪一次构建"（`dhampir_build_id` 读它）。
@@ -174,9 +190,42 @@ const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 const version = release + '+' + sha;
 const out = resolve(arg('--out', join(REPO, 'dist', 'dhampir-' + version)));
 
+// ---------------------------------------------------------------- 目标平台与预构建二进制
+//
+// `--platform linux-x64|windows-x64`：产物的**目标**平台。默认按宿主推 —— 但
+// 交叉编译（在 Linux 宿主上出 windows 产物）时必须显式给：VERSION 的 `platform=`、
+// zip 稳定名、可执行位自检全都跟着它走；猜错了就是"产物名写着 linux、里面是 PE"。
+const PLATFORMS = { 'linux-x64': 'dhampir', 'windows-x64': 'dhampir.exe' };
+const platform = arg('--platform', process.platform === 'win32' ? 'windows-x64' : 'linux-x64');
+if (!PLATFORMS[platform]) {
+  console.error('✗ --platform 只认 ' + Object.keys(PLATFORMS).join(' / ') + '，实得：' + platform);
+  process.exit(1);
+}
+const targetExe = PLATFORMS[platform];
+
+// `--bin <路径>`：用**预构建**的二进制（容器 / cargo-xwin 交叉编译出来的），跳过本机
+// `cargo build`。发布路径一律长这样：native 二进制的 glibc 基线由**构建环境**决定
+// （见 docker/Dockerfile.linux-x64），在 Arch 宿主上直编会被下面的门禁拒收 ——
+// 所以 scripts/release-local.sh 容器/交叉编译完，用 --bin 把二进制交回本脚本；
+// wasm 那半与 glibc 无关，仍由本脚本在宿主机上出（wasm-pack）。
+const prebuilt = arg('--bin', null);
+if (prebuilt && !existsSync(prebuilt)) {
+  console.error('✗ --bin 指向的文件不存在：' + prebuilt);
+  process.exit(1);
+}
+
+// glibc 基线：**linux-x64 产物最高只许要 GLIBC_2.39** —— 与下游宿主 YekiTrim 的
+// xtask `MAX_GLIBC` 同一条线。滚动发行版（宿主 glibc 2.44）直编的 ELF 会要求
+// GLIBC_2.43，在我们要支持的所有发行版上都起不来，而构建期看不出任何问题。
+// 门禁读的是**真出来的二进制**，容器保证构建环境 —— 双保险缺一不可。
+// `--allow-host-glibc` 是显式逃生口（只许"产物仅本机跑"）：照样量、照样报，但放行。
+const MAX_GLIBC = [2, 39];
+const allowHostGlibc = has('--allow-host-glibc');
+
 console.log('产物目录 : ' + out);
 console.log('发布版本 : ' + release + '  (git ' + sha + ')');
 console.log('契约版本 : project_schema = ' + schema + '   host_api = ' + hostApi);
+console.log('目标平台 : ' + platform + (prebuilt ? '   (二进制来自 --bin：' + prebuilt + ')' : '   (本机 cargo build)'));
 console.log('');
 
 // ---------------------------------------------------------------- 构建
@@ -189,13 +238,49 @@ rmSync(out, { recursive: true, force: true });
 mkdirSync(join(out, 'preview', 'pkg'), { recursive: true });
 mkdirSync(join(out, 'bin'), { recursive: true });
 
-run('cargo', ['build', '--release', '--bin', 'dhampir']);
+if (prebuilt) {
+  console.log('  $ (跳过 cargo build：二进制来自 --bin，wasm 仍在本机出)');
+} else {
+  run('cargo', ['build', '--release', '--bin', 'dhampir']);
+}
 run('wasm-pack', ['build', 'crates/dhampir-wasm', '--target', 'web', '--release', '--out-dir', join(out, 'preview', 'pkg')]);
 
 // ---------------------------------------------------------------- 摊平
 cpSync(join(REPO, 'web/engine.js'), join(out, 'preview', 'engine.js'));
-const exe = process.platform === 'win32' ? 'dhampir.exe' : 'dhampir';
-cpSync(join(REPO, 'target/release', exe), join(out, 'bin', exe));
+// 二进制来源：--bin 给的预构建产物（容器 / 交叉编译），否则本机 target/release。
+// 落进产物时**统一改名**成目标平台的形状（linux → dhampir，windows → dhampir.exe）：
+// 交叉编译时"宿主平台"与"目标平台"不同，别拿宿主名字拼产物里的名字。
+const binSrc = prebuilt || join(REPO, 'target/release', PLATFORMS[process.platform === 'win32' ? 'windows-x64' : 'linux-x64']);
+cpSync(binSrc, join(out, 'bin', targetExe));
+
+// ---------------------------------------------------------------- glibc 门禁
+// 只对 linux-x64 产物生效；windows 产物是 PE，没有 GLIBC 符号这回事。
+// 判据与下游宿主 xtask::max_glibc_symbol 同一条：在 .dynstr 里找 GLIBC_ 字面量
+// 取最高版本 —— 不依赖 objdump / readelf，纯字节扫描足够。
+if (platform === 'linux-x64') {
+  const binBytes = readFileSync(join(out, 'bin', targetExe));
+  const isElf = binBytes.subarray(0, 4).toString('latin1') === String.fromCharCode(0x7f) + 'ELF';
+  const max = isElf ? maxGlibcSymbol(binBytes) : null;
+  if (!isElf) {
+    console.log('  glibc 门禁：产物不是 ELF —— 跳过（请确认这是有意的）');
+  } else if (!max) {
+    console.log('  glibc 门禁：ELF 里没有 GLIBC_* 符号（全静态链接？）—— 不拦，但请确认这是有意的');
+  } else {
+    console.log('  glibc 门禁：最高要求 GLIBC_' + max[0] + '.' + max[1] + '（上限 ' + MAX_GLIBC.join('.') + '）');
+    const over = max[0] > MAX_GLIBC[0] || (max[0] === MAX_GLIBC[0] && max[1] > MAX_GLIBC[1]);
+    if (over && !allowHostGlibc) {
+      console.error('✗ 这个二进制需要 GLIBC_' + max[0] + '.' + max[1] + '，超过基线 ' + MAX_GLIBC.join('.') + '。');
+      console.error('  它几乎肯定是在滚动发行版宿主上直编的 —— 在所有目标发行版上都起不来。');
+      console.error('  正确路径：docker build -f docker/Dockerfile.linux-x64 -t dhampir-linux-x64-builder .');
+      console.error('            再跑 scripts/release-local.sh linux（产物经 --bin 交回本脚本）。');
+      console.error('  只在本机跑、不进发布渠道：加 --allow-host-glibc 显式放行。');
+      process.exit(1);
+    }
+    if (over && allowHostGlibc) {
+      console.warn('⚠️ --allow-host-glibc：超基线产物被**显式**放行 —— 不许进发布渠道（下游宿主的门禁会同样拒收它）。');
+    }
+  }
+}
 
 // ---------------------------------------------------------------- 许可证
 // Apache-2.0 §4：**分发时**要随附许可证全文、保留声明、并如实列出第三方组件。
@@ -220,7 +305,8 @@ writeFileSync(join(out, 'VERSION'), [
   'license=Apache-2.0',
   'git=' + sha,
   'built_at=' + stamp,
-  'platform=' + process.platform + '-' + process.arch,
+  // 平台写**目标**平台（--platform），不是构建机 —— 交叉编译时两者不同。
+  'platform=' + platform,
   '',
 ].join('\n'));
 
@@ -230,7 +316,7 @@ const need = [
   join(out, 'preview', 'engine.js'),
   join(out, 'preview', 'pkg', 'dhampir_wasm.js'),
   join(out, 'preview', 'pkg', 'dhampir_wasm_bg.wasm'),
-  join(out, 'bin', exe),
+  join(out, 'bin', targetExe),
   join(out, 'VERSION'),
   join(out, 'LICENSE'),
   join(out, 'THIRD-PARTY-LICENSES.md'),
@@ -255,8 +341,7 @@ if (!has('--no-zip')) {
   // 再出一份**不带 sha** 的稳定名：`dhampir-<产品版本>-<平台>.zip`。
   // 为什么需要它：下载地址要能**写死在钉固文件里**，而带 sha 的名字每提交一次就变。
   // 带 sha 的那份留着 —— 它是"这批字节出自哪次构建"的凭据，两者用途不同，都别删。
-  const stable = join(REPO, 'dist',
-    'dhampir-' + release + '-' + process.platform + '-' + process.arch + '.zip');
+  const stable = join(REPO, 'dist', 'dhampir-' + release + '-' + platform + '.zip');
   rmSync(stable, { force: true });
   cpSync(zip, stable);
   console.log('  zip : ' + stable + '   ← 稳定名（下载地址用这个）');
@@ -303,7 +388,8 @@ function makeZip(from, zip) {
     process.exit(1);
   }
   // 非 Windows 上连可执行位一起验（见 verifyZip 的说明）。
-  verifyZip(zip, process.platform === 'win32' ? null : 'bin/dhampir');
+  // 可执行位自检只对 linux 产物（zip 里 unix 权限位那条）；windows 产物没有这一说。
+  verifyZip(zip, platform === 'linux-x64' ? 'bin/' + targetExe : null);
 }
 
 function makeZipWithPowerShell(from, zip) {
@@ -501,6 +587,29 @@ function sha256File(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
+/// 从 ELF 字节里取它需要的最高 `GLIBC_x.y`（与下游宿主 xtask::max_glibc_symbol 同一判据）。
+///
+/// 刻意不依赖 objdump / readelf：版本串就在 .dynstr 里，纯字节扫描足够 ——
+/// 本仓的 node 依赖面刻意为零，工具依赖同样能不加就不加。
+/// 返回 [major, minor]；一个 GLIBC_* 都没有（全静态链接）返回 null。
+/// ⚠️ `GLIBCXX_3.4`（libstdc++）不含 `GLIBC_` 这个带下划线的前缀，不会误命中；
+/// `GLIBC_ABI_DT_RELR` 这类无数字版本串被 `\d+\.\d+` 的匹配规则自然跳过。
+function maxGlibcSymbol(bytes) {
+  const latin = bytes.toString('latin1');
+  const needle = 'GLIBC_';
+  let best = null;
+  let at = latin.indexOf(needle);
+  while (at >= 0) {
+    const m = /^([0-9]+)\.([0-9]+)/.exec(latin.slice(at + needle.length));
+    if (m) {
+      const cur = [Number(m[1]), Number(m[2])];
+      if (!best || cur[0] > best[0] || (cur[0] === best[0] && cur[1] > best[1])) best = cur;
+    }
+    at = latin.indexOf(needle, at + needle.length);
+  }
+  return best;
+}
+
 /// PowerShell 单引号字符串里，单引号自己要用两个表示。
 function psQuote(value) {
   return "'" + String(value).replace(/'/g, "''") + "'";
@@ -509,4 +618,4 @@ function psQuote(value) {
 console.log('');
 console.log('交给下游宿主：把整个目录放到 <程序目录>/dhampir/ ，然后设');
 console.log('    VTEDIT_DHAMPIR_PREVIEW=<程序目录>/dhampir/preview');
-console.log('    VTEDIT_DHAMPIR_CLI=<程序目录>/dhampir/bin/' + exe);
+console.log('    VTEDIT_DHAMPIR_CLI=<程序目录>/dhampir/bin/' + targetExe);
