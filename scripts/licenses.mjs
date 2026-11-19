@@ -121,6 +121,52 @@ function selfTest() {
   // 未声明许可的要如实写出来，不许留空
   expect(render(thirdParty([{ name: 'c', version: '1', license: null, source: 'registry+x' }])).includes('(未声明)'), '未声明许可没被如实标出');
 
+  // ---- 「生成时 HEAD」那句注释的处理（2026-10-08 加的，因为它曾经让判据永远红）----
+  //
+  // 背景：`expected` 里嵌**当前** HEAD，而盘上那份是在**上一个**提交生成的 ——
+  // 提交本身就改 HEAD，所以整文件逐字节比在已提交的树里**永远不可能相等**。
+  // 实测 `v0.1.0` 那个发布 tag 上也是红的（文件记 7907c22、tag 是 a953fb4）。
+  const stripHead = (text) => text.replace(/^<!-- 生成时 HEAD：[0-9a-f]* -->\r?\n/m, '');
+  const withHead = (sha, body = '| `a` | 1.0.0 | `MIT` |') =>
+    `# 头\n\n${body}\n\n<!-- 生成时 HEAD：${sha} -->\n\n`;
+
+  // 正向：只有 HEAD 不同 -> 内容一致，必须**不算漂**
+  expect(
+    stripHead(withHead('aaaaaaa')) === stripHead(withHead('bbbbbbb')),
+    '只有 HEAD 不同却判成了漂 —— 这就是那个"永远红"的毛病',
+  );
+  // 反向（最关键）：**清单本体**变了必须仍然算漂，否则这条判据被削成空转
+  expect(
+    stripHead(withHead('aaaaaaa', '| `a` | 1.0.0 | `GPL-3.0` |')) !==
+      stripHead(withHead('aaaaaaa', '| `a` | 1.0.0 | `MIT` |')),
+    '把许可改掉了却判成一致 —— 判据被削成了空转',
+  );
+  // 反向：真的多/少一个 crate 也必须漂
+  expect(
+    stripHead(withHead('aaaaaaa', '| `a` | 1.0.0 | `MIT` |\n| `b` | 2.0.0 | `ISC` |')) !==
+      stripHead(withHead('aaaaaaa', '| `a` | 1.0.0 | `MIT` |')),
+    '清单多了一个 crate 却判成一致',
+  );
+  // **CRLF 的 HEAD 行也必须能被剥掉**：本仓要求全仓 LF，但万一混进来，
+  // 别让它变成"第 1 行就不同"这种看不懂的报错（2026-10-08 真的踩到过）。
+  //
+  // 注意这里断的是"**HEAD 那句被剥掉了**"，不是"LF 与 CRLF 剥完相等" ——
+  // 后者是错的：剥完剩下的正文本来就还差一个 `\r`，行尾差异该由
+  // check-text-hygiene 去管，不该在这条判据里被悄悄抹平。
+  const crlfStripped = stripHead(withHead('aaaaaaa').replace(/\n/g, '\r\n'));
+  expect(
+    !crlfStripped.includes('生成时 HEAD'),
+    'CRLF 版本的 HEAD 注释没被剥掉（正则漏了 \\r）',
+  );
+  // 而且"只有 HEAD 不同"这个判定在 CRLF 下同样要成立（两边同 LF、同 CRLF 各自成立）
+  expect(
+    stripHead(withHead('aaaaaaa').replace(/\n/g, '\r\n')) ===
+      stripHead(withHead('bbbbbbb').replace(/\n/g, '\r\n')),
+    'CRLF 下"只有 HEAD 不同"被判成了漂',
+  );
+  // 没有那句注释时不许炸
+  expect(stripHead('# 头\n没有 HEAD 注释\n') === '# 头\n没有 HEAD 注释\n', '没有 HEAD 注释时不该改动文本');
+
   if (bad.length > 0) {
     console.error('✗ 自检失败（先修脚本，别信它的结论）：');
     for (const b of bad) console.error(`    - ${b}`);
@@ -233,14 +279,33 @@ let bad = 0;
 if (!existsSync(OUT_FILE)) { console.error(`✗ ${OUT_FILE} 不在（跑 --write 生成）`); bad += 1; }
 else {
   const actual = readFileSync(OUT_FILE, 'utf8');
-  if (actual !== expected) {
+  // **只比清单本体，不比那行"生成时 HEAD"注释。**
+  //
+  // 为什么：`expected` 里嵌的是**当前** HEAD，而文件是在**上一个**提交上生成的 ——
+  // 提交本身就会改变 HEAD，所以提交后的树里**这两行永远不可能相同**。
+  // 那不是"清单漂了"，是这条判据在结构上无法在已提交的树上变绿。
+  // 实测：`v0.1.0` 那个 tag 上文件记的是 7907c22、tag 是 a953fb4 —— **发布版本上也是红的**。
+  //
+  // 判据要守的是"清单与 cargo metadata 一致"，HEAD 注释只是溯源信息、不是清单内容。
+  // 把它剔掉之后：真的漂了仍然红（下面的反向用例会验），而"刚提交完"不再假红。
+  const stripHead = (text) => text.replace(/^<!-- 生成时 HEAD：[0-9a-f]* -->\r?\n/m, '');
+  if (stripHead(actual) !== stripHead(expected)) {
     console.error('✗ THIRD-PARTY-LICENSES.md 与 cargo metadata 不一致（跑 --write 重生成）');
-    const a = actual.split('\n'); const e = expected.split('\n');
+    const a = stripHead(actual).split('\n');
+    const e = stripHead(expected).split('\n');
     const first = a.findIndex((l, i) => l !== e[i]);
     console.error(`  第一处不同在第 ${first + 1} 行：`);
     console.error(`    盘上：${(a[first] ?? '(没有这一行)').slice(0, 90)}`);
     console.error(`    期望：${(e[first] ?? '(没有这一行)').slice(0, 90)}`);
     bad += 1;
+  } else {
+    const recorded = /^<!-- 生成时 HEAD：([0-9a-f]*) -->$/m.exec(actual);
+    if (recorded && recorded[1] !== (gitHead() ?? recorded[1])) {
+      // **不是错**：只是"生成它的那次提交"跟当前 HEAD 不同。说清楚，别让人以为漂了。
+      console.log(
+        `（清单生成自 ${recorded[1]}，当前 HEAD ${gitHead() ?? '?'} —— 内容一致，仅溯源不同）`,
+      );
+    }
   }
 }
 if (licProblems.length > 0) {

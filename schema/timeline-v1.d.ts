@@ -21,8 +21,6 @@ export interface Clip {
   transition_in?: TransitionSpec | null;
 }
 
-export type Easing = "linear" | "ease_in" | "ease_out" | "ease_in_out" | "back_out";
-
 export interface Effect {
   /** 类型串，对应 core 的特效注册表。 */
   kind: string;
@@ -35,7 +33,8 @@ export interface Effect {
 }
 
 export interface Keyframe {
-  easing?: Easing;
+  /** **CSS 缓动语法的字符串**（口径见 plan/web-animation-criteria.md 的 D2）。 */
+  easing?: "linear" | "ease_in" | "ease_out" | "ease_in_out" | "back_out" | (string & {});
   frame: number;
   target?: string;
   value: number;

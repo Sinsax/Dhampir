@@ -18,10 +18,11 @@
 //     <out>.zip                           ← 构建身份（名字带 +<sha>）
 //     dhampir-<产品版本>-<平台>.zip        ← **稳定名**，下载地址写它
 //     dhampir-<产品版本>-<平台>.zip.sha256.txt
+//     dhampir-<产品版本>-<平台>.zip.manifest.json   ← **机器可读的发布清单**（唯一的数字真相）
 //
 // # 两个"版本"是两回事（2026-10-03 拆开）
 //
-//     version         产品版本（0.1.0）  ← 根 Cargo.toml [workspace.package]
+//     version         产品版本（如 0.2.0）← 根 Cargo.toml [workspace.package]
 //     project_schema  工程文件契约（1）   ← dhampir-timeline/src/project.rs
 //     host_api        wasm 导出面契约（6）← dhampir-timeline/src/host_api.rs
 //
@@ -296,7 +297,7 @@ if (has('--bundle-licenses')) run('node', ['scripts/licenses.mjs', '--bundle', o
 
 writeFileSync(join(out, 'VERSION'), [
   // `version` 与 `project_schema` **必须都在、且是两回事**：
-  //   version        产品版本（0.1.0）—— 人读、"这一版是哪一版"、Release 资产名
+  //   version        产品版本（如 0.2.0）—— 人读、"这一版是哪一版"、Release 资产名
   //   project_schema 工程文件契约（1）—— 底座拿它拒错版工程
   // 合成一条会让"兼容变更"（schema 不动、产品动了）表达不出来。
   'version=' + release,
@@ -349,6 +350,29 @@ if (!has('--no-zip')) {
   const hex = sha256File(stable);
   writeFileSync(stable + '.sha256.txt', hex + '  ' + stable.split(/[\\/]/).pop() + '\n');
   console.log('  sha256: ' + hex);
+
+  // 机器可读的发布清单。**为什么要有这个**（2026-10-08 加）：
+  // 在此之前 sha256 只出现在 stdout 里，而**下游文档得手抄**这些数 ——
+  // 抄完再重打包一次（Cargo.toml / Cargo.lock / 许可证清单都会进产物）sha 就变了，
+  // 文档却不会跟着变。**实测踩到过**：文档写着上一轮构建的 sha，
+  // 下游拿去校验"校验失败"，然后先怀疑自己下错了。
+  //
+  // 所以发布相关的数字只留**一处真相**（这份 json + 侧车），文档只引用、不复述。
+  const manifest = {
+    version: release,
+    project_schema: schema,
+    host_api: hostApi,
+    platform: process.platform + '-' + process.arch,
+    git: sha,
+    built_at: stamp,
+    zip: stable.split(/[\\/]/).pop(),
+    zip_sha256: hex,
+  };
+  // 稳定名一份 + 带 sha 一份：前者给"下载地址"引用，后者给"这批字节出自哪次构建"。
+  for (const p of [stable + '.manifest.json', zip + '.manifest.json']) {
+    writeFileSync(p, JSON.stringify(manifest, null, 2) + '\n');
+  }
+  console.log('  manifest: ' + stable + '.manifest.json');
 }
 
 /// 打 zip。

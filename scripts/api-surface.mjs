@@ -104,6 +104,44 @@ export function scanExports(srcDir) {
   return found;
 }
 
+/** 扫导出函数的**参数名**（按出现顺序；跳过 `self`）。签名可能跨行，所以拼到第一个 `)` 为止。 */
+export function scanSignatures(srcDir) {
+  const found = new Map();
+  if (!existsSync(srcDir)) return found;
+  for (const file of readdirSync(srcDir).filter((name) => name.endsWith('.rs')).sort()) {
+    const lines = readFileSync(join(srcDir, file), 'utf8').split('\n');
+    for (let i = 0; i < lines.length; i += 1) {
+      const match = lines[i].trim().match(/^pub (?:async )?fn (dhampir_[A-Za-z0-9_]+)\s*\(/);
+      if (match === null) continue;
+      let text = '';
+      for (let j = i; j < Math.min(i + 12, lines.length); j += 1) {
+        text += ' ' + lines[j];
+        if (lines[j].includes(')')) break;
+      }
+      const open = text.indexOf('(');
+      const close = text.indexOf(')');
+      const inner = open >= 0 && close > open ? text.slice(open + 1, close) : '';
+      const params = inner
+        .split(',')
+        .map((piece) => piece.trim())
+        .filter((piece) => piece !== '')
+        .map((piece) => piece.split(':')[0].trim().replace(/^mut\s+/, '').replace(/^&/, '').trim())
+        .filter((name) => name !== '' && name !== 'self');
+      found.set(match[1], params);
+    }
+  }
+  return found;
+}
+
+/** 文档里 `### \`dhampir_x(参数, …)\`` 的参数名。**没有这种标题的导出不进这张表**。 */
+export function documentedParams(docText) {
+  const out = new Map();
+  for (const match of docText.matchAll(/^### `(dhampir_[A-Za-z0-9_]+)\(([^)]*)\)`/gm)) {
+    out.set(match[1], match[2].split(',').map((piece) => piece.trim()).filter((piece) => piece !== ''));
+  }
+  return out;
+}
+
 /** 生成 markdown。 */
 export function renderSurface(exports) {
   const lines = [];
@@ -175,7 +213,7 @@ export function judge(docText, exports) {
  * 只查「文档里写的名字是否存在」，会让**新导出悄悄不进文档**，
  * 而"文档落后于代码"与"文档就是全部"从读的人那侧看起来一模一样。
  */
-export function judgeHostApi(docText, exports, version) {
+export function judgeHostApi(docText, exports, version, signatures = null) {
   if (docText === null) {
     return ['缺少 ' + HOST_API_DOC + '（`--write` 只能替你补版本行，说明与名单得人写）'];
   }
@@ -200,6 +238,23 @@ export function judgeHostApi(docText, exports, version) {
   }
   for (const name of known) {
     if (!names.includes(name)) problems.push('导出 ' + name + ' 没有出现在 ' + HOST_API_DOC + ' 的名单里');
+  }
+  // **签名也要对得上**（第 75 轮加）。
+  //
+  // 名字对得上而**参数漂了**，是这一路最容易漏的一种：第 74 轮我把 `set_mask_image`
+  // 从"收裸像素"改成"收位图"，名字没变、文档却还写着 `(asset_id, width, height, rgba)` ——
+  // 名字级别的判据一个字都不会报 ✗。现在逐个比参数名（文档里写了这种标题的才比）。
+  if (signatures !== null) {
+    const documented = documentedParams(docText);
+    for (const [name, want] of documented) {
+      const got = signatures.get(name);
+      if (got === undefined) continue; // 文档写了、代码里没有 -> 上面已经报过
+      if (got.join(',') !== want.join(',')) {
+        problems.push(
+          '文档里 ' + name + ' 的参数是 (' + want.join(', ') + ')，而代码里是 (' + got.join(', ') + ') —— 签名漂了',
+        );
+      }
+    }
   }
   return problems;
 }
@@ -276,6 +331,17 @@ function runSelfTest() {
   expect('宿主 API：没有版本行 -> 红', judgeHostApi(hostDoc.replace('Version: 2\n', ''), hostExports, 2), false);
   expect('宿主 API：版本行不是整行 -> 红', judgeHostApi(hostDoc.replace('Version: 2\n', 'Version: 2（随手写的）\n'), hostExports, 2), false);
   expect('宿主 API：版本与源码不同 -> 红', judgeHostApi(hostDoc, hostExports, 3), false);
+  // 第 75 轮：签名漂了必须红（名字不变）
+  expect(
+    '宿主 API：参数漂了 -> 红',
+    judgeHostApi(
+      hostDoc.replace('- `dhampir_host_api_version`', '- `dhampir_host_api_version`') + '\n### `dhampir_project_open(a, b)`\n',
+      hostExports,
+      2,
+      new Map([['dhampir_project_open', ['json']]]),
+    ),
+    false,
+  );
   expect('宿主 API：文档里有代码里没有的名字 -> 红', judgeHostApi(hostDoc + '- `dhampir_gone`\n', hostExports, 2), false);
   expect(
     '宿主 API：代码里有文档没写的导出 -> 红',
@@ -381,7 +447,7 @@ function main() {
       problems.push('清单与代码不同步（跑 --write 重新生成）');
     }
   }
-  problems.push(...judgeHostApi(hostText, exports, version));
+  problems.push(...judgeHostApi(hostText, exports, version, scanSignatures(srcDir)));
 
   if (problems.length > 0) {
     console.error('✗ 调用面/宿主 API 与代码不一致（' + HOST_API_MODULE + ' 的 ' + (exports.get(HOST_API_MODULE) || []).length + ' 个导出 / 版本 ' + version + '）：');

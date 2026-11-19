@@ -27,6 +27,11 @@
 //! 时间码（只影响显示与解析，M4）、帧号解析（`FromStr`）。
 
 pub mod golden;
+// CSS 缓动（关键字 / `cubic-bezier()` / `steps()`）的**唯一解析与求值实现**。
+// 不依赖 serde：它是纯数学，两端（native / wasm）调同一份 —— 各写一遍迟早在某个
+// 控制点上差一个像素，而那种差异最难归因。口径见 plan/web-animation-criteria.md 的 D2。
+pub mod easing;
+pub mod path;
 // 元素模型 v2。与 v1（schema 模块）**并存**：v1 保持可用，切换是下一步。
 // 这样每个提交都是绿的，而不是把仓库停在「改了一半」的状态。
 // 同样建立在 serde 上，所以跟 schema 一起按 feature 门控。
@@ -60,6 +65,16 @@ pub mod subtitle;
 pub mod danmaku;
 pub mod selfcheck;
 pub mod text_layout;
+/// 文字的**逐帧动效**（T1 弹入 / T3 强调 / T4 抖动）。
+///
+/// 单独一个模块的理由写在它自己的文件头：两个任务曾并行改 `layer.rs`，
+/// 后写的把先写的**整份覆盖**掉了。逻辑挪出来的代价面从 ~180 行降到 12 行。
+pub mod text_motion;
+/// **逐字格子**（P3，2026-10-13）：把一行拆成"每个字各自的盒子"，
+/// 供下游做逐字位移 / 缩放 / 旋转 / 竖排。理由写在它自己的文件头。
+pub mod text_perchar;
+/// **逐字动效的求值**（P3/P4）：逐字档位在某一帧上摊成每字变换。纯函数，无累积状态。
+pub mod text_perchar_anim;
 pub mod timebase;
 pub mod timecode;
 

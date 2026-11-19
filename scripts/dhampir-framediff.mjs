@@ -1871,7 +1871,13 @@ function selfTest() {
   return 0;
 }
 
+// **入口守卫**（第 81 轮补）：这份文件导出解码器与一堆判据函数，别人 import 它是为了
+// 复用（measure-dom-parity.mjs 就是这么用的）—— 而在这个守卫补上之前，import 会**顺手跑起
+// 它自己的 CLI**（argv 是导入方的，于是"量测脚本自检"打出来的是 framediff 的用例）。
+// 同一个坑本会话在 run-guards.mjs 里踩过一次：能被 import 的脚本都要有这一行。
+const isEntry = process.argv[1] !== undefined && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
+
 // 本进程不调 process.exit()：本机 Node/Windows 上真执行 process.exit() 会
 // 概率性撞 libuv 断言，把退出码变成负数——而"退出码可信"正是这个工具的理由。
 // 没有子进程、没有待 drain 的句柄，设 process.exitCode 后自然退出即刻发生。
-process.exitCode = main();
+if (isEntry) process.exitCode = main();

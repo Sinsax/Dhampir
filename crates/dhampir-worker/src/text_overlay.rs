@@ -345,6 +345,8 @@ impl OverlayPainter {
         paint_lines(
             &mut |key| rasterizer.rasterize(key),
             &font_for,
+            // **字体目录**带下去：libass 靠它找字体与回退字体。
+            font_dir,
             image,
             overlay,
             target,
@@ -360,6 +362,41 @@ impl OverlayPainter {
             cache_misses: self.rasterizer.misses(),
             ..self.stats
         }
+    }
+}
+
+/// **字体为什么没有** —— 一句话说清，供 `subtitle_font_missing` 那条消息用。
+///
+/// # 为什么值得单独造一个解释函数（T4）
+///
+/// 这条消息原来只有一句「宿主没有给字体（--font-file）」。但**"没给"与
+/// "给了目录、里面没有点名的那份字体"是两件事**，而且后者的后果**更隐蔽**：
+///
+/// * libass 按**家族名**找字体。目录里没有那个名字时，`resolve_family` 找不到
+///   文件 → 走到 `font_file` 兜底（`None`）→ 画不出来。
+/// * 但如果那一层兜底被改成"随便给一份"，libass 就会**静默解析成系统默认字体**
+///   （本机实测 `ArialMT`，没有中文字形）—— 那时 `lines_failed` 还是 0，
+///   成片里只是"字体不太对"。
+///
+/// 所以这条消息要**点出真正的原因**，否则用户会去查 `--font-file`（他没写错的那个）。
+fn font_missing_reason(
+    font_file: &Option<PathBuf>,
+    font_dir: &Option<PathBuf>,
+    style: &dhampir_core::overlay::TextStyle,
+) -> String {
+    match (font_dir, style.family.as_deref(), font_file) {
+        (None, _, _) => {
+            "宿主没有给字体（--font-file 没给，--font-dir 也没给）。本仓不内嵌字体、也不猜系统字体"
+                .to_string()
+        }
+        (Some(dir), Some(family), _) => format!(
+            "工程里点名了 `font_family: {family}`，但 --font-dir {} 里找不到这份字体。按名字找不着就画不出来（**不会**静默换一个相似字体 —— 换了之后「字长得不对」看起来像「字号配错了」）",
+            dir.display()
+        ),
+        (Some(dir), None, _) => format!(
+            "给了 --font-dir {}，但工程里没写 `font_family`，也没有 --font-file 兜底 —— 没名字可找",
+            dir.display()
+        ),
     }
 }
 
@@ -480,6 +517,8 @@ enum Painted {
 fn paint_parts(
     rasterize: &mut impl FnMut(&TextRasterKey) -> Result<Rc<TextBitmap>, String>,
     font_file: Option<PathBuf>,
+    // **字体目录**：libass 找字体与回退字体的入口（CLI 的 --font-dir）。
+    font_dir: Option<PathBuf>,
     image: &mut Rgba8Image,
     target: (u32, u32),
     parts: &[dhampir_core::overlay::TextRun],
@@ -487,6 +526,11 @@ fn paint_parts(
     scale: f32,
     opacity: f32,
     dy_px: f32,
+    // **横向偏移**（文档像素，T4 抖动；正为向右）。与 `dy_px` 同一条规矩：
+    // 只挪落点，不重算布局。恒 0 时逐字节等于改动前。
+    dx_px: f32,
+    // **这一条的文字形变**（T2）：倾斜 + 纵向压扁。逐段共用同一个（条级字段）。
+    transform: crate::text_transform::TextTransform,
     judge_clip: bool,
     log: &mut IssueLog,
     placement: LinePlacement,
@@ -498,7 +542,10 @@ fn paint_parts(
         log.record(
             "subtitle_font_missing",
             &path,
-            format!("这一帧要画带 `.hl` 的「{whole}」，而宿主没有给字体（--font-file）"),
+            format!(
+                "这一帧要画带 `.hl` 的「{whole}」，却画不出来：{}。不给字体就不出一份「看起来成功、其实没有字幕」的片子",
+                font_missing_reason(&font_file, &font_dir, style)
+            ),
         );
         return Painted::Failed;
     };
@@ -512,6 +559,7 @@ fn paint_parts(
         .collect();
     let total: f32 = widths.iter().sum();
     let offset_y = dy_px.round() as i32;
+    let offset_x = dx_px.round() as i32;
     let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u32;
     // 阴影参数整行算一次（它是**样式级**的，不是逐段的）。
     let shadow = shadow_spec(style);
@@ -530,6 +578,9 @@ fn paint_parts(
             // 与老路同一条：描边要乘这一条的缩放（参照 `swEff = sw * scale`）。
             stroke_px: (style.stroke_px * scale).round() as u32,
             stroke_color: style.stroke_color,
+            // **外圈**跟着同一个 scale 走（与 stroke_px 逐字段一致）。
+            outer_stroke_px: (style.outer_stroke_px * scale).round() as u32,
+            outer_stroke_color: style.outer_stroke_color,
             // 这一张是**文字**位图（阴影是另一张，见下面的 `paint_shadow`）。
             shadow_color: None,
             shadow_blur_px: 0,
@@ -537,6 +588,10 @@ fn paint_parts(
             shadow_dy_px: 0,
             shadow_pad: 0,
             font_file: font_file.clone(),
+            // **契约里的家族名**带下去：libass 按名字找字体，而名字从文件名推
+            // 不可靠（实测会静默回退到 ArialMT，见 `TextRasterKey::font_family`）。
+            font_family: style.family.clone(),
+            font_dir: font_dir.clone(),
             width: placement.bitmap_width,
             height: placement.bitmap_height,
         };
@@ -551,8 +606,9 @@ fn paint_parts(
                 &key,
                 shadow,
                 image,
-                (placement.x, placement.y + offset_y),
+                (placement.x + offset_x, placement.y + offset_y),
                 alpha,
+                transform,
                 &path,
                 log,
             );
@@ -564,7 +620,20 @@ fn paint_parts(
                 return Painted::Failed;
             }
         };
-        let report = match blit_scaled(image, &bitmap, placement.x, placement.y + offset_y, alpha) {
+        // ⚠️ **恒等时走老路径**（`blit_scaled` 逐行拷贝：零开销、逐字节不变）；
+        // 非恒等才走 CPU 仿射（双线性 + 越界透明）。判据是 `is_identity()`。
+        let text_origin = (placement.x + offset_x, placement.y + offset_y);
+        let blitted = if transform.is_identity() {
+            blit_scaled(image, &bitmap, text_origin.0, text_origin.1, alpha)
+        } else {
+            let written =
+                crate::text_transform::blit_affine(image, &bitmap, text_origin, transform, alpha);
+            Ok(BlitReport {
+                written: written as u64,
+                skipped: 0,
+            })
+        };
+        let report = match blitted {
             Ok(report) => report,
             Err(error) => {
                 log.record("subtitle_blit_failed", &path, error);
@@ -581,6 +650,192 @@ fn paint_parts(
         }
     }
     Painted::Drawn { clipped }
+}
+
+/// **逐字画一行**（P3，2026-10-13）。
+///
+/// 与 [`paint_parts`] 的关系：那个是"逐**段**"（一段 = 一个 `.hl` 高亮段，
+/// 整段共用一次栅格化 + 一个位图落点）；本函数是"逐**字**"，
+/// 每个字可以有自己的缩放 / 旋转 / 位移。
+///
+/// # ⚠️ 为什么不直接把 `paint_parts` 改成逐字
+///
+/// 因为**恒等是常态**。绝大多数字幕没有逐字效果，而逐字意味着
+/// "每个字一次栅格化 + 一次仿射" —— 在 1080p 上一条 20 字的字幕就是
+/// 20 倍的光栅化开销，且缓存键从"整行"碎成"每个字"（命中率暴跌）。
+/// ⇒ 调用方必须在行级判据为真时才进来，否则一律走 `paint_parts`（老路）。
+///
+/// # 口径：逐字位图的落点怎么算
+///
+/// `paint_parts` 把**整行**居中（`x_offset` 是段相对整行中心的偏移）。
+/// 这里改成：**每个字各自**定位到"它在行内的位置"，再加上逐字位移。
+///
+/// ```text
+/// 行左端像素 = (位图左 + 位图宽/2) − 整行宽/2      // 位图里文字是居中的
+/// 第 i 个字左端 = 行左端 + (cells[i].offset_em + offset_x_em) × font_px
+/// ```
+///
+/// ⚠️ **`font_px` 要乘这个字自己的 `scale`**（逐字放大是真的把那个字画大，
+/// 不是把整行放大再裁）—— 这也正是"逐字"与"整条 `transform.scale`"的区别。
+#[allow(clippy::too_many_arguments)]
+fn paint_per_char(
+    rasterize: &mut impl FnMut(&TextRasterKey) -> Result<Rc<TextBitmap>, String>,
+    font_file: Option<PathBuf>,
+    font_dir: Option<PathBuf>,
+    image: &mut Rgba8Image,
+    target: (u32, u32),
+    cells: &[dhampir_core::timeline::text_perchar::CharCell],
+    style: &dhampir_core::overlay::TextStyle,
+    scale: f32,
+    opacity: f32,
+    dy_px: f32,
+    dx_px: f32,
+    transform: crate::text_transform::TextTransform,
+    log: &mut IssueLog,
+    placement: LinePlacement,
+) -> Painted {
+    let whole: String = cells.iter().map(|c| c.ch).collect();
+    let path = issue_path(&whole);
+    let Some(font_file) = font_file else {
+        log.record(
+            "subtitle_font_missing",
+            &path,
+            format!(
+                "这一帧要逐字画「{whole}」，却画不出来：{}。不给字体就不出一份「看起来成功、其实没有字幕」的片子",
+                font_missing_reason(&font_file, &font_dir, style)
+            ),
+        );
+        return Painted::Failed;
+    };
+
+    let font_px = placement.font_px as f32;
+    // 整行逻辑宽（em）—— 逐字落点是**相对于行左端**的，所以先要知道整行多宽。
+    let total_em: f32 = cells.iter().map(|c| c.advance_em).sum();
+    // 行左端（目标像素）。
+    // ⚠️ **不能直接用 `placement.x`**：那是"整行位图的左上角"，
+    //    而文字在整行位图里是**居中**的（栅格化那侧的规矩）
+    //    ⇒ 文字左端 = 位图中心 − 整行文字宽 / 2。用 `placement.x` 的结果是
+    //      每个字都偏右（整行宽的一半那么远），而且**行越长偏得越多**。
+    let row_left =
+        placement.x as f32 + placement.bitmap_width as f32 / 2.0 - total_em * font_px / 2.0;
+    // 行盒的垂直中心（逐字纵向位移相对于它）。
+    let row_center_y = placement.y as f32 + placement.bitmap_height as f32 / 2.0;
+
+    let offset_x = dx_px.round() as i32;
+    let offset_y = dy_px.round() as i32;
+    let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u32;
+    let shadow = shadow_spec(style);
+    let half_w = (placement.bitmap_width as f32 / 2.0).round() as i32;
+    let half_h = (placement.bitmap_height as f32 / 2.0).round() as i32;
+
+    for cell in cells {
+        // 这个字自己的字号：**整条缩放 × 逐字缩放**（乘法关系）。
+        let cell_font = font_px * cell.scale * scale;
+        // `!(x >= 1.0)` 同时挡住"小于 1"**和** NaN —— `x < 1.0` 对 NaN 是 false，会放过去。
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        if !(cell_font >= 1.0) {
+            // 缩到 0 的字**不画**（不是"画一张 0 像素的位图" ——
+            // 那会在光栅化那边退化成 1px 并留下一个墨点）。
+            continue;
+        }
+        let cell_font_px = cell_font.round().max(1.0) as u32;
+        // 这个字的宽度（像素）—— 用它**自己的** `advance_em`，不是整行的。
+        let cell_w = cell.advance_em * font_px;
+        // 行内左端（含逐字位移；位移是 em ⇒ 乘 `font_px` 变像素）。
+        let cell_left = row_left + (cell.offset_em + cell.offset_x_em) * font_px;
+        // 这个字位图的**中心**（水平）= 这个字在行内的中心。
+        let cell_center_x = cell_left + cell_w / 2.0;
+        // ⚠️ 位图宽度是**整条目标宽**，字只在中间（栅格化居中）
+        //    ⇒ 左上角 = 中心 − 位图宽/2。这里若用"字的宽/2"回推，
+        //      字会随缩放**平移**（看着像"放大时飘走"）。
+        let x = (cell_center_x + offset_x as f32).round() as i32 - half_w;
+        let y =
+            (row_center_y + cell.offset_y_em * font_px + offset_y as f32).round() as i32 - half_h;
+
+        let key = TextRasterKey {
+            text: cell.ch.to_string(),
+            // ⚠️ **不用 `x_offset` 做行内定位**（那是"段相对整行中心"的旧口径）。
+            //    这里每个字是**独立一张位图**，位置由上面的 `x`/`y` 说了算，
+            //    `x_offset` 恒 0 ⇒ 位图里只有这一个字、它自己居中。
+            x_offset: 0,
+            font_px: cell_font_px,
+            color: style.color,
+            outline: style.outline,
+            // 描边跟着**这个字的**缩放走（与 `paint_parts` 的 `stroke_px * scale` 同口径）。
+            stroke_px: (style.stroke_px * scale * cell.scale).round() as u32,
+            stroke_color: style.stroke_color,
+            // 逐字那一路同样带上外圈（与 stroke_px 同一个 scale 因子）。
+            outer_stroke_px: (style.outer_stroke_px * scale * cell.scale).round() as u32,
+            outer_stroke_color: style.outer_stroke_color,
+            shadow_color: None,
+            shadow_blur_px: 0,
+            shadow_dx_px: 0,
+            shadow_dy_px: 0,
+            shadow_pad: 0,
+            font_file: font_file.clone(),
+            font_family: style.family.clone(),
+            font_dir: font_dir.clone(),
+            width: placement.bitmap_width,
+            height: placement.bitmap_height,
+        };
+        if let Some(shadow) = shadow {
+            paint_shadow(
+                &mut *rasterize,
+                &key,
+                shadow,
+                image,
+                (x, y),
+                alpha,
+                transform,
+                &path,
+                log,
+            );
+        }
+        let bitmap = match rasterize(&key) {
+            Ok(bitmap) => bitmap,
+            Err(error) => {
+                log.record("subtitle_raster_failed", &path, error);
+                return Painted::Failed;
+            }
+        };
+        // 这个字自己的旋转**叠加**在整条形变上（条级旋转 = "整句话歪"，
+        // 逐字旋转 = "这个字歪"，两者独立且可同时有）。
+        let cell_transform = if cell.rotation_deg == 0.0 {
+            transform
+        } else {
+            crate::text_transform::TextTransform {
+                rotation_deg: transform.rotation_deg + cell.rotation_deg,
+                ..transform
+            }
+        };
+        let text_origin = (x, y);
+        let blitted = if cell_transform.is_identity() {
+            blit_scaled(image, &bitmap, text_origin.0, text_origin.1, alpha)
+        } else {
+            let written = crate::text_transform::blit_affine(
+                image,
+                &bitmap,
+                text_origin,
+                cell_transform,
+                alpha,
+            );
+            Ok(BlitReport {
+                written: written as u64,
+                skipped: 0,
+            })
+        };
+        if let Err(error) = blitted {
+            log.record("subtitle_blit_failed", &path, error);
+            return Painted::Failed;
+        }
+    }
+    // ⚠️ 逐字路**不做** `clip_message` 判定：那是按"整行位图 vs 行盒"算的，
+    //    而这里每个字各自一张位图、各自落点 —— 拿整行盒去比会得到
+    //    **恒不报**（每张位图只有一个字那么点墨）。报假警比漏警更坏
+    //    （用户会去改一个没问题的布局），所以这里显式不报，
+    //    逐字溢出判定留给后续"逐字散开"那一档自己带（它知道自己的包围盒）。
+    let _ = target;
+    Painted::Drawn { clipped: false }
 }
 
 /// 一条文字这一帧要不要画阴影 —— 要的话：什么色、挪多远、糊多少。
@@ -637,6 +892,14 @@ fn paint_shadow(
     // 文字位图的落点。阴影的原点 = 它 - pad + 偏移。
     origin: (i32, i32),
     alpha: u32,
+    // **与文字完全相同的形变**（T2）。
+    //
+    // ⚠️ 影子**必须跟着一起转/压**，否则症状是"字歪了、影子还是正的" —— 肉眼可见。
+    // ⚠️ 但**偏移 `(dx,dy)` 不参与旋转**：那两个量是**文档/屏幕空间**的
+    //    （`TextItem::shadow_dx_px` 的文档原话："**文档像素**，与 `transform.x/y` 同一坐标系"）。
+    //    所以这里只把 `transform` 交给叠图，落点仍按 `origin - pad + (dx,dy)` 算 ——
+    //    "光源方向固定"的物理语义。
+    transform: crate::text_transform::TextTransform,
     path: &str,
     log: &mut IssueLog,
 ) -> bool {
@@ -656,19 +919,175 @@ fn paint_shadow(
             return false;
         }
     };
-    match blit_scaled(
-        image,
-        &bitmap,
-        origin.0 - pad + shadow.dx,
-        origin.1 - pad + shadow.dy,
-        alpha,
-    ) {
+    let shadow_origin = (origin.0 - pad + shadow.dx, origin.1 - pad + shadow.dy);
+    let blitted = if transform.is_identity() {
+        blit_scaled(image, &bitmap, shadow_origin.0, shadow_origin.1, alpha).map(|_| ())
+    } else {
+        crate::text_transform::blit_affine(image, &bitmap, shadow_origin, transform, alpha);
+        Ok(())
+    };
+    match blitted {
         Ok(_) => true,
         Err(error) => {
             log.record("subtitle_blit_failed", path, error);
             false
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// 底衬（T6）：画字**之前**先铺一块纯色矩形
+// ---------------------------------------------------------------------------
+
+/// 一行字幕底衬的几何：矩形四边（目标像素，左闭右开半开区间）。
+///
+/// 从**行盒**（`NormalizedRect`）算，不是从位图算 —— 位图的宽**恒等于目标宽**
+/// （见 `text_raster` 的「几何」一节），拿它铺底衬会把整条画面铺满，
+/// 那不是底衬，是一层蒙版。
+///
+/// 外扩量 `pad_px` 是**目标像素**（与 `plate_pad_px` 的口径一致）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PlateRect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+impl PlateRect {
+    /// **字墨迹** + 外扩 ⇒ 目标帧里的矩形。
+    ///
+    /// # ⚠️ 为什么不从**行盒**算（这是一个真机才抓到的 bug）
+    ///
+    /// 第一版拿行盒（`rect.y + rect.height`）四边外扩 `pad_px`，单测全绿 ——
+    /// 但**真机端到端**红在"下侧没有外扩"：底衬 349 / 字 341。
+    /// 反推：`py1 = 行盒下边 + 12 = 349` ⇒ 行盒下边 337，而**字墨迹实际下缘 341**
+    /// —— **字比行盒低了 4px**（下伸部 ＋ 真字体的行盒溢出，见 `bitmap_size`
+    /// 里 `pad_px` 那段注释：位图比行盒高，正是为了装这些墨）。
+    ///
+    /// 于是下侧实际留白只剩 8px 而不是契约的 12 —— **`plate_pad_px` 被悄悄吃掉**。
+    /// 这正是本仓最贵的那类错：跑得通、不报错、数字不对；而且**只有端到端**
+    /// 才暴露（单测用的是构造出来的几何，测不到"栅格化出来的墨迹比行盒大"）。
+    ///
+    /// ⇒ 口径钉死为「**从字墨迹外扩 N 像素**」（用户的直觉口径：字外面留一圈），
+    /// 四个方向的留白**都是真的 `pad_px`**。
+    ///
+    /// # 墨迹从哪来
+    ///
+    /// `bitmap.ink_bounds()` 给位图内的**闭区间**墨迹盒，把它平移到帧坐标即可
+    /// （位图左上角就是 `placement.x/y`，再加上这一帧的偏移）。
+    /// 空位图（没有墨）给 `None` ⇒ 没有可围的东西，**不铺**。
+    fn from_ink(ink: (u32, u32, u32, u32), placement: (i32, i32), pad_px: f32) -> Self {
+        // 墨迹是**闭区间** ⇒ 右/下边要 `+1` 才是半开区间的边界。
+        // 除了"多铺一列像素"，更实际的理由：`ink_bounds` 是闭区间而底衬的
+        // `paint` 走半开区间，不 +1 会让右侧/下侧**少整整一列**。
+        let left = placement.0 + ink.0 as i32;
+        let top = placement.1 + ink.1 as i32;
+        let right = placement.0 + ink.2 as i32 + 1;
+        let bottom = placement.1 + ink.3 as i32 + 1;
+        Self {
+            left: left - pad_px as i32,
+            top: top - pad_px as i32,
+            right: right + pad_px as i32,
+            bottom: bottom + pad_px as i32,
+        }
+    }
+
+    /// 空矩形（宽或高不足 1 像素）：**没有可铺的东西**。
+    fn is_empty(&self) -> bool {
+        self.right <= self.left || self.bottom <= self.top
+    }
+
+    /// source-over 铺一块纯色，裁到画面内。返回**真的写进去的像素数**。
+    ///
+    /// # 为什么不用 `blit_scaled`
+    ///
+    /// `blit_scaled` 吃的是 `TextBitmap`（栅格化出来的字）。底衬是一块纯色，
+    /// 为它造一张位图等于为了复用而多一次分配；而"覆盖度"这件事在底衬上
+    /// 是**平凡**的（整块都是 1），没有 `coverage_from_libass` 那种要恢复的东西。
+    ///
+    /// # 合成公式与 `blit_scaled` 逐字一致
+    ///
+    /// `out = src * a/255 + dst * (1 - a/255)`，alpha 通道同样累加。
+    /// 一致的目的是**底衬与它上面的字走同一条合成**：若两边公式不同，
+    /// 半透明底衬上的字会出现一圈"缝合边"（底衬那半圈与字那半圈算得不一样）。
+    fn paint(&self, image: &mut Rgba8Image, color: [u8; 4]) -> usize {
+        if self.is_empty() || color[3] == 0 {
+            return 0;
+        }
+        let width = image.width as i32;
+        let height = image.height as i32;
+        // 裁到画面内：越界的部分**丢掉**（与 `blit_scaled` 同款），不回绕。
+        let x0 = self.left.max(0);
+        let y0 = self.top.max(0);
+        let x1 = self.right.min(width);
+        let y1 = self.bottom.min(height);
+        if x1 <= x0 || y1 <= y0 {
+            return 0;
+        }
+        let alpha = color[3] as u32;
+        let inverse = 255 - alpha;
+        let mut written = 0usize;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let at = ((y as usize) * (image.width as usize) + x as usize) * 4;
+                if alpha == 255 {
+                    image.pixels[at] = color[0];
+                    image.pixels[at + 1] = color[1];
+                    image.pixels[at + 2] = color[2];
+                    image.pixels[at + 3] = 255;
+                } else {
+                    // 同一个下标同时索引 `color`（源）与 `image.pixels`（目的）：改成迭代器要把
+                    // 两个容器绑在一起，反而更难读。
+                    #[allow(clippy::needless_range_loop)]
+                    for channel in 0..3 {
+                        let src = color[channel] as u32;
+                        let dst = image.pixels[at + channel] as u32;
+                        image.pixels[at + channel] =
+                            (mul_alpha(src, alpha) + mul_alpha(dst, inverse)) as u8;
+                    }
+                    let dst_a = image.pixels[at + 3] as u32;
+                    // 上界：alpha + inverse = 255（`mul_alpha` 的取整不会超过系数）。
+                    image.pixels[at + 3] = (alpha + mul_alpha(dst_a, inverse)) as u8;
+                }
+                written += 1;
+            }
+        }
+        written
+    }
+}
+
+/// **铺这一行的底衬**（如果有）。画字之前调用 —— 顺序是有判据盯着的：
+/// 底衬画在字**之后**会把字盖住（"看着有底衬、其实把字糊了"）。
+///
+/// `color` 为 `None` 时**一个像素都不碰**（这是存量零回归的全部执行处）。
+/// `opacity` 乘进 alpha：底衬要跟着这一行的淡入淡出一起淡，
+/// 否则淡入时会出现"字还半透明、底衬已经全黑"的错帧。
+///
+/// ⚠️ **必须在栅格化之后调**：矩形要按**真实墨迹**算，而墨迹只有拿到位图才知道
+/// （见 [`PlateRect::from_ink`] 那段——这是真机端到端抓到的 bug）。
+fn paint_plate(
+    image: &mut Rgba8Image,
+    ink: Option<(u32, u32, u32, u32)>,
+    placement: (i32, i32),
+    color: Option<[u8; 4]>,
+    pad_px: f32,
+    opacity: f32,
+) -> usize {
+    // ⚠️ 这里**先查颜色再查墨迹**：`plate_color = None` 是存量零回归那条路，
+    // 它必须"一个像素都不碰"且**不依赖墨迹是否存在**。
+    let Some(mut color) = color else {
+        return 0;
+    };
+    // 没有墨迹就没有可围的东西（空行 / 整行透明）—— 不铺。
+    let Some(ink) = ink else {
+        return 0;
+    };
+    // 不透明度与样式 alpha **相乘**（与 `blit_scaled` 把 scale 乘在 alpha 上同一处道理）。
+    let scaled = (color[3] as f32 * opacity.clamp(0.0, 1.0)).round();
+    color[3] = scaled.clamp(0.0, 255.0) as u8;
+    let plate = PlateRect::from_ink(ink, placement, pad_px);
+    plate.paint(image, color)
 }
 
 // ⚠️ `too_many_arguments`：**allow，不是拆结构体**。
@@ -683,6 +1102,8 @@ fn paint_shadow(
 fn paint_one(
     rasterize: &mut impl FnMut(&TextRasterKey) -> Result<Rc<TextBitmap>, String>,
     font_file: Option<PathBuf>,
+    // 同 `paint_parts`：字体目录。
+    font_dir: Option<PathBuf>,
     image: &mut Rgba8Image,
     target: (u32, u32),
     text: &str,
@@ -692,6 +1113,13 @@ fn paint_one(
     // **这一条被整体缩了多少**（1.0 = 没缩）。描边要跟着它缩 ——
     // 参照是 `swEff = sw * wrapped.scale`。函数参数上不能用文档注释。
     scale: f32,
+    // **这一条的字号比例**（求值层已把动画缩放乘进来）。
+    //
+    // 以前这里读的是 `style.font_ratio`（**轨道级**），于是"逐条缩放"
+    // 在求值层算对了、到渲染这一层被丢掉 —— 出片里弹入**一帧都不动**，
+    // 而数据层与单测全是对的。wasm 那条路读的本来就是 `item.font_ratio`，
+    // 两条路因此**不一致**；现在都读这一条。
+    font_ratio: f32,
     // **按高亮切好的分段**（颜色已解析）。空 = 没有 `.hl`，走一次画完的老路。
     parts: &[dhampir_core::overlay::TextRun],
     style: &dhampir_core::overlay::TextStyle,
@@ -699,6 +1127,20 @@ fn paint_one(
     opacity: f32,
     // 这一帧的纵向偏移（文档像素，正为向下）。
     dy_px: f32,
+    // 这一帧的**横向**偏移（文档像素，正为向右）。T4 抖动走这里；
+    // 恒 0 时与改动前画在同一个位置。
+    dx_px: f32,
+    // **这一条的文字形变**（T2）：倾斜 + 纵向压扁。
+    // 恒等时（`TextTransform::default()`）走原来的逐行拷贝路径 ⇒ 老工程零开销、逐字节不变。
+    transform: crate::text_transform::TextTransform,
+    // **逐字格子**（P3）：空 = 没有逐字效果（走老路）。非空且**行内有变换**时
+    // 才走逐字路径（见 `paint_per_char`）。
+    //
+    // ⚠️ 判据是"非空 **且** 有变换"两级，不是单看空 —— 求值层已经用
+    //    `is_active()` 滤过一遍，但渲染侧不该信任上游（`cells` 也可能由别处造出、
+    //    全是恒等），多一步判断的代价是零，漏判的代价是"所有字幕都改走逐字路"
+    //    （缓存碎掉、老工程产物变化）。
+    cells: &[dhampir_core::timeline::text_perchar::CharCell],
     judge_clip: bool,
     log: &mut IssueLog,
 ) -> Painted {
@@ -707,7 +1149,7 @@ fn paint_one(
     if opacity <= 0.0 {
         return Painted::Nothing;
     }
-    let Some(placement) = place_line(rect, target, style.font_ratio) else {
+    let Some(placement) = place_line(rect, target, font_ratio) else {
         return Painted::Nothing;
     };
     let path = issue_path(text);
@@ -716,9 +1158,9 @@ fn paint_one(
             "subtitle_font_missing",
             &path,
             format!(
-                "这一帧要画「{text}」，而宿主没有给字体（--font-file）。\
-                 本仓不内嵌字体、也不猜系统字体，所以这里画不出来 —— \
-                 不给字体就不出一份「看起来成功、其实没有字幕」的片子"
+                "这一帧要画「{text}」，却画不出来：{}。\
+                 不给字体就不出一份「看起来成功、其实没有字幕」的片子",
+                font_missing_reason(&font_file, &font_dir, style)
             ),
         );
         return Painted::Failed;
@@ -748,11 +1190,42 @@ fn paint_one(
     // 影响：全角字（中文）逻辑宽与实际推进一致，**偏移是准的**；
     // 中英混排时英文半角的逻辑宽是估算值，**偏移会差几像素**。
     // 这是"逻辑度量 vs 真实字体"那一类既有差异的延续，不是新引入的形状。
+    // ---------------------------------------------------------------------
+    // **逐字（P3）：配了逐字动效才走这条路。**
+    // ---------------------------------------------------------------------
+    //
+    // ⚠️ 排在 `parts` 之前：逐字比逐段更细（逐段是"一段一个位图"、
+    //    逐字是"一个字一个位图"），两者同时有时逐字能把段色带上（未来），
+    //    而现在同时出现时**逐字优先、`.hl` 颜色暂不生效** —— 已知缺口，
+    //    登记在 `TextItem::cells` 的文档里。
+    //
+    // ⚠️ 两级判据（非空 **且** 真有变换）：光非空不够 —— 一个全恒等的
+    //    `cells` 走逐字路只会把缓存打碎而画面一模一样。
+    if !cells.is_empty() && cells.iter().any(|c| !c.is_identity_transform()) {
+        return paint_per_char(
+            rasterize,
+            // `paint_one` 上面已经确认过字体给没给，这里带下去就行。
+            Some(font_file),
+            font_dir.clone(),
+            image,
+            target,
+            cells,
+            style,
+            scale,
+            opacity,
+            dy_px,
+            dx_px,
+            transform,
+            log,
+            placement,
+        );
+    }
     if !parts.is_empty() {
         return paint_parts(
             rasterize,
             // `paint_one` 上面已经确认过字体给没给，这里带下去就行。
             Some(font_file),
+            font_dir.clone(),
             image,
             target,
             parts,
@@ -760,6 +1233,8 @@ fn paint_one(
             scale,
             opacity,
             dy_px,
+            dx_px,
+            transform,
             judge_clip,
             log,
             placement,
@@ -783,6 +1258,9 @@ fn paint_one(
         // 只有描边不对，很难一眼看出来。
         stroke_px: (style.stroke_px * scale).round() as u32,
         stroke_color: style.stroke_color,
+        // **外圈**同一个 scale（与上一行逐字段一致）。
+        outer_stroke_px: (style.outer_stroke_px * scale).round() as u32,
+        outer_stroke_color: style.outer_stroke_color,
         // 这一张是**文字**位图：阴影是另一张（`paint_shadow`），
         // 两者的键在缓存里各占一格（不然会把没模糊的那张递给有模糊的）。
         shadow_color: None,
@@ -791,12 +1269,16 @@ fn paint_one(
         shadow_dy_px: 0,
         shadow_pad: 0,
         font_file: font_file.to_path_buf(),
+        // 同上：家族名从契约带下来。
+        font_family: style.family.clone(),
+        font_dir: font_dir.clone(),
         width: placement.bitmap_width,
         height: placement.bitmap_height,
     };
     // 纵向偏移（淡入上浮/退场下移）：**只挪落点**，不重算布局 ——
     // 位置是"布局给的行盒 + 这一帧的动画偏移"，两件事分开才说得清。
     let offset_y = dy_px.round() as i32;
+    let offset_x = dx_px.round() as i32;
     let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u32;
     // ---------------------------------------------------------------------
     // **先阴影、后文字**（阴影必须在底下）。
@@ -813,8 +1295,9 @@ fn paint_one(
             &key,
             shadow,
             image,
-            (placement.x, placement.y + offset_y),
+            (placement.x + offset_x, placement.y + offset_y),
             alpha,
+            transform,
             &path,
             log,
         );
@@ -826,7 +1309,53 @@ fn paint_one(
             return Painted::Failed;
         }
     };
-    let report = match blit_scaled(image, &bitmap, placement.x, placement.y + offset_y, alpha) {
+    // ---------------------------------------------------------------------
+    // **底衬（T6）：在字之前铺一块矩形。**
+    // ---------------------------------------------------------------------
+    //
+    // ⚠️ **位置有两重约束，都不是风格**：
+    //
+    // 1. **必须在栅格化之后**：矩形按**真实墨迹**算（`bitmap.ink_bounds()`），
+    //    而墨迹只有拿到位图才知道。第一版从**行盒**算、又在栅格化**之前**铺，
+    //    真机端到端红在"下侧没有外扩"（底衬 349 / 字 341）—— 字比行盒低 4px，
+    //    于是契约的 12px 在下侧被悄悄吃成 8px。见 [`PlateRect::from_ink`]。
+    // 2. **必须在 `blit_scaled` 之前**：底衬画在字**之后**会把字盖住 ——
+    //    "看着有底衬、其实把字糊了"，与"字段是哑的"是同一类静默错误。
+    //    判据见 `底衬铺在字之前_字仍然看得见`。
+    //
+    // 也放在字体检查**之后**：字体给不出来这一行就是 `Failed`（一个字都不画），
+    // 那时单独留一块底衬更糟 —— 画面上会出现一个没有字的色块。
+    //
+    // 底衬属于**字幕**这条通道；弹幕不铺（`plate_color` 是字幕轨道级样式，
+    // 滚动弹幕背后挂一块色块会把画面糊成一片，且参照实现也没有）。
+    // 靠 `style.plate_color` 是不是 `None` 决定 —— 弹幕轨道的 `TextStyle`
+    // 走的字段里没有它，于是恒为 `None`。
+    //
+    // ⚠️ 用**带 `offset_x/offset_y` 的落点**：底衬必须跟着这一帧的抖动/位移走，
+    // 用 `placement` 那个没含偏移的会让底衬在抖动时**纹丝不动**。
+    if judge_clip {
+        paint_plate(
+            image,
+            bitmap.ink_bounds(),
+            (placement.x + offset_x, placement.y + offset_y),
+            style.plate_color,
+            style.plate_pad_px,
+            opacity,
+        );
+    }
+    // ⚠️ 恒等走老路径、非恒等走 CPU 仿射（与 `paint_parts` 那处同一条判据）。
+    let text_origin = (placement.x + offset_x, placement.y + offset_y);
+    let blitted = if transform.is_identity() {
+        blit_scaled(image, &bitmap, text_origin.0, text_origin.1, alpha)
+    } else {
+        let written =
+            crate::text_transform::blit_affine(image, &bitmap, text_origin, transform, alpha);
+        Ok(BlitReport {
+            written: written as u64,
+            skipped: 0,
+        })
+    };
+    let report = match blitted {
         Ok(report) => report,
         Err(error) => {
             log.record("subtitle_blit_failed", &path, error);
@@ -849,11 +1378,20 @@ fn paint_one(
 
 /// 真正干活的那一段。**栅格化器是参数**：于是「落点、叠加、问题、计数」这四件事
 /// 能在不起 ffmpeg 的前提下被单测（与 text_raster 里那个缓存缝同一个理由）。
+///
+/// ⚠️ `too_many_arguments`：与 `render/blend_fn.rs`、`render/compose.rs` **同一处理 ——
+/// allow，不拆结构体**。这几个参数是**四个互相独立的输入**（栅格化器 / 字体解析 /
+/// 字体目录 / 目标图）加三个账（overlay / 日志 / 计数），语义各自独立；
+/// 为了凑 clippy 的 7 造个结构体，只会让「这次画的是谁、画到哪」多一层跳转，
+/// **收益是关掉 lint，代价是让这里更难读**。
+#[allow(clippy::too_many_arguments)]
 fn paint_lines(
     rasterize: &mut impl FnMut(&TextRasterKey) -> Result<Rc<TextBitmap>, String>,
     // 按样式解析出字体文件的闭包（`OverlayPainter::font_for` 的借用版）——
     // 字体不是"整份一个"，字重/族名都可能不同。
     font_for: &dyn Fn(&dhampir_core::overlay::TextStyle) -> Option<PathBuf>,
+    // **字体目录**（CLI 的 --font-dir）：libass 找字体与回退字体的入口。
+    font_dir: &Option<PathBuf>,
     image: &mut Rgba8Image,
     overlay: &TextOverlay,
     target: (u32, u32),
@@ -866,7 +1404,10 @@ fn paint_lines(
     for item in &overlay.items {
         match paint_one(
             &mut *rasterize,
-            font_for(&overlay.subtitle_style),
+            // ⚠️ 字体按**这一条所属轨**解析（`item.track_style`），不是全帧一个 ——
+            // 两条字幕轨的字体族可以不同（见 `TextItem::track_style`）。
+            font_for(&item.track_style),
+            font_dir.clone(),
             image,
             target,
             &item.text,
@@ -876,11 +1417,23 @@ fn paint_lines(
             item.color,
             // 字幕的缩放：布局算出来的（参照从不截断，缩字是它的常规路径）。
             item.scale,
+            // 字号比例：求值层已乘上动画缩放（T1 弹入 / T3 强调）。
+            item.font_ratio,
             // **逐段颜色**：空 = 没有 `.hl`，走一次画完的老路。
             &item.parts,
-            &overlay.subtitle_style,
+            // ⚠️ **轨道级样式按条取**：`overlay.subtitle_style` 那个共享槽
+            // 已删除（它让最后一条字幕轨吃掉前面所有轨，含 T6 底衬）。
+            &item.track_style,
             item.opacity,
             item.dy_px,
+            item.dx_px,
+            crate::text_transform::TextTransform {
+                rotation_deg: item.rotation_deg,
+                scale_x: 1.0,
+                scale_y: item.scale_y,
+            },
+            // **逐字格子（P3）**：空 = 没有逐字效果，走原来那条路。
+            &item.cells,
             true,
             log,
         ) {
@@ -898,7 +1451,9 @@ fn paint_lines(
     for item in &overlay.danmaku {
         match paint_one(
             &mut *rasterize,
-            font_for(&overlay.danmaku_style),
+            // ⚠️ 字体按**这一条所属轨**解析 —— 与字幕那半边同一条理由。
+            font_for(&item.track_style),
+            font_dir.clone(),
             image,
             target,
             &item.text,
@@ -908,11 +1463,26 @@ fn paint_lines(
             // 不把这个字段放进 `DanmakuTextItem` —— 放进去就等于宣称弹幕会缩，
             // 一个恒为 1 的字段只会让读的人以为它有意义。
             1.0,
+            // 弹幕字号：求值层给的（弹幕不缩放，所以就是轨道字号）。
+            item.font_ratio,
             // 弹幕没有 `.hl` 标记。
             &[],
-            &overlay.danmaku_style,
+            // ⚠️ **轨道级样式按条取**：`overlay.danmaku_style` 那个共享槽已删除。
+            &item.track_style,
             item.opacity,
             item.dy_px,
+            // **弹幕不横向抖动**：T4 的 `shake_*` 是字幕轨的字段，`DanmakuSpec`
+            // 上没有它 —— 与上面那个恒 1.0 的 `scale` 同一条理由，
+            // 所以也不往 `DanmakuTextItem` 里放一个恒为 0 的字段。
+            0.0,
+            // **弹幕不做文字形变**（T2 的倾斜/压扁是**字幕轨**的字段，
+            // 与上面那个恒 1.0 的 `scale`、恒 0 的 `dx` 同一条理由 ——
+            // 不往 `DanmakuTextItem` 里放恒缺省字段）。恒等 ⇒ 走老路径、零开销。
+            crate::text_transform::TextTransform::default(),
+            // **弹幕没有逐字效果**（`per_char` 是字幕轨的字段，弹幕契约上没有它）
+            // —— 与上面那个恒 1.0 的 `scale`、恒 0 的 `dx` 同一条理由，
+            // 不往 `DanmakuTextItem` 里塞一个恒空的字段。
+            &[],
             // **不判切线**：滚动中越界是常态（见模块文档）。画面外的墨像素由 `blit`
             // 丢掉，但那既不进问题清单、也不计数 —— 计数只数"画了几条"。
             false,
@@ -981,6 +1551,64 @@ fn clip_message(
 }
 
 #[cfg(test)]
+mod font_reason_tests {
+    use super::*;
+    use dhampir_core::overlay::TextStyle;
+
+    fn style_with(family: Option<&str>) -> TextStyle {
+        TextStyle {
+            family: family.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// **判据（T4）**：`subtitle_font_missing` 那条消息要**点出真正的原因**。
+    ///
+    /// # 为什么这条值得有判据
+    ///
+    /// 这条消息原来只有一句「宿主没有给字体（--font-file）」。但
+    /// **「没给」与「给了目录、里面没有点名的那份字体」是两件事**，
+    /// 而且后者的后果更隐蔽。消息指错方向，用户会去查他**没写错**的那个参数。
+    #[test]
+    fn 缺字体的三种原因各有各的说法() {
+        let dir = PathBuf::from("C:/fonts");
+        let file = Some(PathBuf::from("C:/fonts/a.ttf"));
+
+        // ① 两条都没给：说的是"没给"。
+        let none = font_missing_reason(&None, &None, &style_with(Some("乐米")));
+        assert!(none.contains("--font-file"), "要点出可以给哪个参数：{none}");
+        assert!(none.contains("--font-dir"), "另一条来源也要提：{none}");
+
+        // ② 给了目录、工程也点名了，但找不到：说的是"点名了哪个名字、在哪个目录"。
+        let named = font_missing_reason(&None, &Some(dir.clone()), &style_with(Some("乐米波波体")));
+        assert!(
+            named.contains("乐米波波体"),
+            "要点出**是哪个名字**找不到：{named}"
+        );
+        assert!(named.contains("C:/fonts"), "要点出**是哪个目录**：{named}");
+        assert!(
+            !named.contains("没有给字体（--font-file 没给"),
+            "这不是「没给」那种，别把用户往错的方向指：{named}"
+        );
+
+        // ③ 给了目录、工程没写名字：说的是"没名字可找"。
+        let unnamed = font_missing_reason(&None, &Some(dir.clone()), &style_with(None));
+        assert!(
+            unnamed.contains("font_family"),
+            "要点出缺的是名字：{unnamed}"
+        );
+
+        // **反向**：三种说法的确互不相同 —— 否则"各有各的说法"就是空话。
+        assert_ne!(none, named);
+        assert_ne!(named, unnamed);
+        assert_ne!(none, unnamed);
+
+        // `--font-file` 给了不影响①②③（那两路本来就不看它）。
+        let _ = file;
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use dhampir_core::overlay::{DanmakuTextItem, TextItem};
@@ -997,6 +1625,75 @@ mod tests {
         }
     }
 
+    /// 夹具用的"老工程"轨道级样式：不描边宽度、**不画阴影、不铺底衬**。
+    ///
+    /// ⚠️ 它是**逐条**填进 `TextItem.track_style` 的（不是帧级一份共享的）——
+    /// 帧级那个共享槽正是 task-18 修的 bug。
+    fn fixture_track_style() -> dhampir_core::overlay::TextStyle {
+        dhampir_core::overlay::TextStyle {
+            color: [255, 255, 255, 255],
+            highlight_color: None,
+            font_ratio: 0.04,
+            outline: true,
+            stroke_px: 0.0,
+            stroke_color: [0, 0, 0, 255],
+            // 夹具走「老工程」那一档：不画外圈（2026-10-16 加的字段）。
+            outer_stroke_px: 0.0,
+            outer_stroke_color: [255, 255, 255, 255],
+            family: None,
+            weight: 400,
+            // **不画阴影**：这是"老工程"的那套样式。
+            shadow_color: None,
+            shadow_dx_px: 0.0,
+            shadow_dy_px: 0.0,
+            shadow_blur_px: 0.0,
+            anchor_bottom: 1.0,
+            // **不铺底衬**：同样是"老工程"的样式（T6 的存量零回归前提）。
+            plate_color: None,
+            plate_pad_px: 12.0,
+        }
+    }
+
+    /// 把轨道级样式**写到每一条**上 —— 夹具里改样式时用它。
+    ///
+    /// ⚠️ 存在的理由就是 task-18：轨道级样式**逐条**存在（`TextItem::track_style`），
+    /// 再也没有"改一处、全帧生效"的共享槽了。夹具里所有条目本来就同属一条轨，
+    /// 所以这里就是"给那条轨改样式"。
+    fn set_track_style(
+        overlay: &mut TextOverlay,
+        mut edit: impl FnMut(&mut dhampir_core::overlay::TextStyle),
+    ) {
+        for item in &mut overlay.items {
+            edit(&mut item.track_style);
+        }
+    }
+
+    /// 弹幕夹具的轨道级样式（逐条带 —— 帧级那个共享槽已删除）。
+    fn danmaku_fixture_style() -> dhampir_core::overlay::TextStyle {
+        dhampir_core::overlay::TextStyle {
+            color: [255, 255, 255, 255],
+            highlight_color: None,
+            font_ratio: 0.04,
+            outline: true,
+            stroke_px: 0.0,
+            stroke_color: [0, 0, 0, 255],
+            // 夹具走「老工程」那一档：不画外圈（2026-10-16 加的字段）。
+            outer_stroke_px: 0.0,
+            outer_stroke_color: [255, 255, 255, 255],
+            family: None,
+            weight: 400,
+            // 弹幕恒不画阴影（`DanmakuSpec` 里没有阴影字段）。
+            shadow_color: None,
+            shadow_dx_px: 0.0,
+            shadow_dy_px: 0.0,
+            shadow_blur_px: 0.0,
+            anchor_bottom: 1.0,
+            // 弹幕恒不铺底衬（同一条理由）。
+            plate_color: None,
+            plate_pad_px: 12.0,
+        }
+    }
+
     fn overlay(lines: &[(&str, NormalizedRect)], dropped: usize) -> TextOverlay {
         TextOverlay {
             items: lines
@@ -1010,26 +1707,19 @@ mod tests {
                     color: [255, 255, 255, 255],
                     font_ratio: 0.04,
                     scale: 1.0,
+                    // task-14 加的横向抖动偏移：夹具里恒 0（"老行为"）。
+                    dx_px: 0.0,
                     parts: Vec::new(),
+                    cells: Vec::new(),
+                    track_style: fixture_track_style(),
+                    // T1 的文字形变：夹具里恒 0.0 / 1.0 = **老行为**。
+                    // 本文件所有既有判据都拿这个 `overlay()` 造数据，
+                    // 给非缺省值会让它们全都变成"在测新行为"。
+                    rotation_deg: 0.0,
+                    scale_y: 1.0,
                 })
                 .collect(),
             danmaku: Vec::new(),
-            subtitle_style: dhampir_core::overlay::TextStyle {
-                color: [255, 255, 255, 255],
-                highlight_color: None,
-                font_ratio: 0.04,
-                outline: true,
-                stroke_px: 0.0,
-                stroke_color: [0, 0, 0, 255],
-                family: None,
-                weight: 400,
-                // **不画阴影**：这是"老工程"的那套样式。
-                shadow_color: None,
-                shadow_dx_px: 0.0,
-                shadow_dy_px: 0.0,
-                shadow_blur_px: 0.0,
-            },
-            danmaku_style: dhampir_core::overlay::TextStyle::default(),
             dropped_lines: dropped,
             dropped_danmaku: 0,
         }
@@ -1057,24 +1747,10 @@ mod tests {
                     dy_px: 0.0,
                     color: [255, 255, 255, 255],
                     font_ratio: 0.04,
+                    // ⚠️ 轨道级样式**逐条**带（帧级那个共享槽已删除）。
+                    track_style: danmaku_fixture_style(),
                 })
                 .collect(),
-            subtitle_style: dhampir_core::overlay::TextStyle::default(),
-            danmaku_style: dhampir_core::overlay::TextStyle {
-                color: [255, 255, 255, 255],
-                highlight_color: None,
-                font_ratio: 0.04,
-                outline: true,
-                stroke_px: 0.0,
-                stroke_color: [0, 0, 0, 255],
-                family: None,
-                weight: 400,
-                // 弹幕恒不画阴影（`DanmakuSpec` 里没有阴影字段）。
-                shadow_color: None,
-                shadow_dx_px: 0.0,
-                shadow_dy_px: 0.0,
-                shadow_blur_px: 0.0,
-            },
             dropped_lines: 0,
             dropped_danmaku,
         }
@@ -1320,6 +1996,8 @@ mod tests {
                     rasterize(key)
                 },
                 &|_: &dhampir_core::overlay::TextStyle| painter.font_file.clone(),
+                // 测试里不给字体目录（走 `--font-file` 的父目录兜底）。
+                &None,
                 &mut image,
                 &lines,
                 (640, 360),
@@ -1346,6 +2024,8 @@ mod tests {
         paint_lines(
             &mut |key| fake_rasterizer(&mut calls)(key),
             &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            // 测试里不给字体目录（走 `--font-file` 的父目录兜底）。
+            &None,
             &mut image,
             &lines,
             (640, 360),
@@ -1376,6 +2056,8 @@ mod tests {
         paint_lines(
             &mut |_key| Err("ffmpeg 画不出这一行（退出码 1）：字体不认得".to_string()),
             &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            // 测试里不给字体目录（走 `--font-file` 的父目录兜底）。
+            &None,
             &mut image,
             &lines,
             (64, 64),
@@ -1398,6 +2080,8 @@ mod tests {
         paint_lines(
             &mut |key| fake_rasterizer(&mut calls)(key),
             &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            // 测试里不给字体目录（走 `--font-file` 的父目录兜底）。
+            &None,
             &mut image,
             &lines,
             (64, 64),
@@ -1424,10 +2108,14 @@ mod tests {
         let mut log = IssueLog::new();
         let mut painter = OverlayPainter::new(Some(Path::new("C:/fake/font.ttf")));
         let lines = overlay(&[("一", rect)], 0);
-        assert_eq!(lines.subtitle_style.shadow_color, None, "夹具就是老样式");
+        assert_eq!(
+            lines.items[0].track_style.shadow_color, None,
+            "夹具就是老样式"
+        );
         paint_lines(
             &mut |key| fake_rasterizer(&mut calls)(key),
             &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            &None,
             &mut baseline,
             &lines,
             target,
@@ -1440,11 +2128,14 @@ mod tests {
         let mut transparent = frame(640, 360, [0, 0, 0, 255]);
         let mut calls = 0usize;
         let mut lines = overlay(&[("一", rect)], 0);
-        lines.subtitle_style.shadow_color = Some([0, 0, 0, 0]);
-        lines.subtitle_style.shadow_dy_px = 4.0;
+        set_track_style(&mut lines, |style| {
+            style.shadow_color = Some([0, 0, 0, 0]);
+            style.shadow_dy_px = 4.0;
+        });
         paint_lines(
             &mut |key| fake_rasterizer(&mut calls)(key),
             &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            &None,
             &mut transparent,
             &lines,
             target,
@@ -1472,12 +2163,16 @@ mod tests {
         let mut calls = 0usize;
         let mut painter = OverlayPainter::new(Some(Path::new("C:/fake/font.ttf")));
         let mut lines = overlay(&[("一", rect)], 0);
-        lines.subtitle_style.shadow_color = Some([0, 0, 0, 255]);
+        set_track_style(&mut lines, |style| {
+            style.shadow_color = Some([0, 0, 0, 255])
+        });
         // 只留垂直偏移（不用模糊）：**阴影的落点=文字落点+(0,20)**，于是
         // 两块墨在纵向完全错开，"偏移生效了没有"一眼可判。
-        lines.subtitle_style.shadow_dx_px = 0.0;
-        lines.subtitle_style.shadow_dy_px = 20.0;
-        lines.subtitle_style.shadow_blur_px = 0.0;
+        set_track_style(&mut lines, |style| {
+            style.shadow_dx_px = 0.0;
+            style.shadow_dy_px = 20.0;
+            style.shadow_blur_px = 0.0;
+        });
         paint_lines(
             &mut |key| {
                 calls += 1;
@@ -1493,6 +2188,8 @@ mod tests {
                 Ok(Rc::new(ink_bitmap_of(key.width, key.height, color)))
             },
             &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            // 测试里不给字体目录（走 `--font-file` 的父目录兜底）。
+            &None,
             &mut image,
             &lines,
             target,
@@ -1537,8 +2234,10 @@ mod tests {
         let mut calls = 0usize;
         let mut painter = OverlayPainter::new(Some(Path::new("C:/fake/font.ttf")));
         let mut lines = overlay(&[("一", rect)], 0);
-        lines.subtitle_style.shadow_color = Some([0, 0, 0, 255]);
-        lines.subtitle_style.shadow_blur_px = 6.0;
+        set_track_style(&mut lines, |style| {
+            style.shadow_color = Some([0, 0, 0, 255]);
+            style.shadow_blur_px = 6.0;
+        });
         paint_lines(
             &mut |key| {
                 calls += 1;
@@ -1548,6 +2247,8 @@ mod tests {
                 Ok(Rc::new(ink_bitmap(key.width, key.height)))
             },
             &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            // 测试里不给字体目录（走 `--font-file` 的父目录兜底）。
+            &None,
             &mut image,
             &lines,
             target,
@@ -1596,6 +2297,8 @@ mod tests {
         paint_lines(
             &mut |key| fake_rasterizer(&mut calls)(key),
             &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            // 测试里不给字体目录（走 `--font-file` 的父目录兜底）。
+            &None,
             &mut image,
             &items,
             (640, 360),
@@ -1632,6 +2335,8 @@ mod tests {
         paint_lines(
             &mut |_key| unreachable!("没有字体时不该走到栅格化"),
             &|_: &dhampir_core::overlay::TextStyle| None,
+            // 测试里不给字体目录（走 `--font-file` 的父目录兜底）。
+            &None,
             &mut image,
             &items,
             (640, 360),
@@ -1666,11 +2371,14 @@ mod tests {
             dy_px: 0.0,
             color: [255, 255, 255, 255],
             font_ratio: 0.04,
+            track_style: danmaku_fixture_style(),
         });
         items.dropped_danmaku = 3;
         paint_lines(
             &mut |key| fake_rasterizer(&mut calls)(key),
             &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            // 测试里不给字体目录（走 `--font-file` 的父目录兜底）。
+            &None,
             &mut image,
             &items,
             (640, 360),
@@ -1682,5 +2390,459 @@ mod tests {
         assert_eq!((stats.lines_drawn, stats.lines_dropped), (1, 1));
         assert_eq!((stats.danmaku_drawn, stats.danmaku_dropped), (1, 3));
         assert_eq!(calls, 2, "字幕一行 + 弹幕一条");
+    }
+
+    // ---- 底衬（T6）：**数像素**的判据 ----
+    //
+    // ⚠️ 这一组是 T6 的唯一判据来源。"字段接上了"与"画出来了"是两件事：
+    // 字段接上而 `paint_one` 不认识它，**画面与今天逐像素相同**（哑字段）——
+    // 那正是本仓"跑得通、日志正常、结果不对"的同一形态。所以只数像素。
+
+    /// 数一张图里**等于给定色值**的像素个数。
+    fn count_color(image: &Rgba8Image, color: [u8; 4]) -> usize {
+        image
+            .pixels
+            .chunks_exact(4)
+            .filter(|px| {
+                px[0] == color[0] && px[1] == color[1] && px[2] == color[2] && px[3] == color[3]
+            })
+            .count()
+    }
+
+    /// 数一张图里**与背景不同**的像素个数。
+    fn count_non_background(image: &Rgba8Image, background: [u8; 4]) -> usize {
+        image
+            .pixels
+            .chunks_exact(4)
+            .filter(|px| {
+                px[0] != background[0]
+                    || px[1] != background[1]
+                    || px[2] != background[2]
+                    || px[3] != background[3]
+            })
+            .count()
+    }
+
+    /// 跑一次 `paint_lines`（一行字幕），返回画完的图。
+    ///
+    /// `background` 可选：**底衬那几条判据必须给一个"任何可能的底衬色都不等于它"
+    /// 的底色** —— 用黑底时，一个把默认值误当成"黑底衬"的实现会因为两者同色而
+    /// **看不出来**。这条已被变异抓住过：把 `None` 改成"默认铺一块不透明黑"，
+    /// 黑底图上的判据仍然全绿。
+    fn paint_single_subtitle_on(
+        target: (u32, u32),
+        background: Option<[u8; 4]>,
+        style_setup: impl FnOnce(&mut TextOverlay),
+    ) -> Rgba8Image {
+        let mut image = frame(target.0, target.1, background.unwrap_or([0, 0, 0, 255]));
+        let mut log = IssueLog::new();
+        let mut calls = 0usize;
+        let mut painter = OverlayPainter::new(Some(Path::new("C:/fake/font.ttf")));
+        let mut items = overlay(&[("字幕", rect(0.25, 0.8, 0.5, 0.066))], 0);
+        style_setup(&mut items);
+        paint_lines(
+            &mut |key| fake_rasterizer(&mut calls)(key),
+            &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            &None,
+            &mut image,
+            &items,
+            target,
+            &mut log,
+            &mut painter.stats,
+        );
+        assert!(log.is_empty(), "不该有问题记录：这一行没画出来过");
+        image
+    }
+
+    /// 黑底那条老路（历史用例都走它）。
+    fn paint_single_subtitle(
+        target: (u32, u32),
+        style_setup: impl FnOnce(&mut TextOverlay),
+    ) -> Rgba8Image {
+        paint_single_subtitle_on(target, None, style_setup)
+    }
+
+    /// **反向用例（渲染层）**：`plate_color = None` ⇒ **一个像素都不多画**。
+    ///
+    /// 这条是 T6 的存量零回归判据。与 `layer.rs` 的 JSON 层那条是**两道**
+    /// —— 这条证明"画面没变"，那条证明"工程文件没变"。
+    ///
+    /// **变异自证**：把 `paint_one` 里那个 `if judge_clip` 去掉、或把
+    /// `paint_plate` 开头的 `let Some(color) = color else` 改成 `unwrap_or(某个默认色)`，
+    /// 本条立刻打红（默认样式的 `plate_color` 是 `None`）。
+    #[test]
+    fn 没有底衬时一个像素都不多画() {
+        let target = (640u32, 360u32);
+        // ⚠️ 底色**故意不是一个"可能的底衬色"**（不是黑）。
+        // 用黑底时，"把默认值误当成铺一块不透明黑"的实现会与底色同色 ⇒
+        // 判据看不出来。这条是被变异逼出来的：见 `paint_single_subtitle_on` 的注释。
+        let background = [200, 30, 90, 255];
+
+        // **地基**：夹具那条字幕必须真的画得出字 —— 否则"没多画像素"是废话
+        // （一张空图当然没多画）。这一条不成立时下面全是空的。
+        let probe = paint_single_subtitle_on(target, Some(background), |_| {});
+        let ink = count_non_background(&probe, background);
+        assert!(ink > 0, "夹具本身要画得出字，否则这条判据是空的");
+
+        let default_style = paint_single_subtitle_on(target, Some(background), |_| {});
+        let explicit_none = paint_single_subtitle_on(target, Some(background), |o| {
+            set_track_style(o, |style| style.plate_color = None)
+        });
+        assert_eq!(
+            default_style.pixels, explicit_none.pixels,
+            "plate_color = None 必须与默认样式逐像素相同"
+        );
+
+        // **核心判据：默认样式不许铺任何底衬**。
+        //
+        // 判法：数"底衬**该**占的那块矩形里、但**不在**字位图横向范围内"的像素
+        // —— 那些位置默认样式下必须是纯背景。比"数某个具体底衬色"更强：
+        // **任何**颜色/任何位置的误铺都会让这一条红。
+        let stray = count_stray_in_plate_band(&default_style, background);
+        assert_eq!(
+            stray, 0,
+            "默认样式（plate_color = None）在字之外多画了 {stray} 个像素（该是 0）"
+        );
+    }
+
+    /// 数"底衬矩形之内、但横向在字位图之外"的非背景像素。
+    ///
+    /// `ink_bitmap` 的墨在横向 `[w/8, 3w/8]`（居中 1/4 宽）—— 这里取矩形左右两端
+    /// 各 1/4 作为"字**不可能**占到"的带，于是任何非背景像素都只可能来自底衬。
+    fn count_stray_in_plate_band(image: &Rgba8Image, background: [u8; 4]) -> usize {
+        let r = rect(0.25, 0.8, 0.5, 0.066);
+        let pad = 12.0f32;
+        let w = 640.0f32;
+        let h = 360.0f32;
+        let left = ((r.x * w).round() - pad) as i32;
+        let right = (((r.x + r.width) * w).round() + pad) as i32;
+        let top = ((r.y * h).round() - pad) as i32;
+        let bottom = (((r.y + r.height) * h).round() + pad) as i32;
+        let ink_left = left + (right - left) / 4;
+        let ink_right = left + 3 * (right - left) / 4;
+        let mut stray = 0usize;
+        for y in top.max(0)..bottom {
+            for x in left.max(0)..right.min(image.width as i32) {
+                if x >= ink_left && x < ink_right {
+                    continue;
+                }
+                if let Some(px) = image.pixel(x as u32, y as u32) {
+                    if px != background {
+                        stray += 1;
+                    }
+                }
+            }
+        }
+        stray
+    }
+
+    /// **正向判据（数像素）**：有底衬时，行盒**外扩一圈**的区域里出现
+    /// **等于 `plate_color`** 的像素，且**多出来的像素全都**是它。
+    ///
+    /// # 判据怎么避开"字自己"
+    ///
+    /// 底衬色取一个字**不会用到的**颜色（`[10, 200, 30, 255]`，夹具的墨是纯白），
+    /// 于是"数这个色值"就**只**数得到底衬。再拿"有底衬"减"没底衬"：
+    /// **差出来的那些像素**就是底衬，与字无关。
+    ///
+    /// ⚠️ 特别验了"底衬比行盒大一圈"—— 只验"字周围有底衬"的话，
+    /// 一个把 `pad` 吃成 0 的实现也能过（那正是"看着有底衬、其实贴死在字上"）。
+    #[test]
+    fn 有底衬时外扩一圈出现底衬色() {
+        let target = (640u32, 360u32);
+        let plate = [10, 200, 30, 255];
+        let background = [0, 0, 0, 255];
+        let setup = |o: &mut TextOverlay| {
+            set_track_style(o, |style| {
+                style.plate_color = Some(plate);
+                style.plate_pad_px = 12.0;
+            });
+        };
+
+        let without = paint_single_subtitle(target, |_| {});
+        let with_plate = paint_single_subtitle(target, setup);
+
+        let extra = count_non_background(&with_plate, background)
+            - count_non_background(&without, background);
+        let plate_px = count_color(&with_plate, plate);
+        assert!(
+            plate_px > 0,
+            "有底衬时该数得到底衬色的像素（数到 0 就是没画）"
+        );
+        assert_eq!(
+            extra, plate_px,
+            "多出来的像素必须**全部**是底衬色 —— 出现别的色说明铺块碰了字"
+        );
+
+        // 几何：底衬那块矩形 = 行盒外扩 12px。
+        // ⚠️ 它比"数得到的底衬像素"**大** —— 字是后画的，会把中间那条盖掉
+        // （那正是**对**的层序，见 `底衬铺在字之前_字仍然看得见`）。
+        // 所以判据分两步：① 底衬像素数 ≤ 矩形面积（不可能更满）；
+        // ② 少掉的那些**正是字盖住的那几条**（底衬像素 + 不透明墨 = 矩形面积）。
+        let rect_area = {
+            let r = rect(0.25, 0.8, 0.5, 0.066);
+            let pad = 12.0f32;
+            let w = 640.0f32;
+            let h = 360.0f32;
+            let left = (r.x * w).round() - pad;
+            let top = (r.y * h).round() - pad;
+            let right = ((r.x + r.width) * w).round() + pad;
+            let bottom = ((r.y + r.height) * h).round() + pad;
+            ((right - left) as usize) * ((bottom - top) as usize)
+        };
+        assert!(
+            plate_px <= rect_area,
+            "底衬像素（{plate_px}）不可能多于那块矩形（{rect_area}）"
+        );
+        // 少掉的那部分必须是**字盖住的**（否则就是"只铺了字那一小块"）。
+        let covered_by_ink = rect_area - plate_px;
+        assert!(
+            covered_by_ink > 0 && covered_by_ink < rect_area,
+            "字该盖住矩形的一部分（盖住 {covered_by_ink} / {rect_area}）"
+        );
+    }
+
+    /// ⚠️ **层序判据**：底衬铺在字**之前** —— 字必须仍然看得见。
+    ///
+    /// 铺在字**之后**会把字整个盖住：画面上"有底衬"，但字没了。
+    /// 它与"字段是哑的"属于同一类静默（都看着像做完了，只有数像素才分得开）。
+    ///
+    /// **变异自证**：把 `paint_one` 里那个 `paint_plate(…)` 调用挪到画字之后，
+    /// 本条打红 —— 白色墨像素会被底衬色盖掉。
+    #[test]
+    fn 底衬铺在字之前_字仍然看得见() {
+        let target = (640u32, 360u32);
+        let plate = [10, 200, 30, 255];
+        let image = paint_single_subtitle(target, |o| {
+            set_track_style(o, |style| {
+                style.plate_color = Some(plate);
+                style.plate_pad_px = 12.0;
+            });
+        });
+
+        // 夹具的字是**纯白墨**，底衬是另一个颜色：字还在 ⇒ 图里仍有白色像素。
+        assert!(
+            count_color(&image, [255, 255, 255, 255]) > 0,
+            "铺了底衬之后字必须还在（铺在字之后会把字盖掉）"
+        );
+        // 两种色同时出现，才说明**层序**对（底衬在下、字在上）。
+        assert!(count_color(&image, plate) > 0, "底衬自己也要在");
+    }
+
+    /// `plate_pad_px` **真的改变外扩量**（不是个被忽略的字段）。
+    ///
+    /// 少了这条，一个"把 pad 写死成某个常数"的实现能过上面两条。
+    ///
+    /// # ⚠️ 口径变了（按**字墨迹**外扩，不是行盒）
+    ///
+    /// 真机端到端抓到的 bug：从**行盒**外扩时，字的下伸部会吃掉几像素，
+    /// 于是契约的 12px 在下侧只剩 8px。现在从 `bitmap.ink_bounds()` 外扩，
+    /// 四个方向的留白都是真的 `pad_px`。
+    ///
+    /// 这改变了本条的**前提**：`pad = 0` 时矩形**正好等于墨迹盒**，
+    /// 而字把它盖满 ⇒ 可见的底衬像素是 **0**（第一版从行盒算时，
+    /// 行盒比墨迹大，所以 pad=0 仍看得见一圈）。所以判据改成：
+    /// **pad 越大，可见的底衬像素越多**（严格单调），且 pad = 0 时可见为 0。
+    #[test]
+    fn 外扩量真的改变底衬大小() {
+        let target = (640u32, 360u32);
+        let plate = [10, 200, 30, 255];
+        let count_for = |pad: f32| {
+            count_color(
+                &paint_single_subtitle(target, |o| {
+                    set_track_style(o, |style| {
+                        style.plate_color = Some(plate);
+                        style.plate_pad_px = pad;
+                    });
+                }),
+                plate,
+            )
+        };
+        let (zero, four, twelve) = (count_for(0.0), count_for(4.0), count_for(12.0));
+
+        // `pad = 0`：底衬 == 墨迹盒，被字**完全盖住** ⇒ 一个可见的底衬像素都没有。
+        // ⚠️ 这不是"没铺"：铺了，只是被盖住了。下面 pad>0 的单调性才是"铺了"的证明。
+        assert_eq!(zero, 0, "pad = 0 时底衬正好是墨迹盒，应被字完全盖住");
+        assert!(
+            four > zero,
+            "pad 4 必须比 pad 0 多（{four} vs {zero}）—— 否则 pad 是被忽略的"
+        );
+        assert!(
+            twelve > four,
+            "pad 12 必须比 pad 4 多（{twelve} vs {four}）—— 只看一档分不出'写死常数'"
+        );
+
+        // 外扩 Δ 多出来的**矩形**面积 = (iw+2Δ)(ih+2Δ) − iw·ih，其中 `iw/ih`
+        // 是**墨迹盒**（闭区间 +1 成半开，见 `PlateRect::from_ink`）。
+        // 可见像素的增量**小于**它（字盖住中间那条），但必须落在它之内。
+        // `iw`/`ih` 从夹具的 `ink_bitmap` 推：位图 640 × (24 + 2·pad_px(14)) = 640×32，
+        // 墨迹横向 `[w/8, 3w/8]`、纵向居中一半高 ⇒ 160×16（闭区间）。
+        let (iw, ih) = (160usize + 1, 16usize + 1);
+        let area = |p: usize| (iw + 2 * p) * (ih + 2 * p);
+        let ring = area(12) - area(4); // Δ = 8
+        let gained = twelve - four;
+        assert!(
+            gained > 0 && gained <= ring,
+            "外扩 8px 该多出最多 {ring} 个可见底衬像素，实际 {gained}"
+        );
+    }
+
+    /// 底衬跟着这一行的**不透明度**淡入淡出。
+    ///
+    /// 不透明时铺满，半透明时铺半份 —— 否则淡入前半段会出现
+    /// "字还半透明、底衬已经全黑"的错帧。
+    #[test]
+    fn 底衬跟着不透明度淡入() {
+        let target = (640u32, 360u32);
+        let plate = [10, 200, 30, 255];
+        let background = [0, 0, 0, 255];
+        let opaque = paint_single_subtitle(target, |o| {
+            set_track_style(o, |style| {
+                style.plate_color = Some(plate);
+                style.plate_pad_px = 12.0;
+            });
+        });
+        let half = paint_single_subtitle(target, |o| {
+            set_track_style(o, |style| {
+                style.plate_color = Some(plate);
+                style.plate_pad_px = 12.0;
+            });
+            // 这一帧的不透明度 = 0.5（淡入中间）。
+            o.items[0].opacity = 0.5;
+        });
+
+        // 半透明那帧里**纯**底衬色变少（alpha 只有一半 ⇒ 合成出别的值）。
+        assert!(
+            count_color(&half, plate) < count_color(&opaque, plate),
+            "半透明那帧不该还有同样多的纯底衬像素"
+        );
+        // 但底衬确实铺了（只是淡了）：非背景像素仍明显多于"没底衬"那张。
+        assert!(
+            count_non_background(&half, background) > 0,
+            "半透明底衬也画得出来"
+        );
+    }
+
+    // ── T2：文字形变端到端 ────────────────────────────────────────────
+
+    /// ★ **恒等变换下与接线前逐字节相同**（端到端，不只是 `blit_affine` 级别）。
+    ///
+    /// 判据：同一个 `TextOverlay`，把每条 item 的 `rotation_deg`/`scale_y` 显式设成
+    /// **缺省值**（0.0 / 1.0）画一遍，必须与"根本没接形变"时的结果**逐字节相同**。
+    ///
+    /// ⚠️ 这条防的是"接线时顺手改了老路径的行为" —— 那种错**不报错、只在像素里**，
+    /// 而且会让所有存量工程静默变样。
+    #[test]
+    fn t2_恒等形变端到端逐字节不变() {
+        let mut painter = OverlayPainter::new(Some(Path::new("C:/fake/font.ttf")));
+        let mut log = IssueLog::new();
+        let lines = overlay(&[("恒等", rect(0.25, 0.4, 0.5, 0.066))], 0);
+
+        // 甲：显式恒等（走的是 is_identity() ⇒ 老路径 blit_scaled）。
+        let mut image = frame(640, 360, [0, 0, 0, 255]);
+        let mut calls = 0;
+        paint_lines(
+            &mut |key| fake_rasterizer(&mut calls)(key),
+            &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            &None,
+            &mut image,
+            &lines,
+            (640, 360),
+            &mut log,
+            &mut painter.stats,
+        );
+
+        // 乙：同上，但把形变字段设成**非缺省**再手动清零 —— 确认"设过 = 没设过"。
+        let mut lines2 = overlay(&[("恒等", rect(0.25, 0.4, 0.5, 0.066))], 0);
+        lines2.items[0].rotation_deg = 0.0;
+        lines2.items[0].scale_y = 1.0;
+        let mut image2 = frame(640, 360, [0, 0, 0, 255]);
+        let mut calls2 = 0;
+        paint_lines(
+            &mut |key| fake_rasterizer(&mut calls2)(key),
+            &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+            &None,
+            &mut image2,
+            &lines2,
+            (640, 360),
+            &mut log,
+            &mut painter.stats,
+        );
+
+        assert_eq!(
+            image.pixels, image2.pixels,
+            "恒等形变必须逐字节相同（接线没有改变老路径的行为）"
+        );
+        assert!(image.pixels.iter().any(|&b| b != 0), "这一帧确实画了字");
+    }
+
+    /// ★ **旋转真的落到帧上**（端到端）。
+    ///
+    /// 判据：`rotation_deg = 30` 与 `0` 画出来的帧**必须不同**，且差异只落在文字带附近。
+    #[test]
+    fn t2_旋转真的改变成片像素() {
+        let mut log = IssueLog::new();
+        let mut stats_a = OverlayStats::default();
+        let mut stats_b = OverlayStats::default();
+
+        let mut draw = |rot: f32, stats: &mut OverlayStats| {
+            let mut lines = overlay(&[("斜", rect(0.25, 0.4, 0.5, 0.066))], 0);
+            lines.items[0].rotation_deg = rot;
+            let mut image = frame(640, 360, [0, 0, 0, 255]);
+            let mut calls = 0;
+            paint_lines(
+                &mut |key| fake_rasterizer(&mut calls)(key),
+                &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+                &None,
+                &mut image,
+                &lines,
+                (640, 360),
+                &mut log,
+                stats,
+            );
+            image
+        };
+
+        let flat = draw(0.0, &mut stats_a);
+        let tilted = draw(30.0, &mut stats_b);
+
+        assert_ne!(
+            flat.pixels, tilted.pixels,
+            "rotation_deg=30 必须改变成片像素（否则形变没接上）"
+        );
+        // 两者都真的画出了字。
+        assert!(flat.pixels.iter().any(|&b| b != 0), "未旋转那帧要有字");
+        assert!(tilted.pixels.iter().any(|&b| b != 0), "旋转那帧要有字");
+    }
+
+    /// ★ **纵向压扁真的改变成片像素**（端到端）。
+    #[test]
+    fn t2_压扁真的改变成片像素() {
+        let mut log = IssueLog::new();
+        let mut draw = |sy: f32, stats: &mut OverlayStats| {
+            let mut lines = overlay(&[("扁", rect(0.25, 0.4, 0.5, 0.066))], 0);
+            lines.items[0].scale_y = sy;
+            let mut image = frame(640, 360, [0, 0, 0, 255]);
+            let mut calls = 0;
+            paint_lines(
+                &mut |key| fake_rasterizer(&mut calls)(key),
+                &|_: &dhampir_core::overlay::TextStyle| Some(PathBuf::from("C:/fake/font.ttf")),
+                &None,
+                &mut image,
+                &lines,
+                (640, 360),
+                &mut log,
+                stats,
+            );
+            image
+        };
+        let mut sa = OverlayStats::default();
+        let mut sb = OverlayStats::default();
+        let normal = draw(1.0, &mut sa);
+        let squashed = draw(0.5, &mut sb);
+        assert_ne!(
+            normal.pixels, squashed.pixels,
+            "scale_y=0.5 必须改变成片像素（否则压扁没接上）"
+        );
     }
 }

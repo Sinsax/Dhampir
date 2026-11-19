@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>dom-measure</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #000; }
+  /* 画布钉在左上角，尺寸由工程的 render_hints 决定 —— 于是 headless 的**整窗截图**
+     就等于这张画布（量测脚本按同样的窗口尺寸截图，两张图逐像素可比）。 */
+  #stage { position: absolute; left: 0; top: 0; overflow: hidden; isolation: isolate; }
+  /* 占位方块：位置口径与 web/dom-host.html 一致（left/top 50% + transform 居中），
+     但外观由 ?fill= 覆盖成与引擎同色的实心块，并把占位文字藏掉。
+     为什么要有这个覆盖：DOM 宿主**不解码素材**（它画的就是方块），而这一页要量的
+     是"浏览器对同一几何/混合/掩码的处理"，所以两边必须同色同尺寸。见脚本头部说明。 */
+  .dom-layer { position: absolute; left: 50%; top: 50%; padding: 0; border: 0; color: transparent;
+               background: transparent; white-space: nowrap; will-change: transform, opacity; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<script type="module">
+import { createDomHost } from './dom-host.mjs';
+
+const params = new URLSearchParams(location.search);
+const stage = document.getElementById('stage');
+
+function fail(message) {
+  document.title = 'failed: ' + message;
+  window.__measureError = message;
+}
+
+async function main() {
+  const fill = params.get('fill') === null ? [] : JSON.parse(params.get('fill'));
+  const style = document.createElement('style');
+  style.textContent = fill.map(function (item) {
+    return '[data-layer-id="' + item.id + '"] { width: ' + item.w + 'px; height: ' + item.h + 'px; background: rgb(' + item.color.join(',') + '); }';
+  }).join('\n');
+  document.head.appendChild(style);
+
+  const response = await fetch(params.get('project'));
+  if (!response.ok) { fail('取工程文件失败：HTTP ' + response.status); return; }
+  const doc = await response.json();
+  const hints = doc.render_hints === undefined ? {} : doc.render_hints;
+  if (typeof hints.background === 'string' && hints.background !== '') stage.style.background = hints.background;
+  const host = createDomHost({ container: stage });
+  host.open(doc);
+  host.draw(Number(params.get('frame') === null ? '0' : params.get('frame')));
+  document.title = 'ready';
+  window.__measureReady = true;
+}
+
+main().catch(function (error) { fail(String(error && error.message ? error.message : error)); });
+</script>
+</body>
+</html>

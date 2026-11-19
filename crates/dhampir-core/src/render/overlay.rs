@@ -147,6 +147,12 @@ pub fn compose_overlay(
             opacity: 1.0,
             // 普通 source-over：文字与画面之间不做任何混合花样。
             blend: BlendMode::Normal,
+            // 叠加层不做圆角（字形的圆角是字体自己的事）。
+            corner_radius: 0.0,
+            clip: None,
+            mask: None,
+            tint: None,
+            extra_offset: (0.0, 0.0),
         });
     }
     report.drawn = layers.len();

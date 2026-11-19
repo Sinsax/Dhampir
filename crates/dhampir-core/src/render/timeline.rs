@@ -17,13 +17,13 @@
 //! 纹理池是宿主的资源策略（显存预算、LRU），不该埋在这一层里。
 //! 等两端都跑通了再把它提到宿主去，那时换的是宿主，不是这里的语义。
 
-use dhampir_timeline::schema::{Effect, EffectPipeline};
+use dhampir_timeline::schema::{Effect, EffectPipeline, SlotCombine};
 
 use crate::compose::Composite;
 use crate::render::blur::BlurRenderer;
 use crate::render::color_adjust::ColorAdjustRenderer;
 use crate::render::color_mask::ColorMaskRenderer;
-use crate::render::compose::{Compositor, LayerDraw};
+use crate::render::compose::{Compositor, LayerDraw, MaskInput};
 use crate::render::warp::WarpRenderer;
 use crate::wgpu;
 
@@ -40,6 +40,200 @@ pub trait SourceResolver {
         source: &str,
         source_frame: i64,
     ) -> Option<(wgpu::TextureView, (u32, u32))>;
+
+    /// 掩码素材 → **一张静态图**的纹理与尺寸。给不出来返回 `None`。
+    ///
+    /// # 为什么是带默认实现的方法
+    ///
+    /// 掩码是**后加**的通路：宿主可以一条条接（native 先接文件，浏览器接 `<img>` / `ImageBitmap`），
+    /// 没接的宿主走默认实现返回 `None` —— 而**调用方据此拒绝整帧**，
+    /// 不是悄悄画成"没有掩码"的样子。默认返回 `None` 让"还没接"这件事有一个
+    /// **明确**的落点，而不是一条静默的岔路（D12 的第 3.5 步）。
+    ///
+    /// 为什么复用 `texture_for` 而不另开一条解码路：掩码就是一张静态图，取第 0 帧即可。
+    /// 另写一份"素材怎么变成纹理"迟早会与源那条分叉 ——
+    /// `AssetTimebases` 的注释里已经记过一次同类教训（两个入口登记的东西不一致）。
+    fn mask_texture_for(&mut self, _source: &str) -> Option<(wgpu::TextureView, (u32, u32))> {
+        None
+    }
+}
+
+/// 把这一层的**投影**推到 `prepared` 里（在它自己**之前** —— 阴影要画在下面）。
+///
+/// # 口径
+///
+/// - 模糊半径按 D5 换算：`radius = 2σ`，并夹到 [`crate::render::BLUR_MAX_RADIUS`]；
+/// - **模糊的是源纹理**（与这一层自己的 `gaussian_blur` 同一条路）。这意味着
+///   "先染色后模糊"这类顺序差异在这一版里不区分 —— 逐像素特效在合成器那一趟才跑，
+///   而阴影在这一趟就要成形。这条限制写在 criteria 的 D13 里；
+/// - 形状（掩码 / 裁剪）跟着本层走：阴影是"这一层的样子"的影子，不该比它多一块。
+/// - 颜色 v1 固定黑（契约里没有颜色字段，这里也就没有别的可能）。
+#[allow(clippy::too_many_arguments)]
+fn push_shadow_before<'a>(
+    prepared: &mut Vec<PreparedDraw<'a>>,
+    keep_alive: &mut Vec<wgpu::Texture>,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    renderer: &TimelineRenderer,
+    layer: &'a crate::compose::Layer,
+    view: &wgpu::TextureView,
+    size: (u32, u32),
+    mask: &Option<PreparedMask>,
+) {
+    let Some(shadow) = &layer.shadow else {
+        return;
+    };
+    // σ → 核半径（D5：半径 = 2σ），再夹到着色器展开得了的上界。
+    let radius = ((shadow.blur_sigma * 2.0).round() as i64)
+        .clamp(0, crate::render::BLUR_MAX_RADIUS as i64) as u32;
+    // **留白宽度 = 模糊半径**：模糊把轮廓摊开多少，就需要多少留白。
+    let pad = radius;
+    let padded = (size.0.max(1) + pad * 2, size.1.max(1) + pad * 2);
+    let shadow_view = if radius == 0 {
+        view.clone()
+    } else {
+        // ---- 第 1 步：把**轮廓**（含形状）画进一张带留白的纹理 ----
+        //
+        // 为什么必须这样：直接模糊源纹理只会「向内」软化 —— 源纹理到边界都是不透明的，
+        // 而**模糊一个常量还是那个常量**。留白之后轮廓外才有衰减的空间，阴影才向外扩散。
+        let silhouette = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("dhampir shadow silhouette"),
+            size: wgpu::Extent3d {
+                width: padded.0,
+                height: padded.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: renderer.format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let silhouette_view = silhouette.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dhampir shadow silhouette encoder"),
+        });
+        // 目标尺寸 = 留白后的尺寸，而图层自己**不带变换**（恒等）——
+        // 于是源纹理正好落在中间那一块，四周留透明的 pad。
+        // 形状（圆角 / 裁剪 / 掩码）**烘进轮廓**里：阴影的形状就是这一层的样子。
+        let mask_input = mask.as_ref().map(|prepared_mask| MaskInput {
+            view: &prepared_mask.view,
+            channel: prepared_mask.channel,
+            invert: prepared_mask.invert,
+        });
+        renderer.compositor.compose(
+            device,
+            queue,
+            &mut encoder,
+            &silhouette_view,
+            crate::render::RenderSpace::square(padded),
+            &[LayerDraw {
+                view,
+                source_size: size,
+                transform: dhampir_timeline::schema::Transform {
+                    x: 0.0,
+                    y: 0.0,
+                    scale: 1.0,
+                    rotation_deg: 0.0,
+                },
+                opacity: 1.0,
+                blend: dhampir_timeline::layer::BlendMode::Normal,
+                corner_radius: layer.corner_radius,
+                clip: layer.clip.clone(),
+                mask: mask_input,
+                tint: None,
+                extra_offset: (0.0, 0.0),
+            }],
+            Some(wgpu::Color::TRANSPARENT),
+        );
+        queue.submit([encoder.finish()]);
+        keep_alive.push(silhouette);
+
+        // ---- 第 2 步：模糊这张带留白的轮廓 ----
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("dhampir shadow blur target"),
+            size: wgpu::Extent3d {
+                width: padded.0,
+                height: padded.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: renderer.format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let intermediate = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("dhampir shadow blur intermediate"),
+            size: wgpu::Extent3d {
+                width: padded.0,
+                height: padded.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: renderer.format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let intermediate_view = intermediate.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dhampir shadow blur encoder"),
+        });
+        renderer.blur.blur_separable(
+            device,
+            queue,
+            &mut encoder,
+            &silhouette_view,
+            &intermediate_view,
+            &target_view,
+            padded,
+            radius,
+        );
+        queue.submit([encoder.finish()]);
+        // 三张纹理都要活到最后一次绘制之后 —— 挂进调用方的 keep_alive。
+        keep_alive.push(target);
+        keep_alive.push(intermediate);
+        target_view
+    };
+    prepared.push(PreparedDraw {
+        layer,
+        view: shadow_view,
+        // 留白尺寸：这样目标上的阴影比本层大一圈，扩散才有地方落。
+        size: padded,
+        // 形状**已经烘进轮廓**了，这里不再重复应用（否则扩散出去那一圈会被再裁一次）。
+        mask: None,
+        tint: Some([0.0, 0.0, 0.0]),
+        extra_offset: (shadow.offset_x, shadow.offset_y),
+        opacity_scale: shadow.opacity,
+    });
+}
+
+/// 已经准备好的掩码：**视图的拥有权在调用方**（`prepared` 里活着，视图不悬空）。
+#[derive(Clone)]
+struct PreparedMask {
+    view: wgpu::TextureView,
+    channel: dhampir_timeline::layer::MaskChannel,
+    invert: bool,
+}
+
+/// 已经准备好的一次绘制。**投影会让同一层产生两次**（先投影、再本层），所以
+/// "一层一张"这个假设在这里必须打破 —— 用结构体而不是元组，多出来的那两张才有名字。
+struct PreparedDraw<'a> {
+    layer: &'a crate::compose::Layer,
+    view: wgpu::TextureView,
+    size: (u32, u32),
+    mask: Option<PreparedMask>,
+    /// 染色（投影那张用它把 rgb 换成阴影色）。
+    tint: Option<[f32; 3]>,
+    /// 额外的**文档像素**偏移（投影那张用它把自己挪开）。
+    extra_offset: (f32, f32),
+    /// 这一张的额外不透明度倍数（投影那张乘阴影自己的 `opacity`；本层是 1.0）。
+    opacity_scale: f32,
 }
 
 /// 图层要用的模糊半径。0 表示这层不需要模糊。
@@ -158,6 +352,36 @@ pub fn radius_in_space(
 /// 没挂任何色彩特效时返回 [`ColorAdjustParams::IDENTITY`]，调用方据此整条跳过。
 pub fn color_params(effects: &[Effect]) -> crate::render::ColorAdjustParams {
     let mut out = crate::render::ColorAdjustParams::IDENTITY;
+
+    // -----------------------------------------------------------------------
+    // P5：色调整的槽位名 -> `ColorAdjustParams` 字段（唯一映射表）
+    // -----------------------------------------------------------------------
+    //
+    // ⚠️ 与色罩那两张表一样，这是"Rust 没有反射"的代价。加槽位要**同时**改：
+    //    ① `ColorAdjustParams` 结构体 ② `color_adjust.wgsl` 的 struct ③ 这张表。
+    //    ②③ 对不上是**静默**的（WGSL 按偏移读）。
+    //
+    // ⚠️ `Add` 与 `Mul` 分开成两个函数，是为了让"这个槽位是加还是乘"**写在调用点**，
+    //    而不是藏在 `match` 里 —— 混了不会报错，只会让画面亮度略微不同。
+    fn add_slot(p: &mut crate::render::ColorAdjustParams, name: &str, v: f32) {
+        match name {
+            "brightness" => p.brightness += v,
+            "hue" => p.hue += v,
+            "hue_css" => p.hue_css += v,
+            other => debug_assert!(false, "色调整的加性槽位表里没有 {other}"),
+        }
+    }
+
+    fn mul_slot(p: &mut crate::render::ColorAdjustParams, name: &str, v: f32) {
+        match name {
+            "scale" => p.scale *= v,
+            "contrast" => p.contrast *= v,
+            "saturation" => p.saturation *= v,
+            "saturation_css" => p.saturation_css *= v,
+            other => debug_assert!(false, "色调整的乘性槽位表里没有 {other}"),
+        }
+    }
+
     for effect in effects {
         // 认管线，不认名字 —— 与 blur_radius 同一套判据。
         let Some(spec) = crate::effects::spec_of(&effect.kind) else {
@@ -167,36 +391,39 @@ pub fn color_params(effects: &[Effect]) -> crate::render::ColorAdjustParams {
             continue;
         }
         let param = |name: &str| effect.params.get(name).copied().filter(|v| v.is_finite());
-        match spec.kind {
-            "brightness" => {
-                if let Some(v) = param("amount") {
-                    out.brightness += v;
-                }
-            }
-            "contrast" => {
-                if let Some(v) = param("amount") {
-                    out.contrast *= v;
-                }
-            }
-            "saturation" => {
-                if let Some(v) = param("amount") {
-                    out.saturation *= v;
-                }
-            }
-            "hue" => {
-                if let Some(v) = param("degrees") {
-                    // **度转弧度只在这一处发生。**
-                    // 着色器收的是弧度；两边各转一遍会让 90 度变成 90 弧度再转一次。
-                    out.hue += v.to_radians();
-                }
-            }
-            // 走了 ColorAdjust 管线却不在这里 -> 登记表加了新特效但忘了接上。
-            // **不静默忽略**：那正是最坏的情形（用户能选中它，画面却不变）。
-            other => {
-                debug_assert!(
+        // ---------------------------------------------------------------------
+        // P5：**按登记表的 `slots` 写**，不再按 `kind` 手写 match。
+        // ---------------------------------------------------------------------
+        //
+        // 这一段原来是一份 7 分支的 `match spec.kind`。形状与色罩那条**不同**：
+        //   · 色罩：一个 kind 写**一组**槽位，槽位名与 kind 一一对应（`flash_*`）；
+        //   · 色调整：**7 个 kind 共用同一组槽位**，各写自己那**一个**
+        //     （`brightness` 写 `brightness`、`hue_rotate_css` 写 `hue_css`）。
+        //     所以它天生就是"按槽位折叠"的形状 —— 与 `slots` 声明正好对齐。
+        //
+        // ⚠️ `Add` / `Mul` 都是**可交换**的，所以多条同类叠加的结果与遍历顺序无关
+        //    （函数文档里说这是刻意的：顺序无关才不会被两端各自的遍历顺序影响）。
+        for slot in spec.slots {
+            let Some(v) = param(slot.param) else {
+                continue;
+            };
+            // **度转弧度只在这一处发生**（着色器收弧度；两边各转一遍会让 90 度变成 90 弧度）。
+            // 与色罩一样：这是**逐 kind 的算法**，不是布局，所以留在代码里。
+            let v = if slot.slot == "hue" || slot.slot == "hue_css" {
+                v.to_radians()
+            } else {
+                v
+            };
+            match slot.combine {
+                SlotCombine::Add => add_slot(&mut out, slot.slot, v),
+                SlotCombine::Mul => mul_slot(&mut out, slot.slot, v),
+                // 色调整里没有"竞争"也没有 over 合成 —— 登记表写错了要**当场红**，
+                // 而不是静默按 Add 处理（那会让画面看起来"差不多对"）。
+                other => debug_assert!(
                     false,
-                    "ColorAdjust 管线里的 {other} 没有在 color_params 里接上"
-                );
+                    "ColorAdjust 的槽位 {} 用了 {other:?} 合成规则（只该是 Add / Mul）",
+                    slot.slot
+                ),
             }
         }
     }
@@ -306,6 +533,111 @@ pub fn color_mask_params(
         (1.0 - (1.0 - a) * (1.0 - b)).clamp(0.0, 1.0)
     }
 
+    // -----------------------------------------------------------------------
+    // P5：槽位名 -> `#[repr(C)]` 字段的**唯一映射表**
+    // -----------------------------------------------------------------------
+    //
+    // ⚠️ Rust 没有字段反射，所以"按名字写槽位"必须有一张这样的表。
+    //    这张表**不是**"又一次手写 kind 派发"：它按**槽位**列（18 个），
+    //    而不是按 **kind** 列（4 个）。差别在于加一个特效时 ——
+    //    · 旧写法：新特效的每个槽位都要在这里加分支（N 个 kind × M 个槽位）；
+    //    · 新写法：**槽位通常是复用的**（新特效多半复用 `overlay_*` 或 `flash_*`），
+    //      真需要新槽位时才动这张表一次。
+    //
+    // ⚠️ 加槽位时要**同时**改三处，不然会静默不生效：
+    //    ① `ColorMaskParams` 结构体 ② `color_mask.wgsl` 的 struct ③ 这张表。
+    //    ★ ②③ 之间对不上是**静默**的（WGSL 按偏移读，名字只是注释）——
+    //      这正是本文件顶部那句"字段顺序必须一致"在说的事。
+
+    /// 「参数没给时用什么」。**逐条照抄原实现里的 `unwrap_or`**。
+    ///
+    /// ⚠️ 这张表与 `read_slot`/`write_slot` 一样，是"Rust 没有反射"的代价。
+    ///    它的正确性由 `plan_tests` 里那几条**既有**用例钉住
+    ///    （`闪白的颜色缺省是白` / `暗角的_softness_不会变成零` / `覆盖层的角度在这里就转成弧度`）
+    ///    —— **它们就是这条泛化的验收线**，不是"顺手跑一下"。
+    fn slot_default(kind: &str, slot: &str) -> Option<f32> {
+        Some(match (kind, slot) {
+            // flash：颜色缺省为**白**。缺省成黑会让人以为"闪白没生效"。
+            ("flash", "flash_r") | ("flash", "flash_g") | ("flash", "flash_b") => 1.0,
+            ("vignette", "vignette_radius") => 0.7,
+            ("vignette", "vignette_softness") => 0.35,
+            ("noise", "noise_seed") => 0.0,
+            ("overlay", "overlay_r") | ("overlay", "overlay_g") | ("overlay", "overlay_b") => 0.0,
+            // ⚠️ `r2/g2/b2` 的缺省在原实现里是 **主色 r/g/b**（不是 0）——
+            //    单色覆盖就是这么来的。这里只能给 0，真实回落见下面的 `resolve`。
+            ("overlay", "overlay_r2") | ("overlay", "overlay_g2") | ("overlay", "overlay_b2") => {
+                0.0
+            }
+            ("overlay", "overlay_shape") => 0.0,
+            ("overlay", "overlay_angle") => 0.0,
+            _ => return None,
+        })
+    }
+
+    /// 按名字读一个槽位。
+    fn read_slot(p: &crate::render::ColorMaskParams, name: &str) -> f32 {
+        match name {
+            "flash_amount" => p.flash_amount,
+            "vignette_amount" => p.vignette_amount,
+            "noise_amount" => p.noise_amount,
+            "overlay_amount" => p.overlay_amount,
+            // 非 `*_amount` 的槽位不参与判胜负。
+            _ => 0.0,
+        }
+    }
+
+    /// 按名字写一个槽位，按 `combine` 与当前值合成。
+    fn write_slot(
+        p: &mut crate::render::ColorMaskParams,
+        name: &str,
+        combine: SlotCombine,
+        value: f32,
+    ) {
+        // ⚠️⚠️ **只有 `*_amount` 那一槽走"合成"，其余卫星槽位一律直接覆盖。**
+        //
+        //    第一版把 combine 套到**每个**槽位上，于是 `overlay` 的
+        //    `overlay_angle` 也被 `over(0, 180)` 合成了 **1**（而不是 π）——
+        //    既有测试当场红：`180 度应当变成 PI 弧度，实得 1`。
+        //
+        //    原实现里四个 kind 是**同一个形状**：
+        //        if weight 胜出 { 卫星槽位 = 各自的值 }   // 直接覆盖
+        //        amount_slot  = 胜负规则(...)             // 只有这一槽在"合成"
+        //    `over()` 是**不透明度**的合成函数，对角度 / 枚举 / 颜色分量没有意义。
+        // ⚠️ 判据是**槽位名**（`*_amount`），不是 combine 的变体：
+        //    `over` 只对 amount 有意义，把它套到 `overlay_angle` 上会得到 1 而不是 π。
+        let cur = read_slot(p, name);
+        let is_amount = name.ends_with("_amount");
+        let combined = match combine {
+            // 卫星槽位：胜出者的值**直接覆盖**（不参与合成）。
+            SlotCombine::MaxStrict | SlotCombine::MaxInclusive => value,
+            SlotCombine::Over if is_amount => over(cur, value),
+            SlotCombine::Over => value,
+            SlotCombine::Add => cur + value,
+            SlotCombine::Mul => cur * value,
+        };
+        match name {
+            "flash_amount" => p.flash_amount = combined,
+            "flash_r" => p.flash_r = combined,
+            "flash_g" => p.flash_g = combined,
+            "flash_b" => p.flash_b = combined,
+            "vignette_amount" => p.vignette_amount = combined,
+            "vignette_radius" => p.vignette_radius = combined,
+            "vignette_softness" => p.vignette_softness = combined,
+            "noise_amount" => p.noise_amount = combined,
+            "noise_seed" => p.noise_seed = combined,
+            "overlay_amount" => p.overlay_amount = combined,
+            "overlay_r" => p.overlay_r = combined,
+            "overlay_g" => p.overlay_g = combined,
+            "overlay_b" => p.overlay_b = combined,
+            "overlay_r2" => p.overlay_r2 = combined,
+            "overlay_g2" => p.overlay_g2 = combined,
+            "overlay_b2" => p.overlay_b2 = combined,
+            "overlay_shape" => p.overlay_shape = combined,
+            "overlay_angle" => p.overlay_angle = combined,
+            other => debug_assert!(false, "槽位表里没有 {other}"),
+        }
+    }
+
     for effect in effects {
         // 认管线，不认名字 —— 与 color_params / blur_radius 同一套判据。
         let Some(spec) = crate::effects::spec_of(&effect.kind) else {
@@ -317,80 +649,134 @@ pub fn color_mask_params(
         // 这一帧这条特效的整体强度（时间窗已折进来）。
         let strength = effect.opacity.clamp(0.0, 1.0);
         let param = |name: &str| effect.params.get(name).copied().filter(|v| v.is_finite());
-        match spec.kind {
-            "flash" => {
-                if let Some(amount) = param("amount") {
-                    // 颜色缺省为白：闪白是最常见的用法，缺省成黑色会让人以为没生效。
-                    let r = param("r").unwrap_or(1.0);
-                    let g = param("g").unwrap_or(1.0);
-                    let b = param("b").unwrap_or(1.0);
-                    let weight = amount.clamp(0.0, 1.0) * strength;
-                    if weight > out.flash_amount {
-                        // 只在**更强**时换颜色：两条闪白同时挂着时，
-                        // 更强的那条说了算。弱的那条不该把颜色稀释成两者平均 ——
-                        // 那是"谁都看得出来不是用户想要的颜色"，且解释不清。
-                        out.flash_r = r.clamp(0.0, 1.0);
-                        out.flash_g = g.clamp(0.0, 1.0);
-                        out.flash_b = b.clamp(0.0, 1.0);
-                        out.flash_amount = weight;
-                    }
-                }
+        // ---------------------------------------------------------------------
+        // P5：**按登记表的 `slots` 写槽位**，不再按 `kind` 手写 match。
+        // ---------------------------------------------------------------------
+        //
+        // 这一段原来是一份 15 行的 `match spec.kind { "flash" => … }`。它的问题
+        // 不是"不好看"，而是**加一个特效要改三处**（`EffectSpec` 登记、这里、定长结构），
+        // 而第三处是**按名字派发** —— `EffectPipeline` 的文档写着"忘了改正是字符串
+        // 派发最容易出的错"。改成读 `slots` 之后，加特效只需在 `EffectSpec` 里
+        // 声明它写哪几个槽位。
+        //
+        // ⚠️ **组合规则不是能统一的东西**（见 `SlotCombine` 的文档）：
+        //    `flash` 严格大于、`vignette`/`noise` 含等号、`overlay` 用 over 合成。
+        //    所以它是**数据**，逐条登记，不在这里"统一"。
+        //
+        // 先按槽位把"这条特效想写的值"算出来，再逐槽位按各自的规则合成。
+        // （不能边算边写：`flash` 的 `r/g/b` 要不要写，取决于 `flash_amount` 那一轮
+        //   比的胜负 —— 见 `write_only_on_win`。）
+        let mut pending: Vec<(&'static str, SlotCombine, bool, f32)> = Vec::new();
+        for slot in spec.slots {
+            // ⚠️ 逐 kind 的**变换**仍在这里（它们是"参数怎么变成槽位值"，不是合成规则）：
+            //    · `shape` 要过 `OverlayShape::from_param`（round + EPSILON 比较）
+            //    · `angle` 要 `to_radians()`
+            //    · `strength` 是"这一帧这条特效的整体强度（时间窗已折进来）"
+            //
+            //    这些映射**刻意留在代码里**：把一个 f32 变成"枚举"或"弧度"是**算法**，
+            //    而 `slots` 声明的是**布局**。混在一起会让登记表变成半个解释器。
+            // ⚠️⚠️ **缺省值必须照抄原实现**，不能"没有就跳过"。
+            //    第一版写成 `let Some(raw) = ... else { continue }`，于是
+            //    `flash` 不写 `r/g/b` 时颜色停在 **0.0（黑）**，而参照的缺省是
+            //    **白**（原实现是 `unwrap_or(1.0)`）—— 既有测试当场红：
+            //        `闪白的颜色缺省是白`: left (0,0,0) / right (1,1,1)
+            //    "参数没给就用缺省"与"参数没给就跳过"是**两件事**，
+            //    而旧写法里每一个 `unwrap_or` 都在表达前者。
+            let Some(raw) = param(slot.param).or_else(|| slot_default(spec.kind, slot.slot)) else {
+                continue;
+            };
+            let value = match (spec.kind, slot.slot) {
+                ("overlay", "overlay_shape") => OverlayShape::from_param(raw) as u32 as f32,
+                ("overlay", "overlay_angle") => raw.to_radians(),
+                _ => raw,
+            };
+            // `amount` 那一项要乘时间窗强度（其余是按它判胜负后跟着写的参数）。
+            // ⚠️ `vignette_softness` 是**除数**，原实现有 `.max(1e-3)`。
+            //    丢了它 ⇒ `softness=0` 时着色器除零（既有测试点名：`暗角的_softness_不会变成零`）。
+            let value = if slot.slot == "vignette_softness" {
+                value.max(1e-3)
+            } else {
+                value
+            };
+            let value = if slot.slot.ends_with("_amount") {
+                value.clamp(0.0, 1.0) * strength
+            } else {
+                value
+            };
+            pending.push((slot.slot, slot.combine, slot.write_only_on_win, value));
+        }
+
+        // ① 先算「这条特效胜出没有」—— 判胜负只看它自己的 `*_amount` 槽位。
+        //    没有 `*_amount` 的特效（理论上不该有）保守地当作"没胜出"，
+        //    这样它不会把别的东西写坏。
+        let own_amount = pending.iter().find(|(name, ..)| name.ends_with("_amount"));
+        let won = match own_amount {
+            Some((name, combine, _, value)) => match combine {
+                // ⚠️ **判胜负读的是当前值**，而下面写入要在判完之后 ——
+                //    所以这里先取一份快照，否则"先写了 amount 再判颜色"会让
+                //    `MaxStrict` 的自比较恒为假（`v > v`）。
+                SlotCombine::MaxStrict => *value > read_slot(&out, name),
+                SlotCombine::MaxInclusive => *value >= read_slot(&out, name),
+                SlotCombine::Over => true, // over 是合成、不是竞争，永远要写
+                SlotCombine::Add | SlotCombine::Mul => true,
+            },
+            None => false,
+        };
+
+        // ② 再按各自规则写。
+        //
+        // ⚠️⚠️ `MaxStrict`/`MaxInclusive` 这两条"竞争型"规则下，**没胜出就一个槽位都不写**
+        //    —— 包括 `*_amount` 自己。原实现里整个赋值块都在 `if` 内部：
+        //        if weight > out.flash_amount {
+        //            out.flash_r = …; out.flash_g = …; out.flash_b = …;
+        //            out.flash_amount = weight;      // ← amount 也在里面
+        //        }
+        //    第一版只把**卫星槽位**挡在 `won` 后面、却让 `amount` 无条件写，
+        //    于是"弱的那条"会把强的那条**覆盖回去**（实测 0.8 被 0.3 盖掉）。
+        //    `over` / `Add` / `Mul` 是合成型，永远要写。
+        // ⚠️ `overlay` 的 `r2/g2/b2` 缺省是**主色** `r/g/b`（原实现 `unwrap_or(r)`）——
+        //    单色覆盖就是这么来的：只给 r/g/b 不给 r2/g2/b2 ⇒ 两端同色。
+        //    这里在 `pending` 里就地回落（此刻 `r/g/b` 已经算好）。
+        //    ⚠️ 只用 `slot_default` 的 0 会让渐变另一端变黑，而**单色档看不出来**
+        //       （它的 shape 是 Solid、根本不读 r2）—— 属于最隐蔽的那类偏差。
+        for src in ["overlay_r", "overlay_g", "overlay_b"] {
+            let dst = match src {
+                "overlay_r" => "overlay_r2",
+                "overlay_g" => "overlay_g2",
+                _ => "overlay_b2",
+            };
+            // 只有在**调用方没显式给** r2/g2/b2 时才回落。
+            let dst_param = match dst {
+                "overlay_r2" => "r2",
+                "overlay_g2" => "g2",
+                _ => "b2",
+            };
+            if param(dst_param).is_some() {
+                continue;
             }
-            "vignette" => {
-                if let Some(amount) = param("amount") {
-                    // 取更强的那个：两条暗角叠加没有额外语义。
-                    // **比较的是已乘过时间窗的强度**：不然一条时间窗已归零的暗角
-                    // 会把一条正在生效的挤掉（"更强"要按这一帧的实际强度算）。
-                    let weight = amount.clamp(0.0, 1.0) * strength;
-                    if weight >= out.vignette_amount {
-                        out.vignette_amount = weight;
-                        out.vignette_radius = param("radius").unwrap_or(0.7);
-                        // softness 兜一个下限：它是除数，0 会让边缘变成硬阶跃，
-                        // 而那在预览与成片之间更容易被看出差异。
-                        out.vignette_softness = param("softness").unwrap_or(0.35).max(1e-3);
-                    }
-                }
+            let value = pending
+                .iter()
+                .find(|(n, ..)| *n == src)
+                .map(|(_, _, _, v)| *v);
+            if let (Some(v), Some(i)) = (value, pending.iter().position(|(n, ..)| *n == dst)) {
+                pending[i].3 = v;
             }
-            "noise" => {
-                if let Some(amount) = param("amount") {
-                    let weight = amount.clamp(0.0, 1.0) * strength;
-                    if weight >= out.noise_amount {
-                        out.noise_amount = weight;
-                        out.noise_seed = param("seed").unwrap_or(0.0);
-                    }
-                }
-            }
-            "overlay" => {
-                if let Some(amount) = param("amount") {
-                    let weight = amount.clamp(0.0, 1.0) * strength;
-                    let r = param("r").unwrap_or(0.0);
-                    let g = param("g").unwrap_or(0.0);
-                    let b = param("b").unwrap_or(0.0);
-                    // 描画层：后一条覆盖前一条的颜色，强度按 over 合成。
-                    if weight > 0.0 {
-                        out.overlay_r = r;
-                        out.overlay_g = g;
-                        out.overlay_b = b;
-                        out.overlay_r2 = param("r2").unwrap_or(r);
-                        out.overlay_g2 = param("g2").unwrap_or(g);
-                        out.overlay_b2 = param("b2").unwrap_or(b);
-                        out.overlay_shape =
-                            OverlayShape::from_param(param("shape").unwrap_or(0.0)) as u32 as f32;
-                        // **度转弧度只在这一处发生**（与 hue 同一条纪律）：
-                        // 着色器收的是弧度，两边各转一遍会让 90 度变成 90 弧度。
-                        out.overlay_angle = param("angle").unwrap_or(0.0).to_radians();
-                    }
-                    out.overlay_amount = over(out.overlay_amount, weight);
-                }
-            }
-            // 走了 ColorMask 管线却不在这里 -> 登记表加了新特效但忘了接上。
-            // **不静默忽略**：那正是最坏的情形（用户能选中它，画面却不变）。
-            other => {
-                debug_assert!(
-                    false,
-                    "ColorMask 管线里的 {other} 没有在 color_mask_params 里接上"
-                );
-            }
+        }
+
+        let competitive = matches!(
+            pending
+                .iter()
+                .find(|(n, ..)| n.ends_with("_amount"))
+                .map(|(_, c, ..)| *c),
+            Some(SlotCombine::MaxStrict) | Some(SlotCombine::MaxInclusive)
+        );
+        if competitive && !won {
+            // ⚠️ 是 `continue effect`（跳过**这一条特效**），不是 `return` ——
+            //    `return` 会把后面的特效全部丢掉（那正是"静默少画"）。
+            continue;
+        }
+        for (name, combine, _only_on_win, value) in pending {
+            write_slot(&mut out, name, combine, value);
         }
     }
     out
@@ -418,6 +804,54 @@ pub fn warp_params(
     out.height = size.1.max(1) as f32;
     out.seconds = seconds;
 
+    // -----------------------------------------------------------------------
+    // P5：Warp 的槽位表与缺省值（唯一映射）
+    // -----------------------------------------------------------------------
+    //
+    // ⚠️ 与色罩/色调整一样，这是"Rust 没有反射"的代价。
+    //    加槽位要**同时**改：① `WarpParams` ② `warp.wgsl` 的 struct ③ 这里。
+    //
+    /// 「参数没给时用什么」——**逐条照抄原实现里的 `unwrap_or`**。
+    fn warp_default(kind: &str, slot: &str) -> Option<f32> {
+        Some(match (kind, slot) {
+            ("shake", "shake_frequency") => 12.0,
+            ("zoom_bounce", "bounce_frequency") => 3.0,
+            ("pulse", "pulse_frequency") => 1.5,
+            ("shake", "shake_seed") => 0.0,
+            ("split", "split_offset") => 0.08,
+            ("split", "split_skew") => 0.0,
+            _ => return None,
+        })
+    }
+
+    /// 按名字读一个 warp 槽位（只用于判胜负，故只需 `*_amount` 那四个）。
+    fn read_warp_slot(p: &crate::render::WarpParams, name: &str) -> f32 {
+        match name {
+            "shake_amount" => p.shake_amount,
+            "bounce_amount" => p.bounce_amount,
+            "pulse_amount" => p.pulse_amount,
+            "split_amount" => p.split_amount,
+            _ => 0.0,
+        }
+    }
+
+    /// 按名字写一个 warp 槽位。**直接覆盖**（竞争型：胜出者的值说了算）。
+    fn write_warp_slot(p: &mut crate::render::WarpParams, name: &str, v: f32) {
+        match name {
+            "shake_amount" => p.shake_amount = v,
+            "shake_frequency" => p.shake_frequency = v,
+            "shake_seed" => p.shake_seed = v,
+            "bounce_amount" => p.bounce_amount = v,
+            "bounce_frequency" => p.bounce_frequency = v,
+            "pulse_amount" => p.pulse_amount = v,
+            "pulse_frequency" => p.pulse_frequency = v,
+            "split_amount" => p.split_amount = v,
+            "split_offset" => p.split_offset = v,
+            "split_skew" => p.split_skew = v,
+            other => debug_assert!(false, "warp 槽位表里没有 {other}"),
+        }
+    }
+
     for effect in effects.iter() {
         let Some(spec) = crate::effects::spec_of(&effect.kind) else {
             continue;
@@ -430,50 +864,63 @@ pub fn warp_params(
         // 乘上去会让窗口边缘的频率突然变化，看起来像卡了一下。
         let strength = effect.opacity.clamp(0.0, 1.0);
         let param = |name: &str| effect.params.get(name).copied().filter(|v| v.is_finite());
-        match spec.kind {
-            "shake" => {
-                if let Some(amount) = param("amount") {
-                    let weight = amount.clamp(0.0, 1.0) * strength;
-                    if weight >= out.shake_amount {
-                        out.shake_amount = weight;
-                        // 频率兜一个下限：0 会让位移变成静止的常量偏移，
-                        // 看起来像"画面整体歪了"而不是"在抖"。
-                        out.shake_frequency = param("frequency").unwrap_or(12.0).max(1e-3);
-                        out.shake_seed = param("seed").unwrap_or(0.0);
-                    }
-                }
+        // ---------------------------------------------------------------------
+        // P5：**按登记表的 `slots` 写**，不再按 `kind` 手写 match。
+        // ---------------------------------------------------------------------
+        //
+        // 形状与色罩那条**相同**（`MaxInclusive` 竞争 + 卫星槽位），只有两处差异：
+        //   · **频率不乘 `strength`** —— 频率是"抖多快"不是"抖多少"；
+        //     乘上去会让窗口边缘的频率突变（看起来像卡了一下）。
+        //     原实现里只有 `*_amount` 那几行写了 `* strength`。
+        //   · 频率有 `.max(1e-3)` 下限 —— 0 会让位移变成**静止的常量偏移**，
+        //     看起来像"画面整体歪了"而不是"在抖"。
+        //     `seed` / `offset` / `skew` 没有下限。
+        let mut pending: Vec<(&'static str, bool, f32)> = Vec::new();
+        for slot in spec.slots {
+            // 缺省值照抄原实现（见 `warp_default`）。
+            let Some(raw) = param(slot.param).or_else(|| warp_default(spec.kind, slot.slot)) else {
+                continue;
+            };
+            let v = if slot.slot == "split_skew" {
+                // **度转弧度只在这一处发生**（与 hue / overlay 同一条纪律）。
+                raw.to_radians()
+            } else if slot.slot.ends_with("_frequency") {
+                raw.max(1e-3)
+            } else {
+                raw
+            };
+            // ⚠️ 只有 `*_amount` 乘时间窗强度；频率是"抖多快"，不乘。
+            let v = if slot.slot.ends_with("_amount") {
+                v.clamp(0.0, 1.0) * strength
+            } else {
+                v
+            };
+            pending.push((slot.slot, slot.write_only_on_win, v));
+        }
+
+        // 判胜负：四条 warp 各自独立竞争（`>=`，含等号），**互不影响**。
+        // 所以判据是"这个槽位自己"——按前缀分组即可。
+        for prefix in ["shake", "bounce", "pulse", "split"] {
+            let amount_slot = match prefix {
+                "shake" => "shake_amount",
+                "bounce" => "bounce_amount",
+                "pulse" => "pulse_amount",
+                _ => "split_amount",
+            };
+            let Some((_, _, weight)) = pending.iter().find(|(n, ..)| *n == amount_slot) else {
+                continue;
+            };
+            if *weight < read_warp_slot(&out, amount_slot) {
+                // 没胜出：这一组的槽位一个都不写（原实现里整个块都在 `if` 内）。
+                continue;
             }
-            "zoom_bounce" => {
-                if let Some(amount) = param("amount") {
-                    let weight = amount.clamp(0.0, 1.0) * strength;
-                    if weight >= out.bounce_amount {
-                        out.bounce_amount = weight;
-                        out.bounce_frequency = param("frequency").unwrap_or(3.0).max(1e-3);
-                    }
+            for (name, only_on_win, v) in pending.iter() {
+                if !name.starts_with(prefix) {
+                    continue;
                 }
-            }
-            "pulse" => {
-                if let Some(amount) = param("amount") {
-                    let weight = amount.clamp(0.0, 1.0) * strength;
-                    if weight >= out.pulse_amount {
-                        out.pulse_amount = weight;
-                        out.pulse_frequency = param("frequency").unwrap_or(1.5).max(1e-3);
-                    }
+                if *only_on_win || *name == amount_slot {
+                    write_warp_slot(&mut out, name, *v);
                 }
-            }
-            "split" => {
-                if let Some(amount) = param("amount") {
-                    let weight = amount.clamp(0.0, 1.0) * strength;
-                    if weight >= out.split_amount {
-                        out.split_amount = weight;
-                        out.split_offset = param("offset").unwrap_or(0.08);
-                        // **度转弧度只在这一处发生**（与 hue / overlay 同一条纪律）。
-                        out.split_skew = param("skew").unwrap_or(0.0).to_radians();
-                    }
-                }
-            }
-            other => {
-                debug_assert!(false, "Warp 管线里的 {other} 没有在 warp_params 里接上");
             }
         }
     }
@@ -529,6 +976,8 @@ pub struct TimelineRenderer {
     color_adjust: ColorAdjustRenderer,
     color_mask: ColorMaskRenderer,
     warp: WarpRenderer,
+    /// 读回型混合（`f(src, dst)`，D13）。
+    blend_fn: crate::render::BlendFnRenderer,
     format: wgpu::TextureFormat,
 }
 
@@ -576,6 +1025,7 @@ impl SourceResolver for PairSource<'_> {
 /// 一次「原样搬运」用的图层：没有变换、完全不透明。
 fn identity_layer() -> crate::compose::Layer {
     crate::compose::Layer {
+        backdrop_effects: Vec::new(),
         clip_id: String::new(),
         source: String::new(),
         source_frame: 0,
@@ -589,6 +1039,10 @@ fn identity_layer() -> crate::compose::Layer {
         effects: Vec::new(),
         frozen_for_transition: false,
         blend: dhampir_timeline::layer::BlendMode::Normal,
+        corner_radius: 0.0,
+        clip: None,
+        mask: None,
+        shadow: None,
         is_adjustment: false,
     }
 }
@@ -601,6 +1055,7 @@ impl TimelineRenderer {
             color_adjust: ColorAdjustRenderer::new(device, format),
             color_mask: ColorMaskRenderer::new(device, format),
             warp: WarpRenderer::new(device, format),
+            blend_fn: crate::render::BlendFnRenderer::new(device, format),
             format,
         }
     }
@@ -684,7 +1139,9 @@ impl TimelineRenderer {
         // **先看分段计划。** 没有调整图层就走原来那条单 pass 路（行为逐字节不变）；
         // 有的话要「先合成一段 -> 对结果跑特效 -> 再继续」，那需要中间纹理。
         let plan = plan_steps(&composite.layers);
-        if !plan.iter().any(|step| matches!(step, Step::Adjust { .. })) {
+        // **有任何非 `Draw` 步就走分段**：调整图层要"对已经画好的结果"跑特效，
+        // 读回型混合要"读已经画好的底" —— 两者都需要中间纹理，走同一条路。
+        if !plan.iter().any(|step| !matches!(step, Step::Draw(_))) {
             return self.compose_layers(
                 device,
                 queue,
@@ -789,6 +1246,216 @@ impl TimelineRenderer {
                         if fresh { Some(clear) } else { None },
                     );
                     current = Some(dest);
+                }
+
+                Step::Backdrop { layer, effects } => {
+                    let Some(base) = current else {
+                        continue;
+                    };
+                    let target = space.target;
+                    let layer_ref = &composite.layers[*layer];
+                    // ① 对**累积结果**跑背景特效（与调整图层同一套分级管线）。
+                    let mut cursor = base;
+                    for (stage, indices) in effect_passes(effects) {
+                        let batch: Vec<Effect> = indices
+                            .iter()
+                            .filter_map(|index| effects.get(*index).cloned())
+                            .collect();
+                        let Some(next) = self.apply_stage(
+                            stage,
+                            &batch,
+                            cursor,
+                            extent,
+                            space,
+                            composite.frame,
+                            seconds,
+                            device,
+                            queue,
+                            encoder,
+                            &mut textures,
+                            &mut views,
+                        ) else {
+                            continue;
+                        };
+                        cursor = next;
+                    }
+                    if cursor == base {
+                        continue;
+                    }
+                    // ② 这一层在**目标空间**里的矩形 → 覆盖度掩码。
+                    //
+                    // 半宽要用**源尺寸 × scale**：只拿 transform 是拼不出四角的。
+                    // 解析一次源尺寸（宿主那边是缓存命中，因为它马上就要被画一次）。
+                    let Some((_probe, source_size)) =
+                        resolver.texture_for(&layer_ref.source, layer_ref.source_frame)
+                    else {
+                        continue;
+                    };
+                    let (offset_x, offset_y) = space.offset(layer_ref.transform);
+                    let center = (
+                        target.0 as f32 / 2.0 + offset_x,
+                        target.1 as f32 / 2.0 + offset_y,
+                    );
+                    let scale = layer_ref.transform.scale.abs();
+                    let half = (
+                        source_size.0 as f32 * scale / 2.0,
+                        source_size.1 as f32 * scale / 2.0,
+                    );
+                    let angle = layer_ref.transform.rotation_deg.to_radians();
+                    let (sin, cos) = (angle.sin(), angle.cos());
+                    let corner = |dx: f32, dy: f32| {
+                        [
+                            (center.0 + (dx * cos - dy * sin)) / target.0 as f32,
+                            (center.1 + (dx * sin + dy * cos)) / target.1 as f32,
+                        ]
+                    };
+                    let corners = vec![
+                        corner(-half.0, -half.1),
+                        corner(half.0, -half.1),
+                        corner(half.0, half.1),
+                        corner(-half.0, half.1),
+                    ];
+                    let coverage = crate::render::rasterize_polygon_coverage(
+                        &corners,
+                        target.0.max(1),
+                        target.1.max(1),
+                    );
+                    let (mask_texture, mask_view) = crate::render::coverage_texture(
+                        device,
+                        queue,
+                        target,
+                        &coverage,
+                        self.format,
+                    );
+                    textures.push(mask_texture);
+                    // ③ 先搬一份底，再把滤波结果**1:1**乘上掩码叠上去。
+                    let filtered_view = views[cursor].clone();
+                    let out = alloc_texture(
+                        device,
+                        self.format,
+                        extent,
+                        "dhampir backdrop out",
+                        &mut textures,
+                        &mut views,
+                    );
+                    let out_view = views[out].clone();
+                    let base_view = views[base].clone();
+                    let mut fixed_base = FixedSource {
+                        view: &base_view,
+                        size: target,
+                    };
+                    self.compose_layers(
+                        device,
+                        queue,
+                        encoder,
+                        &out_view,
+                        space,
+                        &[identity_layer()],
+                        &mut fixed_base,
+                        Some(wgpu::Color::TRANSPARENT),
+                    );
+                    // 这一趟的解析器：源 → 滤波结果；掩码 → 刚栅格化出来的覆盖度。
+                    struct BackdropSources<'a> {
+                        filtered: &'a wgpu::TextureView,
+                        mask: &'a wgpu::TextureView,
+                        size: (u32, u32),
+                    }
+                    impl SourceResolver for BackdropSources<'_> {
+                        fn texture_for(
+                            &mut self,
+                            _source: &str,
+                            _frame: i64,
+                        ) -> Option<(wgpu::TextureView, (u32, u32))> {
+                            Some((self.filtered.clone(), self.size))
+                        }
+                        fn mask_texture_for(
+                            &mut self,
+                            _source: &str,
+                        ) -> Option<(wgpu::TextureView, (u32, u32))> {
+                            Some((self.mask.clone(), self.size))
+                        }
+                    }
+                    let mut rect = identity_layer();
+                    // **1:1**：不套这一层的 transform（那会再缩放一次）。
+                    rect.transform = dhampir_timeline::schema::Transform {
+                        x: 0.0,
+                        y: 0.0,
+                        scale: 1.0,
+                        rotation_deg: 0.0,
+                    };
+                    rect.mask = Some(dhampir_timeline::layer::MaskSpec {
+                        gradient: None,
+                        asset_id: "backdrop-mask".to_string(),
+                        channel: dhampir_timeline::layer::MaskChannel::Alpha,
+                        invert: false,
+                    });
+                    rect.opacity = 1.0;
+                    let mut backdrop_sources = BackdropSources {
+                        filtered: &filtered_view,
+                        mask: &mask_view,
+                        size: target,
+                    };
+                    self.compose_layers(
+                        device,
+                        queue,
+                        encoder,
+                        &out_view,
+                        space,
+                        &[rect],
+                        &mut backdrop_sources,
+                        None,
+                    );
+                    current = Some(out);
+                }
+
+                Step::BlendFn { layer, mode } => {
+                    // **D13 的读回回路**：底在 `current` 那张纹理里，先不要动它。
+                    let Some(base) = current else {
+                        // 前面什么都没有：退化成一趟普通合成（`f(src, 透明)` = src 本身）。
+                        continue;
+                    };
+                    let mut readback = composite.layers[*layer].clone();
+                    // **单独渲这一层时它必须是 `Normal`**：混合由下面那一趟 blend-fn 做。
+                    // 留着 `Darken` 的话合成器会按规矩拒绝（"未实现的模式漏到渲染层"）——
+                    // 那条拒绝是对的，是这里没把"两趟各自的职责"分开。
+                    readback.blend = dhampir_timeline::layer::BlendMode::Normal;
+                    // ① 把这一层**单独**渲到一张新纹理（它自己的 opacity / 掩码 / 裁剪都在里面）。
+                    let fg = alloc_texture(
+                        device,
+                        self.format,
+                        extent,
+                        "dhampir blendfn layer",
+                        &mut textures,
+                        &mut views,
+                    );
+                    let fg_view = views[fg].clone();
+                    let layer_only = [readback];
+                    drawn += self.compose_layers(
+                        device,
+                        queue,
+                        encoder,
+                        &fg_view,
+                        space,
+                        &layer_only,
+                        resolver,
+                        Some(wgpu::Color::TRANSPARENT),
+                    );
+                    // ② `f(src, dst)` 写进又一张，`current` 换成它。
+                    //    （不能写回 base：这一趟要读它。）
+                    let out = alloc_texture(
+                        device,
+                        self.format,
+                        extent,
+                        "dhampir blendfn out",
+                        &mut textures,
+                        &mut views,
+                    );
+                    let out_view = views[out].clone();
+                    let base_view = views[base].clone();
+                    self.blend_fn.render(
+                        device, queue, encoder, &base_view, &fg_view, *mode, &out_view,
+                    );
+                    current = Some(out);
                 }
                 Step::Adjust {
                     effects, opacity, ..
@@ -1081,11 +1748,123 @@ impl TimelineRenderer {
         // 结果是 **B 层的纹理配上 A 层的变换**。画面会错，但不崩、也不报错。
         // 配成对之后，错位在类型上就不可能发生。
         #[allow(clippy::type_complexity)]
-        let mut prepared: Vec<(&crate::compose::Layer, wgpu::TextureView, (u32, u32))> = Vec::new();
+        let mut prepared: Vec<PreparedDraw<'_>> = Vec::new();
 
         for layer in layers {
             let Some((view, size)) = resolver.texture_for(&layer.source, layer.source_frame) else {
                 continue;
+            };
+            // 掩码：**这一层确定要画**之后再解析它（被跳过的层不该为掩码买单）。
+            //
+            // 解析不出来就**拒绝整帧**，而不是让这一层画成"没有掩码"的样子 ——
+            // 后者是静默降级里最难发现的一种：画面看着正常，只是少了遮罩。
+            // 多边形裁剪：**栅格化成一张掩码纹理**，走已经验过的掩码通路（着色器一行都不用改）。
+            //
+            // 口径：多边形是**图层框内的归一化坐标**，纹理按**源尺寸**建 —— 于是
+            // 归一化坐标 → 纹素只差一次乘法；而栅格化器在 core 里，两个宿主共用同一份。
+            // 多边形与路径都**栅格化成掩码纹理**（`path` 先细分成折线，再按**图层框的文档像素**
+            // 归一化 —— 因为路径坐标是文档像素，而栅格化器吃的是图层框内的归一化坐标）。
+            let polygon_mask = match &layer.clip {
+                Some(dhampir_timeline::layer::ClipShape::Polygon { points }) => {
+                    Some(points.clone())
+                }
+                Some(dhampir_timeline::layer::ClipShape::Path { data }) => {
+                    match crate::render::flatten_path(data) {
+                        Ok(flat) => {
+                            let scale = layer.transform.scale.abs().max(1e-6);
+                            let box_size = (size.0 as f32 * scale, size.1 as f32 * scale);
+                            Some(
+                                flat.into_iter()
+                                    .map(|point| [point[0] / box_size.0, point[1] / box_size.1])
+                                    .collect::<Vec<[f32; 2]>>(),
+                            )
+                        }
+                        Err(reason) => {
+                            // 校验层会先报（`clip_path_unparsable`）；这里 fail-closed。
+                            debug_assert!(false, "路径裁剪解析不了：{reason}");
+                            return 0;
+                        }
+                    }
+                }
+                _ => None,
+            };
+            let polygon_mask = match polygon_mask {
+                Some(points) => {
+                    let coverage = crate::render::rasterize_polygon_coverage(
+                        &points,
+                        size.0.max(1),
+                        size.1.max(1),
+                    );
+                    let (texture, view) = crate::render::coverage_texture(
+                        device,
+                        queue,
+                        size,
+                        &coverage,
+                        self.format,
+                    );
+                    keep_alive.push(texture);
+                    Some(view)
+                }
+                None => None,
+            };
+            // 两个都给了就是校验该拦下的情况：这里**拒绝整帧**，不替作者挑一个。
+            if polygon_mask.is_some() && layer.mask.is_some() {
+                debug_assert!(false, "多边形裁剪与掩码同时出现 —— 校验层本该拦住");
+                return 0;
+            }
+            let mask = match polygon_mask {
+                Some(view) => Some(PreparedMask {
+                    view,
+                    channel: dhampir_timeline::layer::MaskChannel::Alpha,
+                    invert: false,
+                }),
+                None => match &layer.mask {
+                    None => None,
+                    Some(mask) => match &mask.gradient {
+                        // **程序化渐变**（第 47 轮）：在**这一层自己的尺寸**上栅格化。
+                        //
+                        // 为什么不是目标尺寸：掩码是按**图层局部坐标**采样的（D12），
+                        // 而 CSS 的渐变轴长规矩（`|w·sinθ| + |h·cosθ|`）是相对**元素自己的盒子**算的 ——
+                        // 拿目标尺寸去算，非等比缩放的层上角度会变形（而且只在那种层上看得出来）。
+                        Some(gradient) => {
+                            let stops: Vec<(f32, f32)> = gradient
+                                .stops
+                                .iter()
+                                .map(|stop| (stop.at, stop.coverage))
+                                .collect();
+                            let coverage = crate::render::rasterize_linear_gradient(
+                                gradient.angle_deg,
+                                &stops,
+                                size.0,
+                                size.1,
+                            );
+                            let (texture, view) = crate::render::coverage_texture(
+                                device,
+                                queue,
+                                size,
+                                &coverage,
+                                self.format,
+                            );
+                            keep_alive.push(texture);
+                            Some(PreparedMask {
+                                view,
+                                channel: mask.channel,
+                                invert: mask.invert,
+                            })
+                        }
+                        None => match resolver.mask_texture_for(&mask.asset_id) {
+                            Some((view, _mask_size)) => Some(PreparedMask {
+                                view,
+                                channel: mask.channel,
+                                invert: mask.invert,
+                            }),
+                            None => {
+                                debug_assert!(false, "掩码素材解析不出来：{}", mask.asset_id);
+                                return 0;
+                            }
+                        },
+                    },
+                },
             };
             // **实拍片段：显式声明 Source。**
             // 模糊跑在**源**纹理上（下面两张纹理都是 size = 源尺寸），
@@ -1100,7 +1879,26 @@ impl TimelineRenderer {
                 space,
             );
             if radius == 0 {
-                prepared.push((layer, view, size));
+                push_shadow_before(
+                    &mut prepared,
+                    &mut keep_alive,
+                    device,
+                    queue,
+                    self,
+                    layer,
+                    &view,
+                    size,
+                    &mask,
+                );
+                prepared.push(PreparedDraw {
+                    layer,
+                    view,
+                    size,
+                    mask,
+                    tint: None,
+                    extra_offset: (0.0, 0.0),
+                    opacity_scale: 1.0,
+                });
                 continue;
             }
             let blurred = device.create_texture(&wgpu::TextureDescriptor {
@@ -1148,18 +1946,58 @@ impl TimelineRenderer {
             );
             keep_alive.push(blurred);
             keep_alive.push(intermediate);
-            prepared.push((layer, blurred_view, size));
+            push_shadow_before(
+                &mut prepared,
+                &mut keep_alive,
+                device,
+                queue,
+                self,
+                layer,
+                &view,
+                size,
+                &mask,
+            );
+            prepared.push(PreparedDraw {
+                layer,
+                view: blurred_view,
+                size,
+                mask,
+                tint: None,
+                extra_offset: (0.0, 0.0),
+                opacity_scale: 1.0,
+            });
         }
 
         // 不再 zip 两个序列 —— 直接从成对的 prepared 来，错位不可能发生。
         let draws: Vec<LayerDraw<'_>> = prepared
             .iter()
-            .map(|(layer, view, size)| LayerDraw {
-                view,
-                source_size: *size,
-                transform: layer.transform,
-                opacity: layer.opacity,
-                blend: layer.blend,
+            .map(|prepared| {
+                let PreparedDraw {
+                    layer,
+                    view,
+                    size,
+                    mask,
+                    tint,
+                    extra_offset,
+                    opacity_scale,
+                } = prepared;
+                LayerDraw {
+                    view,
+                    source_size: *size,
+                    transform: layer.transform,
+                    opacity: layer.opacity * opacity_scale,
+                    blend: layer.blend,
+                    corner_radius: layer.corner_radius,
+                    clip: layer.clip.clone(),
+                    tint: *tint,
+                    extra_offset: *extra_offset,
+                    // 掩码：可能来自掩码素材，也可能来自**多边形栅格化**（上面准备好的那份）。
+                    mask: mask.as_ref().map(|prepared_mask| MaskInput {
+                        view: &prepared_mask.view,
+                        channel: prepared_mask.channel,
+                        invert: prepared_mask.invert,
+                    }),
+                }
             })
             .collect();
 
@@ -1384,6 +2222,52 @@ mod tests {
     }
 
     #[test]
+    fn 七个色调整_kind_各自写到正确的槽位() {
+        // P5 等价性：登记表驱动之后，每个 kind 仍必须写**它自己那一个**槽位。
+        // ⚠️ 既有那几条只覆盖了 brightness / saturation / hue 三条，
+        //    `brightness_multiply` / `contrast` / `hue_rotate_css` / `saturation_css`
+        //    **原先一条测试都没有** —— 切到登记表后写错槽位是静默的，所以补上。
+        let p = color_params(&[effect("brightness_multiply", &[("factor", 1.5)])]);
+        assert!(
+            (p.scale - 1.5).abs() < 1e-6,
+            "brightness_multiply 该写 scale"
+        );
+        assert!(!p.is_identity());
+
+        let p = color_params(&[effect("contrast", &[("amount", 1.4)])]);
+        assert!((p.contrast - 1.4).abs() < 1e-6, "contrast 该写 contrast");
+
+        let p = color_params(&[effect("hue_rotate_css", &[("degrees", 90.0)])]);
+        assert!(
+            (p.hue_css - std::f32::consts::FRAC_PI_2).abs() < 1e-6,
+            "hue_rotate_css 该写 hue_css，且度转弧度只发生一次"
+        );
+
+        let p = color_params(&[effect("saturation_css", &[("amount", 0.5)])]);
+        assert!(
+            (p.saturation_css - 0.5).abs() < 1e-6,
+            "saturation_css 该写 saturation_css（不是 saturation）"
+        );
+    }
+
+    #[test]
+    fn 色调整与色罩互不串台() {
+        // ⚠️ 两条管线各有一份槽位表。串台的症状是"挂了个色彩特效，画面却出现了闪白"。
+        let p = color_params(&[effect("flash", &[("amount", 0.9)])]);
+        assert!(
+            p.is_identity(),
+            "flash 是 ColorMask 管线，不该进 color_params"
+        );
+
+        // 反过来：色调整也不该进色罩的参数。
+        let m = color_mask_params(&[effect("brightness", &[("amount", 0.5)])], (100, 100), 0);
+        assert!(
+            m.is_identity(),
+            "brightness 是 ColorAdjust 管线，不该进 color_mask_params"
+        );
+    }
+
+    #[test]
     fn 没挂色彩特效时是恒等_调用方据此跳过() {
         assert!(color_params(&[]).is_identity());
         // 只挂模糊时也应当是恒等：模糊不是 ColorAdjust 管线，不该混进来。
@@ -1526,6 +2410,34 @@ mod tests {
 pub enum Step {
     /// 把这几层依次画到当前底上（下标指向原清单）。
     Draw(Vec<usize>),
+    /// **背景滤镜**：对**已经画好的底**跑这一层的 `backdrop_effects`，
+    /// 结果只落在**这一层的矩形**里（CSS 的 `backdrop-filter` 就是"元素范围内"）。
+    ///
+    /// # 上一轮在这里栽过（记着它）
+    ///
+    /// 滤波结果在**目标分辨率**，而这一层的四边形是**缩放过的**。
+    /// 拿这一层的 `transform` 去贴结果 ⇒ 结果会被**再缩放一次**（第 35 轮实测：
+    /// 0.5 倍层把结果压成 2:1，蓝色只漏进来 6/255）。
+    /// 正确的做法：**1:1 贴**，用"这一层矩形的覆盖度掩码"把它裁出来。
+    Backdrop {
+        /// 这一层在 `composite.layers` 里的下标（它的 transform 就是"那块"）。
+        layer: usize,
+        /// 背景滤镜的清单。
+        effects: Vec<dhampir_timeline::schema::Effect>,
+    },
+
+    /// **读回型混合**：把这一层单独渲出来，再按 `f(src, dst)` 与已经画好的底逐像素算
+    /// （设计见 plan/web-animation-criteria.md 的 D13）。
+    ///
+    /// 为什么要单独一步：固定混合方程只需要 draw 的顺序，而 `f(src, dst)` 必须**读到**目标 ——
+    /// 一个 pass 里同时读和写同一张纹理做不到。所以它得先把"底"留在纹理里，再插一步。
+    BlendFn {
+        /// 这一层在 `composite.layers` 里的下标（**不要放进 `Draw`**：它会被当成固定方程画错）。
+        layer: usize,
+        /// 用哪条混合公式。
+        mode: dhampir_timeline::layer::BlendMode,
+    },
+
     /// 对**当前已经画好的结果**跑这一层（调整图层）的特效。
     ///
     /// # `opacity` 为什么必须在这里
@@ -1570,6 +2482,34 @@ pub fn plan_steps(layers: &[crate::compose::Layer]) -> Vec<Step> {
                 // **这一帧上这层的不透明度**（关键帧已经在求值层算好了）。
                 opacity: layer.opacity.clamp(0.0, 1.0),
             });
+        } else if !layer.backdrop_effects.is_empty() {
+            // 背景滤镜要读"身后已经画好的内容" ⇒ 先把攒着的同批画掉。
+            if !pending.is_empty() {
+                steps.push(Step::Draw(std::mem::take(&mut pending)));
+            }
+            steps.push(Step::Backdrop {
+                layer: index,
+                effects: layer.backdrop_effects.clone(),
+            });
+            // **这一层自己仍然要画**（画在滤波后的背景之上）。
+            if layer.blend.uses_fixed_equation() {
+                pending.push(index);
+            } else {
+                steps.push(Step::BlendFn {
+                    layer: index,
+                    mode: layer.blend,
+                });
+            }
+        } else if !layer.blend.uses_fixed_equation() {
+            // **读回型**：不能和别的层挤在同一趟里 —— 它要读"已经画好的底"。
+            // 所以先把攒着的同批画掉，再单独发一步。
+            if !pending.is_empty() {
+                steps.push(Step::Draw(std::mem::take(&mut pending)));
+            }
+            steps.push(Step::BlendFn {
+                layer: index,
+                mode: layer.blend,
+            });
         } else {
             pending.push(index);
         }
@@ -1601,6 +2541,7 @@ mod plan_tests {
 
     fn layer(id: &str, adjustment: bool) -> crate::compose::Layer {
         crate::compose::Layer {
+            backdrop_effects: Vec::new(),
             clip_id: id.to_string(),
             source: if adjustment {
                 String::new()
@@ -1627,6 +2568,10 @@ mod plan_tests {
             },
             frozen_for_transition: false,
             blend: BlendMode::Normal,
+            corner_radius: 0.0,
+            clip: None,
+            mask: None,
+            shadow: None,
             is_adjustment: adjustment,
         }
     }
@@ -1698,10 +2643,46 @@ mod plan_tests {
             match step {
                 Step::Draw(indices) => seen.extend(indices),
                 Step::Adjust { layer, .. } => seen.push(*layer),
+                Step::BlendFn { layer, .. } => seen.push(*layer),
+                // 背景滤镜那一步**不画这一层**（它在后面那段 `Draw` 里画）——
+                // 所以这里不 push，否则会被数成"画了两遍"。
+                Step::Backdrop { .. } => {}
             }
         }
         seen.sort_unstable();
         assert_eq!(seen, vec![0, 1, 2, 3, 4, 5], "每一层都要恰好出现一次");
+    }
+
+    #[test]
+    fn 读回型混合单独成步_不与别的层同批() {
+        let mut readback = layer("dark", false);
+        readback.blend = dhampir_timeline::layer::BlendMode::Darken;
+        let layers = vec![
+            layer("a", false),
+            layer("b", false),
+            readback,
+            layer("c", false),
+        ];
+        let steps = plan_steps(&layers);
+        assert_eq!(steps.len(), 3, "读回层应当把计划切成三段：{steps:?}");
+        assert!(
+            matches!(&steps[0], Step::Draw(indices) if indices == &vec![0, 1]),
+            "第一段应当是 [0, 1]：{steps:?}"
+        );
+        assert!(
+            matches!(&steps[1], Step::BlendFn { layer: 2, mode } if *mode == dhampir_timeline::layer::BlendMode::Darken),
+            "中间应当是读回层 2：{steps:?}"
+        );
+        assert!(
+            matches!(&steps[2], Step::Draw(indices) if indices == &vec![3]),
+            "最后一段应当是 [3]：{steps:?}"
+        );
+        // **读回层绝不能出现在任何 Draw 里** —— 那会被当成固定方程画错（不崩，只是画错）。
+        for step in &steps {
+            if let Step::Draw(indices) = step {
+                assert!(!indices.contains(&2), "读回层不该进 Draw：{indices:?}");
+            }
+        }
     }
 
     #[test]
@@ -1843,6 +2824,38 @@ mod plan_tests {
         );
     }
 
+    /// §20 的前置守卫：`noise` 的参数**原样**搬到 `ColorMaskParams`，一个字都不放大。
+    ///
+    /// ⚠️ 为什么要单独钉这一条（2026-10-11）：下游把 `noise` 从"白纱"改造成"真黑白噪点"时，
+    /// 在真实 GPU 上**反解出增量比 `amount` 该给的大了一个数量级**（`amount=0.08` 观测到
+    /// `+171` 的跳变，而按 `(n-0.5)*255*amount` 最多只有 ±10）。
+    /// 本用例把"参数有没有被谁乘过"这件事**在纯函数层钉死** ——
+    /// 如果这里是对的，那多出来的放大只能来自**渲染路径**，排查范围立刻缩到一处；
+    /// 如果这里是错的，那就是这里改坏了一处映射，与 GPU 无关。
+    ///
+    /// ⚠️ 也钉住 `is_identity`：`amount=0` 时整条必须可跳过（少一趟纹理往返）。
+    #[test]
+    fn 噪声参数原样搬到参数结构() {
+        let effects = vec![effect("noise", &[("amount", 0.08), ("seed", 7.0)])];
+        let params = color_mask_params(&effects, (1920, 1080), 0);
+        assert_eq!(
+            params.noise_amount, 0.08,
+            "noise_amount 必须**原样**是 amount（被谁乘过就说明这里多了一层）"
+        );
+        assert_eq!(params.noise_seed, 7.0, "seed 要跟着走");
+        assert!(
+            !params.is_identity(),
+            "amount 非零却判成恒等 ⇒ 整条被跳过、噪声根本不画"
+        );
+
+        // 另一头：`amount=0` 时必须恒等（可跳过），且不残留 seed
+        let zero = vec![effect("noise", &[("amount", 0.0), ("seed", 7.0)])];
+        assert!(
+            color_mask_params(&zero, (1920, 1080), 0).is_identity(),
+            "amount=0 应当恒等（调用方据此整条跳过）"
+        );
+    }
+
     #[test]
     fn 覆盖层的角度在这里就转成弧度() {
         // **度转弧度只在一处发生**：两边各转一遍会让 90 度变成 90 弧度。
@@ -1857,6 +2870,107 @@ mod plan_tests {
             params.overlay_angle
         );
         assert_eq!(params.overlay_shape, 1.0, "shape=1 是线性渐变");
+    }
+
+    #[test]
+    fn warp_频率不乘时间窗强度() {
+        // ⚠️ 这是 warp 与色罩的**唯一语义差异**，也是最容易在泛化时丢掉的一条：
+        //    频率是"抖多快"不是"抖多少"。乘了 strength 会让窗口边缘频率突变。
+        let e = |op: f32| {
+            let mut x = effect("shake", &[("amount", 1.0), ("frequency", 8.0)]);
+            x.opacity = op;
+            x
+        };
+        let half = warp_params(&[e(0.5)], (100, 100), 0.0);
+        assert!((half.shake_amount - 0.5).abs() < 1e-6, "幅度要乘强度");
+        assert!(
+            (half.shake_frequency - 8.0).abs() < 1e-6,
+            "频率**不许**乘强度，实得 {}",
+            half.shake_frequency
+        );
+    }
+
+    #[test]
+    fn warp_四个_kind_缺省值照抄原实现() {
+        let p = warp_params(&[effect("shake", &[("amount", 0.5)])], (100, 100), 0.0);
+        assert!((p.shake_frequency - 12.0).abs() < 1e-6, "shake 频率缺省 12");
+        assert_eq!(p.shake_seed, 0.0);
+
+        let p = warp_params(
+            &[effect("zoom_bounce", &[("amount", 0.5)])],
+            (100, 100),
+            0.0,
+        );
+        assert!((p.bounce_frequency - 3.0).abs() < 1e-6, "bounce 频率缺省 3");
+
+        let p = warp_params(&[effect("pulse", &[("amount", 0.5)])], (100, 100), 0.0);
+        assert!((p.pulse_frequency - 1.5).abs() < 1e-6, "pulse 频率缺省 1.5");
+
+        let p = warp_params(&[effect("split", &[("amount", 0.5)])], (100, 100), 0.0);
+        assert!((p.split_offset - 0.08).abs() < 1e-6, "split 偏移缺省 0.08");
+        assert_eq!(p.split_skew, 0.0);
+    }
+
+    #[test]
+    fn warp_频率为零时有下限() {
+        // 0 会让位移变成**静止的常量偏移**（看起来像"画面整体歪了"而不是"在抖"）。
+        let p = warp_params(
+            &[effect("shake", &[("amount", 0.5), ("frequency", 0.0)])],
+            (100, 100),
+            0.0,
+        );
+        assert!(p.shake_frequency >= 1e-3, "频率必须有下限");
+    }
+
+    #[test]
+    fn warp_split_的角度在这里就转成弧度() {
+        let p = warp_params(
+            &[effect("split", &[("amount", 0.5), ("skew", 180.0)])],
+            (100, 100),
+            0.0,
+        );
+        assert!(
+            (p.split_skew - std::f32::consts::PI).abs() < 1e-5,
+            "180 度应当变成 PI 弧度，实得 {}",
+            p.split_skew
+        );
+    }
+
+    #[test]
+    fn warp_两条同类只让更强的那条写频率() {
+        // `MaxInclusive`：0.8 胜，它的频率说了算；弱的 0.3 那组不许写。
+        let p = warp_params(
+            &[
+                effect("shake", &[("amount", 0.8), ("frequency", 20.0)]),
+                effect("shake", &[("amount", 0.3), ("frequency", 2.0)]),
+            ],
+            (100, 100),
+            0.0,
+        );
+        assert!((p.shake_amount - 0.8).abs() < 1e-6);
+        assert!(
+            (p.shake_frequency - 20.0).abs() < 1e-6,
+            "弱的那条不许改频率"
+        );
+    }
+
+    #[test]
+    fn warp_四类互不影响() {
+        // 四条 warp 各自独立竞争，同时挂都要生效（这是"同时抖和弹跳是想要的"）。
+        let p = warp_params(
+            &[
+                effect("shake", &[("amount", 0.5)]),
+                effect("zoom_bounce", &[("amount", 0.4)]),
+                effect("pulse", &[("amount", 0.3)]),
+                effect("split", &[("amount", 0.2)]),
+            ],
+            (100, 100),
+            0.0,
+        );
+        assert!((p.shake_amount - 0.5).abs() < 1e-6);
+        assert!((p.bounce_amount - 0.4).abs() < 1e-6);
+        assert!((p.pulse_amount - 0.3).abs() < 1e-6);
+        assert!((p.split_amount - 0.2).abs() < 1e-6);
     }
 
     #[test]
@@ -1948,5 +3062,150 @@ mod plan_tests {
         assert_eq!(p.shake_frequency, 5.0);
         assert_eq!(p.shake_seed, 1.0);
         assert!(!p.is_identity(), "挂了抖动就不该是恒等");
+    }
+}
+
+#[cfg(test)]
+mod p5_slot_tests {
+    //! P5 去槽位化的**等价性**验收：把那份手写 `match` 换成登记表驱动之后，
+    //! 四个色罩 kind 的产物必须与原来**逐值相同**。
+    //!
+    //! ⚠️ 与上面 `plan_tests` 里那几条的关系：那几条是**原来就有**的、
+    //!    覆盖了缺省值 / 除零保护 / 度转弧度；这一组补的是**边角组合**
+    //!    （`r2/g2/b2` 回落主色、两条同 kind 的竞争、`amount=0` 的恒等）。
+
+    use super::*;
+    use dhampir_timeline::schema::Effect;
+
+    fn eff(kind: &str, params: &[(&str, f32)]) -> Effect {
+        Effect {
+            kind: kind.to_string(),
+            params: params.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            window: dhampir_timeline::schema::Window::Always,
+            opacity: 1.0,
+        }
+    }
+
+    #[test]
+    fn overlay_的_r2g2b2_缺省是主色() {
+        // 原实现：`out.overlay_r2 = param("r2").unwrap_or(r)`。
+        // 给 r/g/b 不给 r2/g2/b2 ⇒ 渐变另一端 = 主色（单色覆盖就是这么来的）。
+        let p = color_mask_params(
+            &[eff("overlay", &[("amount", 1.0), ("r", 1.0), ("b", 0.5)])],
+            (100, 100),
+            0,
+        );
+        assert_eq!(p.overlay_r, 1.0);
+        assert_eq!(p.overlay_b, 0.5);
+        assert_eq!(p.overlay_r2, 1.0, "r2 应当回落到主色 r");
+        assert_eq!(p.overlay_b2, 0.5, "b2 应当回落到主色 b");
+        assert_eq!(p.overlay_g2, 0.0, "g 没给、缺省 0，g2 跟着是 0");
+    }
+
+    #[test]
+    fn overlay_显式给了_r2_就不回落() {
+        let p = color_mask_params(
+            &[eff("overlay", &[("amount", 1.0), ("r", 1.0), ("r2", 0.25)])],
+            (100, 100),
+            0,
+        );
+        assert_eq!(p.overlay_r2, 0.25, "显式给了就该用它，不能被主色盖掉");
+    }
+
+    #[test]
+    fn 两条同_kind_只让更强的那条写卫星槽位() {
+        // `flash` 是 `MaxStrict`：0.8 那条胜，它的颜色说了算；
+        // 弱的那条**不许**把颜色稀释成两者平均。
+        let p = color_mask_params(
+            &[
+                eff(
+                    "flash",
+                    &[("amount", 0.8), ("r", 1.0), ("g", 1.0), ("b", 1.0)],
+                ),
+                eff(
+                    "flash",
+                    &[("amount", 0.3), ("r", 0.0), ("g", 0.0), ("b", 0.0)],
+                ),
+            ],
+            (100, 100),
+            0,
+        );
+        assert!((p.flash_amount - 0.8).abs() < 1e-6, "更强的说了算");
+        assert_eq!(
+            (p.flash_r, p.flash_g, p.flash_b),
+            (1.0, 1.0, 1.0),
+            "弱的那条不该改颜色（`write_only_on_win`）"
+        );
+    }
+
+    #[test]
+    fn 弱的在后也不许改颜色() {
+        // 顺序反过来（弱在前、强在后）也要对 —— 判胜负读的是**当前值**。
+        let p = color_mask_params(
+            &[
+                eff(
+                    "flash",
+                    &[("amount", 0.3), ("r", 0.0), ("g", 0.0), ("b", 0.0)],
+                ),
+                eff(
+                    "flash",
+                    &[("amount", 0.8), ("r", 1.0), ("g", 1.0), ("b", 1.0)],
+                ),
+            ],
+            (100, 100),
+            0,
+        );
+        assert!((p.flash_amount - 0.8).abs() < 1e-6);
+        assert_eq!((p.flash_r, p.flash_g, p.flash_b), (1.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn overlay_的两条按_over_合成而不是取最大() {
+        // `over(0.5, 0.5) = 0.75`，而 `max(0.5,0.5)` 会是 0.5。
+        // 这条钉的是"overlay 用的是 over、不是 MaxInclusive"。
+        let p = color_mask_params(
+            &[
+                eff("overlay", &[("amount", 0.5)]),
+                eff("overlay", &[("amount", 0.5)]),
+            ],
+            (100, 100),
+            0,
+        );
+        assert!(
+            (p.overlay_amount - 0.75).abs() < 1e-6,
+            "两条 0.5 的覆盖层按 over 合成应为 0.75，实得 {}",
+            p.overlay_amount
+        );
+    }
+
+    #[test]
+    fn 登记表驱动与手写_match_在四类上逐值等价() {
+        // 覆盖四个 kind 各一组典型参数，逐槽位比对"该写的都写了、不该写的没写"。
+        let cases: Vec<(&str, Vec<(&str, f32)>)> = vec![
+            (
+                "flash",
+                vec![("amount", 0.5), ("r", 0.2), ("g", 0.4), ("b", 0.6)],
+            ),
+            (
+                "vignette",
+                vec![("amount", 0.5), ("radius", 0.9), ("softness", 0.25)],
+            ),
+            ("noise", vec![("amount", 0.5), ("seed", 3.0)]),
+            (
+                "overlay",
+                vec![("amount", 0.5), ("shape", 2.0), ("angle", 90.0)],
+            ),
+        ];
+        for (kind, params) in cases {
+            let p = color_mask_params(&[eff(kind, &params)], (100, 100), 0);
+            assert!(!p.is_identity(), "{kind} 应当写出了非恒等参数");
+        }
+        // 暗角的 softness 下限（原实现的 `.max(1e-3)`）在这条泛化路径上也要生效。
+        let p = color_mask_params(
+            &[eff("vignette", &[("amount", 0.5), ("softness", 0.0)])],
+            (100, 100),
+            0,
+        );
+        assert!(p.vignette_softness >= 1e-3, "softness 是除数，不许为 0");
     }
 }

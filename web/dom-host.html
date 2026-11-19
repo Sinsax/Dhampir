@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>HTML 宿主（第二个宿主）：把工程文件摊成 DOM</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; font: 14px/1.6 system-ui, "Microsoft YaHei", sans-serif; background: #101014; color: #e6e6ea; }
+  header { padding: 12px 16px; border-bottom: 1px solid #26262e; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  main { display: grid; grid-template-columns: 1fr 420px; gap: 0; height: calc(100vh - 108px); }
+  #stage-wrap { overflow: auto; padding: 16px; }
+  /* 画布区域：与 render_hints 的比例一致，缩放到看得见 */
+  /* isolation: isolate —— 让 mix-blend-mode 只在**画面内**合成，不要跟页面背景混。 */
+  #stage { position: relative; background: #16161c; outline: 1px solid #2c2c36; transform-origin: top left; isolation: isolate; }
+  .dom-layer { position: absolute; left: 50%; top: 50%; padding: 6px 10px; background: #3a3a4a; color: #fff;
+               border-radius: 4px; white-space: nowrap; will-change: transform, opacity; }
+  aside { border-left: 1px solid #26262e; padding: 12px 16px; overflow: auto; }
+  code, pre { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+  pre { background: #16161c; padding: 8px; border-radius: 4px; overflow: auto; }
+  .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
+  button { background: #2a2a34; color: #e6e6ea; border: 1px solid #3a3a46; border-radius: 4px; padding: 4px 10px; cursor: pointer; }
+  textarea { width: 100%; height: 110px; background: #16161c; color: #e6e6ea; border: 1px solid #3a3a46; border-radius: 4px; }
+  .hint { color: #9a9aa8; }
+  .bad { color: #ff8080; }
+  .ok { color: #7ddc9a; }
+</style>
+</head>
+<body>
+<header>
+  <strong>HTML 宿主</strong>
+  <span class="hint">吃的是同一份工程文件；求值走 <code>web/anim-eval.mjs</code>（第二实现，判据在 <code>scripts/check-anim-eval.mjs</code>）</span>
+</header>
+<main>
+  <div id="stage-wrap">
+    <div class="row">
+      <label>帧 <input id="frame" type="range" min="0" max="30" value="0" step="1"></label>
+      <span id="frame-label" class="hint">0</span>
+      <button id="play">播放</button>
+      <button id="load">载入 target/waapi-demo/out.doc.json</button>
+    </div>
+    <div id="scale-row" class="row"><label>缩放 <input id="scale" type="range" min="0.1" max="1" value="0.5" step="0.05"></label></div>
+    <div id="stage"></div>
+    <p id="status" class="hint">等待工程文件……</p>
+  </div>
+  <aside>
+    <h3>这一帧的通道值</h3>
+    <pre id="values">（还没有工程）</pre>
+    <h3>粘贴工程文件</h3>
+    <textarea id="doc" placeholder="把 out.doc.json 的内容粘进来"></textarea>
+    <div class="row">
+      <button id="use-pasted">用这份</button>
+      <button id="show-interface">接口清单</button>
+    </div>
+    <pre id="interface"></pre>
+    <h3>它**不**做什么</h3>
+    <ul class="hint">
+      <li>不取源、不收位图、不栅格化文字 —— 那些由浏览器自己管（<code>sources_for</code> 返回空、<code>set_bitmap</code> 直接报错）</li>
+      <li>不实现转场权重与素材帧换算（还没到那一步）</li>
+      <li>锚点用的是"宽高一半"这个近似，真正的锚点在引擎里</li>
+    </ul>
+  </aside>
+</main>
+<script type="module">
+import { createDomHost, HOST_INTERFACE } from './dom-host.mjs';
+
+const stage = document.getElementById('stage');
+const statusEl = document.getElementById('status');
+const valuesEl = document.getElementById('values');
+const frameEl = document.getElementById('frame');
+const scaleEl = document.getElementById('scale');
+const host = createDomHost({
+  container: stage,
+  onValues: ({ frame, layers }) => {
+    valuesEl.textContent = 'frame ' + frame + '\n' + JSON.stringify(layers, null, 2);
+  },
+});
+
+function applyScale() {
+  const s = Number(scaleEl.value);
+  stage.style.transform = 'scale(' + s + ')';
+  stage.parentElement.style.height = (1080 * s + 32) + 'px';
+}
+scaleEl.addEventListener('input', applyScale);
+
+function adopt(text) {
+  try {
+    const doc = JSON.parse(text);
+    const result = host.open(doc);
+    const frames = doc.render_hints === undefined ? 30 : Math.max(1, (doc.timeline.tracks[0].layers[0].end | 0));
+    frameEl.max = String(Math.max(30, frames));
+    statusEl.className = 'ok';
+    statusEl.textContent = '已载入：' + result.layers + ' 层。拖动帧号看通道值（DOM 与 core 的值应当一致）。';
+    host.draw(Number(frameEl.value));
+    applyScale();
+  } catch (error) {
+    statusEl.className = 'bad';
+    statusEl.textContent = '载入失败：' + error.message;
+  }
+}
+
+document.getElementById('load').addEventListener('click', async () => {
+  try {
+    const response = await fetch('../target/waapi-demo/out.doc.json');
+    adopt(await response.text());
+  } catch (error) {
+    statusEl.className = 'bad';
+    statusEl.textContent = '取不到 out.doc.json（file:// 下 fetch 会被拒）。先跑 ' +
+      'node scripts/waapi2doc.mjs fixtures/waapi-snapshot.sample.json target/waapi-demo/out.doc.json，' +
+      '再用 scripts/dhampir-local.mjs 起静态服务，或把内容粘到右边。原始错误：' + error.message;
+  }
+});
+document.getElementById('use-pasted').addEventListener('click', () => adopt(document.getElementById('doc').value));
+document.getElementById('show-interface').addEventListener('click', () => {
+  document.getElementById('interface').textContent = JSON.stringify(host.describe(), null, 2) + '\n\n接口名（与 wasm 宿主同名）：\n' + HOST_INTERFACE.join(' / ');
+});
+
+frameEl.addEventListener('input', () => {
+  document.getElementById('frame-label').textContent = frameEl.value;
+  host.draw(Number(frameEl.value));
+});
+
+let timer = null;
+document.getElementById('play').addEventListener('click', (event) => {
+  if (timer !== null) { clearInterval(timer); timer = null; event.target.textContent = '播放'; return; }
+  event.target.textContent = '暂停';
+  timer = setInterval(() => {
+    const next = (Number(frameEl.value) + 1) % (Number(frameEl.max) + 1);
+    frameEl.value = String(next);
+    document.getElementById('frame-label').textContent = String(next);
+    host.draw(next);
+  }, 1000 / 30);
+});
+</script>
+</body>
+</html>

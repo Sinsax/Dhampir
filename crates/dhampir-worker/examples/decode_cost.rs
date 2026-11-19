@@ -155,6 +155,7 @@ fn measure(
         width: doc.render_hints.width,
         height: doc.render_hints.height,
         sequence: doc.sequence_size(),
+        background: None,
         subtitles: &subtitles,
         font_file: None,
         font_bold_file: None,

@@ -270,6 +270,27 @@ pub struct Keyframe {
     #[serde(default = "default_keyframe_target")]
     pub target: String,
     pub value: f32,
+    /// **CSS 缓动语法的字符串**（口径见 plan/web-animation-criteria.md 的 D2）。
+    ///
+    /// 已知取值：既是历史拼写 `linear` / `ease_in` / `ease_out` / `ease_in_out` / `back_out`，
+    /// 也接受 CSS 的 `ease` / `ease-in` / `ease-out` / `ease-in-out` / `step-start` / `step-end`
+    /// 与函数式 `cubic-bezier(x1,y1,x2,y2)` / `steps(n[, position])`。
+    /// **注意下划线与连字符是两条不同的曲线**（前者是二次曲线，后者等于 cubic-bezier）。
+    /// 认不出来的取值会被校验层报成 `unknown_easing`。
+    ///
+    /// 形状是**字符串**，不是枚举名列表 —— 所以用 `schemars(with = "String")` 把生成出来的
+    /// JSON Schema 钉成 string（否则派生形状会按 Rust 的 `Css` 变体长成一个对象）。
+    //
+    // 但值域里有五个**既有拼写**是已知的：只留一个裸 string，下游 TS 就会丢掉它们、编辑器
+    // 不再补全。所以再用 `extend` 把已知取值带出去，生成器据此产出
+    // `"linear" | … | (string & {})` —— **真值仍在 Rust 这边**，那边只负责翻译。
+    #[cfg_attr(
+        feature = "json-schema",
+        schemars(
+            with = "String",
+            extend("x-known-values" = ["linear", "ease_in", "ease_out", "ease_in_out", "back_out"])
+        )
+    )]
     #[serde(default)]
     pub easing: Easing,
 }
@@ -313,9 +334,7 @@ pub fn parse_effect_target(target: &str) -> Option<EffectTarget> {
 
 /// 缓动曲线。公式**写死在这里**，两端调同一个函数——
 /// 各写一遍迟早在某个控制点上差一个像素，而那种差异最难归因。
-#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Easing {
     #[default]
     Linear,
@@ -341,34 +360,77 @@ pub enum Easing {
     /// 弹入用的是 `s = 3`（更猛的过冲），差别只有峰值那一下（约 1.10 vs 1.25），
     /// 而且只在 0.35 秒的窗口里 —— 转译器会把它报出来。
     BackOut,
+    /// **任意 CSS 缓动串**（`cubic-bezier(...)` / `steps(...)` / CSS 关键字 / 别名）。
+    ///
+    /// 原样收下、原样写回 —— 认不认识由 [`crate::easing::parse`] 判定，
+    /// 校验层据此报 `unknown_easing`。这是"加取值不该升契约版本"的第三处同形
+    /// （另两处是 `Effect.kind` 与 `Keyframe.target`）。口径见
+    /// `plan/web-animation-criteria.md` 的 D2。
+    Css(String),
+}
+
+// 序列化**手写**：单元变体仍写成它们从前的那些串（老工程一个字节都不变），
+// `Css` 原样写出它承载的串。用 derive 的话 `Css` 会变成 {"css": "..."}，
+// 那就与"JSON 里就是 CSS 缓动字符串"这条口径不符了。
+impl Serialize for Easing {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_text())
+    }
+}
+
+impl<'de> Deserialize<'de> for Easing {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Ok(Self::from_text(text))
+    }
 }
 
 impl Easing {
-    /// [0,1] 上的映射。输入会被夹到 [0,1]，避免外部算出越界值。
-    pub fn apply(self, t: f32) -> f32 {
-        let t = t.clamp(0.0, 1.0);
+    /// 写进文件的那个文本。**往返时逐字节保留**。
+    pub fn as_text(&self) -> &str {
         match self {
-            Self::Linear => t,
-            Self::EaseIn => t * t,
-            Self::EaseOut => 1.0 - (1.0 - t) * (1.0 - t),
-            Self::EaseInOut => {
-                if t < 0.5 {
-                    2.0 * t * t
-                } else {
-                    1.0 - 2.0 * (1.0 - t) * (1.0 - t)
-                }
-            }
-            // `back_out`（经典系数 1.70158）：
-            //     (t-1)^2 * ((s+1)*(t-1) + s) + 1
-            // 与 参照实现 的 `back_out(t, s)` 同一个式子，只是它的贴纸用 s=3。
-            //
-            // **过冲**：t≈0.7 时超过 1（约 1.10），然后落回 1。
-            // 不是"更慢的 ease_out"——`EaseOut` 单调不减且**永不大于 1**。
-            Self::BackOut => {
-                const S: f32 = 1.70158;
-                let u = t - 1.0;
-                u * u * ((S + 1.0) * u + S) + 1.0
-            }
+            Self::Linear => "linear",
+            Self::EaseIn => "ease_in",
+            Self::EaseOut => "ease_out",
+            Self::EaseInOut => "ease_in_out",
+            Self::BackOut => "back_out",
+            Self::Css(text) => text.as_str(),
+        }
+    }
+
+    /// 从文件里的文本还原。**只认前五个既有拼写**，其余一律进 `Css`（原样保留）。
+    pub fn from_text(text: String) -> Self {
+        match text.as_str() {
+            "linear" => Self::Linear,
+            "ease_in" => Self::EaseIn,
+            "ease_out" => Self::EaseOut,
+            "ease_in_out" => Self::EaseInOut,
+            "back_out" => Self::BackOut,
+            _ => Self::Css(text),
+        }
+    }
+
+    /// 解析成可求值的形式。**校验层用它报 `unknown_easing`。**
+    pub fn form(&self) -> Result<crate::easing::EasingForm, crate::easing::EasingError> {
+        crate::easing::parse(self.as_text())
+    }
+
+    /// 这个取值认不认识。
+    pub fn is_known(&self) -> bool {
+        self.form().is_ok()
+    }
+
+    /// `[0,1]` 上的映射。
+    ///
+    /// **输入夹到 `[0,1]`，输出不夹** —— 过冲是回弹的全部意义（`back_out` 会超过 1）。
+    ///
+    /// 未知串时退回线性：这是**防御性**兜底。载入路径上校验层先报 `unknown_easing`
+    /// 把它拦住了，所以正常工程走不到这里；而求值路径**不许 panic**
+    /// （逐帧路径里任何 panic 都是整块 chunk 失败）。
+    pub fn apply(&self, t: f32) -> f32 {
+        match self.form() {
+            Ok(form) => form.apply(t),
+            Err(_) => t.clamp(0.0, 1.0),
         }
     }
 }
@@ -577,6 +639,67 @@ pub struct EffectSpec {
     /// 放在 `EffectSpec` 里而不是让 UI 自己写一张表：UI 那张表一定会与
     /// 渲染侧对"这特效是不是瞬时的"的判断漂开，而漂了没有任何东西会红。
     pub window_default: Option<WindowDefault>,
+    /// **这个特效往哪些 uniform 槽位写、用哪条合成规则**（P5 去槽位化）。
+    ///
+    /// `&[]` = 这个 kind 不走"定长槽位"那条路（模糊 / Warp 各自有专名 uniform，
+    /// ColorAdjust 的 7 个槽位是**共享**的、由 `kind` 决定写哪个 —— 见 §下方注释）。
+    ///
+    /// # 为什么要有这一列
+    ///
+    /// 加特效原来要改**三处**：`EffectSpec` 登记、`timeline.rs` 里那份
+    /// `match spec.kind`、以及对应的定长结构。而第三条 `match` 是**按名字派发**的 ——
+    /// 正是 [`EffectPipeline`] 的文档说"最容易漏改"的那一种。
+    ///
+    /// 收进这一列之后，"加一个落在既有管线内的特效" = 加一条 `EffectSpec`
+    /// **+ 声明它写哪几个槽位**，渲染主路径不用再动。
+    ///
+    /// ⚠️ 组合规则**不是**能统一的：几条本来就不同的创作语义
+    /// （"更强的闪白说了算" vs "两条暗角叠加无意义" vs "覆盖层按 over 合成"）。
+    /// 所以它是**数据**（[`SlotCombine`]），不是"大家都乘个系数"。
+    pub slots: &'static [EffectSlot],
+}
+
+/// 一个特效往某个 uniform 槽位写的规则（P5 去槽位化）。
+///
+/// `param` 与 `slot` **刻意分开**：参数名是**外部契约**（`Effect.params` 里的键），
+/// 槽位名是**内部实现**（`#[repr(C)]` 结构里的字段）。两者同名是巧合、不是约定 ——
+/// 例如 `flash` 的参数叫 `amount`，而它写的槽位叫 `flash_amount`
+/// （另外三个槽位 `flash_r/g/b` 来自参数 `r/g/b`，是**不同名**的）。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EffectSlot {
+    /// 外部参数名（`Effect.params` 的键）。
+    pub param: &'static str,
+    /// 内部槽位名（`#[repr(C)]` 结构里的字段名）。
+    pub slot: &'static str,
+    /// 与同一槽位的**其它**特效竞争时怎么合成。
+    pub combine: SlotCombine,
+    /// `false` = 只有 `combine` 判定**胜出**时才写这个槽位。
+    ///
+    /// ⚠️ `flash` 就是这条：它的 `r/g/b` **只在 `amount` 更强时才换**
+    /// （两条闪白同时挂着时，弱的那条不该把颜色稀释成两者平均 ——
+    /// 那是"谁都看得出来不是用户想要的颜色"，且解释不清）。
+    /// 把"写参数"与"判胜负"合成一步会让**输的那次也改颜色**。
+    pub write_only_on_win: bool,
+}
+
+/// 同一槽位上多条特效的合成规则（P5 去槽位化）。
+///
+/// 每一种都是**刻意的创作语义**，有对应的注释与原实现位置；
+/// 去槽位化时**必须原样带过去**，不许"统一"成一个式子。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotCombine {
+    /// 严格更大者胜（`> `）。原实现：`flash`（`render/timeline.rs:547`）。
+    MaxStrict,
+    /// 大于等于者胜（`>=`）。原实现：`vignette` / `noise`（`:558` / `:570`）。
+    MaxInclusive,
+    /// 按 **over** 合成：`1-(1-a)(1-b)`，结果夹到 `[0,1]`。原实现：`overlay`（`:595`）。
+    Over,
+    /// 相加（可交换）。原实现：`brightness` / `hue` 等色调整（`:364` 段）。
+    Add,
+    /// 相乘（可交换）。原实现：`scale` / `contrast` / `saturation` 等（`:364` 段）。
+    Mul,
 }
 
 impl EffectSpec {
@@ -787,6 +910,14 @@ pub fn validate_project_with_effects(project: &Project, effects: &[EffectSpec]) 
                         "keyframe_value_not_finite",
                         &format!("{}.keyframes[{}]", clip_path, keyframe_index),
                         "关键帧的值必须是有限数".to_string(),
+                    ));
+                }
+                // 缓动：真值是**字符串**（D2），所以认不认识必须在这里判。
+                if let Err(bad) = keyframe.easing.form() {
+                    issues.push(Issue::new(
+                        bad.code(),
+                        &format!("{}.keyframes[{}].easing", clip_path, keyframe_index),
+                        bad.message(),
                     ));
                 }
             }
@@ -1147,6 +1278,7 @@ mod tests {
         space: EffectSpace::Document,
         pipeline: EffectPipeline::SeparableBlur,
         window_default: None,
+        slots: &[],
     };
 
     #[test]
@@ -1456,6 +1588,66 @@ mod tests {
             ease_out_peak <= 1.0 + 1e-6,
             "EaseOut 不该过冲，实得 {ease_out_peak}"
         );
+    }
+
+    #[test]
+    fn 缓动的取值原样往返_老工程一个字节都不变() {
+        // D2 的核心承诺：**JSON 里就是 CSS 缓动字符串**，既有拼写原样写回。
+        for (json, expected) in [
+            (r#"{"frame":0,"value":1.0,"easing":"linear"}"#, "linear"),
+            (r#"{"frame":0,"value":1.0,"easing":"ease_in"}"#, "ease_in"),
+            (r#"{"frame":0,"value":1.0,"easing":"ease_out"}"#, "ease_out"),
+            (
+                r#"{"frame":0,"value":1.0,"easing":"ease_in_out"}"#,
+                "ease_in_out",
+            ),
+            (r#"{"frame":0,"value":1.0,"easing":"back_out"}"#, "back_out"),
+            (
+                r#"{"frame":0,"value":1.0,"easing":"cubic-bezier(0.2,0.8,0.4,1)"}"#,
+                "cubic-bezier(0.2,0.8,0.4,1)",
+            ),
+            (
+                r#"{"frame":0,"value":1.0,"easing":"steps(4, jump-both)"}"#,
+                "steps(4, jump-both)",
+            ),
+        ] {
+            let key: Keyframe = serde_json::from_str(json).expect("能读回");
+            assert_eq!(key.easing.as_text(), expected, "{json} 的缓动应当原样保留");
+            let written = serde_json::to_string(&key).expect("能写出");
+            // **缓动那一个值**逐字节不变：读进来写出去还是同一个串（不做归一化、不改拼写）。
+            // 不断言整个对象一样 —— target 的缺省由 serde 补写，那是既有行为，与本次无关。
+            let round: serde_json::Value = serde_json::from_str(&written).unwrap();
+            assert_eq!(
+                round.get("easing").and_then(|value| value.as_str()),
+                Some(expected),
+                "{json} 往返后缓动应当逐字节不变，写出的是 {written}"
+            );
+        }
+    }
+
+    #[test]
+    fn 缺省缓动仍然是_linear_那一个词() {
+        // 记录**既有行为**：缺省会被 serde 补写出来，写的就是 linear。
+        // 这不是本次改的（target 的缺省也一样会写出来），但必须钉住 ——
+        // 老工程重写一遍时缓动那一格不能凭空多一个别的词。
+        let key: Keyframe = serde_json::from_str(r#"{"frame":3,"value":0.5}"#).expect("能读回");
+        assert_eq!(key.easing, Easing::Linear);
+        let written = serde_json::to_string(&key).unwrap();
+        assert!(
+            written.contains(r#""easing":"linear""#),
+            "缺省应当写成 linear：{written}"
+        );
+    }
+
+    #[test]
+    fn 认不出来的缓动在契约层是可判定的() {
+        let bad = Easing::Css("bounce".to_string());
+        assert!(!bad.is_known());
+        assert_eq!(bad.form().unwrap_err().code(), "unknown_easing");
+        // 求值路径**不许 panic**：未知串退回线性（防御性兜底；正常工程在校验层就被拦住）。
+        assert!((bad.apply(0.5) - 0.5).abs() < 1e-6);
+        // 认得的串当然要是认得的。
+        assert!(Easing::Css("steps(4, jump-both)".to_string()).is_known());
     }
 
     #[test]

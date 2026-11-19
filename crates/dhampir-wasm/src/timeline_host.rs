@@ -117,7 +117,19 @@ use std::collections::{BTreeMap, HashMap};
 use dhampir_core::animation::{decode as decode_animation, detect_format};
 use dhampir_core::compose::{self, Composite};
 use dhampir_core::io::{FrameSink, FrameSource};
-use dhampir_core::overlay::{DanmakuTextItem, SubtitleTable, evaluate_overlay};
+use dhampir_core::overlay::{DanmakuTextItem, SubtitleTable, TextStyle, evaluate_overlay};
+
+/// **一帧里一条文字都没有**时，形状里那个样式该填什么。
+///
+/// `host_api::OverlayView` 的 `subtitle_style` / `danmaku_style` 是**必需的**
+/// `TextStyleView`（不是 `Option`）—— 类型上就没有"没有样式"这个状态。
+/// 帧级那个字段在 `0e3209b` 之后已经不存在（样式改由每一条自己带），
+/// 所以"一条都没有"时必须给一个**确定的**值，而不是凭空造。
+///
+/// 给 [`TextStyle::default`]：它同时是"什么都没配"的语义，
+/// 与"这一帧没有弹幕/字幕要画"正好对得上 —— 消费方此时也没有东西要画。
+static DEFAULT_TRACK_STYLE: std::sync::LazyLock<TextStyle> =
+    std::sync::LazyLock::new(TextStyle::default);
 use dhampir_core::readback::Rgba8Image;
 use dhampir_core::render::{
     AnimationTextures, OverlayItem, RenderSpace, SourceResolver, compose_overlay, ink_report,
@@ -139,6 +151,16 @@ use crate::web::{js_err, new_instance};
 thread_local! {
     /// 工程预览宿主。与 PROJECT 分开：工程可以在没有 canvas 时先载入并校验。
     static PROJECT_HOST: RefCell<Option<ProjectHost>> = const { RefCell::new(None) };
+}
+
+thread_local! {
+    /// 已注册的掩码 id 的**影子清单**。
+    ///
+    /// 为什么要影子：`draw_impl` 是在 `PROJECT_HOST` **已经被可变借用**的情况下跑的，
+    /// 里面再 `PROJECT_HOST.with(|h| h.borrow())` 就是**重入** ⇒ `RefCell already mutably
+    /// borrowed` ⇒ wasm 里变成 `unreachable`，页面上一帧都画不出来（第 80 轮实测）。
+    /// 所以这份清单在**设置掩码时**同步更新，绘制时只读它。
+    static MASK_IDS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 thread_local! {
     /// **解码器读出来的动图延迟真值**：asset_id -> 逐帧延迟表。
@@ -297,6 +319,15 @@ struct TextLineSpec {
     /// （`font_ratio / style.font_ratio` 也能推，但那是靠两个字段的商，
     /// 一旦其中一个改了口径就会**静默**漂）。
     scale: f32,
+    /// **这一条自己的轨道样式** —— JS 栅格化时**必须逐条用它**。
+    ///
+    /// ⚠️⚠️ 为什么必须逐条带（2026-10-16 修的真事故）：帧级只有一份 `subtitle_style`
+    /// （= `overlay.items.first()` 的那份），而**同一份工程里可以同时有多条字幕轨**
+    /// （YekiTrim 的「文字元素」就是一条条独立轨）⇒ 只要这一帧有元素在场，`first()` 就是元素
+    /// ⇒ **整帧的字（含真正的字幕）都穿上那个元素的样式**，症状是"字幕的描边颜色被文字层带偏"
+    /// （元素 (26,26,26) vs 字幕 (64,60,59)）—— **不需要两条轨重叠**，而且只有预览那条腿会中
+    /// （成片是逐轨画的，不受影响）。
+    style: TextStyle,
 }
 
 /// 一条弹幕的身份：泳道 + 在屏帧区间（**闭**区间）。
@@ -627,6 +658,12 @@ pub struct ProjectHost {
     /// 页面上只剩「启动失败：unreachable executed」，看不出跟素材有关。
     /// ImageBitmap 在**每一个**实现的联合类型里都有，所以它是最稳的源。
     bitmaps: HashMap<String, web_sys::ImageBitmap>,
+    /// **掩码图**（asset id → 纹理）。浏览器那条腿的掩码通路：
+    ///
+    /// 预览宿主没有素材表，取不到掩码图。所以由 JS 侧 fetch + 解码后，
+    /// 通过 `dhampir_project_set_mask_image` 把像素交进来，这里存纹理。
+    /// 没注册的那些会让 `draw` **响亮报错**（而不是静默画一张没有掩码的图 ✗）。
+    masks: HashMap<String, (wgpu::Texture, wgpu::TextureView, (u32, u32))>,
     /// 强制走位图。JS 探测过之后告诉宿主；此时**不许退回 video**（退回去就是 trap）。
     require_bitmap: bool,
     /// 预览尺寸。**由 canvas 决定**，不由工程决定。
@@ -707,6 +744,8 @@ struct BoundVideos<'a> {
     queue: &'a wgpu::Queue,
     videos: &'a HashMap<String, HtmlVideoElement>,
     bitmaps: &'a HashMap<String, web_sys::ImageBitmap>,
+    /// 掩码图（宿主注册的）。没有这一项，掩码层的 `mask_texture_for` 只能返回 None。
+    masks: &'a HashMap<String, (wgpu::Texture, wgpu::TextureView, (u32, u32))>,
     require_bitmap: bool,
     format: wgpu::TextureFormat,
     /// 一份源纹理的缓存。缓存的是**纹理**不是像素：每次渲染仍重新拷一次。
@@ -766,6 +805,14 @@ impl BoundVideos<'_> {
 }
 
 impl SourceResolver for BoundVideos<'_> {
+    /// 掩码图：**注册过就给，没注册就 None**（调用方会转成"整帧拒绝"并报出来）。
+    /// 这一条是浏览器腿掩码通路的最后一环：JS 侧解码完调 set_mask_image，渲染这一趟就能取到。
+    fn mask_texture_for(&mut self, source: &str) -> Option<(wgpu::TextureView, (u32, u32))> {
+        self.masks
+            .get(source)
+            .map(|(_, view, size)| (view.clone(), *size))
+    }
+
     fn texture_for(
         &mut self,
         source: &str,
@@ -956,6 +1003,8 @@ fn text_lines(
             danmaku: None,
             opacity: item.opacity,
             scale: item.scale,
+            // **逐条的轨道样式**（见字段注释：帧级那份只是回退，不许拿它画所有人）。
+            style: item.track_style.clone(),
         });
     }
     (Some(overlay), specs)
@@ -1000,6 +1049,7 @@ fn danmaku_placements(
             opacity: item.opacity,
             // **弹幕不缩字**（参照的弹幕路径没有缩字逻辑），恒 1。
             scale: 1.0,
+            style: item.track_style.clone(),
         });
     }
     specs
@@ -1246,6 +1296,29 @@ impl ProjectHost {
     }
 
     fn draw_impl(&mut self, frame: i64, present: bool) -> Result<(), String> {
+        // **预览宿主没有素材表**：工程里用到掩码素材、而 JS 还没把图交进来时，渲染器解析不出来。
+        // 以前那是"只 debug_assert ⇒ 静默画一张**没有掩码**的图" ✗ —— 那种错没人看得出来。
+        // 所以这里**响亮地拒绝**（渐变遮罩不算：它是程序化生成的，不需要素材）。
+        // **不许在这里碰 `PROJECT_HOST`**：它此刻已被可变借用（重入 ⇒ RefCell panic）。
+        // 读影子清单即可 —— 它在 `set_mask_image` 里同步。
+        let registered_mask_ids: Vec<String> = MASK_IDS.with(|cell| cell.borrow().clone());
+        let needed = PROJECT.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .map(|doc| {
+                    dhampir_core::timeline::layer::missing_mask_assets(
+                        &doc.timeline,
+                        &registered_mask_ids,
+                    )
+                })
+                .unwrap_or_default()
+        });
+        if !needed.is_empty() {
+            return Err(format!(
+                "这份工程用了掩码素材（{}），而**预览宿主还没接到那张图** —— 预览这里刻意报错，而不是画一张没有掩码的图（出片端照常画）。在 JS 侧 await engine.uploadMasks() 把图交进来即可",
+                needed.join("、")
+            ));
+        }
         // **顺带把文档坐标系取出来。** 预览的渲染目标是画布，而契约里的像素量
         // （transform.x/y、调整图层的模糊半径）以 render_hints 度量 —— 两者不等时
         // 由 RenderSpace 按比例换算。少了这一步，同一个工程在不同画布尺寸下
@@ -1273,11 +1346,19 @@ impl ProjectHost {
                     .to_timebase()
                     .map(|tb| tb.num as f32 / tb.den.max(1) as f32)
                     .unwrap_or(0.0);
-                (composite, doc.sequence_size(), seconds, fps)
+                // **画布底色**：`render_hints.background`（没有就是透明 = 黑）。
+                // 它替代了"纯色背景层"—— 清屏色不引入任何"有素材图层"，所以不碰分段路径那条泄漏。
+                let background = doc.render_hints.background_rgba();
+                (composite, doc.sequence_size(), seconds, fps, background)
             })
         });
-        let Some((composite, sequence, seconds, fps)) = loaded else {
+        let Some((composite, sequence, seconds, fps, background)) = loaded else {
             return Err("还没有载入通过校验的工程".to_string());
+        };
+        // 清屏色：工程写了 `render_hints.background` 就用它，否则沿用改造前的透明（= 黑）。
+        let background_color = match background {
+            Some([r, g, b, a]) => wgpu::Color { r, g, b, a },
+            None => wgpu::Color::TRANSPARENT,
         };
 
         // 拆分借用：这些字段互不相干，解析器只需要其中几个的不可变借用。
@@ -1287,6 +1368,7 @@ impl ProjectHost {
             renderer,
             videos,
             bitmaps,
+            masks,
             require_bitmap,
             size,
             text_lines,
@@ -1461,6 +1543,7 @@ impl ProjectHost {
             queue: &ctx.queue,
             videos,
             bitmaps,
+            masks,
             require_bitmap: *require_bitmap,
             format: sink_format,
             textures: HashMap::new(),
@@ -1482,7 +1565,7 @@ impl ProjectHost {
             space,
             &composite,
             &mut resolver,
-            wgpu::Color::TRANSPARENT,
+            background_color,
             seconds,
         );
         // **文字叠在底上，不清屏** —— 清屏是上面那一句的事（compose_overlay 绝不清屏，
@@ -1694,8 +1777,30 @@ fn frame_overlay(doc: &ProjectDoc, frame: i64) -> Option<host_api::OverlayView> 
                 })
                 .collect(),
             // **两类各一套画法**（字幕暖色、弹幕白色）。
-            subtitle_style: text_style_view(&overlay.subtitle_style),
-            danmaku_style: text_style_view(&overlay.danmaku_style),
+            // ⚠️ 轨道级样式现在是**逐条**带着的（`TextItem::track_style`，
+            // 见 `0e3209b`：帧级共享槽会让"后一条轨的样式覆盖前一条"）——
+            // 帧级那个字段已经没了。取第一条即这一帧字幕的画法；
+            // 一条都没有时退回**默认样式**（见下 `danmaku_style` 那段同一条理由）。
+            subtitle_style: text_style_view(
+                overlay
+                    .items
+                    .first()
+                    .map(|item| &item.track_style)
+                    .unwrap_or(&DEFAULT_TRACK_STYLE),
+            ),
+            // ⚠️ 与上面  同一个理由：弹幕的轨道级样式
+            // 现在是**逐条**带着的（`DanmakuTextItem::track_style`，`0e3209b` 那次搬家），
+            // 帧级那个字段已经没了。取第一条即这一帧弹幕的画法；
+            // 一条都没有时退回**字幕**那套 —— 这里返回类型是必需的 `TextStyleView`
+            // （不是 `Option`），没有没有样式这个状态可表达，退回同帧字幕样式
+            // 是唯一不凭空造值的选择（对端此时也没有弹幕要画）。
+            danmaku_style: text_style_view(
+                overlay
+                    .danmaku
+                    .first()
+                    .map(|item| &item.track_style)
+                    .unwrap_or(&DEFAULT_TRACK_STYLE),
+            ),
             dropped_lines: overlay.dropped_lines,
             dropped_danmaku: overlay.dropped_danmaku,
         })
@@ -2372,6 +2477,7 @@ pub async fn dhampir_project_attach(canvas_id: String) -> Result<String, JsValue
             renderer,
             videos: HashMap::new(),
             bitmaps: HashMap::new(),
+            masks: HashMap::new(),
             require_bitmap: false,
             size,
             text_lines: Vec::new(),
@@ -2759,6 +2865,80 @@ pub fn dhampir_project_set_bitmap(source: String, bitmap: web_sys::ImageBitmap) 
     });
 }
 
+/// **把一张掩码图交给预览宿主**（asset id + 尺寸 + RGBA 像素）。
+///
+/// **把一张掩码图交给预览宿主**（浏览器那条腿）。
+///
+/// 预览宿主没有素材表、取不到掩码图，所以由 JS 侧负责"取 + 解码"
+/// （`fetch` → `createImageBitmap`），再把位图对象交进来 ——
+/// **与源位图那条路同一个形状**（`dhampir_project_set_bitmap`）。
+///
+/// 用 `copy_external_image_to_texture` 而不是自建 GPU 缓冲：那是这个仓库里
+/// 位图进纹理的**唯一**一条路（见 `BoundVideos` 的上传），掩码没有理由另走一条。
+///
+/// **没交进来的掩码会让 `draw` 报错**（不是静默画一张没有掩码的图）。
+#[wasm_bindgen]
+pub fn dhampir_project_set_mask_image(
+    asset_id: String,
+    bitmap: web_sys::ImageBitmap,
+) -> Result<(), JsValue> {
+    let width = bitmap.width();
+    let height = bitmap.height();
+    if width == 0 || height == 0 {
+        return Err(js_err("掩码位图的尺寸是 0 —— 多半是解码失败"));
+    }
+    PROJECT_HOST.with(|h| {
+        let mut borrowed = h.borrow_mut();
+        let host = borrowed
+            .as_mut()
+            .ok_or_else(|| js_err("工程预览宿主尚未初始化，先调 dhampir_project_attach"))?;
+        let texture = host.ctx.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("dhampir preview mask"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: PREVIEW_FORMAT,
+            // RENDER_ATTACHMENT 不是可选的：Dawn 要求 copy_external_image_to_texture 的目标带它。
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        host.ctx.queue.copy_external_image_to_texture(
+            &wgpu::wgt::CopyExternalImageSourceInfo {
+                source: wgpu::wgt::ExternalImageSource::ImageBitmap(bitmap.clone()),
+                origin: wgpu::wgt::Origin2d::ZERO,
+                flip_y: false,
+            },
+            wgpu::wgt::CopyExternalImageDestInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+                color_space: wgpu::wgt::PredefinedColorSpace::Srgb,
+                premultiplied_alpha: false,
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        host.masks
+            .insert(asset_id, (texture, view, (width, height)));
+        // 影子清单跟着宿主那份走（重建成一份，避免两份漂开）。
+        let ids: Vec<String> = host.masks.keys().cloned().collect();
+        MASK_IDS.with(|cell| *cell.borrow_mut() = ids);
+        Ok(())
+    })
+}
+
 /// 这一帧需要哪些源、各自停在**第几秒**。
 ///
 /// 秒数由**整数帧号**与工程的时间基算出（frame * den / num）——
@@ -2968,8 +3148,27 @@ pub fn dhampir_project_text_frame(frame: i32) -> String {
                         .iter()
                         .map(|item| danmaku_item_json(item))
                         .collect::<Vec<_>>(),
-                    text_style_json(&overlay.subtitle_style),
-                    text_style_json(&overlay.danmaku_style),
+                    // 与上面 typed 那条同口径：轨道级样式从**条目**上取。
+                    overlay
+                        .items
+                        .first()
+                        .map(|item| text_style_json(&item.track_style))
+                        .unwrap_or(serde_json::Value::Null),
+                    // ⚠️ **弹幕的画法从条目上取，不再有帧级的 `danmaku_style`**。
+                    //
+                    // `0e3209b` 把弹幕的轨道级样式从"帧级共享槽"搬成了
+                    // `DanmakuTextItem::track_style`（那次修的是"两条轨并存时
+                    // 后一条的样式覆盖前一条"的 bug），**但漏改了本文件** ⇒
+                    // 这里一直编译不过。搬家的语义是：同一轨的每一条**都带着**
+                    // 自己那份轨道级样式，所以取**第一条**就是这一帧弹幕的画法。
+                    //
+                    // 没有弹幕条目时给 `Null`（不是"凭空造一份默认样式"）——
+                    // 消费方据此知道"这一帧没有弹幕"，与"有弹幕但样式是默认值"分开。
+                    overlay
+                        .danmaku
+                        .first()
+                        .map(|item| text_style_json(&item.track_style))
+                        .unwrap_or(serde_json::Value::Null),
                     overlay.dropped_lines,
                     overlay.dropped_danmaku,
                 ),
@@ -3064,6 +3263,10 @@ fn placement_json(line: &TextLineSpec) -> serde_json::Value {
     // **这一条的缩放**：描边宽度 = `border_px * scale`（参照 `swEff = sw * wrapped.scale`）。
     // 同一处曾经也没发，同理。
     value["scale"] = serde_json::json!(line.scale);
+    // ⚠️ **这一条自己的轨道样式**（2026-10-16）：以前不发 ⇒ JS 只能拿帧级那一份画所有行，
+    //    而帧级那份是 `items.first()` 的 ⇒ **同屏有元素时整帧（含字幕）都穿元素的样式**
+    //    （用户报的「字幕描边被带偏」）。形状复用 `text_style_json`，别在这里另拼一份。
+    value["style"] = text_style_json(&line.style);
     // 全是空白字符的行：栅格化出来本来就是空的，判它等于判「空格没有墨迹」。
     value["visible"] = serde_json::json!(is_visible(&line.text));
     if let Some(danmaku) = line.danmaku {
@@ -3074,7 +3277,7 @@ fn placement_json(line: &TextLineSpec) -> serde_json::Value {
     value
 }
 
-/// `{text, rect, opacity, dy_px, color, font_ratio, scale, parts}` —— 与 CLI 的
+/// `{text, rect, opacity, dy_px, dx_px, color, font_ratio, scale, parts}` —— 与 CLI 的
 /// `cmd_subtitle` **逐字段同名**。
 ///
 /// ⚠️ **`color` / `font_ratio` / `scale` / `parts` 这四个键曾经漏在预览侧**，
@@ -3095,6 +3298,11 @@ fn text_item_json(item: &dhampir_core::overlay::TextItem) -> serde_json::Value {
         // 淡入淡出：两端都要能对账"这一帧多透明、偏了多少"。
         "opacity": item.opacity,
         "dy_px": item.dy_px,
+        // **横向偏移**（T4 抖动）。与 `dy_px` 同一条理由：漏了它，
+        // 预览侧就只能纵向抖、成片侧两轴都抖 —— 而两边**各自都看不出来**，
+        // 只有把两端的帧对起来才看得见（本仓已经栽过 `color`/`font_ratio`/`scale`/`parts`
+        // 这四个键漏在预览侧，见上面那段 ⚠️）。
+        "dx_px": item.dx_px,
         // **逐条颜色**：同一轨里不同的条可以不一样（ASS 的 `\c`），求值层已经解析好。
         "color": item.color,
         // 字号与**这一条被缩了多少**：JS 侧栅格化要用（字号决定 `ctx.font`，
@@ -3107,6 +3315,32 @@ fn text_item_json(item: &dhampir_core::overlay::TextItem) -> serde_json::Value {
             .parts
             .iter()
             .map(|r| serde_json::json!({ "text": r.text, "color": r.color }))
+            .collect::<Vec<_>>(),
+        // **逐字格子（P3，2026-10-13）**：每个字的位置 + 这一帧它自己的变换。
+        //
+        // ⚠️⚠️ **必须导出** —— 这是"预览↔成片逐字对拍"的**唯一**依据。
+        //    不导出的话 P4 判据只能比整行，而"整行一样、逐字不一样"
+        //    正是逐字功能最典型的失败模式（预览里散开了、成片里没有）。
+        //    ⚠️ 本仓已经栽过**四次**同形状的坑：`color` / `font_ratio` /
+        //       `scale` / `parts` 都曾漏在预览侧的导出里，而两端**各自都看不出来**。
+        //    空数组 = 这一条没有逐字效果（宿主走老路）。
+        "cells": item
+            .cells
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    // 字符本身：对拍时**要能认出是哪一个字**，
+                    // 否则"第 3 个字"在两端可能指到不同的字上（零宽字符、
+                    // 组合记号的存在让"序号"与"字形"不是一一对应）。
+                    "ch": c.ch.to_string(),
+                    "offset_em": c.offset_em,
+                    "advance_em": c.advance_em,
+                    "scale": c.scale,
+                    "rotation_deg": c.rotation_deg,
+                    "offset_x_em": c.offset_x_em,
+                    "offset_y_em": c.offset_y_em,
+                })
+            })
             .collect::<Vec<_>>(),
     })
 }
@@ -3126,12 +3360,25 @@ fn danmaku_item_json(item: &DanmakuTextItem) -> serde_json::Value {
         rect: item.rect,
         opacity: item.opacity,
         dy_px: item.dy_px,
+        // ⚠️ **弹幕没有逐条的抖动**（`DanmakuTextItem` 上本来就没有这个字段）——
+        //    抖动是字幕那条路的东西（T4）。这里如实给 0，不是"忘了填"。
+        dx_px: 0.0,
         color: item.color,
         font_ratio: item.font_ratio,
+        // **轨道级样式跟着这一条走**（见 `DanmakuTextItem::track_style` 的长注释：
+        // 弹幕的轨道级字段曾经是**丢**的，T6 底衬那个 bug 就是这么来的）。
+        // 这里原样转交 —— 与真路径同一条口径，不另拼一份。
+        track_style: item.track_style.clone(),
         // 弹幕不缩字（参照的弹幕没有缩字逻辑）；这里是从弹幕条目转出来的。
         scale: 1.0,
+        // ⚠️ **弹幕没有逐条的形变**（`DanmakuTextItem` 上本来就没有这两个字段）——
+        //    倾斜/压扁是字幕那条路的东西。这里如实给 0 / 1，不是"忘了填"，
+        //    与上面 `dx_px: 0.0` 同一条理由。
+        rotation_deg: 0.0,
+        scale_y: 1.0,
         // 弹幕没有 `.hl` 标记（参照的弹幕路径也不解析它）。
         parts: Vec::new(),
+        cells: Vec::new(),
     });
     value["lane"] = serde_json::json!(item.lane);
     value["enter"] = serde_json::json!(item.enter);
@@ -3157,6 +3404,9 @@ fn text_style_view(style: &dhampir_core::overlay::TextStyle) -> host_api::TextSt
         shadow_dx_px: style.shadow_dx_px,
         shadow_dy_px: style.shadow_dy_px,
         shadow_blur_px: style.shadow_blur_px,
+        // **文字纵向锚**（v6 -> v7）。原样带过去 —— 它本来就归一化好了，
+        // 与上面 `stroke_px` 那些"要按目标尺寸换算"的字段不同。
+        anchor_bottom: style.anchor_bottom,
     }
 }
 
@@ -3185,6 +3435,11 @@ fn text_style_json(style: &dhampir_core::overlay::TextStyle) -> serde_json::Valu
         "outline": style.outline,
         "stroke_px": style.stroke_px,
         "stroke_color": style.stroke_color,
+        // ⚠️ **外圈（白环）也要发给 JS**（2026-10-16）：宿主 `web/engine.js` 是**自己画字**的
+        //    （canvas 2D），它照着这份样式画。以前这两个键**根本没发** ⇒ 预览里画不出白环，
+        //    而 CLI 那条腿（ffmpeg 栅格化）照画 —— 用户看到的正是「成片有两层描边、预览只有一层」。
+        "outer_stroke_px": style.outer_stroke_px,
+        "outer_stroke_color": style.outer_stroke_color,
         "family": style.family,
         "weight": style.weight,
         "shadow_color": style.shadow_color,
@@ -3425,6 +3680,7 @@ pub async fn dhampir_project_text_probe(frame: i32) -> Result<String, JsValue> {
                 queue: &host.ctx.queue,
                 videos: &host.videos,
                 bitmaps: &host.bitmaps,
+                masks: &host.masks,
                 require_bitmap: host.require_bitmap,
                 format,
                 textures: HashMap::new(),
@@ -3996,6 +4252,7 @@ mod tests {
             danmaku: None,
             opacity: 0.5,
             scale: 0.75,
+            style: TextStyle::default(),
         };
         let placed = placement_json(&line);
         assert_eq!(
@@ -4014,10 +4271,15 @@ mod tests {
             rect,
             opacity: 0.5,
             dy_px: 3.0,
+            dx_px: 0.0,
             color: [1, 2, 3, 4],
             font_ratio: 0.055,
             scale: 0.75,
             parts: Vec::new(),
+            cells: Vec::new(),
+            track_style: TextStyle::default(),
+            rotation_deg: 0.0,
+            scale_y: 1.0,
         };
         let value = text_item_json(&item);
         // 逐字段同名是**契约**，不是巧合：CLI 的 `cmd_subtitle` 发的是同一组键。

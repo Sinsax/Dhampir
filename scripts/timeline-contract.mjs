@@ -9,8 +9,8 @@
 // 契约改一个字段、忘了改 TS，前端拿到的是「看起来对」的类型，直到运行时才炸。
 // 所以 TS 从 Rust 类型推导（schemars 出 JSON Schema），并且每次守卫都重新推导一遍。
 
-import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -53,13 +53,44 @@ export function stripBom(text) {
 
 /** 跑 Rust 侧的导例程，拿回 JSON Schema 文本。`form` 见 {@link FORMS}。 */
 export function schemaFromRust(form = '--project-v1') {
-  const out = execFileSync(
+  // 捕获 cargo 的输出走**文件重定向**，不走管道（第 80 轮改）。
+  //
+  // 受限环境（沙箱 / 某些 CI 策略）里**建不出命名管道**，`execFileSync` 默认的
+  // `stdio: 'pipe'` 会直接 EPERM 抛出 —— 那会把"环境不给"读成"契约不一致"，
+  // 而且抛出来的是一坨循环引用的错误对象（本会话就是这样）。改成文件之后，
+  // 起不来与退出码非 0 都变成**说得清楚的红**。
+  const logDir = join(REPO_ROOT, 'target', 'contract-logs');
+  mkdirSync(logDir, { recursive: true });
+  const stemOfForm = form.replace(/^--/, '');
+  const outPath = join(logDir, 'emit_schema-' + stemOfForm + '.json');
+  const errPath = join(logDir, 'emit_schema-' + stemOfForm + '.err');
+  const outFd = openSync(outPath, 'w');
+  const errFd = openSync(errPath, 'w');
+  const result = spawnSync(
     'cargo',
     // `--` 不能省：没有它，cargo 会把 `--doc` 当成自己的参数并报 unexpected argument。
     ['run', '-q', '-p', 'dhampir-timeline', '--features', 'json-schema', '--example', 'emit_schema', '--', form],
-    { cwd: REPO_ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+    { cwd: REPO_ROOT, windowsHide: true, stdio: ['ignore', outFd, errFd] },
   );
-  return stripBom(out).trim() + '\n';
+  closeSync(outFd);
+  closeSync(errFd);
+  const readOr = (path) => {
+    try {
+      return readFileSync(path, 'utf8');
+    } catch {
+      return '';
+    }
+  };
+  const stderr = readOr(errPath);
+  if (result.error) {
+    throw new Error('起不来 cargo（' + form + '）：' + String(result.error.message) +
+      (stderr.trim() === '' ? '' : '\n' + stderr.trim().slice(-500)));
+  }
+  if (result.status !== 0) {
+    throw new Error('emit_schema ' + form + ' 退出码 ' + String(result.status) +
+      (stderr.trim() === '' ? '' : '\n' + stderr.trim().slice(-800)));
+  }
+  return stripBom(readOr(outPath)).trim() + '\n';
 }
 
 // ---------------------------------------------------------------------------
@@ -108,8 +139,17 @@ export function tsType(node, defs) {
     case 'integer':
     case 'number':
       return 'number';
-    case 'string':
+    case 'string': {
+      // **开放串**成例：schema 里它必须是 string（值域真是开放的），但已知取值要带上 ——
+      // 纯 string 会让编辑器不再补全。已知取值由 Rust 侧的
+      // `#[schemars(extend("x-known-values" = [...]))]` 给出：**真值仍在 Rust 那边**，
+      // 这里只负责把它翻译成 `"a" | "b" | (string & {})`（最后那一支保住补全）。
+      const known = Array.isArray(node['x-known-values']) ? node['x-known-values'] : [];
+      if (known.length > 0) {
+        return [...new Set(known.map((value) => JSON.stringify(value)))].join(' | ') + ' | (string & {})';
+      }
       return 'string';
+    }
     case 'boolean':
       return 'boolean';
     case 'null':
@@ -196,6 +236,16 @@ function runSelfTest() {
   cases.push([
     'const 出字面量',
     tsType({ type: 'string', const: 'subtitle' }, {}) === '"subtitle"',
+  ]);
+  // **开放串成例**：值域真是开放的（schema 里就是一个 string），但已知取值要带上，
+  // 否则编辑器不再补全。最后那一支 `(string & {})` 就是"任意串也合法"的写法。
+  cases.push([
+    '开放串带上已知取值',
+    tsType({ type: 'string', 'x-known-values': ['a', 'b'] }, {}) === '"a" | "b" | (string & {})',
+  ]);
+  cases.push([
+    '没有已知取值的串还是 string',
+    tsType({ type: 'string' }, {}) === 'string',
   ]);
   cases.push([
     'enum 与 const 混在 oneOf 里',
@@ -294,4 +344,7 @@ function main() {
   );
 }
 
-main();
+// 入口守卫：被 import 时不要执行 CLI（也让它能被别处复用 tsType/emitDts）。
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main();
+}

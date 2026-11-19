@@ -127,18 +127,26 @@ const USAGE: &str = "\
   --width <像素>        输出宽度（默认取工程文件里的 render_hints.width）
   --height <像素>       输出高度（默认取工程文件里的 render_hints.height）
   --font-file <文件>    frame / render 画字幕用的字体文件（ttf/ttc/otf）。
-                        工程里有字幕轨时**必须给**：本仓不内嵌字体、也不猜系统字体，
-                        画不出来就判失败（问题码 subtitle_font_missing），
-                        而不是静默出一份没有字幕的片子
+                        字体来源之一（兜底那份）。本仓不内嵌字体、
+                        也不猜系统字体，画不出来就判失败
+                        （问题码 subtitle_font_missing），而不是静默出一份
+                        没有字幕的片子
+  --font-dir <目录>     字体来源之一（**优先**那份）：按工程里的 font_family
+                        族名在这个目录里找字体。libass 按名字找字体，
+                        而「名字」只能由契约给 —— 从文件名推出来的名字
+                        它认不出来，会静默换成系统默认字体
   -h, --help            显示本帮助
 
   字幕有**两种口径**，可以只要一种，也可以都要 —— 它们是两条独立的路：
-    * 烧进画面：--font-file（工程里有字幕轨时少给就判失败，见上）。
+    * 烧进画面：字体来自**两条来源**，按优先级取：
+        ① --font-dir + 工程里的 `font_family`（按族名找，**优先**）
+        ② --font-file（点名一份，兜底）
+      两条都没给、工程却有字幕轨 -> **判失败**（而且是**出片前**就出声）。
       它要 GPU 栅格化，所以只有 frame / render 走得到；
     * 侧挂文件：--subtitle-out（**只有 render 认**）。它不要字体也不要 GPU，
       搬的是「这一段里说过什么」：条目的时间是**相对这一趟的产物**从 0 起算的毫秒，
       内容只有文本与时间（源里的加粗/斜体/颜色不进侧挂）。
-      没给 --font-file 时画面上的字一个都不会有，侧挂文件照写。
+      没给字体时画面上的字一个都不会有，侧挂文件照写。
 
   subtitle 子命令不需要 GPU，也不需要 ffmpeg —— 它只出结构，不画图。
 
@@ -1004,6 +1012,9 @@ fn load_project_or_usage(path: &str) -> Result<ProjectDoc, ExitCode> {
 /// 判定必须**只看文本**，两个宿主才会给同一个答案 —— 这正是本函数存在的理由。
 pub fn is_absolute_uri(raw: &Path) -> bool {
     let text = raw.to_string_lossy();
+    if text.starts_with('/') {
+        return true;
+    }
     let bytes = text.as_bytes();
     // 1. POSIX 绝对：以 '/' 开头。只看真正的 '/'（我们要的是书写形态，不是"本平台认不认"）。
     if bytes.first() == Some(&b'/') {
@@ -1090,7 +1101,6 @@ pub fn load_asset_map(path: &str, asset_root: &Path) -> Result<Vec<(String, Path
     }
     Ok(rows)
 }
-
 /// 素材表：id -> 文件。**位置由宿主解释**，所以相对 uri 要挂到 --asset-root 上。
 ///
 /// 「绝对」按 [`is_absolute_uri`] 的**书写形态**判，不按当前平台判 ——
@@ -1389,6 +1399,7 @@ fn cmd_frame(args: &Args) -> Result<ExitCode, CommandError> {
         width,
         height,
         sequence: doc.sequence_size(),
+        background: doc.render_hints.background_rgba(),
         subtitles: &subtitles,
         font_file,
         font_bold_file,
@@ -1513,12 +1524,19 @@ fn cmd_render(args: &Args) -> Result<ExitCode, CommandError> {
         Err(code) => return Ok(code),
     };
     let subtitles = load_subtitles(&doc, &sources)?;
-    if !subtitles.is_empty() && font_file.is_none() {
+    // **字体来源有两条**：`--font-file` 点名一份，或者 `--font-dir` + 契约里的
+    // `font_family` 按名字找。**两条都没给**才是画不出来。
+    //
+    // 这条判断曾经只看 `--font-file`，于是"只给 `--font-dir`"那种（契约本来就
+    // 支持的）用法会被误报成缺字体 —— 而 `pick_font` 明明能从目录里解析出来。
+    if !subtitles.is_empty() && font_file.is_none() && font_dir.is_none() {
         // 提前出声：这个组合的结果是**整趟出片判失败**（每一帧都记 subtitle_font_missing），
         // 而等待一趟分钟级的出片之后再看到失败，是最没有用的失败方式。
         eprintln!(
-            "工程里有 {} 份字幕素材，却没给 --font-file —— 这一趟会判失败。\
-             本仓不内嵌字体、也不猜系统字体。",
+            "工程里有 {} 份字幕素材，却没给 --font-file 也没给 --font-dir —— \
+             这一趟会判失败。本仓不内嵌字体、也不猜系统字体：\
+             用 --font-file 点名一份，或在工程里写 `font_family` 并用 --font-dir \
+             指向装字体的目录。",
             subtitles.len()
         );
     }
@@ -1597,6 +1615,7 @@ fn cmd_render(args: &Args) -> Result<ExitCode, CommandError> {
         width,
         height,
         sequence: doc.sequence_size(),
+        background: doc.render_hints.background_rgba(),
         subtitles: &subtitles,
         font_file,
         font_bold_file,
@@ -1928,6 +1947,45 @@ fn load_subtitles(doc: &ProjectDoc, sources: &SourceTable) -> Result<SubtitleTab
 /// 给了但指不到文件就报**用法错**（退出码 2）：把路径打错字的人应该马上看到这句话，
 /// 而不是等着看「每一行字幕都画不出来」的清单 —— 那是同一个错，但难查得多。
 fn resolve_font(args: &Args) -> Result<Option<&Path>, ExitCode> {
+    // **字体目录先查**：它给了而目录不在，是一条**响亮**的错误。
+    //
+    // 为什么不静默放过：libass 找不到 `fontsdir=` 指的地方时会**静默改用
+    // 系统默认字体**（本机实测解析成 `ArialMT`，没有中文字形），
+    // 而那时 `lines_failed` 仍是 0、`issues` 仍是空 —— 只是一幅"字体不太对"的
+    // 成片。那比 `.notdef` 方框更难查（方框至少看得出来）。
+    if let Some(text) = args.font_dir.as_deref() {
+        let dir = Path::new(text);
+        if !dir.is_dir() {
+            eprintln!("--font-dir 指不到一个目录：{text}");
+            eprintln!(
+                "  它必须是一个**装字体文件**的目录。找不到的话 libass 会静默改用                 系统默认字体，而成片里看不出来 —— 所以这里直接拦下。"
+            );
+            return Err(ExitCode::from(2));
+        }
+    }
+    // `--font-dir` 给了、工程里也有 `font_family`，但**一个字体文件都没找到**：
+    // 同样是"按名字找、找不到"那条静默路。这一步只能查目录**空不空** ——
+    // 具体哪个族名缺，要等求值层把样式拿上来（见 `pick_font` 的说明）。
+    if let (Some(text), None) = (args.font_dir.as_deref(), args.font_file.as_deref()) {
+        let dir = Path::new(text);
+        let has_any_font = std::fs::read_dir(dir)
+            .map(|entries| {
+                entries.flatten().any(|entry| {
+                    let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                    [".ttf", ".ttc", ".otf", ".otc"]
+                        .iter()
+                        .any(|ext| name.ends_with(ext))
+                })
+            })
+            .unwrap_or(false);
+        if !has_any_font {
+            eprintln!("--font-dir 里一个字体文件都没有：{text}");
+            eprintln!(
+                "  没有 `--font-file` 兜底，又在这个目录里找不到字体 ——                  那这条字幕会由 libass 静默换成系统默认字体。先放一份字体进去，                 或者用 `--font-file` 点名一份。"
+            );
+            return Err(ExitCode::from(2));
+        }
+    }
     let Some(text) = args.font_file.as_deref() else {
         return Ok(None);
     };
@@ -2009,6 +2067,7 @@ fn sidecar_text(
             text: span.text.clone(),
             // 侧挂 SRT 没有 travel（那是 ASS 的 `\move` 专有）。
             travel_ms: None,
+            scale: None,
             // 侧挂文件只带文本与时间：源里的加粗/斜体/颜色不进这里（`to_srt` 也没有地方放）。
             style: CueStyle::default(),
         });
@@ -2072,29 +2131,19 @@ fn cmd_subtitle(args: &Args) -> Result<ExitCode, CommandError> {
 
     let sequence = doc.sequence_size();
     let overlay = evaluate_overlay(&doc.timeline, frame, sequence, Some(&table));
-    let (items, danmaku, subtitle_style, danmaku_style, dropped_lines, dropped_danmaku) =
-        match overlay {
-            Some(overlay) => (
-                overlay.items.iter().map(text_item_json).collect::<Vec<_>>(),
-                overlay
-                    .danmaku
-                    .iter()
-                    .map(danmaku_item_json)
-                    .collect::<Vec<_>>(),
-                text_style_json(&overlay.subtitle_style),
-                text_style_json(&overlay.danmaku_style),
-                overlay.dropped_lines,
-                overlay.dropped_danmaku,
-            ),
-            None => (
-                Vec::new(),
-                Vec::new(),
-                serde_json::Value::Null,
-                serde_json::Value::Null,
-                0,
-                0,
-            ),
-        };
+    let (items, danmaku, dropped_lines, dropped_danmaku) = match overlay {
+        Some(overlay) => (
+            overlay.items.iter().map(text_item_json).collect::<Vec<_>>(),
+            overlay
+                .danmaku
+                .iter()
+                .map(danmaku_item_json)
+                .collect::<Vec<_>>(),
+            overlay.dropped_lines,
+            overlay.dropped_danmaku,
+        ),
+        None => (Vec::new(), Vec::new(), 0, 0),
+    };
 
     print_json(&serde_json::json!({
         "frame": frame,
@@ -2102,10 +2151,12 @@ fn cmd_subtitle(args: &Args) -> Result<ExitCode, CommandError> {
         "subtitle_assets": table.len(),
         "items": items,
         "danmaku": danmaku,
-        // **两类各一套画法**（以前是一份共用的，见 `TextStyle` 的说明）。
-        // 逐字段同名于 `host_api::TextStyleView` 与 wasm 的 `dhampir_project_text_frame`。
-        "subtitle_style": subtitle_style,
-        "danmaku_style": danmaku_style,
+        // ⚠️ **字幕与弹幕都没有帧级的 `"style"` 了** —— 两者的轨道级样式
+        // 都跟着**每个 item** 走（`text_item_json` / `danmaku_item_json` 里的 `"style"`）。
+        //
+        // 这里曾经有 `"subtitle_style"` / `"danmaku_style"` 两个键，它们是两个
+        // **共享槽**的残影：循环里每轨整份重写、只留最后一份 ⇒
+        // **两条轨并存时它们只知道最后一条**。
         "dropped_lines": dropped_lines,
         "dropped_danmaku": dropped_danmaku,
     }))?;
@@ -2145,6 +2196,9 @@ fn text_item_json(item: &dhampir_core::overlay::TextItem) -> serde_json::Value {
         // 淡入淡出：两端都要能对账"这一帧多透明、偏了多少"。
         "opacity": item.opacity,
         "dy_px": item.dy_px,
+        // **横向偏移**（T4 抖动）。与 wasm 侧 `text_item_json` **逐字段同名** ——
+        // 漏在任一端就是"预览与成片各抖各的"，而两端**各自都看不出来**。
+        "dx_px": item.dx_px,
         // **逐条颜色**：同一轨里不同的条可以不一样（ASS 的 `\c`）。
         "color": item.color,
         // 字号与**这一条被缩了多少**。JS 侧栅格化要用它们：
@@ -2158,6 +2212,42 @@ fn text_item_json(item: &dhampir_core::overlay::TextItem) -> serde_json::Value {
             .iter()
             .map(|r| serde_json::json!({ "text": r.text, "color": r.color }))
             .collect::<Vec<_>>(),
+        // **逐字格子（P3，2026-10-13）**：每个字的位置 + 这一帧它自己的变换。
+        //
+        // ⚠️⚠️ **必须导出** —— 这是"预览↔成片逐字对拍"的**唯一**依据。
+        //    不导出的话 P4 判据只能比整行，而"整行一样、逐字不一样"
+        //    正是逐字功能最典型的失败模式（预览里散开了、成片里没有）。
+        //    ⚠️ 本仓已经栽过**四次**同形状的坑：`color` / `font_ratio` /
+        //       `scale` / `parts` 都曾漏在预览侧的导出里，而两端**各自都看不出来**。
+        //    空数组 = 这一条没有逐字效果（宿主走老路）。
+        "cells": item
+            .cells
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    // 字符本身：对拍时**要能认出是哪一个字**，
+                    // 否则"第 3 个字"在两端可能指到不同的字上（零宽字符、
+                    // 组合记号的存在让"序号"与"字形"不是一一对应）。
+                    "ch": c.ch.to_string(),
+                    "offset_em": c.offset_em,
+                    "advance_em": c.advance_em,
+                    "scale": c.scale,
+                    "rotation_deg": c.rotation_deg,
+                    "offset_x_em": c.offset_x_em,
+                    "offset_y_em": c.offset_y_em,
+                })
+            })
+            .collect::<Vec<_>>(),
+        // ⚠️ **这一条所属轨的轨道级样式跟着条目走**（不是全帧一份共享的）。
+        //
+        // 这里曾经把 `subtitle_style` 放在**帧级**输出一份，而求值层那份来自一个
+        // "每轨整份重写、循环结束只留最后一份"的共享槽 ⇒ **两条字幕轨并存时，
+        // 前面那条轨的轨道级样式（描边 / 阴影 / 底衬 / 字体族…）全部失效**。
+        // 详见 `dhampir_core::overlay::TextItem::track_style`。
+        //
+        // 与 wasm 侧 `text_item_json` **逐字段同名** —— 漏在任一端就是
+        // "预览与成片不一样"，而两端各自都看不出来。
+        "style": text_style_json(&item.track_style),
     })
 }
 
@@ -2175,12 +2265,24 @@ fn danmaku_item_json(item: &dhampir_core::overlay::DanmakuTextItem) -> serde_jso
         rect: item.rect,
         opacity: item.opacity,
         dy_px: item.dy_px,
+        // 弹幕**不做横向抖动**（T4 的 `shake_*` 是字幕轨的字段，
+        // `DanmakuSpec` 上没有）。恒 0 ⇒ 与改动前画在同一个位置。
+        dx_px: 0.0,
         color: item.color,
         font_ratio: item.font_ratio,
         // 弹幕不缩字（参照的弹幕没有缩字逻辑）；这里是从弹幕条目转出来的。
         scale: 1.0,
         // 弹幕没有 `.hl` 标记（参照的弹幕路径也不解析它）。
         parts: Vec::new(),
+        cells: Vec::new(),
+        // 弹幕的轨道级样式（现在是**逐条**的 `DanmakuTextItem::track_style`）。
+        // 这个字段只为复用 `text_item_json` 的序列化形状而填。
+        track_style: item.track_style.clone(),
+        // ⚠️ 弹幕**不做旋转 / 非等比压缩**（T1 那两个字段是**字幕轨**的：
+        // `DanmakuSpec` 上没有对应旋钮，`evaluate_overlay` 的弹幕那半边也不填它们）。
+        // 恒 0.0 / 1.0 ⇒ 与改动前画在同一个位置、同一个形状。
+        rotation_deg: 0.0,
+        scale_y: 1.0,
     });
     value["lane"] = serde_json::json!(item.lane);
     value["enter"] = serde_json::json!(item.enter);
@@ -2557,6 +2659,164 @@ mod tests {
 
     fn argv(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| item.to_string()).collect()
+    }
+
+    /// **判据（T4）**：`--font-dir` **指不到目录**时要响亮报错（退出码 2）。
+    ///
+    /// # 为什么这个用例必须让"另一条路走不通"（这条判据差点是假的）
+    ///
+    /// `resolve_font` 里有**两条**能返回 `Err` 的路：目录不**存在**、和目录里
+    /// 一个字体文件都没有。我第一版只断言"返回了 Err"——于是把"存在性检查"
+    /// 整条删掉，它也照样红（因为不存在目录反正也读不出字体文件，第二条路接住了）。
+    /// **那条判据测的是"有错"，不是"这个错"** —— 删掉真代码它不红。
+    ///
+    /// 所以这里给 `--font-file` 一个**真实存在的**兜底：那样第二条路
+    /// （"没兜底才拦"）就**不会**触发，能触发 `Err` 的只剩"目录不存在"这一条。
+    /// 这样删掉存在性检查，这条判据**必然**变红。
+    #[test]
+    fn 字体目录不在要响亮报错() {
+        let Some(fallback) = test_font_path() else {
+            eprintln!("本机找不到一份测试字体，这条跳过");
+            return;
+        };
+        let mut args = parse(&argv(&["frame", "--project", "p.json", "--out", "o"])).unwrap();
+        // **关键是这一行**：有兜底 ⇒ 第二条 Err 路不会触发 ⇒ 只剩存在性检查。
+        args.font_file = Some(fallback.to_string_lossy().to_string());
+        args.font_dir = Some("C:/definitely/not/here".to_string());
+        let code = resolve_font(&args).expect_err("不存在的目录必须拦下，哪怕有 --font-file 兜底");
+        assert_eq!(code, ExitCode::from(2), "这是用法错，退出码该是 2");
+
+        // **反向**：真目录必须放行（否则这条判据会把正常用法也拦掉）。
+        //
+        // ⚠️ 用**当前平台**一定存在的目录，**不要写死 `C:/Windows/Fonts`** ——
+        // CI 有一条 ubuntu 腿，那种路径在 Linux 上必然不存在，这条就会变成
+        // "Windows 绿、Linux 红"的假回归。
+        let real_dir = std::env::temp_dir();
+        assert!(real_dir.is_dir(), "前提不成立：临时目录竟然不存在");
+        args.font_dir = Some(real_dir.to_string_lossy().to_string());
+        assert!(
+            resolve_font(&args).is_ok(),
+            "存在的目录不该被拦 —— 那样这条判据就成了恒红的假严"
+        );
+    }
+
+    /// **判据（T4）**：`--font-dir` **存在但里面一个字体文件都没有**、
+    /// 又没给 `--font-file` 时响亮报错；给了 `--font-file` 兜底就该放行。
+    ///
+    /// 与上一条互补：上一条把兜底**给上**以隔离出"存在性检查"，
+    /// 这一条把兜底**拿掉**以隔离出"空目录检查"。两条合起来，
+    /// 删掉任意一半检查都会有判据变红。
+    #[test]
+    fn 字体目录空且没兜底要响亮报错() {
+        // **不自己造目录**：这个沙箱里"工作区内的可执行文件写不了临时目录"
+        // （`拒绝访问 os error 5`），自己造目录会让这条测试**静默跳过** ——
+        // 而跳过就等于没有判据（实测：跳过时把检查整条删掉，测试照样绿）。
+        //
+        // 改成找一个**已经存在、且确实没有字体文件**的目录：
+        // 用 crate 自己的源码目录（`crates/dhampir-worker/src`，只有 .rs 文件）。
+        // **不能用 `target/`**：`CARGO_MANIFEST_DIR` 是 `crates/dhampir-worker`，
+        // 那个 `target/` 子目录并不存在 —— 这条测试会因此静默跳过
+        // （踩过一次：跳过时把检查删掉它照样绿）。
+        let empty = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        if !empty.is_dir() {
+            eprintln!("{} 不在，这条跳过", empty.display());
+            return;
+        }
+        // 前提自检：这个目录里**真的**没有字体文件，否则这条判据什么也没测。
+        let has_font = std::fs::read_dir(&empty)
+            .map(|entries| {
+                entries.flatten().any(|entry| {
+                    let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                    [".ttf", ".ttc", ".otf", ".otc"]
+                        .iter()
+                        .any(|ext| name.ends_with(ext))
+                })
+            })
+            .unwrap_or(false);
+        assert!(
+            !has_font,
+            "{} 里有字体文件，这条判据的前提不成立",
+            empty.display()
+        );
+
+        let text = empty.to_string_lossy().to_string();
+        let mut args = parse(&argv(&["frame", "--project", "p.json", "--out", "o"])).unwrap();
+        args.font_dir = Some(text.clone());
+        let code = resolve_font(&args).expect_err("空目录 + 没兜底必须拦下");
+        assert_eq!(code, ExitCode::from(2), "这是用法错，退出码该是 2");
+
+        // **反向**：给了 `--font-file` 兜底，空目录就不该再拦。
+        let Some(font) = test_font_path() else {
+            eprintln!("本机找不到一份测试字体，这条的后半段跳过");
+            return;
+        };
+        args.font_file = Some(font.to_string_lossy().to_string());
+        assert!(
+            resolve_font(&args).is_ok(),
+            "有 --font-file 兜底时空目录不该拦 —— 否则这条判据把正常用法也拦了"
+        );
+    }
+
+    /// **判据（T4）**：字体**来源有两条** —— 只给 `--font-dir`（不给 `--font-file`）
+    /// 时必须有字体返回，而不是 `None`。
+    ///
+    /// 这条盯的是一个真出现过的缺口：判断曾只看 `--font-file`，
+    /// 于是"只给目录"那种（契约本就支持的）用法被判成缺字体。
+    #[test]
+    fn 只给字体目录也算给了字体() {
+        let mut args = parse(&argv(&["frame", "--project", "p.json", "--out", "o"])).unwrap();
+        args.font_file = None;
+        // ⚠️ 这个目录里**必须真有一个字体文件** —— `resolve_font` 除了查目录在不在，
+        // 还查它**空不空**（空目录同样是"按名字找不到"那条静默路）。
+        // 所以**不能拿临时目录顶替**：它是真实存在的空目录，会正确地被判成不合格。
+        //
+        // 也**不能写死 `C:/Windows/Fonts`**：CI 有一条 ubuntu 腿，那条路径在 Linux 上
+        // 不存在，判据就会变成"Windows 绿、Linux 红"的假回归。
+        // 做法：造一个本测试专用的目录，往里放一个**名字像字体**的文件。
+        // 这里只验 CLI 的**参数判定**、不真解析字体，所以空壳文件就够。
+        let scratch = std::env::temp_dir().join(format!("dhampir-fontdir-{}", std::process::id()));
+        // ⚠️ **别只认 `temp_dir()`**：受限沙箱下 %TEMP% 对测试子进程是**拒写**的
+        // （本机实测 `Os { code: 5 }`，而同一个目录从普通 shell 建得出来 —— 于是这条判据
+        //  会表现成"代码坏了"，其实是环境）。退回**仓库的 `target/tmp`**：在"只许写工作区"
+        // 的策略下它仍然可写，并且随 `/target/` 一起被 gitignore。
+        // ⚠️ 报错**要点名路径**（本仓口径）：以前只给 `Os { code: 5 }`，看到的人无从知道是哪个目录。
+        let scratch = if std::fs::create_dir_all(&scratch).is_ok() {
+            scratch
+        } else {
+            let fallback = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/tmp")
+                .join(format!("dhampir-fontdir-{}", std::process::id()));
+            if let Err(e) = std::fs::create_dir_all(&fallback) {
+                panic!("建临时字体目录失败：{}（{e}）", fallback.display());
+            }
+            fallback
+        };
+        std::fs::write(scratch.join("probe.ttf"), b"not a real font").expect("放一个占位字体");
+        args.font_dir = Some(scratch.to_string_lossy().to_string());
+        // `resolve_font` 回的是 `--font-file` 那一份（`Option<&Path>`）；
+        // "只给目录"时它回 `None` **是**对的 —— 目录那份由求值层按族名解析。
+        // 所以这里判的是**它不报错**（不把这条路误判成缺字体）。
+        assert!(
+            resolve_font(&args).is_ok(),
+            "只给 --font-dir 是一条合法用法，不该在这里被拦"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+        // **反向**：两条都没给才是"没给字体"，但那时也不该在**这里**报错
+        // （提前出声那一段在出片路径上，见 `run_frame`）。
+        args.font_dir = None;
+        assert!(resolve_font(&args).is_ok(), "两条都没给时这里是 Ok(None)");
+        assert!(resolve_font(&args).unwrap().is_none());
+    }
+
+    /// 本机一份够用的测试字体（ASCII 路径优先，免掉 T1 那条非 ASCII 的坑）。
+    fn test_font_path() -> Option<PathBuf> {
+        for candidate in ["C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/simhei.ttf"] {
+            let path = PathBuf::from(candidate);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+        None
     }
 
     #[test]

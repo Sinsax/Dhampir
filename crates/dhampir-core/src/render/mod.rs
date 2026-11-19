@@ -25,6 +25,7 @@ mod scene;
 mod timeline;
 mod warp;
 
+pub mod blend_fn;
 /// corpus 的公共部分：一帧怎么渲染、怎么判、整表摘要怎么算、**记录长什么样**。
 ///
 /// `pub` 的理由与 [`scene_model`] 一样，而且更强：**两个宿主都要调它**。
@@ -32,6 +33,9 @@ mod warp;
 /// 代码——以及"画完之后写成什么表"——在两端各写一遍，那个证明就退化成
 /// "两份驱动大致相当"。
 pub mod corpus;
+pub mod gradient;
+pub mod path;
+pub mod polygon;
 
 /// corpus 场景的**纯数值模型**：一堆 `f64` 算术，不碰 GPU、不碰 `wgpu`。
 ///
@@ -46,13 +50,14 @@ mod wgsl_subset;
 pub use animation::{
     AnimationTextures, FRAME_FORMAT as ANIMATION_FRAME_FORMAT, resolve_frame_index,
 };
+pub use blend_fn::BlendFnRenderer;
 pub use blit::{BLIT_WGSL, BlitRenderer};
 pub use blur::{
     BLUR_WGSL, BlurRenderer, MAX_RADIUS as BLUR_MAX_RADIUS, TAPS as BLUR_TAPS, gaussian_weights_1d,
 };
 pub use color_adjust::{COLOR_ADJUST_WGSL, ColorAdjustParams, ColorAdjustRenderer};
 pub use color_mask::{COLOR_MASK_WGSL, ColorMaskParams, ColorMaskRenderer, OverlayShape};
-pub use compose::{COMPOSE_WGSL, Compositor, LayerDraw, RenderSpace, inverse_affine};
+pub use compose::{COMPOSE_WGSL, Compositor, LayerDraw, MaskInput, RenderSpace, inverse_affine};
 pub use corpus::{
     CORPUS_RECORD_KIND, CORPUS_RECORD_SCHEMA, CORPUS_TABLE_MILESTONE, CORPUS_TARGET_FORMAT,
     CorpusError, Counts, PointReading, RenderPair, SceneFrame, SceneRun, TableRow, epoch_seconds,
@@ -60,10 +65,13 @@ pub use corpus::{
     render_frame, render_frame_pair, render_frame_record, render_run, report_text, scene_json,
     table_digest,
 };
+pub use gradient::rasterize_linear_gradient;
 pub use overlay::{
     InkBounds, InkReport, OverlayItem, OverlayReport, compose_overlay, ink_report,
     placement_transform,
 };
+pub use path::flatten_path;
+pub use polygon::{coverage_texture, rasterize_polygon_coverage};
 pub use probe::{
     PROBE_CLEAR_COLOR, PROBE_TARGET_SIZE, PROBE_VERTICES, ProbeRenderer, ProbeSample, ProbeVertex,
     SampleExpectation, VERTEX_INSET, probe_samples, render_probe_frame,

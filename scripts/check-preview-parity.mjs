@@ -36,6 +36,10 @@ export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 /** 允许用 RenderSpace::square 的文件：这些路径上**没有工程**，目标尺寸就是它自己的坐标系。 */
 export const SQUARE_ALLOWED = [
   { path: 'crates/dhampir-core/src/render/compose.rs', why: '它自己的单元测试（相同尺寸时比例是 1）' },
+  {
+    path: 'crates/dhampir-core/src/render/timeline.rs',
+    why: '投影的轮廓渲染：源纹理按 1:1 画进一张**带透明留白**的纹理（留白 = 模糊半径，两宿主同一份代码）——\n      这一步在**源像素空间**里做，与文档坐标系无关，所以用 square(留白尺寸) 是对的：\n      真正的文档→目标换算在阴影那一张（它带 layer.transform，走 space.offset）',
+  },
   { path: 'crates/dhampir-core/src/render/overlay.rs', why: '文字叠加：行位图的落点已经是目标像素（place_line(rect, target) 的产物），这条路上没有文档坐标系可换算' },
   { path: 'crates/dhampir-worker/examples/decode_sequence.rs', why: '顺序解码的例子，输入是裸帧序列而不是工程' },
   { path: 'crates/dhampir-worker/examples/render_project.rs', why: '渲染例子直接渲契约，没有工程壳' },

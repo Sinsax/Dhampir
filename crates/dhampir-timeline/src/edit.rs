@@ -25,7 +25,7 @@
 //!   最容易被漏掉、而且漏了以后"画面看起来完全正常"的一处。
 //!   source_in **不动**：它是素材自己的帧号，与序列帧率无关。
 
-use crate::layer::{Layer, source_frame_at};
+use crate::layer::{Layer, source_frame_at_rate};
 use crate::project::ProjectDoc;
 use crate::project::validate_project_doc;
 use crate::schema::{Easing, EffectSpec, Frame, Issue, Keyframe, TimebaseDto};
@@ -199,18 +199,26 @@ pub fn insert_reference(
         None => unique_id(doc, &request.asset_id),
     };
     candidate.timeline.tracks[track_index].layers.push(Layer {
+        backdrop_effects: Vec::new(),
         id: id.clone(),
         start: request.at,
         end: request.at.saturating_add(request.length),
         transform: crate::layer::TransformV2::default(),
         opacity: 1.0,
         blend: crate::layer::BlendMode::Normal,
+        corner_radius: 0.0,
+        clip: None,
+        mask: None,
+        shadow: None,
         enabled: true,
         gain: 1.0,
         recorded: crate::layer::Recorded::default(),
         source: Some(crate::layer::SourceRef {
             asset_id: request.asset_id.clone(),
             source_in: request.source_in,
+            // 新建的层**默认原速**。速率是表达意图的东西，
+            // 给个非 1.0 的默认值会让每次"新建片段"都静默变成变速。
+            source_rate: 1.0,
         }),
         // 新建的层默认**不循环**：静默循环会把"素材长度配错了"藏起来。
         // 要循环得显式说。
@@ -248,12 +256,18 @@ pub fn trim(
     let timebase = candidate.timeline.timebase;
     // **先把要用的东西读出来，再拿可变借用。** 借用与改动的边界摆整齐，
     // 混在一起写出来的就是"既要 &mut 又要 &"那种绕不过去的报错。
-    let (start, source_in, asset_id) = {
+    let (start, source_in, asset_id, source_rate) = {
         let layer = &candidate.timeline.tracks[track_index].layers[layer_index];
         (
             layer.start,
             layer.source.as_ref().map(|source| source.source_in),
             layer.source.as_ref().map(|source| source.asset_id.clone()),
+            // 带上 rate：**变速片段上，"被剪掉的那几帧"对应的素材帧数是 `帧数 × rate`**。
+            // 漏了它，修剪入点之后内容会往前跳（时长仍然对，所以看不出来）。
+            layer
+                .source
+                .as_ref()
+                .map_or(1.0, |source| source.source_rate),
         )
     };
     let asset = match asset_id.as_deref() {
@@ -262,9 +276,14 @@ pub fn trim(
     };
     // 入点：**画面不动** —— 把 source_in 推进"被剪掉的那几帧"对应的素材帧数。
     let advanced = match (edge, source_in) {
-        (TrimEdge::In, Some(source_in)) => {
-            source_frame_at(source_in, to_frame.saturating_sub(start), &timebase, &asset).ok()
-        }
+        (TrimEdge::In, Some(source_in)) => source_frame_at_rate(
+            source_in,
+            to_frame.saturating_sub(start),
+            source_rate,
+            &timebase,
+            &asset,
+        )
+        .ok(),
         _ => None,
     };
     let layer = &mut candidate.timeline.tracks[track_index].layers[layer_index];
@@ -299,7 +318,7 @@ fn seam_easing(keys: &[Keyframe], cut: Frame) -> Easing {
         .filter(|key| key.frame >= cut)
         .min_by_key(|key| key.frame)
         .or_else(|| keys.iter().max_by_key(|key| key.frame))
-        .map(|key| key.easing)
+        .map(|key| key.easing.clone())
         .unwrap_or_default()
 }
 
@@ -353,11 +372,21 @@ pub fn split(
     // **源帧连续**：右侧从"切点那一刻的素材帧"开始。
     right.source = match original.source.as_ref() {
         Some(source) => {
-            let advanced = source_frame_at(source.source_in, local, &timebase, &asset)
-                .unwrap_or_else(|_| source.source_in.saturating_add(local));
+            // **必须带上 rate**：变速片段上，切点对应的素材帧是 `local × rate` 而不是 `local`。
+            // 用 `source_frame_at`（原速那条）会把右半段的入点算少 ——
+            // 症状是"切开之后右半段的内容往前跳了一截"，而两半各自的时长都对。
+            let advanced = source_frame_at_rate(
+                source.source_in,
+                local,
+                source.source_rate,
+                &timebase,
+                &asset,
+            )
+            .unwrap_or_else(|_| source.source_in.saturating_add(local));
             Some(crate::layer::SourceRef {
                 asset_id: source.asset_id.clone(),
                 source_in: advanced,
+                source_rate: source.source_rate,
             })
         }
         None => None,
@@ -752,18 +781,24 @@ mod tests {
 
     fn layer(id: &str, start: Frame, end: Frame, source_in: Option<Frame>) -> Layer {
         Layer {
+            backdrop_effects: Vec::new(),
             id: id.to_string(),
             start,
             end,
             transform: TransformV2::default(),
             opacity: 1.0,
             blend: BlendMode::Normal,
+            corner_radius: 0.0,
+            clip: None,
+            mask: None,
+            shadow: None,
             enabled: true,
             gain: 1.0,
             recorded: Recorded::default(),
             source: source_in.map(|source_in| SourceRef {
                 asset_id: "clip".to_string(),
                 source_in,
+                source_rate: 1.0,
             }),
             loop_source: false,
             effects: Vec::new(),

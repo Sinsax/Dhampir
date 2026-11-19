@@ -48,5 +48,6 @@ pub mod pipeline;
 pub mod scenes;
 pub mod text_overlay;
 pub mod text_raster;
+pub mod text_transform;
 
 pub use dhampir_core::timeline::{probe_digest, probe_report};

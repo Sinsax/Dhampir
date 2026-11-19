@@ -72,7 +72,7 @@ impl BlendMode {
         BlendMode::Add,
         BlendMode::Multiply,
         BlendMode::Screen,
-        // 以下需要读取目标像素，v2 不实现（枚举先占位，与上面同因）。
+        // 以下要读目标像素：走**读回型回路**（D13），不再"做不到"而是"另一条路"。
         BlendMode::Darken,
         BlendMode::Lighten,
         BlendMode::Overlay,
@@ -80,14 +80,37 @@ impl BlendMode {
         BlendMode::Difference,
     ];
 
-    /// 能不能用固定混合方程表达。
+    /// 能不能用**固定混合方程**表达（也就是合成器那条一趟直写的路）。
     ///
-    /// 渲染器**必须**先问这个，再决定要不要往下走 —— 让「做不到」在渲染前就显形，
-    /// 而不是画出一张悄悄降级的图。
-    pub const fn is_implemented(self) -> bool {
+    /// 渲染器**必须**先问这个：不能的（`darken` / `lighten` / `overlay` / `soft_light` /
+    /// `difference`）要走**读回型**回路 —— 先把已经画好的底读成一张纹理，
+    /// 再按 `f(src, dst)` 逐像素算（设计见 plan/web-animation-criteria.md 的 D13）。
+    pub const fn uses_fixed_equation(self) -> bool {
         matches!(
             self,
             Self::Normal | Self::Add | Self::Multiply | Self::Screen
+        )
+    }
+
+    /// 这一版**能不能画**。
+    ///
+    /// 与 [`Self::uses_fixed_equation`] 分开是刻意的：**"要读目标"与"做不到"是两件事** ——
+    /// 读回型回路（D13）落地之后，后 5 条会在这里变成 `true`，而
+    /// `uses_fixed_equation` **永远是那 4 条**（它描述的是"走哪条路"，不是"能不能"）。
+    ///
+    /// 第 31 轮起**全部 9 条都是 `true`**：前 4 条走固定方程、后 5 条走读回型回路（D13）。
+    pub const fn is_implemented(self) -> bool {
+        matches!(
+            self,
+            Self::Normal
+                | Self::Add
+                | Self::Multiply
+                | Self::Screen
+                | Self::Darken
+                | Self::Lighten
+                | Self::Overlay
+                | Self::SoftLight
+                | Self::Difference
         )
     }
 }
@@ -103,6 +126,30 @@ pub struct TransformV2 {
     pub x: f32,
     pub y: f32,
     pub scale: f32,
+    /// **纵向倍数**（`1.0` = 纵向跟随 `scale`，即**等比**）。
+    ///
+    /// # 语义：`scale` 管横向，`scale_y` 管纵向
+    ///
+    /// * `scale` = **横向**缩放（`scale_y` 缺省时它同时管纵向 ⇒ 退化成等比，与改动前完全一致）；
+    /// * `scale_y` = **纵向**的**额外**倍数，**乘在 `scale` 之上**。
+    ///
+    /// 最终纵向倍数 = `scale × scale_y`。
+    ///
+    /// # 为什么是"倍数"而不是"纵向绝对值"
+    ///
+    /// 做成"纵向绝对值"（让 `scale_y` 顶替 `scale` 管纵向）的话，缺省就得表达成
+    /// "跟随 scale" —— 那只能靠哨兵值（`0`？`NaN`？），而哨兵值是第二份真相。
+    /// 做成倍数则让**缺省 1.0 恰好等于老语义**：纵向倍数 = `scale × 1.0` = `scale`，
+    /// 与"没有这个字段"逐字节相同。
+    ///
+    /// ⇒ **非等比压缩**（横向压扁、纵向拉伸）就是 `scale` 与 `scale_y` 不相等；
+    /// 相等时走的就是老工程那条路，一个像素都不差。
+    ///
+    /// ⚠️ **`skip_serializing_if` 不能省**：缺省 1.0 时**一个键都不许出现在工程文件里**，
+    /// 否则每个老工程的变换键集都变大（R4 判据当场红）。与 `SubtitleStyle::anchor_bottom`
+    /// （`:537`）是同一条纪律、同一对 helper（`one` / `is_one_f32`）——这里**不新造**。
+    #[serde(default = "one", skip_serializing_if = "is_one_f32")]
+    pub scale_y: f32,
     /// **角度制**（契约规定，不由字段名暗示）。
     pub rotation: f32,
 }
@@ -113,6 +160,7 @@ impl Default for TransformV2 {
             x: 0.0,
             y: 0.0,
             scale: 1.0,
+            scale_y: 1.0,
             rotation: 0.0,
         }
     }
@@ -127,6 +175,45 @@ pub struct SourceRef {
     pub asset_id: String,
     /// 素材内起点（帧）。
     pub source_in: Frame,
+    /// **播放速率**。`1.0` = 原速；`2.0` = 两倍速（同样的输出时长吃掉两倍的源帧）。
+    ///
+    /// # 为什么要有它（D24）
+    ///
+    /// 在这之前，`end - start` **同时表示两件事**：占多长输出时间、要读多少源帧。
+    /// 两者被绑死，于是**没有任何旋钮能表达"这段放两倍速"** ——
+    /// 想快播只能把 `end` 减半，结果是**时长对了、内容被截断一半**。
+    ///
+    /// # 语义（三个量各管一件事，不许混）
+    ///
+    /// * `end - start` = **输出帧数**（这一层在时间线上占多久）；
+    /// * `source_rate` = 每输出 1 帧消耗**几个**源帧；
+    /// * 消耗的源帧数 = `(end - start) × source_rate`（从 `source_in` 起算）。
+    ///
+    /// 所以 `rate=2.0` 时，30 个输出帧吃掉 60 个源帧 —— **时长不变、内容不截断**，
+    /// 只是放快了。与 `-filter:v setpts=PTS/2` 同义。
+    ///
+    /// # 缺省 `1.0` 而不是 `Option`
+    ///
+    /// 缺省必须让**所有老工程逐字节不变**（本仓一贯口径）。用 `f64` + `serde(default)`
+    /// 比 `Option<f64>` 好：下游不必区分"没有这个键"和"写了 1.0"，
+    /// 少一种状态就少一类分支。
+    ///
+    /// # 边界（**故意不做静默钳位**）
+    ///
+    /// * `rate <= 0` 或非有限值 ⇒ **契约校验报错**。`0` 会让"消耗多少源帧"恒为 0
+    ///   （整段定格在 `source_in`），负数会倒放 —— 两者都不是"快慢"能覆盖的语义，
+    ///   真要做应该各有专门的字段，**不能靠一个 0 或负数偷偷生效**。
+    /// * 源帧不够（`source_in + 消耗帧数` 超出素材）⇒ 钳在末帧，与既有非循环路径一致
+    ///   （`source_frame_at_delays` 的"不外推"同一条规矩）。
+    #[serde(default = "default_source_rate")]
+    pub source_rate: f64,
+}
+
+/// [`SourceRef::source_rate`] 的缺省值：原速。
+///
+/// 抽成函数是因为 `serde(default = "...")` 要一个**路径**，不能直接写 `default = "1.0"`。
+fn default_source_rate() -> f64 {
+    1.0
 }
 
 /// 挂在元素上的标记。
@@ -155,6 +242,156 @@ pub struct Recorded {
     pub markers: Vec<Marker>,
 }
 
+/// 掩码通道：拿素材的哪一路当遮罩（设计见 plan/web-animation-criteria.md 的 D12）。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MaskChannel {
+    /// 用 alpha（缺省）。
+    #[default]
+    Alpha,
+    /// 用亮度。系数与 core 的 luma 同一组（Rec.709）—— 与 D6 的老规矩一致：
+    /// **口径要写进文档**，不许两边各猜一组。
+    Luminance,
+}
+
+/// 层的**投影**（`filter: drop-shadow()` 那件事）。
+///
+/// # 为什么它不是一条 effect pipeline
+///
+/// 逐像素管线（色彩 / 遮罩 / 重映射 / 模糊）都是"**把这一层的像素改一下**"；
+/// 投影不是改像素，而是**同一层多画一张**（模糊 + 染色 + 偏移，画在本层**下面**）。
+/// 把它塞进 pipeline 会让"一趟逐像素"的模型出现一个例外，而例外正是最难查的那种。
+///
+/// # 口径
+///
+/// - 长度都是**文档像素**；
+/// - `blur_sigma` 是 **CSS `drop-shadow()` 的那个模糊半径（σ）** —— 引擎按下界口径
+///   换算成本仓的核半径（`radius = 2σ`，见 D5）；
+/// - 颜色 v1 **固定黑**（要彩色再加字段，不在这里偷偷支持）；
+/// - `opacity` 是整张阴影的浓淡（0..1），与图层自己的 opacity 相乘。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ShadowSpec {
+    #[serde(default)]
+    pub offset_x: f32,
+    #[serde(default)]
+    pub offset_y: f32,
+    /// CSS `drop-shadow()` 的模糊半径（σ，文档像素）。
+    #[serde(default)]
+    pub blur_sigma: f32,
+    #[serde(default = "one")]
+    pub opacity: f32,
+}
+
+/// 一层怎么被掩码。
+///
+/// # 素材层（D12 的第一条决定）
+///
+/// 掩码是一张**登记过的素材**，所以契约是「层引用素材 id」而不是「层内嵌一张图」——
+/// 素材的注册、时间基、URI 解析、"引用不存在的素材要报错"这套校验**都已经有了**。
+///
+/// 坐标口径（D12 的第三条决定，也是本设计里唯一一处新坐标）：掩码图的**整张**映射到
+/// **图层自己的矩形**上（拉伸填满），即**图层局部坐标** —— 与合成源的源像素坐标不是同一套。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MaskSpec {
+    /// 指向 `assets` 里的一条。**与 `gradient` 二选一**（缺省空串）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub asset_id: String,
+    /// 程序化渐变（第 46 轮）：不挂素材，直接按角度与断点生成遮罩。
+    /// **与 `asset_id` 二选一**；缺省不写进文件。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gradient: Option<LinearGradient>,
+    /// 通道，缺省 `alpha`（缺省不写进文件）。
+    #[serde(default, skip_serializing_if = "is_default_mask_channel")]
+    pub channel: MaskChannel,
+    /// 是否反相，缺省 false（缺省不写进文件）。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub invert: bool,
+}
+
+/// 线性渐变的遮罩（程序化，不挂素材）。
+///
+/// 几何口径照 CSS：`angle_deg` 里 **0° 朝上、90° 朝右**（屏幕 y 向下），
+/// 渐变轴过图层矩形中心，轴长 = `|w·sinθ| + |h·cosθ|`（CSS 对盒子的那条规矩）。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LinearGradient {
+    pub angle_deg: f32,
+    /// 断点，至少两个；位置非递减。
+    pub stops: Vec<GradientStop>,
+}
+
+/// 渐变的一个断点：位置与**覆盖度**（遮罩用的就是它）。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct GradientStop {
+    pub at: f32,
+    pub coverage: f32,
+}
+
+/// 裁剪形状。长度一律是**文档像素**。
+///
+/// # 为什么只有这三种
+///
+/// 引擎用的是**每像素覆盖度**（着色器里一个无分支 SDF），能用同一套式子表达的只有
+/// 圆 / 椭圆 / 圆角矩形 —— 正好是 CSS `clip-path` 里的 `circle()` / `ellipse()` / `inset()`。
+/// `polygon()` 与 `path()` 需要一般多边形求交或掩码纹理，**明确不做**（登记表里记着这个缺口，
+/// 不在这里假装支持）。
+///
+/// `center` 是**图层框内的归一化比例**（`[0.5, 0.5]` 就是正中间），`None` 等价于居中 ——
+/// 与 CSS `at 50% 50%` 同一个口径。
+///
+/// # 为什么是比例而不是像素
+///
+/// CSS 的 `at X Y` 是相对**元素左上角**，而 `X%` 是相对元素尺寸的百分比。用比例表达，
+/// 作者侧（`at 25% 75%`）与 DOM 侧（CSS 原文）**都不需要知道图层的像素尺寸** ——
+/// 而尺寸是素材的属性，转译器根本不知道。像素值仍然拒绝：那需要尺寸才能换算。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ClipShape {
+    /// `circle(R at X Y)`。
+    Circle {
+        radius: f32,
+        /// 归一化中心（`[0.5, 0.5]` = 正中），`None` 等价于居中。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        center: Option<[f32; 2]>,
+    },
+    /// `ellipse(RX RY at X Y)`。
+    Ellipse {
+        radius_x: f32,
+        radius_y: f32,
+        /// 归一化中心（`[0.5, 0.5]` = 正中），`None` 等价于居中。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        center: Option<[f32; 2]>,
+    },
+    /// `polygon(x y, x y, …)`：顶点是**图层框内的归一化坐标**（0..1，与 `center` 同一套口径）。
+    ///
+    /// 引擎把它**栅格化成一张掩码纹理**再走已经验过的掩码通路 —— 所以这一版
+    /// 着色器一行都不用改，而且**两个宿主共用同一份栅格化代码**（core 里纯 Rust）。
+    ///
+    /// 口径（v1）：非零环绕规则；边缘用 2×2 超采样近似抗锯齿；顶点允许在框外
+    /// （框外部分自然被裁掉，不报错）。
+    Polygon { points: Vec<[f32; 2]> },
+    /// `path("…")`：SVG 路径数据，坐标是**文档像素**、原点是图层框的**左上角**
+    /// （与 CSS `clip-path: path()` 同一套，所以 DOM 侧原样透传）。
+    ///
+    /// 支持 `M L H V C Q Z`（含相对形式）；**弧 `A` 与光滑续接 `S`/`T` 明说不支持**
+    /// （遇到就报错，不猜一个近似）。曲线按固定段数细分 —— 确定性优先。
+    Path { data: String },
+    /// `inset(上 右 下 左 round R)`：四条边各缩进多少。
+    Inset {
+        top: f32,
+        right: f32,
+        bottom: f32,
+        left: f32,
+        #[serde(default, skip_serializing_if = "is_zero_f32")]
+        radius: f32,
+    },
+}
+
 /// 基础元素 + 拓展。
 ///
 /// 判定规则（三行，不需要额外字段）：
@@ -176,6 +413,38 @@ pub struct Layer {
     pub opacity: f32,
     #[serde(default)]
     pub blend: BlendMode,
+    /// **圆角半径**（文档像素）。0 = 无圆角 = 老行为（缺省不写进文件）。
+    ///
+    /// 引擎在合成着色器里用一个**无分支**的圆角矩形 SDF 画它（见
+    /// `plan/web-animation-criteria.md` 的 D10）：半径 0 时那条路径的输出**逐字节不变**，
+    /// 半径 > 0 时只切四个角（有 GPU 用例逐点钉着）。
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub corner_radius: f32,
+    /// **裁剪形状**（`None` = 不裁 = 老行为，缺省不写进文件）。
+    ///
+    /// 与 `corner_radius` 的关系：圆角裁的是**图层自己的矩形**，`clip` 裁的是形状 ——
+    /// 两者**同时生效**（各自算一个覆盖度再相乘），与 CSS 里 `border-radius` 与
+    /// `clip-path` 同时写的行为一致。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip: Option<ClipShape>,
+    /// **掩码**（`None` = 不掩 = 老行为，缺省不写进文件）。
+    ///
+    /// 契约先立、引擎还没画（设计见 D12）：渲染前由 [`unimplemented_masks`] 与
+    /// 文档校验的警告如实报出来 —— 与圆角 / 未实现的混合模式同一套形态。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<MaskSpec>,
+    /// **投影**（`None` = 不投 = 老行为，缺省不写进文件）。设计见 criteria 的 D13。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow: Option<ShadowSpec>,
+    /// **背景滤镜**（`backdrop-filter`）：对**这一层下面已经画好的内容**跑这些特效，
+    /// 且**只在这一层的矩形里**生效（CSS 的规矩就是"元素范围内"）。
+    ///
+    /// 与 `effects` 的区别是本条最要紧的一处：`effects` 改的是**这一层自己**的像素；
+    /// 背景滤镜读的是**它身后的东西**。空 = 不做 = 老行为（缺省不写进文件）。
+    ///
+    /// 设计见 criteria 的 D13（读回型那一批的第二个用户）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backdrop_effects: Vec<Effect>,
     #[serde(default = "yes")]
     pub enabled: bool,
     /// **音频增益**（线性倍数，1.0 = 原样）。
@@ -254,6 +523,24 @@ impl Layer {
     }
 }
 
+/// **外圈描边**：在 `stroke_ratio` 那一圈**外面**再加一圈（常态白）。
+///
+/// # 为什么不是「把 `stroke_ratio` 加大一圈」
+///
+/// 那样画出来的是一圈**同色**的粗边；这里要的是**两圈不同色**（外白内深）——
+/// libass 一遍只能给一个 `Outline` 与一个 `OutlineColour`，所以要**多一遍栅格化 + 环带相减**：
+/// 见 `dhampir-worker` 的 `rasterize_with_stroke` 与 `ring_of`。
+///
+/// ⚠️ 单位与口径与 `SubtitleStyle::stroke_ratio` **完全一致**（目标高的比例、**外侧宽**），
+/// 所以契约里两个数可以直接相加（`内圈 + 外圈` 就是白环那一遍的 `Outline`）。
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct OuterStroke {
+    /// 外圈宽度（目标高的比例；**外侧宽**口径）。
+    pub ratio: f32,
+    /// 外圈颜色（RGBA）。常态是白。
+    pub color: [u8; 4],
+}
 /// 字幕样式。**放在轨道级，不是元素级。**
 ///
 /// 理由：一条字幕轨 = 一个字幕素材 + 一套样式。想要两套样式就开两条轨 ——
@@ -271,6 +558,50 @@ pub struct SubtitleStyle {
     /// 底边距 = 目标高度 * 这个比例。
     #[serde(default = "subtitle_bottom_margin")]
     pub bottom_margin: f32,
+    /// **文字块底边的归一化 y**（0 = 画面顶边，1 = 画面底边）。默认 1.0 = 贴底。
+    ///
+    /// # 为什么要有它（与 `safe_width_ratio` 是一对）
+    ///
+    /// `bottom_margin` 本来身兼两职：既是"距底边多远"，又被拿去当**左右安全宽**，
+    /// 于是两个用途**互相锁死** —— 安全宽 0.875 要求它 = 0.0625，
+    /// 而要把文字抬到画面上方需要它 ≈ 0.6，抬上去 `max_width` 变负数
+    /// ⇒ **一个字都排不出来**（布局返回空，报告里一行差异都没有）。
+    ///
+    /// 拆分办法：`safe_width_ratio` 显式配了就**只认它**管左右，
+    /// 本字段专管纵向。本字段 `< 1.0` 时接管，否则仍走 `1.0 - bottom_margin` 的老式子
+    /// ⇒ **不写这两个字段的既有工程逐字节不变**（有单测钉着）。
+    ///
+    /// ⚠️ 与 `bottom_margin` 的单位不同：那个是**比例（相对目标高）**，
+    /// 这个是**归一化坐标**（1.0 就是"整个画面高"，不再是比例）。
+    /// 二者在同一量纲里，正因为如此才能相减 —— 但别把它们当成一个东西。
+    ///
+    /// 宿主（YekiTrim）就是拿它表达"上 / 中 / 下"三档纵向位置的。
+    ///
+    /// ⚠️ **`skip_serializing_if` 不能省**：缺省 1.0 时**一个键都不许出现在工程文件里**，
+    /// 否则每个老工程的样式键集都变大（R4 判据当场红）。
+    #[serde(default = "one", skip_serializing_if = "is_one_f32")]
+    pub anchor_bottom: f32,
+    /// **绝对盒原点**（归一化 0..1，**文字块左上角**）。None = 沿用本仓自己的锚点（现状，零回归）。
+    ///
+    /// # 与 anchor_bottom 的分工（两个都管纵向，但不是一个东西）
+    ///
+    /// * anchor_bottom：文字块**底边**贴在哪 —— 横向**仍然居中**，纵向由它推；
+    /// * origin：**整块**摆在哪 —— 给了它，横向与纵向都用它，anchor_bottom 不参与。
+    ///
+    /// # 为什么需要它（2026-10-15）
+    ///
+    /// 宿主（YekiTrim）的面板给**每个**文字元素算好了「盒左上角百分比」
+    /// （process 的 placement::Pick）—— 那是**逐事件**的自由落点。
+    /// 本仓原本只有「上/中/下 + 横向居中」这一套（anchor_bottom），**表达不出**任意一个绝对点
+    /// ⇒ 宿主那条通道发过来的位置在出片这一侧被丢掉。
+    /// 需求书与验收判据：YekiTrim 仓的 docs/plan/dhampir-text-origin-request.md。
+    ///
+    /// ⚠️ **竖排（vertical）忽略本字段** —— 与 anchor_bottom 同一条口径（竖排下纵向变成了
+    ///    **长度方向**，语义转置了；见 text_layout::layout 里那段说明）。
+    ///
+    /// ⚠️ skip_serializing_if 不能省：没写时**一个键都不许出现**（既有工程逐字节不变）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<[f32; 2]>,
     /// 最多几行（超出的行丢掉 —— 字幕不该盖住半屏）。
     #[serde(default = "subtitle_max_lines")]
     pub max_lines: u32,
@@ -301,6 +632,14 @@ pub struct SubtitleStyle {
     /// 描边颜色。`outline` 为假时忽略。
     #[serde(default = "subtitle_stroke_color")]
     pub stroke_color: [u8; 4],
+    /// **外圈描边**：在 `stroke_ratio` 那一圈**外面**再加一圈（常态白）。
+    ///
+    /// `None` = 不画（默认，既有工程**逐字节不变**）。给了它 ⇒ 渲染侧多一遍栅格化：
+    /// 白环 = 「内圈 + 外圈」那遍的覆盖度 **减去** 内圈那遍的覆盖度（见 `rasterize_with_stroke`）。
+    ///
+    /// ⚠️ 白环画在**最底下**（先白环、再内圈描边、最后填充）—— 顺序反了整圈字会糊成白色。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outer_stroke: Option<OuterStroke>,
     /// **淡入时长（毫秒）。** 0 = 硬出现。
     ///
     /// 参照实现 的入场包络：`fadeIn = 0.35`，透明度走 `pow2_out`，
@@ -448,6 +787,221 @@ pub struct SubtitleStyle {
     /// 谁要拿它当逐像素判据，先看 `plan/text-shadow-design.md` §2。
     #[serde(default, skip_serializing_if = "is_zero_f32")]
     pub shadow_blur_ratio: f32,
+    /// **底衬（plate）的颜色**。`None` = 不铺底衬（默认，既有工程逐字节不变）。
+    ///
+    /// 半透明是常态（参照给的是黑 55%：`[0,0,0,140]`），所以四通道是 RGBA，
+    /// `alpha` 与 `color` / `shadow_color` 一样**生效**。
+    ///
+    /// # 为什么不能走 libass 的 `BorderStyle=3`
+    ///
+    /// 那是 ASS 原生的"不透明底盒"，看着正好是这件事 —— 但底座这条路走不通，
+    /// 两条理由**各自独立成立**：
+    ///
+    /// 1. **传不下去**：底座走 `subtitles=…:fontsdir=…:force_style=…`，而
+    ///    `force_style` 的拼装只写 `FontName/FontSize/PrimaryColour/Outline/OutlineColour`
+    ///    五个键（见 `text_raster.rs::drawtext_args`）。`BorderStyle` 与 `BackColour`
+    ///    **一个都不在里面** ⇒ 在 `.ass` 里写 `BorderStyle=3` 会被 force_style 盖掉。
+    /// 2. **与"白墨"那条设计正面冲突**：底座**有意**把填充与描边**都**画成
+    ///    [`crate`] 的白墨（见 `text_raster.rs::WHITE_INK` 的注释）—— 因为 libass
+    ///    输出的 alpha **恒为 0**、颜色提前合成进 RGB，只有"全是白墨"时覆盖度
+    ///    才恢复得出来。而底衬要的是**另一种墨**，混进去覆盖度就再也分不开了。
+    ///
+    /// ⇒ 实现改在宿主侧（`text_overlay.rs::paint_one`）：**画字之前先铺一块矩形**，
+    /// 纯几何，既不动 libass，也不碰白墨那条设计。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plate_color: Option<[u8; 4]>,
+    /// **底衬向四周外扩的像素数**（目标像素）。默认 12。
+    ///
+    /// 只在 `plate_color` 有值时生效 —— 没有底衬就无所谓留白。
+    ///
+    /// # 为什么是**目标像素**而不是像 `font_ratio` 那样的比例
+    ///
+    /// 参照的底衬是浏览器 `padding: 12px` 那种"离字多远"的观感量，它的参照值
+    /// 就是 **12**；把它写成比例会在预览（640x360）与成片（1920x1080）上给出
+    /// 两个不同的外扩量，而"底衬包得住字"是**一眼能看出来**的 —— 那正是这个仓
+    /// 最不想有的那类"预览看着对、成片贴不住"。
+    ///
+    /// ⚠️ 与 `transform.x/y`、`rise_in_px` 那套**文档像素**不是同一个坐标系：
+    /// 这里定的是**目标像素**，因为底衬是宿主在**已经栅格化好的目标帧**上铺的
+    /// （`place_line` 给的就是目标像素坐标）。
+    ///
+    /// # ⚠️ 这一项**必须** `skip_serializing_if`
+    ///
+    /// 它等于默认值时**不写进文件** —— 与 `shadow_dx_px` / `shadow_blur_ratio`
+    /// 同款。理由不是省字节，是**本仓有一条判据盯着"老工程的样式键集"**：
+    /// `v2_tests::没写过阴影的样式重写出来一个字节都不多` 会把
+    /// `SubtitleStyle` 全部键名与默认写法**逐字**比一次。少了这个 `skip`，
+    /// 任何老工程重写一次都会多出一个 `"plate_pad_px":12.0`，那条判据当场打红
+    /// —— 它拦的正是"升级之后工程文件悄悄变形"。
+    ///
+    /// # ⚠️ 为什么是 `Option<f32>` 而不是裸 `f32` 默认 12.0
+    ///
+    /// 与 `scale_in_from` / `shake_hz` 那一组**同一条理由**（见它们的文档注释）：
+    ///
+    /// * 裸 `f32` + `skip_serializing_if = "等于默认值"` 能满足"老工程一个键都不多"，
+    ///   但会让**用户显式写的 `12.0`** 也被静默吃掉 —— 读回来仍是 12.0、
+    ///   渲染逐像素一样，所以**永远不会有症状**，而"显式写了却读不回来"
+    ///   正是本仓最恨的那类静默；
+    /// * `Option` 一举两得：**不写键 = 默认 12**（老工程一个键都不多），
+    ///   **写了就是写的那个值**（哪怕它恰好等于 12）。
+    ///
+    /// 求值处一律 `plate_pad_px.unwrap_or(default_plate_pad_px())`。
+    ///
+    /// ⚠️ 本仓有一条判据盯着"老工程的样式键集"：
+    /// `v2_tests::没写过阴影的样式重写出来一个字节都不多` 会把 `SubtitleStyle`
+    /// 全部键名与默认写法**逐字**比一次。所以这一行少了 `skip_serializing_if`，
+    /// 任何老工程重写一次都会多出一个 `"plate_pad_px":12.0`，那条判据当场打红
+    /// （加字段时实测打红过）—— 它拦的正是"升级之后工程文件悄悄变形"。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plate_pad_px: Option<f32>,
+    // =====================================================================
+    // T1 弹入 / T3 强调 / T4 抖动（2026-10-11）
+    //
+    // ⚠️ **逻辑在 [`crate::text_motion`]，这里只有声明。**
+    //
+    // 这不是洁癖，是踩出来的：这六个字段与另一项工作（底衬）**同时**加在
+    // 同一个 `SubtitleStyle` 上，而"整份写回 `layer.rs`"把先写的那些**无声**
+    // 冲掉过一次（没有提交、没有报错，只在下游留下"函数找不到"）。
+    // 把逻辑放到自己的文件里之后，那种事故的代价从 ~180 行降到这 12 行。
+    // **往后再加字段照这个来**：声明留这里，求值放各自模块。
+    // =====================================================================
+    /// **弹入的起始缩放**（T1）。`None` = 1.0（不缩）。
+    ///
+    /// # 为什么是 `Option<f32>` 而不是裸 `f32` 默认 1.0
+    ///
+    /// 这一组六个字段的口径**全是** `None` = 用默认行为。理由与
+    /// `shadow_*` 那一组不同，值得写下来：这个字段的"默认值"**不是一个关掉的值**
+    /// （`scale_in_from` 的默认是 `1.0`，即"不缩"），而 `1.0` 同时也是一个
+    /// **用户可能显式写的合法值**。
+    ///
+    /// 裸 `f32` + `skip_serializing_if = "等于默认值"` 会让"显式写的 1.0"
+    /// 被静默吃掉 —— 读回来仍是 1.0、渲染也一样，所以**永远不会有症状**，
+    /// 但用户的显式意图没了。而"显式写了却读不回来"正是本仓最恨的那类静默。
+    ///
+    /// `Option` 一举两得：**不写键 = 默认行为**（老工程一个键都不多），
+    /// **写了就是写的那个值**（哪怕它恰好等于默认值）。
+    ///
+    /// 求值处见 [`crate::text_motion::scale_in_params`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_in_from: Option<f32>,
+    /// **弹入的过冲峰值**（T1）。`None` = 1.0（不过冲）。
+    ///
+    /// 参照值是 **1.15**；`scale_in_from` 参照 **0.7**、`scale_in_ms` 参照 **180**。
+    /// 三个一起才是一个"弹入"（`0.7 → 1.15 → 1.0`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_in_peak: Option<f32>,
+    /// **弹入窗口的时长（毫秒）**（T1）。`None` = 0 = 关（**不缩**）。
+    ///
+    /// ⚠️ 三个字段里**只有它**决定"开不开"。`from` / `peak` 都给了但它是 0
+    /// ⇒ 不缩 —— 因为"窗口多长"是唯一能定义"缩到什么程度"的量
+    /// （另两个只是端点）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_in_ms: Option<u64>,
+    /// **周期缩放曲线**（心跳，2026-10-18）：`[(毫秒, 倍率), …]`，按 `scale_cycle_ms` 循环。
+    ///
+    /// ⚠️ 为什么要**新原语**：`scale_in_*` 那条是 `back_out3` 的**单峰**、且**只在入场窗口**
+    /// （窗口之后恒 1.0）—— "放大一次、回落、再小放大、每秒来一次"这种**周期多峰**曲线
+    /// 它数学上表达不了（转译器 `heartbeat` 那一档因此长期只能退化成"单次过冲"并如实报 NOTE）。
+    ///
+    /// 语义：`local_ms % cycle_ms` 落在点列两个相邻点之间，用 `back_out3` 在
+    /// `scale_a → scale_b` 之间插值；末点之后到周期结束一律 1.0（**那就是"停顿"**）。
+    /// ⚠️ 首点必须是 `ms = 0`；点列要**按下标递增**（不递增时行为由实现决定，校验层不管）。
+    ///
+    /// `None`（默认）= 不启用 ⇒ 逐字沿用 `scale_in_*` 那条老路（**存量零回归**）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_curve: Option<Vec<crate::text_motion::ScalePoint>>,
+    /// **周期缩放的周期长度（毫秒）**（心跳）。`None` 或 0 ⇒ `scale_curve` 不生效。
+    ///
+    /// ⚠️ 与曲线分开是**有意的**：同一组脉冲点可以用在不同节奏上（1s / 1.2s），
+    /// 合成一个字段就得把点列按节奏重算，而点列是"形状"、节奏是"速度"。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_cycle_ms: Option<u32>,
+    /// **抖动幅度**（T4，**文档像素**）。`None` = 0.0 = 不抖。
+    ///
+    /// 单位与 `rise_in_px` / `transform.x/y` 同一套（文档像素），
+    /// 不是目标像素 —— 这样预览与成片落同一个比例。
+    ///
+    /// 求值处见 [`crate::text_motion::shake_params`] /
+    /// [`crate::text_motion::text_shake_px`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shake_px: Option<f32>,
+    /// **抖动频率（Hz）**（T4）。`None` = [`crate::text_motion::DEFAULT_SHAKE_HZ`]（18.0）。
+    ///
+    /// 只在 `shake_px > 0` 时有意义。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shake_hz: Option<f32>,
+    /// **抖动的相位**（弧度）（T4）。`None` = 0.0。
+    ///
+    /// # 为什么必须能逐条错开
+    ///
+    /// 抖动是**纯 `t` 的函数**（见 [`crate::text_motion::text_shake_px`]），
+    /// 同屏两条若相位相同就**整体同拍**地一起晃 —— 那不是"两条在抖"，
+    /// 是"整块字在抖"，看着像画面在抖而不是文字在抖。
+    /// 宿主给每条**不同的相位**才有各自的手抖感。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shake_phase: Option<f32>,
+    /// **逐字动效**（P3，2026-10-13）：每一个字各自动、按序号错峰。
+    ///
+    /// # 为什么单开一个结构而不是往上面那几个字段上再挂几个
+    ///
+    /// 上面六个字段（`scale_in_*` / `shake_*`）全是**轨级常量**：
+    /// 一条轨上一次求值得到一对数字，整行公用。逐字动效的**本质**是
+    /// "同一个曲线在每个字上晚开始一会儿" —— 它需要**按序号求值**，
+    /// 形状上就不是"再挂一个常量"，而是"一份能按 index 查的函数参数"。
+    /// 硬塞进上面那组会让"这条轨到底逐字不逐字"要靠多个字段的**组合**去猜。
+    ///
+    /// # `None` = 没有逐字动效
+    ///
+    /// 与上面六个字段同一条纪律（[`Option`] + `skip_serializing_if`）：
+    /// 老工程重写**一个键都不多**，求值结果必须与改动前**逐字节相同**。
+    /// 渲染侧靠 [`text_perchar_anim::PerCharSpec::is_active`] 分流 ——
+    /// 为假时**整条逐字路径都不进**（老路的栅格化缓存仍然有效）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_char: Option<crate::text_perchar_anim::PerCharSpec>,
+    /// **逐字出场窗口（帧）**（2026-10-18）：窗口**锚在出点**，逐字错峰沿用
+    /// `per_char` 那份，进度**反着走**（`to → from`）⇒ "出场逐字变小"。
+    ///
+    /// ⚠️ 与 `per_char` **分开一个字段**（而不是塞进 `PerCharSpec`）：那个结构的文档写着
+    /// "由转译器从 `anim` 档名展开而来、没有"用户写没写"这一说"，而这里是**轨级**的、
+    /// 与"这一档的入场形状"无关（同一个 `per_char` 配不同的出场时长是合法的）。
+    ///
+    /// `None` / 0 ⇒ 不做出场（**老工程零回归**）。求值见
+    /// [`crate::text_perchar_anim::char_transform_at_out`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_char_out_frames: Option<u32>,
+    /// **竖排**（E 组 3 档）。`None` / `false` = 横排（既有行为）。
+    ///
+    /// # 为什么是 `Option<bool>` 而不是 `bool`
+    ///
+    /// 与 `per_char` 同一个理由：**缺省时一个键都不许出现在工程文件里**，
+    /// 否则每个老工程的样式键集都变大（R4 判据当场红）。
+    /// `Option<bool>` 的 `None` 与 `Some(false)` 在这里**语义相同**（都横排），
+    /// 但只有 `None` **不落盘** —— 所以转译器对"没配"必须写 `None`，不许写 `Some(false)`。
+    ///
+    /// # 竖排要改的是**折行**，不是只把字转 90°
+    ///
+    /// 这是本组成本最高的一条：横排的折行是"一行放不下就另起一行"
+    /// （行宽 = 安全宽、行高 = 行盒高），竖排是"一**列**放不下就另起一列"
+    /// （列宽 = 行盒高、列高 = 安全高）。**两者是转置关系，不是缩放关系** ——
+    /// 直接旋转画布会让字与字之间的**基线对齐**全错（标点、拉丁字母会偏）。
+    ///
+    /// ⚠️ 竖排下 [`Self::max_lines`] 的语义变成"最多几**列**"（名字没改，
+    /// 因为它在契约里的含义是"这个方向最多几个单位"，横竖都读得通）。
+    ///
+    /// ⚠️⚠️ **这一点真机踩到过，值得单独说**：竖排的"一列放得下几个字"
+    /// = `安全比例 / font_ratio`。实测 `font_ratio = 0.16` +
+    /// `safe_width_ratio = 0.2` 时每列只放得下 **1.25 个字** ⇒ 6 个字要 5 列，
+    /// 而 `max_lines = 3` 于是**只画了 2 个字**。
+    /// ⇒ 症状是"竖排只显示头两个字"，看着像**渲染 bug**，
+    ///   其实是**配置的数学**（列容量 = 安全比例 ÷ 字号比例）。
+    ///   竖排档位给 `safe_width_ratio` 时要按这个式子估，别照抄横排的值。
+    ///
+    /// ⚠️ 与 `bottom_margin` / `anchor_bottom` 的交互：那两项在横排下管**纵向**位置，
+    /// 竖排下"纵向"变成了**列方向** ⇒ 位置语义也跟着转置。
+    /// 第一版**不做**这套转置（E 组 3 档只用居中的竖排），
+    /// 所以竖排时**忽略** `anchor_bottom`，改为按行盒高居中 —— 这一点要如实写在判据里。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertical: Option<bool>,
 }
 
 /// `0.0` 不写进文件 —— 这是"既有工程逐字节不变"的执行处：
@@ -456,12 +1010,44 @@ pub struct SubtitleStyle {
 /// 与 `schema.rs` 的 `is_one` 同款（那边是"等于默认值就不写"的另一个实例）。
 /// 比法用 `== 0.0`：`-0.0 == 0.0` 为真，于是负零也走"不写"那一支 —— 而它在
 /// JSON 里是 `-0.0`，写出来就是个没意义的新键。
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn is_default_mask_channel(value: &MaskChannel) -> bool {
+    *value == MaskChannel::Alpha
+}
+
 fn is_zero_f32(value: &f32) -> bool {
     *value == 0.0
 }
 
+/// `skip_serializing_if` 用：**1.0 不写进工程文件**。
+///
+/// 与 [`is_zero_f32`] 同一条理由 —— 那一条管"默认是 0"的字段，这一条管"默认是 1"的。
+/// ⚠️ 少了它，`anchor_bottom` 会把**每一个老工程**的样式键集撑大一个键，
+/// 而那正是两条 R4 判据（`写过阴影的样式原样往返` / `没写过阴影的样式重写出来一个字节都不多`）
+/// 当场抓住的东西 —— 这两条判据**不认识新字段**，只认识"键集变了"。
+fn is_one_f32(value: &f32) -> bool {
+    *value == 1.0
+}
+
 fn default_font_weight() -> u32 {
     400
+}
+
+/// 底衬外扩的默认值（目标像素）。参照值就是 12。
+///
+/// ⚠️ 用在**求值处**：`plate_pad_px.unwrap_or(default_plate_pad_px())`。
+/// 字段是 `Option<f32>` + `skip_serializing_if = "Option::is_none"` ——
+/// 于是"没写过"与"写了 12.0"在**行为**上相同、在**文件**里不同
+/// （"等值不写"的形状会把后者静默吃掉）。
+///
+/// **`pub` 是契约的一部分**：消费方（`dhampir-worker` 铺底衬那一步）
+/// 读的是 `plate_pad_px` 这个 `Option`，而"没写时算多少"这个数必须从**这里**取 ——
+/// 不然它就变成了第二个实现，改一处不改另一处正是本仓最恨的那类漂移。
+pub fn default_plate_pad_px() -> f32 {
+    12.0
 }
 
 fn subtitle_font_ratio() -> f32 {
@@ -494,11 +1080,20 @@ impl Default for SubtitleStyle {
         Self {
             font_ratio: subtitle_font_ratio(),
             bottom_margin: subtitle_bottom_margin(),
+            // **默认 1.0 = 贴底 = 老行为**。不是"我觉得合理的位置"——
+            // 契约默认值的判据是"**让老工程一字不变**"（同 `subtitle_stroke_ratio`
+            // 那段注释里记的坑）。
+            anchor_bottom: 1.0,
+            // None = 沿用本仓自己的锚点（上/中/下 + 居中），既有工程逐字节不变 ——
+            // 同 anchor_bottom 那条注释：契约默认值的判据是「让老工程一字不变」。
+            origin: None,
             max_lines: subtitle_max_lines(),
             color: subtitle_color(),
             outline: true,
             stroke_ratio: subtitle_stroke_ratio(),
             stroke_color: subtitle_stroke_color(),
+            // None = 不画外圈（既有工程逐字节不变）—— 同 stroke_ratio 那条注释的判据。
+            outer_stroke: None,
             // **默认全 0**：既有工程的行为是"硬出现/硬消失"，
             // 默认值必须让它**逐字节不变**（`schema` 不必升版本）。
             fade_in_ms: 0,
@@ -523,6 +1118,29 @@ impl Default for SubtitleStyle {
             shadow_dx_px: 0.0,
             shadow_dy_px: 0.0,
             shadow_blur_ratio: 0.0,
+            // None = 不铺底衬（既有工程逐字节不变）。外扩量给参照值 12，
+            // 但它在 `plate_color` 为 None 时**读都不会被读到**。
+            plate_color: None,
+            plate_pad_px: None,
+            // T1/T3/T4：**全部 `None`**。`None` = 用默认行为（不缩 / 不过冲 /
+            // 窗口 0 / 不抖），所以老工程重写一次**一个键都不多**，
+            // 而求值路径上它们各自落到"单位变换"（缩放恒 1.0、抖动恒 0）——
+            // 见 `text_motion::默认样式求值出来是单位变换`。
+            scale_in_from: None,
+            scale_in_peak: None,
+            scale_in_ms: None,
+            scale_curve: None,
+            scale_cycle_ms: None,
+            shake_px: None,
+            shake_hz: None,
+            shake_phase: None,
+            // 逐字动效默认**关**：老工程求值结果与改动前逐字节相同。
+            per_char: None,
+            per_char_out_frames: None,
+            // ⚠️ 手动 Default 里也必须写这一行 —— 这个结构体的 Default 是**手写的**
+            //    （不是 derive），漏一个字段是**编译错**（正是我们要的：
+            //    漏了会被编译器抓住，而不是悄悄取到 bool 的零值）。
+            vertical: None,
         }
     }
 }
@@ -721,6 +1339,7 @@ pub fn migrate_v1_to_v2(project: &Project) -> Result<TimelineV2, MigrateError> {
                 return Err(MigrateError::DuplicateId(clip.id.clone()));
             }
             layers.push(Layer {
+                backdrop_effects: Vec::new(),
                 id: clip.id.clone(),
                 start: clip.track_at,
                 // v1 是 [track_at, track_at + duration)，v2 直接存右端点。
@@ -729,10 +1348,19 @@ pub fn migrate_v1_to_v2(project: &Project) -> Result<TimelineV2, MigrateError> {
                     x: clip.transform.x,
                     y: clip.transform.y,
                     scale: clip.transform.scale,
+                    // v1 没有非等比缩放 —— 迁移一律给 1.0。
+                    // ⚠️ 这正是"缺省 1.0 = 老语义（纵向跟随 scale）"要保证的：
+                    // 迁移后纵向倍数 = scale × 1.0 = scale，与 v1 逐字节同义。
+                    // 给 0.0 会让所有老工程的画面纵向塌成一条线。
+                    scale_y: 1.0,
                     rotation: clip.transform.rotation_deg,
                 },
                 opacity: clip.opacity,
                 blend: BlendMode::Normal,
+                corner_radius: 0.0,
+                clip: None,
+                mask: None,
+                shadow: None,
                 enabled: true,
                 gain: 1.0,
                 recorded: Recorded::default(),
@@ -740,6 +1368,9 @@ pub fn migrate_v1_to_v2(project: &Project) -> Result<TimelineV2, MigrateError> {
                 source: Some(SourceRef {
                     asset_id: clip.source.clone(),
                     source_in: clip.source_in,
+                    // v1 没有速率这个概念。**迁移必须给 1.0**（原速）——
+                    // 这是"迁移不改观感"那一条：v1 工程迁上来，画面必须逐字节一样。
+                    source_rate: 1.0,
                 }),
                 // v1 没有循环这个概念，迁移后就是**不循环**。
                 loop_source: false,
@@ -847,6 +1478,72 @@ pub fn source_frame_at(
     Ok(source_in.saturating_add(clamped))
 }
 
+/// 带**播放速率**的取帧：`local_frame` 这一输出帧应当取素材的哪一帧。
+///
+/// # 与 [`source_frame_at`] 的关系
+///
+/// [`source_frame_at`] 是 `rate = 1.0` 的特例。这里没有把它删掉换成"传 1.0"，
+/// 因为那条路径被**逐字节不变**钉着（老工程不许动），多绕一层浮点就多一分
+/// 改变既有输出的风险。于是：**`rate == 1.0` 时走原来那条整数路径，逐字节等价**；
+/// 只有真给了非 1.0 才进浮点分支。
+///
+/// # 为什么用 `f64` 而整数那一层用 i128
+///
+/// `rate` 本身就是小数（`0.5`、`2.0`、`1.25`），没法用整数表达。
+/// 但**换算回帧号之后要向下取整**，与 [`source_frame_at`] 同一个方向
+/// （理由见那里的"取整方向"一节）。
+///
+/// 这里**不做累积**：每一帧都从 `local_frame` 独立算起
+/// （`source_in + floor(local_frame × rate × 时间基换算)`），
+/// 而不是"上一帧 + rate"。累积会把浮点误差一帧一帧攒起来 ——
+/// 30 帧的 1.25 倍速能攒出可见的偏移，而独立换算不会。
+///
+/// # 错误
+///
+/// `rate <= 0`、`NaN`、`inf` 都报错（见 [`SourceRef::source_rate`] 的边界一节）。
+pub fn source_frame_at_rate(
+    source_in: Frame,
+    local_frame: Frame,
+    rate: f64,
+    timeline: &TimebaseDto,
+    asset: &TimebaseDto,
+) -> Result<Frame, String> {
+    if !rate.is_finite() || rate <= 0.0 {
+        return Err(format!(
+            "播放速率必须是大于 0 的有限值，实得 {rate}（1.0 = 原速；0 与负数不是「快慢」能表达的语义）"
+        ));
+    }
+    // 原速走原路：**逐字节等价**，也避免给老工程引入浮点。
+    if rate == 1.0 {
+        return source_frame_at(source_in, local_frame, timeline, asset);
+    }
+    if timeline.num == 0 || timeline.den == 0 {
+        return Err(format!(
+            "时间线的时间基不合法：{}/{}",
+            timeline.num, timeline.den
+        ));
+    }
+    if asset.num == 0 || asset.den == 0 {
+        return Err(format!("素材的时间基不合法：{}/{}", asset.num, asset.den));
+    }
+    // local_frame 是时间线上的帧数；先按速率放大，再换成素材帧数。
+    //
+    // 顺序要紧：**先乘 rate 再换时间基**，与"先换算再乘"在数学上等价，
+    // 但前者只做一次除法/取整，少一次舍入。
+    let scaled = (local_frame as f64) * rate * (f64::from(timeline.den) * f64::from(asset.num))
+        / (f64::from(timeline.num) * f64::from(asset.den));
+    if !scaled.is_finite() {
+        return Err(format!(
+            "取帧换算溢出：local_frame={local_frame} rate={rate} 时间基={}/{} 素材基={}/{}",
+            timeline.num, timeline.den, asset.num, asset.den
+        ));
+    }
+    // 向下取整（与整数路径同方向）。clamp 到 i64 是为了极端输入不 UB。
+    let floor = scaled.floor();
+    let clamped = floor.clamp(i64::MIN as f64, i64::MAX as f64) as i64;
+    Ok(source_in.saturating_add(clamped))
+}
+
 /// 按**逐帧延迟表**把时间换成素材帧号 —— GIF 那种"每帧停留时长不一样"的素材。
 ///
 /// # 为什么需要它（`source_frame_at` 在这里是错的）
@@ -878,6 +1575,36 @@ pub fn source_frame_at_delays(
     delays_ms: &[u32],
     loop_source: bool,
 ) -> Result<Frame, String> {
+    source_frame_at_delays_rate(
+        source_in,
+        local_frame,
+        1.0,
+        timeline,
+        delays_ms,
+        loop_source,
+    )
+}
+
+/// [`source_frame_at_delays`] 的**带速率**版本（D24）。
+///
+/// 这条路径是**按毫秒**查表的，所以速率落在一个很自然的地方：把"这一帧在时间线上的
+/// 时刻"乘上 `rate`（`rate=2.0` ⇒ 同样的输出帧对应时间轴上一倍远的时刻，
+/// 于是走表走得快一倍）。表本身与循环那一段逐字不变。
+///
+/// `rate == 1.0` 时与 [`source_frame_at_delays`] **逐字节等价**。
+pub fn source_frame_at_delays_rate(
+    source_in: Frame,
+    local_frame: Frame,
+    rate: f64,
+    timeline: &TimebaseDto,
+    delays_ms: &[u32],
+    loop_source: bool,
+) -> Result<Frame, String> {
+    if !rate.is_finite() || rate <= 0.0 {
+        return Err(format!(
+            "播放速率必须是大于 0 的有限值，实得 {rate}（1.0 = 原速）"
+        ));
+    }
     if timeline.num == 0 || timeline.den == 0 {
         return Err(format!(
             "时间线的时间基不合法：{}/{}",
@@ -893,8 +1620,23 @@ pub fn source_frame_at_delays(
     if total <= 0 {
         return Err("延迟表的总时长是 0 —— 那样任何时刻都落在第 0 帧，等于不动".to_string());
     }
-    // 这一帧在时间线上的时刻（毫秒）。纯整数：中间量 i128。
-    let ms = i128::from(local_frame) * 1000 * i128::from(timeline.den) / i128::from(timeline.num);
+    // 这一帧在时间线上的时刻（毫秒），再按速率放大。
+    //
+    // **先乘 rate 再取整**：`local * 1000 * den / num` 这一步本来就是整除，
+    // 若先整除再乘 rate，`rate` 为小数时会先丢掉零头。
+    // 这里用一个整数分数近似 rate（千分之一精度）来保住"全程整数"这条既有性质 ——
+    // 延迟表路径本来就是整数运算，不想为了速率把它变成浮点。
+    let ms = if rate == 1.0 {
+        i128::from(local_frame) * 1000 * i128::from(timeline.den) / i128::from(timeline.num)
+    } else {
+        let per_mille = (rate * 1000.0).round() as i128;
+        if per_mille <= 0 {
+            return Err(format!("播放速率太小，量化到千分之一后为 0：{rate}"));
+        }
+        // 乘完再除，顺序与上面那条一致。
+        i128::from(local_frame) * 1000 * i128::from(timeline.den) * per_mille
+            / (i128::from(timeline.num) * 1000)
+    };
     let ms = if loop_source {
         ms.rem_euclid(total)
     } else {
@@ -963,6 +1705,34 @@ pub fn source_frame_looped(
     Ok(raw.rem_euclid(count))
 }
 
+/// [`source_frame_looped`] 的**带速率**版本（D24）。
+///
+/// 只把"换算出 `raw`"那一步换成 [`source_frame_at_rate`]，循环那一段逐字不变 ——
+/// 于是 `rate == 1.0` 时与 [`source_frame_looped`] **逐字节等价**
+/// （`source_frame_at_rate` 内部就走原路）。
+///
+/// **循环与速率可以叠**：`rate=2.0` + `loop_source=true` = "两倍速放这张动图，
+/// 放到结尾回开头"。取模发生在速率换算**之后**，所以循环周期按素材帧数算 ——
+/// 与"素材是个圈"的语义一致（速率只改变走圈多快）。
+pub fn source_frame_looped_rate(
+    source_in: Frame,
+    local_frame: Frame,
+    rate: f64,
+    timeline: &TimebaseDto,
+    asset: &TimebaseDto,
+    frame_count: Option<Frame>,
+    loop_source: bool,
+) -> Result<Frame, String> {
+    let raw = source_frame_at_rate(source_in, local_frame, rate, timeline, asset)?;
+    if !loop_source {
+        return Ok(raw);
+    }
+    let Some(count) = frame_count.filter(|count| *count > 0) else {
+        return Ok(raw);
+    };
+    Ok(raw.rem_euclid(count))
+}
+
 /// 一条字幕/弹幕**这一帧**的不透明度与纵向偏移。
 ///
 /// # 为什么它住在契约层（而不是各宿主自己算）
@@ -987,6 +1757,33 @@ pub fn source_frame_looped(
 ///
 /// 返回 `(不透明度, 纵向偏移像素)`。偏移为正表示**向下**。
 pub fn text_envelope(
+    local_ms: u64,
+    span_ms: u64,
+    fade_in_ms: u64,
+    fade_out_ms: u64,
+    rise_in_px: f32,
+    rise_out_px: f32,
+) -> (f32, f32) {
+    text_envelope_plain(
+        local_ms,
+        span_ms,
+        fade_in_ms,
+        fade_out_ms,
+        rise_in_px,
+        rise_out_px,
+    )
+}
+
+/// [`text_envelope`] 的本体（**不含缩放**）。
+///
+/// 拆出来是因为 [`crate::text_motion::text_envelope_scaled`] 要**复用它**：
+/// 缩放是"另一件事"（T1 弹入），而淡入淡出这一套口径一个字都不该动 ——
+/// 复制一份就会漂，而漂了以后两端各自还都是"自洽"的。
+///
+/// ⚠️ **这个函数没有第三个返回值**：缩放那一路刻意不在这里。
+/// 谁要缩放就调 `text_motion` 那份，别往这里加参数 ——
+/// 加了它，弹幕那条（不缩放的）路就也得跟着改。
+pub fn text_envelope_plain(
     local_ms: u64,
     span_ms: u64,
     fade_in_ms: u64,
@@ -1218,12 +2015,17 @@ mod tests {
 
     fn base_layer(id: &str, start: Frame, end: Frame) -> Layer {
         Layer {
+            backdrop_effects: Vec::new(),
             id: id.to_string(),
             start,
             end,
             transform: TransformV2::default(),
             opacity: 1.0,
             blend: BlendMode::Normal,
+            corner_radius: 0.0,
+            clip: None,
+            mask: None,
+            shadow: None,
             enabled: true,
             gain: 1.0,
             recorded: Recorded::default(),
@@ -1324,6 +2126,195 @@ mod tests {
         assert!(
             source_frame_at_delays(0, 0, &bad, &[30], true).is_err(),
             "时间基不合法应当报错"
+        );
+    }
+
+    // ---- D24：播放速率 ----
+
+    /// `rate = 1.0` 必须与不带速率那条**逐字节等价**。
+    ///
+    /// 这是全仓最贵的不变量（老工程不许动），所以它是这一组的**第一条**。
+    #[test]
+    fn 速率_1_0_与不带速率逐字节一致() {
+        let tl = tb(30, 1);
+        let asset = tb(30, 1);
+        for local in 0..60 {
+            assert_eq!(
+                source_frame_at(7, local, &tl, &asset).unwrap(),
+                source_frame_at_rate(7, local, 1.0, &tl, &asset).unwrap(),
+                "rate=1.0 在 local={local} 处应当与 source_frame_at 相同"
+            );
+        }
+        // 循环那条同理。
+        for local in 0..60 {
+            assert_eq!(
+                source_frame_looped(3, local, &tl, &asset, Some(10), true).unwrap(),
+                source_frame_looped_rate(3, local, 1.0, &tl, &asset, Some(10), true).unwrap(),
+                "rate=1.0 的循环在 local={local} 处应当相同"
+            );
+        }
+        // 延迟表那条同理。
+        let delays = [40u32, 60, 100];
+        for local in 0..40 {
+            assert_eq!(
+                source_frame_at_delays(0, local, &tl, &delays, true).unwrap(),
+                source_frame_at_delays_rate(0, local, 1.0, &tl, &delays, true).unwrap(),
+                "rate=1.0 的延迟表在 local={local} 处应当相同"
+            );
+        }
+    }
+
+    /// 两倍速：30 个输出帧应当吃掉 60 个源帧。
+    ///
+    /// 这是 D24 的核心判据 —— 改之前"要读多少源帧"被 `end - start` 绑死，
+    /// 现在由 `rate` 单独决定。
+    #[test]
+    fn 速率_2_0_吃两倍源帧() {
+        let tl = tb(30, 1);
+        let asset = tb(30, 1);
+        let at = |local: i64| source_frame_at_rate(100, local, 2.0, &tl, &asset).unwrap();
+
+        assert_eq!(at(0), 100, "第 0 帧取 source_in");
+        assert_eq!(at(1), 102, "每前进 1 个输出帧，素材前进 2 帧");
+        assert_eq!(at(15), 130);
+        assert_eq!(at(29), 158, "第 29 帧应当在 source_in + 58 处");
+
+        // **反向**：原速必须只前进 1 帧 —— 否则上面那条可能只是"到处都 ×2"。
+        let plain = |local: i64| source_frame_at(100, local, &tl, &asset).unwrap();
+        assert_eq!(plain(29), 129, "原速第 29 帧应当只到 +29");
+        assert_ne!(at(29), plain(29), "两倍速与原速必须真的不同");
+    }
+
+    /// 半速：30 个输出帧只吃掉 15 个源帧。
+    #[test]
+    fn 速率_0_5_吃一半源帧() {
+        let tl = tb(30, 1);
+        let asset = tb(30, 1);
+        let at = |local: i64| source_frame_at_rate(0, local, 0.5, &tl, &asset).unwrap();
+        assert_eq!(at(0), 0);
+        assert_eq!(at(1), 0, "半速时每两帧才走一格");
+        assert_eq!(at(2), 1);
+        assert_eq!(at(3), 1);
+        assert_eq!(at(29), 14, "第 29 帧 → floor(29 × 0.5) = 14");
+    }
+
+    /// **不累积**：每一帧都从 `local` 独立算起，而不是"上一帧 + rate"。
+    ///
+    /// 累积会把浮点误差一帧帧攒起来。这里用 1.25 倍速（二进制不可精确表示的小数）
+    /// 走 400 帧，若实现是累积的，误差会明显偏离"独立换算"的结果。
+    #[test]
+    fn 速率_不累积浮点误差() {
+        let tl = tb(30, 1);
+        let asset = tb(30, 1);
+        for local in [1i64, 37, 100, 243, 400] {
+            let got = source_frame_at_rate(0, local, 1.25, &tl, &asset).unwrap();
+            let want = (local as f64 * 1.25).floor() as i64;
+            assert_eq!(
+                got, want,
+                "local={local}：应当是独立换算 {want}，而不是累积出来的 {got}"
+            );
+        }
+    }
+
+    /// 循环与速率可以叠：速率改变走圈快慢，周期仍是素材帧数。
+    #[test]
+    fn 速率与循环可以叠() {
+        let tl = tb(30, 1);
+        let asset = tb(30, 1);
+        // 素材 10 帧、两倍速、从 0 进圈。
+        let at = |local: i64| {
+            source_frame_looped_rate(0, local, 2.0, &tl, &asset, Some(10), true).unwrap()
+        };
+        assert_eq!(at(0), 0);
+        assert_eq!(at(1), 2);
+        assert_eq!(at(4), 8);
+        assert_eq!(at(5), 0, "第 5 帧走到 10，绕回 0");
+        assert_eq!(at(6), 2, "绕回后继续按两倍速走");
+        // 10 帧素材、两倍速 ⇒ 5 个输出帧一圈。
+        assert_eq!(at(10), 0, "第 10 帧应当在第 2 圈的起点");
+    }
+
+    /// 延迟表（动图）上的速率：按毫秒查表，速率把时刻放大。
+    #[test]
+    fn 速率对延迟表生效() {
+        let tl = tb(30, 1);
+        // 三帧、每帧 100ms ⇒ 一圈 300ms。
+        let delays = [100u32, 100, 100];
+        // 原速：local=0 → 0ms → 第 0 帧；local=3 → 100ms → 第 1 帧。
+        assert_eq!(
+            source_frame_at_delays_rate(0, 0, 1.0, &tl, &delays, true).unwrap(),
+            0
+        );
+        assert_eq!(
+            source_frame_at_delays_rate(0, 3, 1.0, &tl, &delays, true).unwrap(),
+            1
+        );
+        // 两倍速：local=3 的时刻被放大到 200ms → 第 2 帧。
+        assert_eq!(
+            source_frame_at_delays_rate(0, 3, 2.0, &tl, &delays, true).unwrap(),
+            2,
+            "两倍速下第 3 帧应当走到表里的第 2 格"
+        );
+        // 反向：同一个 local，两倍速与半速必须不同。
+        assert_ne!(
+            source_frame_at_delays_rate(0, 3, 2.0, &tl, &delays, true).unwrap(),
+            source_frame_at_delays_rate(0, 3, 0.5, &tl, &delays, true).unwrap()
+        );
+    }
+
+    /// 坏速率要**报错**，不是悄悄当成 1.0。
+    ///
+    /// 静默兜底比报错危险得多：用户设了 `rate = 0` 期望"定格"，
+    /// 若被当成原速，画面会照常播 —— 而没有任何一处会说"你要的那个没生效"。
+    #[test]
+    fn 坏速率要报错() {
+        let tl = tb(30, 1);
+        let asset = tb(30, 1);
+        for bad in [0.0, -1.0, -0.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                source_frame_at_rate(0, 0, bad, &tl, &asset).is_err(),
+                "速率 {bad} 应当报错"
+            );
+            assert!(
+                source_frame_at_delays_rate(0, 0, bad, &tl, &[100], true).is_err(),
+                "延迟表路径上速率 {bad} 也应当报错"
+            );
+        }
+        // 合法边界：极小正数仍然算合法（不是 0）。
+        assert!(source_frame_at_rate(0, 0, 0.001, &tl, &asset).is_ok());
+    }
+
+    /// 缺省的 `source_rate` 是 1.0，且**老工程 JSON 里没有这个键也能解析**。
+    #[test]
+    fn 缺省速率是原速() {
+        let json = r#"{"asset_id":"a","source_in":5}"#;
+        let parsed: SourceRef = serde_json::from_str(json).expect("老 JSON 应当能解析");
+        assert_eq!(parsed.source_rate, 1.0, "缺省必须是原速");
+        assert_eq!(parsed.source_in, 5);
+
+        // **反向**：写了 2.0 就得是 2.0 —— 否则上面那条可能只是"永远给 1.0"。
+        let json = r#"{"asset_id":"a","source_in":5,"source_rate":2.0}"#;
+        let parsed: SourceRef = serde_json::from_str(json).expect("带速率的 JSON 应当能解析");
+        assert_eq!(parsed.source_rate, 2.0);
+    }
+
+    /// 原速序列化时**不该写出多余字段**……但它会写。
+    ///
+    /// 这一条**记录现状**而不是表达期望：`source_rate` 没有 `skip_serializing_if`，
+    /// 所以往返一次会把 `"source_rate":1.0` 加进 JSON。老工程**读**没问题
+    /// （缺省 1.0），但"写回去多一个键"会让字节级比对失败。
+    /// 若将来要求"重新保存的老工程逐字节不变"，就得加 `skip_serializing_if`。
+    #[test]
+    fn 原速会写出_source_rate_键_记录现状() {
+        let value = SourceRef {
+            asset_id: "a".to_string(),
+            source_in: 0,
+            source_rate: 1.0,
+        };
+        let json = serde_json::to_string(&value).unwrap();
+        assert!(
+            json.contains("source_rate"),
+            "现状是会写出来的（{json}）—— 若改成不写，请同步改这条测试与 CHANGELOG"
         );
     }
 
@@ -1527,6 +2518,7 @@ mod tests {
         with_source.source = Some(SourceRef {
             asset_id: "a".to_string(),
             source_in: 0,
+            source_rate: 1.0,
         });
         assert!(!with_source.is_adjustment(), "有素材 → 实拍片段");
 
@@ -1545,12 +2537,14 @@ mod tests {
 
     #[test]
     fn 混合模式可实现性与枚举留全() {
+        // 「走哪条路」与「能不能画」是两件事 —— 两个谓词都要钉住。
         for mode in [
             BlendMode::Normal,
             BlendMode::Add,
             BlendMode::Multiply,
             BlendMode::Screen,
         ] {
+            assert!(mode.uses_fixed_equation(), "{mode:?} 走固定方程");
             assert!(mode.is_implemented(), "{mode:?} 应当可实现");
         }
         for mode in [
@@ -1561,8 +2555,12 @@ mod tests {
             BlendMode::Difference,
         ] {
             assert!(
-                !mode.is_implemented(),
-                "{mode:?} 需要读目标像素，v2 不该说它可实现"
+                !mode.uses_fixed_equation(),
+                "{mode:?} 要读目标像素 ⇒ 走读回型回路"
+            );
+            assert!(
+                mode.is_implemented(),
+                "{mode:?} 的读回回路第 31 轮起已落地（D13）"
             );
         }
     }
@@ -1584,6 +2582,77 @@ mod tests {
             212,
             "元素挪了，标记跟着挪"
         );
+    } // =====================================================================
+    // T1：`TransformV2::scale_y` —— 非等比缩放的契约表达
+    // =====================================================================
+
+    /// ⚠️ **缺省 1.0 时 `scale_y` 一个键都不许出现在 JSON 里。**
+    ///
+    /// 少了 `skip_serializing_if`，每个老工程的变换键集都凭空多一个键 ——
+    /// R4（"存量工程逐字节不变"）当场红。与 `SubtitleStyle::anchor_bottom` 同一条纪律。
+    #[test]
+    fn 缺省_scale_y_不写进_json() {
+        let json = serde_json::to_string(&TransformV2::default()).expect("要能序列化");
+        assert!(
+            !json.contains("scale_y"),
+            "缺省 1.0 时 scale_y 不许出现在 JSON 里，实际：{json}"
+        );
+        // 其余四个键照旧都在（没顺手把别的也 skip 掉）
+        for key in ["\"x\"", "\"y\"", "\"scale\"", "\"rotation\""] {
+            assert!(json.contains(key), "{key} 不该被吃掉：{json}");
+        }
+    }
+
+    /// 非缺省时必须**写出来**，否则这个字段等于不存在（用户设了看不到、也存不住）。
+    #[test]
+    fn 非缺省的_scale_y_要写进_json() {
+        let transform = TransformV2 {
+            scale_y: 0.6,
+            ..TransformV2::default()
+        };
+        let json = serde_json::to_string(&transform).expect("要能序列化");
+        assert!(
+            json.contains("\"scale_y\":0.6"),
+            "非缺省的 scale_y 必须写出来，实际：{json}"
+        );
+    }
+
+    /// 老工程（没有这个键）读进来 ⇒ `scale_y == 1.0` ⇒ 纵向跟随 `scale` = 等比。
+    #[test]
+    fn 老工程没有_scale_y_键时按_1_0_补齐() {
+        let json = r#"{"x":0.0,"y":0.0,"scale":1.5,"rotation":0.0}"#;
+        let transform: TransformV2 = serde_json::from_str(json).expect("老工程要能读进来");
+        assert_eq!(
+            transform.scale_y, 1.0,
+            "缺省必须是 1.0（纵向跟随 scale），不是 0.0 —— 0.0 会让画面纵向塌成一条线"
+        );
+        assert_eq!(transform.scale, 1.5, "scale 原样保留");
+    }
+
+    /// `Default` 与 serde 缺省值**必须是同一个数**：两处各写一个常量是经典的漂移点，
+    /// 症状是"新建的工程对、读进来的老工程不对"。
+    #[test]
+    fn default_与_serde_缺省值一致() {
+        assert_eq!(TransformV2::default().scale_y, 1.0);
+        let from_empty: TransformV2 =
+            serde_json::from_str(r#"{"x":0.0,"y":0.0,"scale":1.0,"rotation":0.0}"#).unwrap();
+        assert_eq!(from_empty.scale_y, TransformV2::default().scale_y);
+        assert_eq!(
+            one(),
+            TransformV2::default().scale_y,
+            "serde 缺省函数 one() 要同值"
+        );
+    }
+
+    /// v1 → v2 迁移一律给 1.0：迁移后纵向倍数 = `scale × 1.0` = `scale`，
+    /// 与 v1 逐字节同义（v1 本来就没有非等比缩放）。
+    #[test]
+    fn v1_迁移过来的_scale_y_是_1_0() {
+        let v2 = migrate_v1_to_v2(&v1_project()).expect("v1 要能迁移到 v2");
+        let transform = &v2.tracks[0].layers[0].transform;
+        assert_eq!(transform.scale_y, 1.0, "v1 迁移不给 0.0 / 别的值");
+        assert_eq!(transform.scale, 1.5, "v1 的 scale 原样搬过来");
+        assert_eq!(transform.rotation, 90.0, "v1 的 rotation_deg 搬到 rotation");
     }
 }
 
@@ -1723,9 +2792,17 @@ pub fn validate_timeline_v2(timeline: &TimelineV2, effects: &[EffectSpec]) -> Ve
                     ));
                 }
             }
-            if !effects.is_empty() {
-                for (effect_index, effect) in layer.effects.iter().enumerate() {
-                    let effect_path = format!("{path}.effects[{effect_index}]");
+            // **两张表走同一套校验**：`effects` 改这一层自己的像素，`backdrop_effects` 读它身后的东西 ——
+            // 但它们的取值口径来自**同一个注册表**，所以任何一张表都不许绕过校验。
+            for (list_name, list) in [
+                ("effects", &layer.effects),
+                ("backdrop_effects", &layer.backdrop_effects),
+            ] {
+                if list.is_empty() {
+                    continue;
+                }
+                for (effect_index, effect) in list.iter().enumerate() {
+                    let effect_path = format!("{path}.{list_name}[{effect_index}]");
                     match effects.iter().find(|spec| spec.kind == effect.kind) {
                         None => issues.push(Issue::new(
                             "unknown_effect",
@@ -1805,6 +2882,65 @@ pub fn unimplemented_blends(timeline: &TimelineV2) -> Vec<(String, BlendMode)> {
     out
 }
 
+/// 工程里用到的**掩码素材** id（去重、按出现顺序）。
+///
+/// 为什么要有它：预览宿主（浏览器那条腿）**没有素材表**，取不到掩码图。
+/// 那种情形以前是"渲染时解析不出来 ⇒ 只 debug_assert ⇒ 静默画一张没有掩码的图" ✗。
+/// 有了这份清单，宿主可以在画之前**响亮地报出来**："这份工程用了掩码，预览还没接上"。
+///
+/// 渐变遮罩不算在内 —— 它是程序化生成的，不需要素材。
+pub fn mask_asset_ids(timeline: &TimelineV2) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for track in &timeline.tracks {
+        for layer in &track.layers {
+            let Some(mask) = &layer.mask else { continue };
+            if mask.asset_id.is_empty() {
+                continue;
+            }
+            if !out.contains(&mask.asset_id) {
+                out.push(mask.asset_id.clone());
+            }
+        }
+    }
+    out
+}
+
+/// 工程用到、但**宿主还没注册**的掩码素材 id（按出现顺序、去重）。
+///
+/// 这是给**宿主**用的一问一答：宿主先把它手上有的掩码图注册进来，
+/// 再问这句话 —— 非空就说明"预览会画错"（少了掩码），必须报出来而不是照画。
+///
+/// 为什么要分成"清单"与"缺哪些"两个函数：
+/// 注册是**宿主的事**（浏览器那条腿要 fetch + 解码 + 上传），而"哪几张缺"是**纯计算** ——
+/// 纯的那部分放这里，就能在没有浏览器的地方被钉住。
+///
+/// 渐变遮罩永远不会出现在返回值里：它是程序化生成的，不需要任何素材。
+pub fn missing_mask_assets(timeline: &TimelineV2, registered: &[String]) -> Vec<String> {
+    mask_asset_ids(timeline)
+        .into_iter()
+        .filter(|id| !registered.contains(id))
+        .collect()
+}
+
+/// 层的**背景滤镜**本实现还画不出来的清单。与 [`unimplemented_blends`] 同一套形态。
+///
+/// 设计见 plan/web-animation-criteria.md 的 D13：契约先把"作者要什么"立起来，
+/// 引擎那条"读身后内容再跑特效"的回路是下一步 —— 在那之前，渲染前必须能知道
+/// "这个我画不了"，而不是悄悄画成没有背景滤镜的样子。
+pub fn unimplemented_backdrops(timeline: &TimelineV2) -> Vec<String> {
+    let mut out = Vec::new();
+    for (track_index, track) in timeline.tracks.iter().enumerate() {
+        for (layer_index, layer) in track.layers.iter().enumerate() {
+            if !layer.backdrop_effects.is_empty() {
+                out.push(format!(
+                    "tracks[{track_index}].layers[{layer_index}].backdrop_effects"
+                ));
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod v2_tests {
     use super::*;
@@ -1812,12 +2948,17 @@ mod v2_tests {
 
     fn layer(id: &str, start: Frame, end: Frame) -> Layer {
         Layer {
+            backdrop_effects: Vec::new(),
             id: id.to_string(),
             start,
             end,
             transform: TransformV2::default(),
             opacity: 1.0,
             blend: BlendMode::Normal,
+            corner_radius: 0.0,
+            clip: None,
+            mask: None,
+            shadow: None,
             enabled: true,
             gain: 1.0,
             recorded: Recorded::default(),
@@ -1861,6 +3002,7 @@ mod v2_tests {
             space: crate::schema::EffectSpace::Document,
             pipeline,
             window_default: None,
+            slots: &[],
         }
     }
 
@@ -1869,6 +3011,7 @@ mod v2_tests {
         value.source = asset.map(|asset_id| SourceRef {
             asset_id: asset_id.to_string(),
             source_in: 0,
+            source_rate: 1.0,
         });
         value
     }
@@ -2020,23 +3163,289 @@ mod v2_tests {
     }
 
     #[test]
-    fn 未实现的混合模式_契约接受但渲染前必须被发现() {
-        let mut l = layer("a", 0, 10);
-        l.blend = BlendMode::Overlay;
-        let timeline = timeline(vec![track("v", vec![l])]);
-        // 契约层**不报错**：枚举留全就是为了将来支持时不必改版本号。
+    fn 九条混合模式都能画_但只有四条走固定方程() {
+        // 第 31 轮起 `unimplemented_blends` 永远是空的：读回型回路（D13）把后 5 条也接上了。
+        // 这条判据改成钉**两条路的区分** —— 那才是渲染器真正要问的问题。
+        for mode in BlendMode::ALL {
+            let mut l = layer("a", 0, 10);
+            l.blend = mode;
+            let timeline = timeline(vec![track("v", vec![l])]);
+            assert!(
+                validate_timeline_v2(&timeline, &[]).is_empty(),
+                "{mode:?} 契约应当接受"
+            );
+            assert!(
+                unimplemented_blends(&timeline).is_empty(),
+                "{mode:?} 不该再说「做不了」"
+            );
+        }
+        let fixed = BlendMode::ALL
+            .iter()
+            .filter(|m| m.uses_fixed_equation())
+            .count();
+        assert_eq!(fixed, 4, "只有 4 条能一趟直写");
+        assert_eq!(BlendMode::ALL.len() - fixed, 5, "另外 5 条走读回型回路");
+    }
+
+    #[test]
+    fn 掩码素材清单_去重且不含渐变() {
+        let plain = timeline(vec![track("v", vec![layer("a", 0, 10)])]);
+        assert!(mask_asset_ids(&plain).is_empty(), "没有掩码时应当是空的");
+        // 素材掩码：出现两次也只算一个 id。
+        let mut first = layer("a", 0, 10);
+        first.mask = Some(MaskSpec {
+            asset_id: "m.png".to_string(),
+            gradient: None,
+            channel: MaskChannel::Alpha,
+            invert: false,
+        });
+        let mut second = layer("b", 0, 10);
+        second.mask = Some(MaskSpec {
+            asset_id: "m.png".to_string(),
+            gradient: None,
+            channel: MaskChannel::Alpha,
+            invert: false,
+        });
+        // 渐变掩码：不需要素材，**不该**出现在清单里。
+        let mut gradient = layer("c", 0, 10);
+        gradient.mask = Some(MaskSpec {
+            asset_id: String::new(),
+            gradient: Some(LinearGradient {
+                angle_deg: 90.0,
+                stops: vec![
+                    GradientStop {
+                        at: 0.0,
+                        coverage: 0.0,
+                    },
+                    GradientStop {
+                        at: 1.0,
+                        coverage: 1.0,
+                    },
+                ],
+            }),
+            channel: MaskChannel::Alpha,
+            invert: false,
+        });
+        let doc = timeline(vec![track("v", vec![first, second, gradient])]);
+        assert_eq!(mask_asset_ids(&doc), vec!["m.png".to_string()]);
+    }
+
+    #[test]
+    fn 缺哪些掩码素材_注册过的就不缺了() {
+        let mut masked = layer("a", 0, 10);
+        masked.mask = Some(MaskSpec {
+            asset_id: "m.png".to_string(),
+            gradient: None,
+            channel: MaskChannel::Alpha,
+            invert: false,
+        });
+        let mut gradient_layer = layer("b", 0, 10);
+        gradient_layer.mask = Some(MaskSpec {
+            asset_id: String::new(),
+            gradient: Some(LinearGradient {
+                angle_deg: 0.0,
+                stops: vec![
+                    GradientStop {
+                        at: 0.0,
+                        coverage: 0.0,
+                    },
+                    GradientStop {
+                        at: 1.0,
+                        coverage: 1.0,
+                    },
+                ],
+            }),
+            channel: MaskChannel::Alpha,
+            invert: false,
+        });
+        let doc = timeline(vec![track("v", vec![masked, gradient_layer])]);
+        // 一张都没注册：缺的正是素材那张（**渐变不算**）。
+        assert_eq!(missing_mask_assets(&doc, &[]), vec!["m.png".to_string()]);
+        // 注册过就不缺了 —— 这是宿主（浏览器那条腿）要回答的问题。
+        assert!(missing_mask_assets(&doc, &["m.png".to_string()]).is_empty());
+        // 注册了别的、没注册这张，照样缺。
+        assert_eq!(
+            missing_mask_assets(&doc, &["other.png".to_string()]),
+            vec!["m.png".to_string()]
+        );
+        // 没有掩码的工程永远是空的。
+        let plain = timeline(vec![track("v", vec![layer("c", 0, 10)])]);
+        assert!(missing_mask_assets(&plain, &[]).is_empty());
+    }
+
+    #[test]
+    fn 背景滤镜缺省不写进文件_写了就能被认出来() {
+        let flat = timeline(vec![track("v", vec![layer("a", 0, 10)])]);
+        let text = serde_json::to_string(&flat).expect("能写出");
         assert!(
-            validate_timeline_v2(&timeline, &[]).is_empty(),
+            !text.contains("backdrop_effects"),
+            "缺省不该写进文件：{text}"
+        );
+        let mut l = layer("a", 0, 10);
+        l.backdrop_effects = vec![Effect {
+            kind: "gaussian_blur".to_string(),
+            params: std::collections::BTreeMap::from([("radius".to_string(), 4.0_f32)]),
+            ..Default::default()
+        }];
+        let backdrop = timeline(vec![track("v", vec![l])]);
+        // 契约层**接受**它（枚举/字段留全是为了将来支持时不必改版本号）。
+        // 校验器按**参数**收登记表（它不自己去 core 取）—— 这里给一张最小的。
+        let specs = [crate::schema::EffectSpec {
+            kind: "gaussian_blur",
+            params: &[("radius", 0.0, 16.0)],
+            space: crate::schema::EffectSpace::Source,
+            pipeline: crate::schema::EffectPipeline::SeparableBlur,
+            window_default: None,
+            slots: &[],
+        }];
+        let issues = validate_timeline_v2(&backdrop, &specs);
+        assert!(issues.is_empty(), "契约应当接受它，得到 {issues:?}");
+        let written = serde_json::to_string(&backdrop).expect("能写出");
+        assert!(
+            written.contains("backdrop_effects"),
+            "写了就该写出来：{written}"
+        );
+        // 但渲染前必须能知道"这个我画不了"——不许静默画成没有背景滤镜的样子。
+        let pending = unimplemented_backdrops(&backdrop);
+        assert_eq!(pending.len(), 1);
+        assert!(
+            pending[0].contains("backdrop_effects"),
+            "path 要指到字段：{}",
+            pending[0]
+        );
+        // 参数越界同样要被拦（两张表走同一套注册表）。
+        let mut bad = layer("a", 0, 10);
+        bad.backdrop_effects = vec![Effect {
+            kind: "gaussian_blur".to_string(),
+            params: std::collections::BTreeMap::from([("radius".to_string(), 9999.0_f32)]),
+            ..Default::default()
+        }];
+        let issues = validate_timeline_v2(&timeline(vec![track("v", vec![bad])]), &specs);
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.code == "effect_param_out_of_range"
+                    && issue.path.contains("backdrop_effects")),
+            "背景滤镜的参数越界必须被拦：{issues:?}"
+        );
+    }
+
+    #[test]
+    fn 投影缺省不写进文件_写了就原样往返() {
+        let flat = timeline(vec![track("v", vec![layer("a", 0, 10)])]);
+        let text = serde_json::to_string(&flat).expect("能写出");
+        assert!(!text.contains("shadow"), "缺省不该写进文件：{text}");
+        let mut l = layer("a", 0, 10);
+        l.shadow = Some(ShadowSpec {
+            offset_x: 4.0,
+            offset_y: 6.0,
+            blur_sigma: 3.0,
+            opacity: 0.5,
+        });
+        let dropped = timeline(vec![track("v", vec![l])]);
+        assert!(
+            validate_timeline_v2(&dropped, &[]).is_empty(),
             "契约应当接受它"
         );
-        // 但渲染前必须能知道「这个我做不了」——不许静默按 normal 画。
-        let pending = unimplemented_blends(&timeline);
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].1, BlendMode::Overlay);
+        let written = serde_json::to_string(&dropped).expect("能写出");
+        assert!(written.contains("\"offset_x\":4.0"), "{written}");
+        assert!(written.contains("\"blur_sigma\":3.0"), "{written}");
+        // 第 28 轮起引擎真的会画它了（"同一层多画一张"）—— 所以这里不再有"还没实现"那条查询。
         assert!(
-            pending[0].0.contains("blend"),
-            "path 要指到字段：{}",
-            pending[0].0
+            !written.contains("unimplemented"),
+            "契约里不该出现实现状态的痕迹"
+        );
+    }
+
+    #[test]
+    fn 掩码缺省不写进文件_写了就原样往返() {
+        let flat = timeline(vec![track("v", vec![layer("a", 0, 10)])]);
+        let text = serde_json::to_string(&flat).expect("能写出");
+        assert!(!text.contains("mask"), "缺省不该写进文件：{text}");
+        let mut l = layer("a", 0, 10);
+        l.mask = Some(MaskSpec {
+            gradient: None,
+            asset_id: "m.png".to_string(),
+            channel: MaskChannel::Luminance,
+            invert: true,
+        });
+        let masked = timeline(vec![track("v", vec![l])]);
+        assert!(
+            validate_timeline_v2(&masked, &[]).is_empty(),
+            "契约应当接受它"
+        );
+        let written = serde_json::to_string(&masked).expect("能写出");
+        assert!(written.contains("\"asset_id\":\"m.png\""), "{written}");
+        assert!(written.contains("\"channel\":\"luminance\""), "{written}");
+        assert!(written.contains("\"invert\":true"), "{written}");
+        // 缺省值不写：通道 alpha、invert false。
+        let mut l2 = layer("a", 0, 10);
+        l2.mask = Some(MaskSpec {
+            gradient: None,
+            asset_id: "m.png".to_string(),
+            channel: MaskChannel::Alpha,
+            invert: false,
+        });
+        let text2 = serde_json::to_string(&timeline(vec![track("v", vec![l2])])).expect("能写出");
+        assert!(!text2.contains("channel"), "缺省通道不该写：{text2}");
+        assert!(!text2.contains("invert"), "false 不该写：{text2}");
+    }
+
+    #[test]
+    fn 裁剪形状缺省不写进文件_写了就原样往返() {
+        let flat = timeline(vec![track("v", vec![layer("a", 0, 10)])]);
+        let text = serde_json::to_string(&flat).expect("能写出");
+        assert!(!text.contains("clip"), "缺省不该写进文件：{text}");
+        let mut l = layer("a", 0, 10);
+        l.clip = Some(ClipShape::Circle {
+            radius: 30.0,
+            center: Some([10.0, -5.0]),
+        });
+        let shaped = timeline(vec![track("v", vec![l])]);
+        assert!(
+            validate_timeline_v2(&shaped, &[]).is_empty(),
+            "契约应当接受它"
+        );
+        let written = serde_json::to_string(&shaped).expect("能写出");
+        assert!(
+            written.contains("\"kind\":\"circle\""),
+            "形状要按 kind 标签写出来：{written}"
+        );
+        // 内缩的圆角为 0 时不写（缺省就是 0）；居中时 center 也不写。
+        let mut l2 = layer("a", 0, 10);
+        l2.clip = Some(ClipShape::Inset {
+            top: 4.0,
+            right: 4.0,
+            bottom: 4.0,
+            left: 4.0,
+            radius: 0.0,
+        });
+        let text2 = serde_json::to_string(&timeline(vec![track("v", vec![l2])])).expect("能写出");
+        assert!(text2.contains("\"kind\":\"inset\""), "{text2}");
+        assert!(
+            !text2.contains("center"),
+            "没有显式中心时不该写 center：{text2}"
+        );
+    }
+
+    #[test]
+    fn 圆角为_0_时不写进文件_而大于_0_时契约接受() {
+        // 0 = 老行为：**序列化时一个字节都不多**（这是"老工程逐字节不变"在文件层的判据）。
+        let flat = timeline(vec![track("v", vec![layer("a", 0, 10)])]);
+        let text = serde_json::to_string(&flat).expect("能写出");
+        assert!(!text.contains("corner_radius"), "0 不该写进文件：{text}");
+        // 大于 0：契约接受（引擎从第 13 轮起真的画了 —— 见 D10 的落地进度与那条 GPU 用例）。
+        let mut l = layer("a", 0, 10);
+        l.corner_radius = 24.0;
+        let rounded = timeline(vec![track("v", vec![l])]);
+        assert!(
+            validate_timeline_v2(&rounded, &[]).is_empty(),
+            "契约应当接受它"
+        );
+        let written = serde_json::to_string(&rounded).expect("能写出");
+        assert!(
+            written.contains("\"corner_radius\":24.0"),
+            "大于 0 时必须写出来：{written}"
         );
     }
 
@@ -2366,5 +3775,72 @@ mod v2_tests {
         };
         let text = serde_json::to_string(&style).expect("要能写回去");
         assert!(!text.contains("shadow_dx_px"), "负零写出了新键：{text}");
+    }
+    // ---- 底衬（T6）：**JSON 层**的"既有工程逐字节不变" ----
+
+    /// **反向用例（JSON 层）**：`plate_color = None` 时序列化出来
+    /// **一个键都不多**。
+    ///
+    /// ⚠️ 这条与 `paint_one` 那条**渲染层**判据是**两道**，缺一不可：
+    /// 渲染那条只证明"没多画像素"，证明不了"工程文件里多了键"；
+    /// 而后者正是本仓反复强调的"升级一次、工程变样"。
+    ///
+    /// **变异自证**：把 `plate_color` / `plate_pad_px` 上任意一个
+    /// `skip_serializing_if` 摘掉，两个 `contains` 立刻打红。
+    #[test]
+    fn 没写过底衬的样式重写出来一个字节都不多() {
+        let style = SubtitleStyle::default();
+        assert_eq!(style.plate_color, None, "默认必须是不铺底衬");
+        assert_eq!(style.plate_pad_px, None, "默认必须是'没写过'");
+
+        let again = serde_json::to_string(&style).expect("要能写回去");
+        for key in ["plate_color", "plate_pad_px"] {
+            assert!(
+                !again.contains(key),
+                "老工程里不该出现 {key}（少了 skip_serializing_if）：{again}"
+            );
+        }
+    }
+
+    /// **正向用例（JSON 层）**：显式写了底衬，两个键**都要原样往返**。
+    ///
+    /// ⚠️ 点名的那个坑：`plate_pad_px` 若写成裸 `f32` +
+    /// `skip_serializing_if = "等于默认值"`，**显式写的 12.0 会被吃掉** ——
+    /// 读回来仍是 12.0、渲染也一样，所以**永远不会有症状**，
+    /// 但用户的显式意图没了。用 `Option` 才分得开"没写"与"写了默认值"。
+    #[test]
+    fn 写过底衬的样式原样往返() {
+        let json = r#"{"plate_color":[0,0,0,140],"plate_pad_px":12.0}"#;
+        let style: SubtitleStyle = serde_json::from_str(json).expect("要能读进来");
+        assert_eq!(style.plate_color, Some([0, 0, 0, 140]), "参照值：黑 55%");
+        assert_eq!(
+            style.plate_pad_px,
+            Some(12.0),
+            "显式写的默认值必须留得住（这是 Option 唯一的理由）"
+        );
+
+        let again = serde_json::to_string(&style).expect("要能写回去");
+        assert!(
+            again.contains(r#""plate_color":[0,0,0,140]"#),
+            "底衬色被吃掉了：{again}"
+        );
+        assert!(
+            again.contains(r#""plate_pad_px":12.0"#),
+            "显式写的 12.0 被静默吃掉了（裸 f32 + 等值 skip 就是这症状）：{again}"
+        );
+    }
+
+    /// 求值口径：`None` ⇒ 参照值 12；写了就用写的那个。
+    #[test]
+    fn 底衬外扩量取默认值的口径() {
+        assert_eq!(default_plate_pad_px(), 12.0);
+        let none = SubtitleStyle::default();
+        assert_eq!(none.plate_pad_px.unwrap_or(default_plate_pad_px()), 12.0);
+        let some = SubtitleStyle {
+            plate_color: Some([0, 0, 0, 140]),
+            plate_pad_px: Some(30.0),
+            ..SubtitleStyle::default()
+        };
+        assert_eq!(some.plate_pad_px.unwrap_or(default_plate_pad_px()), 30.0);
     }
 }

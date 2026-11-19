@@ -157,6 +157,11 @@ fn 落点(
             transform,
             opacity: 1.0,
             blend: dhampir_core::timeline::layer::BlendMode::Normal,
+            corner_radius: 0.0,
+            clip: None,
+            mask: None,
+            tint: None,
+            extra_offset: (0.0, 0.0),
         }],
         Some(wgpu::Color::TRANSPARENT),
     );

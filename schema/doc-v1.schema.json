@@ -197,6 +197,158 @@
         "difference"
       ]
     },
+    "ClipShape": {
+      "description": "裁剪形状。长度一律是**文档像素**。\n\n# 为什么只有这三种\n\n引擎用的是**每像素覆盖度**（着色器里一个无分支 SDF），能用同一套式子表达的只有\n圆 / 椭圆 / 圆角矩形 —— 正好是 CSS `clip-path` 里的 `circle()` / `ellipse()` / `inset()`。\n`polygon()` 与 `path()` 需要一般多边形求交或掩码纹理，**明确不做**（登记表里记着这个缺口，\n不在这里假装支持）。\n\n`center` 是**图层框内的归一化比例**（`[0.5, 0.5]` 就是正中间），`None` 等价于居中 ——\n与 CSS `at 50% 50%` 同一个口径。\n\n# 为什么是比例而不是像素\n\nCSS 的 `at X Y` 是相对**元素左上角**，而 `X%` 是相对元素尺寸的百分比。用比例表达，\n作者侧（`at 25% 75%`）与 DOM 侧（CSS 原文）**都不需要知道图层的像素尺寸** ——\n而尺寸是素材的属性，转译器根本不知道。像素值仍然拒绝：那需要尺寸才能换算。",
+      "oneOf": [
+        {
+          "description": "`circle(R at X Y)`。",
+          "type": "object",
+          "properties": {
+            "center": {
+              "description": "归一化中心（`[0.5, 0.5]` = 正中），`None` 等价于居中。",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "number",
+                "format": "float"
+              },
+              "maxItems": 2,
+              "minItems": 2
+            },
+            "kind": {
+              "type": "string",
+              "const": "circle"
+            },
+            "radius": {
+              "type": "number",
+              "format": "float"
+            }
+          },
+          "required": [
+            "kind",
+            "radius"
+          ]
+        },
+        {
+          "description": "`ellipse(RX RY at X Y)`。",
+          "type": "object",
+          "properties": {
+            "center": {
+              "description": "归一化中心（`[0.5, 0.5]` = 正中），`None` 等价于居中。",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "number",
+                "format": "float"
+              },
+              "maxItems": 2,
+              "minItems": 2
+            },
+            "kind": {
+              "type": "string",
+              "const": "ellipse"
+            },
+            "radius_x": {
+              "type": "number",
+              "format": "float"
+            },
+            "radius_y": {
+              "type": "number",
+              "format": "float"
+            }
+          },
+          "required": [
+            "kind",
+            "radius_x",
+            "radius_y"
+          ]
+        },
+        {
+          "description": "`polygon(x y, x y, …)`：顶点是**图层框内的归一化坐标**（0..1，与 `center` 同一套口径）。\n\n引擎把它**栅格化成一张掩码纹理**再走已经验过的掩码通路 —— 所以这一版\n着色器一行都不用改，而且**两个宿主共用同一份栅格化代码**（core 里纯 Rust）。\n\n口径（v1）：非零环绕规则；边缘用 2×2 超采样近似抗锯齿；顶点允许在框外\n（框外部分自然被裁掉，不报错）。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "polygon"
+            },
+            "points": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "format": "float"
+                },
+                "maxItems": 2,
+                "minItems": 2
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "points"
+          ]
+        },
+        {
+          "description": "`path(\"…\")`：SVG 路径数据，坐标是**文档像素**、原点是图层框的**左上角**\n（与 CSS `clip-path: path()` 同一套，所以 DOM 侧原样透传）。\n\n支持 `M L H V C Q Z`（含相对形式）；**弧 `A` 与光滑续接 `S`/`T` 明说不支持**\n（遇到就报错，不猜一个近似）。曲线按固定段数细分 —— 确定性优先。",
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "path"
+            }
+          },
+          "required": [
+            "kind",
+            "data"
+          ]
+        },
+        {
+          "description": "`inset(上 右 下 左 round R)`：四条边各缩进多少。",
+          "type": "object",
+          "properties": {
+            "bottom": {
+              "type": "number",
+              "format": "float"
+            },
+            "kind": {
+              "type": "string",
+              "const": "inset"
+            },
+            "left": {
+              "type": "number",
+              "format": "float"
+            },
+            "radius": {
+              "type": "number",
+              "format": "float"
+            },
+            "right": {
+              "type": "number",
+              "format": "float"
+            },
+            "top": {
+              "type": "number",
+              "format": "float"
+            }
+          },
+          "required": [
+            "kind",
+            "top",
+            "right",
+            "bottom",
+            "left"
+          ]
+        }
+      ]
+    },
     "DanmakuSpec": {
       "description": "弹幕参数。**放在轨道级**：一条弹幕轨 = 一份弹幕素材 + 一套泳道参数。",
       "type": "object",
@@ -329,25 +481,6 @@
         "asset_id"
       ]
     },
-    "Easing": {
-      "description": "缓动曲线。公式**写死在这里**，两端调同一个函数——\n各写一遍迟早在某个控制点上差一个像素，而那种差异最难归因。",
-      "oneOf": [
-        {
-          "type": "string",
-          "enum": [
-            "linear",
-            "ease_in",
-            "ease_out",
-            "ease_in_out"
-          ]
-        },
-        {
-          "description": "**回弹**：先冲过头再落回来（`back_out`）。\n\n# 与 `EaseOut` / `EaseIn` 的关系（值得写下来）\n\n参照实现 的三条缓动里，两条**已经**能对本仓的现成变体：\n\n```text\n参照实现  pow2_out(t) = 1-(1-t)^2   ==  EaseOut\n参照实现  pow2_in(t)  = t^2         ==  EaseIn\n```\n\n我先前在转译器里把运镜的过渡报成\"用 `ease_out` 近似\"——\n**那是错的，它们逐值相同**。所以这一条不是\"补一个近似\"，\n是\"第三条缓动（过冲）本仓确实没有\"。\n\n系数取经典的 `1.70158`（CSS 的 `easeOutBack` 同款）。参照实现 的贴纸\n弹入用的是 `s = 3`（更猛的过冲），差别只有峰值那一下（约 1.10 vs 1.25），\n而且只在 0.35 秒的窗口里 —— 转译器会把它报出来。",
-          "type": "string",
-          "const": "back_out"
-        }
-      ]
-    },
     "Effect": {
       "description": "特效：类型 + 参数。**不接受可上传的 shader**——那等于把两端一致性交给用户。\n\n# 三个字段各管一件事\n\n- `kind` / `params`：**算什么**（已有）\n- `window`：**哪几帧生效、强度怎么起落**（新增）—— 让\"第 30 帧闪一下白\"\n  不必发明一个新的特效类型\n- `opacity`：**整体混合多少**（新增）—— 与 `window` 相乘，且**可被关键帧驱动**\n\n`window` 与 `opacity` 分开而不是把强度塞进 `params`：\n它们是**所有**特效共有的量，而 `params` 是每个特效私有的。混在一起的话\n`params` 的键空间会被通用名污染（每个特效都得叫 `amount` 还是 `strength`？）。",
       "type": "object",
@@ -393,13 +526,39 @@
         }
       }
     },
+    "GradientStop": {
+      "description": "渐变的一个断点：位置与**覆盖度**（遮罩用的就是它）。",
+      "type": "object",
+      "properties": {
+        "at": {
+          "type": "number",
+          "format": "float"
+        },
+        "coverage": {
+          "type": "number",
+          "format": "float"
+        }
+      },
+      "required": [
+        "at",
+        "coverage"
+      ]
+    },
     "Keyframe": {
       "description": "关键帧。frame 是**相对片段起点**的偏移，不是绝对帧号——\n这样片段一挪，关键帧跟着走，不会静默错位。\n\n# `target`：这个键在驱动**哪个**量\n\n在它成为字段之前，求值函数叫 `opacity_from` —— **结构上只算一个标量**：\n既不问自己在驱动什么，也装不下第二条曲线。于是\"运镜\"（要同时驱动\n`scale` 与 `x/y`）在这份契约里**根本表达不出来**。\n\n取值：\n- `\"opacity\"`（缺省）/`\"x\"`/`\"y\"`/`\"scale\"`/`\"rotation\"` —— 驱动元素自身的量；\n- `\"effect.<下标>.<参数名>\"` —— 驱动**某条特效的参数**。\n  例：`\"effect.0.radius\"` 让第 0 条特效的模糊半径随帧变化 ——\n  \"模糊从小涨到大再回落\"这类**瞬时特效**因此不需要新的特效类型。\n\n**缺省是 `\"opacity\"`**：老工程里没有这个键，语义必须与从前逐字节一致。",
       "type": "object",
       "properties": {
         "easing": {
-          "$ref": "#/$defs/Easing",
-          "default": "linear"
+          "description": "**CSS 缓动语法的字符串**（口径见 plan/web-animation-criteria.md 的 D2）。\n\n已知取值：既是历史拼写 `linear` / `ease_in` / `ease_out` / `ease_in_out` / `back_out`，\n也接受 CSS 的 `ease` / `ease-in` / `ease-out` / `ease-in-out` / `step-start` / `step-end`\n与函数式 `cubic-bezier(x1,y1,x2,y2)` / `steps(n[, position])`。\n**注意下划线与连字符是两条不同的曲线**（前者是二次曲线，后者等于 cubic-bezier）。\n认不出来的取值会被校验层报成 `unknown_easing`。\n\n形状是**字符串**，不是枚举名列表 —— 所以用 `schemars(with = \"String\")` 把生成出来的\nJSON Schema 钉成 string（否则派生形状会按 Rust 的 `Css` 变体长成一个对象）。",
+          "type": "string",
+          "default": "linear",
+          "x-known-values": [
+            "linear",
+            "ease_in",
+            "ease_out",
+            "ease_in_out",
+            "back_out"
+          ]
         },
         "frame": {
           "type": "integer",
@@ -423,9 +582,32 @@
       "description": "基础元素 + 拓展。\n\n判定规则（三行，不需要额外字段）：\n- 有 `source` → 实拍片段；\n- **没有** `source`、**有** `effects` → **调整图层**（影响下面已画上去的全部内容）；\n- 都没有 → 占位。",
       "type": "object",
       "properties": {
+        "backdrop_effects": {
+          "description": "**背景滤镜**（`backdrop-filter`）：对**这一层下面已经画好的内容**跑这些特效，\n且**只在这一层的矩形里**生效（CSS 的规矩就是\"元素范围内\"）。\n\n与 `effects` 的区别是本条最要紧的一处：`effects` 改的是**这一层自己**的像素；\n背景滤镜读的是**它身后的东西**。空 = 不做 = 老行为（缺省不写进文件）。\n\n设计见 criteria 的 D13（读回型那一批的第二个用户）。",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Effect"
+          }
+        },
         "blend": {
           "$ref": "#/$defs/BlendMode",
           "default": "normal"
+        },
+        "clip": {
+          "description": "**裁剪形状**（`None` = 不裁 = 老行为，缺省不写进文件）。\n\n与 `corner_radius` 的关系：圆角裁的是**图层自己的矩形**，`clip` 裁的是形状 ——\n两者**同时生效**（各自算一个覆盖度再相乘），与 CSS 里 `border-radius` 与\n`clip-path` 同时写的行为一致。",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClipShape"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "corner_radius": {
+          "description": "**圆角半径**（文档像素）。0 = 无圆角 = 老行为（缺省不写进文件）。\n\n引擎在合成着色器里用一个**无分支**的圆角矩形 SDF 画它（见\n`plan/web-animation-criteria.md` 的 D10）：半径 0 时那条路径的输出**逐字节不变**，\n半径 > 0 时只切四个角（有 GPU 用例逐点钉着）。",
+          "type": "number",
+          "format": "float"
         },
         "effects": {
           "type": "array",
@@ -471,6 +653,17 @@
             "$ref": "#/$defs/Marker"
           }
         },
+        "mask": {
+          "description": "**掩码**（`None` = 不掩 = 老行为，缺省不写进文件）。\n\n契约先立、引擎还没画（设计见 D12）：渲染前由 [`unimplemented_masks`] 与\n文档校验的警告如实报出来 —— 与圆角 / 未实现的混合模式同一套形态。",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MaskSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "note": {
           "type": "string",
           "default": ""
@@ -479,6 +672,17 @@
           "type": "number",
           "format": "float",
           "default": 1.0
+        },
+        "shadow": {
+          "description": "**投影**（`None` = 不投 = 老行为，缺省不写进文件）。设计见 criteria 的 D13。",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ShadowSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "source": {
           "description": "没有它就不是实拍片段 —— 这正是调整图层能存在的原因。",
@@ -532,6 +736,27 @@
         "end"
       ]
     },
+    "LinearGradient": {
+      "description": "线性渐变的遮罩（程序化，不挂素材）。\n\n几何口径照 CSS：`angle_deg` 里 **0° 朝上、90° 朝右**（屏幕 y 向下），\n渐变轴过图层矩形中心，轴长 = `|w·sinθ| + |h·cosθ|`（CSS 对盒子的那条规矩）。",
+      "type": "object",
+      "properties": {
+        "angle_deg": {
+          "type": "number",
+          "format": "float"
+        },
+        "stops": {
+          "description": "断点，至少两个；位置非递减。",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GradientStop"
+          }
+        }
+      },
+      "required": [
+        "angle_deg",
+        "stops"
+      ]
+    },
     "Marker": {
       "description": "挂在元素上的标记。",
       "type": "object",
@@ -561,6 +786,50 @@
         "frame"
       ]
     },
+    "MaskChannel": {
+      "description": "掩码通道：拿素材的哪一路当遮罩（设计见 plan/web-animation-criteria.md 的 D12）。",
+      "oneOf": [
+        {
+          "description": "用 alpha（缺省）。",
+          "type": "string",
+          "const": "alpha"
+        },
+        {
+          "description": "用亮度。系数与 core 的 luma 同一组（Rec.709）—— 与 D6 的老规矩一致：\n**口径要写进文档**，不许两边各猜一组。",
+          "type": "string",
+          "const": "luminance"
+        }
+      ]
+    },
+    "MaskSpec": {
+      "description": "一层怎么被掩码。\n\n# 素材层（D12 的第一条决定）\n\n掩码是一张**登记过的素材**，所以契约是「层引用素材 id」而不是「层内嵌一张图」——\n素材的注册、时间基、URI 解析、\"引用不存在的素材要报错\"这套校验**都已经有了**。\n\n坐标口径（D12 的第三条决定，也是本设计里唯一一处新坐标）：掩码图的**整张**映射到\n**图层自己的矩形**上（拉伸填满），即**图层局部坐标** —— 与合成源的源像素坐标不是同一套。",
+      "type": "object",
+      "properties": {
+        "asset_id": {
+          "description": "指向 `assets` 里的一条。**与 `gradient` 二选一**（缺省空串）。",
+          "type": "string"
+        },
+        "channel": {
+          "description": "通道，缺省 `alpha`（缺省不写进文件）。",
+          "$ref": "#/$defs/MaskChannel"
+        },
+        "gradient": {
+          "description": "程序化渐变（第 46 轮）：不挂素材，直接按角度与断点生成遮罩。\n**与 `asset_id` 二选一**；缺省不写进文件。",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LinearGradient"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "invert": {
+          "description": "是否反相，缺省 false（缺省不写进文件）。",
+          "type": "boolean"
+        }
+      }
+    },
     "Meta": {
       "description": "元信息。纯给人看的。",
       "type": "object",
@@ -586,10 +855,160 @@
         }
       }
     },
+    "OuterStroke": {
+      "description": "**外圈描边**：在 `stroke_ratio` 那一圈**外面**再加一圈（常态白）。\n\n# 为什么不是「把 `stroke_ratio` 加大一圈」\n\n那样画出来的是一圈**同色**的粗边；这里要的是**两圈不同色**（外白内深）——\nlibass 一遍只能给一个 `Outline` 与一个 `OutlineColour`，所以要**多一遍栅格化 + 环带相减**：\n见 `dhampir-worker` 的 `rasterize_with_stroke` 与 `ring_of`。\n\n⚠️ 单位与口径与 `SubtitleStyle::stroke_ratio` **完全一致**（目标高的比例、**外侧宽**），\n所以契约里两个数可以直接相加（`内圈 + 外圈` 就是白环那一遍的 `Outline`）。",
+      "type": "object",
+      "properties": {
+        "color": {
+          "description": "外圈颜色（RGBA）。常态是白。",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0
+          },
+          "maxItems": 4,
+          "minItems": 4
+        },
+        "ratio": {
+          "description": "外圈宽度（目标高的比例；**外侧宽**口径）。",
+          "type": "number",
+          "format": "float"
+        }
+      },
+      "required": [
+        "ratio",
+        "color"
+      ]
+    },
+    "PerCharSpec": {
+      "description": "**一个逐字档位的参数**（对应 `polish.toml` 里 `anim` 的一档）。\n\n⚠️ 全是**裸值 + 明确的默认**（不是 `Option`）—— 与 `SubtitleStyle` 那六个\n`Option` 字段**不同的口径**，理由在这里值得写清楚：\n\n* `SubtitleStyle` 上的 `Option` 是为了**区分\"没写\"与\"写了默认值\"**，\n  因为那几个字段由用户在 toml 里手写（\"显式写了 1.0\"是用户意图）。\n* 本结构是**代码内部的中间表示**：它由转译器从 `anim` 档名**展开**而来，\n  展开完就是一个完整答案，没有\"用户写没写\"这一说。\n  ⇒ 用裸值，省掉下游每一处 `unwrap_or`。\n\n⚠️ 但 `name` 例外地是 `Option` —— 它纯诊断用（报告里点名是哪一档），\n且 `None` 有明确含义（\"这一条没配逐字效果\"）。它**不参与任何求值**。",
+      "type": "object",
+      "properties": {
+        "easing": {
+          "description": "**曲线**（`back_out` / `linear` / …），名字与\n[`crate::schema::Easing::from_text`] 认的那套一致。\n\n⚠️ 默认 `linear` **不是** `Easing::default()`（那是同一个值，但这里\n刻意用字符串字面量：字段类型是 `String`，与 `Keyframe::easing` 同款，\n认不出的串由求值处退回线性、由校验层报 `unknown_easing`）。",
+          "type": "string",
+          "default": "linear"
+        },
+        "name": {
+          "description": "**这是第几档**（诊断用）。`None` = 本档不做逐字动效。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "offset_x_from": {
+          "description": "逐字**位移**（em；x 向右、y 向下），起始 / 终止。",
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
+        "offset_x_to": {
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
+        "offset_y_from": {
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
+        "offset_y_to": {
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
+        "per_char_frames": {
+          "description": "**每个字自己的动画时长**（帧）。",
+          "type": "integer",
+          "format": "int64",
+          "default": 0
+        },
+        "reverse": {
+          "description": "**错峰方向**：`false` = 从第 0 个字往后（默认）。\n\n`true` = 从**最后一个字往前**（\"从尾巴收\"那类）。做成显式开关而不是\n\"把序号倒过来\"由调用方做 —— 倒序号会让 `stagger` 的语义跟着反，\n两处反了刚好抵消、看着\"没生效\"。",
+          "type": "boolean"
+        },
+        "rotation_from": {
+          "description": "逐字**起始旋转**（角度）。",
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
+        "rotation_to": {
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
+        "scale_from": {
+          "description": "逐字**起始缩放**（1.0 = 不缩）。",
+          "type": "number",
+          "format": "float",
+          "default": 1.0
+        },
+        "scale_spread": {
+          "description": "**按序号放大的字号**（乘数，不是加法）：越靠后的字越大（负数 = 越小）。\n\n# ⚠️⚠️ 为什么单有 `scale_from/to` 不够（2026-10-13，C 组施工时发现）\n\n`scale_from` / `scale_to` 是**每个字同一个值** ⇒ 只能整行缩放。\n而 C 组的「大小字」（末/首/中字重音）、「变小」（递减/骤降/尾音）、\n「放大」（递增/爆开/首字引爆）**共 11 档**要的都是\n**按序号改字号** —— 一个档把**某一个字**放大、其余不变。\n那是 `rank` 的函数，不是常数。\n\n```text\nrank = reverse ? (count-1-index) : index   // 与 spread_x_em 同一个\n第 i 个字最终 scale = mix(scale_from, scale_to) × (1 + scale_spread × rank)\n```\n\n# 为什么是**乘法**而不是加法\n\n字号是**倍率**。倍率的\"再大 20%\"与\"再加 0.2\"在 `scale_from != 1.0` 时\n完全不是一回事：上式里 `scale_from = 0.6`（先缩小）再 `+0.2`\n得到的是 `0.8`（相对原字仍小），而 `×(1+0.2)` 得到 `0.72`。\n观感上要的是**相对当前倍率的比例**，所以用乘法。\n\n⚠️ `rank` 与 `spread_x_em` **共用**：同一个\"第几个字\"。\n   各算一份的话，\"沿弧线散开\"这类组合档（位移递增 + 字号递增）\n   会在 `reverse` 下**方向不一致**（一个从左起、一个从右起）。\n\n⚠️ `count <= 1` 时 rank 项为 0（一个字没有\"哪个字重音\"可言）。",
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
+        "scale_to": {
+          "description": "逐字**终止缩放**（1.0 = 不缩）。",
+          "type": "number",
+          "format": "float",
+          "default": 1.0
+        },
+        "spread_x_em": {
+          "description": "**按序号放大的位移**（em）：越靠后的字挪得越多（负数 = 越靠前挪得多）。\n\n# ⚠️⚠️ 为什么必须有它（2026-10-13 真机实测踩到的）\n\n上面那四个 `offset_*` 是**同一个值给每个字**。于是一个\n`offset_x_to = 0.4` 的档把**所有字一起右移** —— 字距一点没变，\n只是整行平移。**真机实测**：`一二三四五六七八` 八个字的\n起点差恒为 `20, 20, 20, …`，与没有逐字效果时**完全一样**，\n包围盒只差 2px（那点差来自落点取整）。\n\n而\"整行平移\"用 `transform.translate` 就够了，**不需要逐字拆行** ——\n所以那个档实际上是\"付了逐字的代价、拿到整行的效果\"，且\n**判据会假绿**（包围盒确实变了一点）。\n\n⇒ \"散开\"的本意是**越往后的字挪得越多**（fan out），那是\n`rank × spread`，不是常数。本字段就管这个：\n\n```text\nrank = reverse ? (count-1-index) : index\n额外位移 x = spread_x_em × rank / (count-1)\n```\n\n除 `count-1` 是**归一化**：让\"最后一个字挪满 `spread_x_em`\"，\n且**与字数无关**（否则 20 个字的一句话会散到画面外，观感完全不同）。\n`count <= 1` 时 rank 项取 0（一个字没有\"散开\"可言）。\n\n与 `offset_*` 的关系：两者**相加**（`offset` 是共同的基线偏移、\n`spread` 是逐字的额外差）。只写 `spread` 是最常见的用法。",
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
+        "spread_x_from": {
+          "description": "逐字位移的**基线**（每个字共同的，与 `offset_x_from/to` 同形）。",
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
+        "spread_x_to": {
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
+        "spread_y_em": {
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
+        "spread_y_from": {
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
+        "spread_y_to": {
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
+        "stagger_frames": {
+          "description": "**相邻两个字开始的间隔**（帧）。0 = 全部同时（\"逐字\"退化成\"整行\"）。",
+          "type": "integer",
+          "format": "int64",
+          "default": 0
+        }
+      }
+    },
     "RenderHints": {
       "description": "输出的**建议值**，宿主可覆盖（预览尺寸归宿主这条判断不变）。",
       "type": "object",
       "properties": {
+        "background": {
+          "description": "**画布底色**：`#rgb` / `#rrggbb` / `#rrggbbaa`。`None` = 透明（宿主/编码器那边就是黑）。\n\n# 为什么要有它（2026-10-06）\n\nYekiTrim 的「画面构成 → 背景 = 纯色/黑」在底座这条腿上**原先没有任何落地路径**：\n底座没有\"纯色图层\"原语，而加一层**有素材的图层**会触发分段路径的逐帧泄漏（长片 OOM，\n实测 2 层 1500 帧）。\n\n清屏色是**零图层**的落地方式：留边处直接是这个颜色，既不碰那条泄漏，也不用编一张 1×1 的图。\n语义上它等于\"主画面之外那块画布本来是什么颜色\"，与 CSS 里 `background` 的直觉一致。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "format": {
           "type": "string",
           "default": "mp4"
@@ -608,6 +1027,54 @@
         }
       }
     },
+    "ScalePoint": {
+      "description": "周期缩放曲线上的一个点：`(毫秒, 倍率)`。\n\n⚠️ 单独一个结构而**不是**元组：它进的是工程文件（`.doc.json`），\n`[[0,1.05],[120,1.0]]` 这种位置数组在报告与排错里谁也读不出来。",
+      "type": "object",
+      "properties": {
+        "ms": {
+          "description": "相对**周期起点**的毫秒。",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "scale": {
+          "description": "这一点的缩放倍率（1.0 = 基线）。",
+          "type": "number",
+          "format": "float"
+        }
+      },
+      "required": [
+        "ms",
+        "scale"
+      ]
+    },
+    "ShadowSpec": {
+      "description": "层的**投影**（`filter: drop-shadow()` 那件事）。\n\n# 为什么它不是一条 effect pipeline\n\n逐像素管线（色彩 / 遮罩 / 重映射 / 模糊）都是\"**把这一层的像素改一下**\"；\n投影不是改像素，而是**同一层多画一张**（模糊 + 染色 + 偏移，画在本层**下面**）。\n把它塞进 pipeline 会让\"一趟逐像素\"的模型出现一个例外，而例外正是最难查的那种。\n\n# 口径\n\n- 长度都是**文档像素**；\n- `blur_sigma` 是 **CSS `drop-shadow()` 的那个模糊半径（σ）** —— 引擎按下界口径\n  换算成本仓的核半径（`radius = 2σ`，见 D5）；\n- 颜色 v1 **固定黑**（要彩色再加字段，不在这里偷偷支持）；\n- `opacity` 是整张阴影的浓淡（0..1），与图层自己的 opacity 相乘。",
+      "type": "object",
+      "properties": {
+        "blur_sigma": {
+          "description": "CSS `drop-shadow()` 的模糊半径（σ，文档像素）。",
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
+        "offset_x": {
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
+        "offset_y": {
+          "type": "number",
+          "format": "float",
+          "default": 0.0
+        },
+        "opacity": {
+          "type": "number",
+          "format": "float",
+          "default": 1.0
+        }
+      }
+    },
     "SourceRef": {
       "description": "素材引用。**有它才是实拍片段。**",
       "type": "object",
@@ -620,6 +1087,12 @@
           "description": "素材内起点（帧）。",
           "type": "integer",
           "format": "int64"
+        },
+        "source_rate": {
+          "description": "**播放速率**。`1.0` = 原速；`2.0` = 两倍速（同样的输出时长吃掉两倍的源帧）。\n\n# 为什么要有它（D24）\n\n在这之前，`end - start` **同时表示两件事**：占多长输出时间、要读多少源帧。\n两者被绑死，于是**没有任何旋钮能表达\"这段放两倍速\"** ——\n想快播只能把 `end` 减半，结果是**时长对了、内容被截断一半**。\n\n# 语义（三个量各管一件事，不许混）\n\n* `end - start` = **输出帧数**（这一层在时间线上占多久）；\n* `source_rate` = 每输出 1 帧消耗**几个**源帧；\n* 消耗的源帧数 = `(end - start) × source_rate`（从 `source_in` 起算）。\n\n所以 `rate=2.0` 时，30 个输出帧吃掉 60 个源帧 —— **时长不变、内容不截断**，\n只是放快了。与 `-filter:v setpts=PTS/2` 同义。\n\n# 缺省 `1.0` 而不是 `Option`\n\n缺省必须让**所有老工程逐字节不变**（本仓一贯口径）。用 `f64` + `serde(default)`\n比 `Option<f64>` 好：下游不必区分\"没有这个键\"和\"写了 1.0\"，\n少一种状态就少一类分支。\n\n# 边界（**故意不做静默钳位**）\n\n* `rate <= 0` 或非有限值 ⇒ **契约校验报错**。`0` 会让\"消耗多少源帧\"恒为 0\n  （整段定格在 `source_in`），负数会倒放 —— 两者都不是\"快慢\"能覆盖的语义，\n  真要做应该各有专门的字段，**不能靠一个 0 或负数偷偷生效**。\n* 源帧不够（`source_in + 消耗帧数` 超出素材）⇒ 钳在末帧，与既有非循环路径一致\n  （`source_frame_at_delays` 的\"不外推\"同一条规矩）。",
+          "type": "number",
+          "format": "double",
+          "default": 1.0
         }
       },
       "required": [
@@ -631,6 +1104,11 @@
       "description": "字幕样式。**放在轨道级，不是元素级。**\n\n理由：一条字幕轨 = 一个字幕素材 + 一套样式。想要两套样式就开两条轨 ——\n这正是 PR 里字幕轨的做法。放元素级会让每个 Layer 字面量都多一个字段，\n而换来的只是\"同一条轨上两种样式\"，那件事本来就该用两条轨表达。\n\n字号与边距用**比例**（相对目标高度），不用像素：像素在预览（640x360）与\n成片（1920x1080）里含义不同，两端就不一致了。",
       "type": "object",
       "properties": {
+        "anchor_bottom": {
+          "description": "**文字块底边的归一化 y**（0 = 画面顶边，1 = 画面底边）。默认 1.0 = 贴底。\n\n# 为什么要有它（与 `safe_width_ratio` 是一对）\n\n`bottom_margin` 本来身兼两职：既是\"距底边多远\"，又被拿去当**左右安全宽**，\n于是两个用途**互相锁死** —— 安全宽 0.875 要求它 = 0.0625，\n而要把文字抬到画面上方需要它 ≈ 0.6，抬上去 `max_width` 变负数\n⇒ **一个字都排不出来**（布局返回空，报告里一行差异都没有）。\n\n拆分办法：`safe_width_ratio` 显式配了就**只认它**管左右，\n本字段专管纵向。本字段 `< 1.0` 时接管，否则仍走 `1.0 - bottom_margin` 的老式子\n⇒ **不写这两个字段的既有工程逐字节不变**（有单测钉着）。\n\n⚠️ 与 `bottom_margin` 的单位不同：那个是**比例（相对目标高）**，\n这个是**归一化坐标**（1.0 就是\"整个画面高\"，不再是比例）。\n二者在同一量纲里，正因为如此才能相减 —— 但别把它们当成一个东西。\n\n宿主（YekiTrim）就是拿它表达\"上 / 中 / 下\"三档纵向位置的。\n\n⚠️ **`skip_serializing_if` 不能省**：缺省 1.0 时**一个键都不许出现在工程文件里**，\n否则每个老工程的样式键集都变大（R4 判据当场红）。",
+          "type": "number",
+          "format": "float"
+        },
         "bottom_margin": {
           "description": "底边距 = 目标高度 * 这个比例。",
           "type": "number",
@@ -723,10 +1201,77 @@
           "default": 2,
           "minimum": 0
         },
+        "origin": {
+          "description": "**绝对盒原点**（归一化 0..1，**文字块左上角**）。None = 沿用本仓自己的锚点（现状，零回归）。\n\n# 与 anchor_bottom 的分工（两个都管纵向，但不是一个东西）\n\n* anchor_bottom：文字块**底边**贴在哪 —— 横向**仍然居中**，纵向由它推；\n* origin：**整块**摆在哪 —— 给了它，横向与纵向都用它，anchor_bottom 不参与。\n\n# 为什么需要它（2026-10-15）\n\n宿主（YekiTrim）的面板给**每个**文字元素算好了「盒左上角百分比」\n（process 的 placement::Pick）—— 那是**逐事件**的自由落点。\n本仓原本只有「上/中/下 + 横向居中」这一套（anchor_bottom），**表达不出**任意一个绝对点\n⇒ 宿主那条通道发过来的位置在出片这一侧被丢掉。\n需求书与验收判据：YekiTrim 仓的 docs/plan/dhampir-text-origin-request.md。\n\n⚠️ **竖排（vertical）忽略本字段** —— 与 anchor_bottom 同一条口径（竖排下纵向变成了\n   **长度方向**，语义转置了；见 text_layout::layout 里那段说明）。\n\n⚠️ skip_serializing_if 不能省：没写时**一个键都不许出现**（既有工程逐字节不变）。",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number",
+            "format": "float"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "outer_stroke": {
+          "description": "**外圈描边**：在 `stroke_ratio` 那一圈**外面**再加一圈（常态白）。\n\n`None` = 不画（默认，既有工程**逐字节不变**）。给了它 ⇒ 渲染侧多一遍栅格化：\n白环 = 「内圈 + 外圈」那遍的覆盖度 **减去** 内圈那遍的覆盖度（见 `rasterize_with_stroke`）。\n\n⚠️ 白环画在**最底下**（先白环、再内圈描边、最后填充）—— 顺序反了整圈字会糊成白色。",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OuterStroke"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "outline": {
           "description": "是否加描边（压住亮背景）。",
           "type": "boolean",
           "default": true
+        },
+        "per_char": {
+          "description": "**逐字动效**（P3，2026-10-13）：每一个字各自动、按序号错峰。\n\n# 为什么单开一个结构而不是往上面那几个字段上再挂几个\n\n上面六个字段（`scale_in_*` / `shake_*`）全是**轨级常量**：\n一条轨上一次求值得到一对数字，整行公用。逐字动效的**本质**是\n\"同一个曲线在每个字上晚开始一会儿\" —— 它需要**按序号求值**，\n形状上就不是\"再挂一个常量\"，而是\"一份能按 index 查的函数参数\"。\n硬塞进上面那组会让\"这条轨到底逐字不逐字\"要靠多个字段的**组合**去猜。\n\n# `None` = 没有逐字动效\n\n与上面六个字段同一条纪律（[`Option`] + `skip_serializing_if`）：\n老工程重写**一个键都不多**，求值结果必须与改动前**逐字节相同**。\n渲染侧靠 [`text_perchar_anim::PerCharSpec::is_active`] 分流 ——\n为假时**整条逐字路径都不进**（老路的栅格化缓存仍然有效）。",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PerCharSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "per_char_out_frames": {
+          "description": "**逐字出场窗口（帧）**（2026-10-18）：窗口**锚在出点**，逐字错峰沿用\n`per_char` 那份，进度**反着走**（`to → from`）⇒ \"出场逐字变小\"。\n\n⚠️ 与 `per_char` **分开一个字段**（而不是塞进 `PerCharSpec`）：那个结构的文档写着\n\"由转译器从 `anim` 档名展开而来、没有\"用户写没写\"这一说\"，而这里是**轨级**的、\n与\"这一档的入场形状\"无关（同一个 `per_char` 配不同的出场时长是合法的）。\n\n`None` / 0 ⇒ 不做出场（**老工程零回归**）。求值见\n[`crate::text_perchar_anim::char_transform_at_out`]。",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "plate_color": {
+          "description": "**底衬（plate）的颜色**。`None` = 不铺底衬（默认，既有工程逐字节不变）。\n\n半透明是常态（参照给的是黑 55%：`[0,0,0,140]`），所以四通道是 RGBA，\n`alpha` 与 `color` / `shadow_color` 一样**生效**。\n\n# 为什么不能走 libass 的 `BorderStyle=3`\n\n那是 ASS 原生的\"不透明底盒\"，看着正好是这件事 —— 但底座这条路走不通，\n两条理由**各自独立成立**：\n\n1. **传不下去**：底座走 `subtitles=…:fontsdir=…:force_style=…`，而\n   `force_style` 的拼装只写 `FontName/FontSize/PrimaryColour/Outline/OutlineColour`\n   五个键（见 `text_raster.rs::drawtext_args`）。`BorderStyle` 与 `BackColour`\n   **一个都不在里面** ⇒ 在 `.ass` 里写 `BorderStyle=3` 会被 force_style 盖掉。\n2. **与\"白墨\"那条设计正面冲突**：底座**有意**把填充与描边**都**画成\n   [`crate`] 的白墨（见 `text_raster.rs::WHITE_INK` 的注释）—— 因为 libass\n   输出的 alpha **恒为 0**、颜色提前合成进 RGB，只有\"全是白墨\"时覆盖度\n   才恢复得出来。而底衬要的是**另一种墨**，混进去覆盖度就再也分不开了。\n\n⇒ 实现改在宿主侧（`text_overlay.rs::paint_one`）：**画字之前先铺一块矩形**，\n纯几何，既不动 libass，也不碰白墨那条设计。",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0
+          },
+          "maxItems": 4,
+          "minItems": 4
+        },
+        "plate_pad_px": {
+          "description": "**底衬向四周外扩的像素数**（目标像素）。默认 12。\n\n只在 `plate_color` 有值时生效 —— 没有底衬就无所谓留白。\n\n# 为什么是**目标像素**而不是像 `font_ratio` 那样的比例\n\n参照的底衬是浏览器 `padding: 12px` 那种\"离字多远\"的观感量，它的参照值\n就是 **12**；把它写成比例会在预览（640x360）与成片（1920x1080）上给出\n两个不同的外扩量，而\"底衬包得住字\"是**一眼能看出来**的 —— 那正是这个仓\n最不想有的那类\"预览看着对、成片贴不住\"。\n\n⚠️ 与 `transform.x/y`、`rise_in_px` 那套**文档像素**不是同一个坐标系：\n这里定的是**目标像素**，因为底衬是宿主在**已经栅格化好的目标帧**上铺的\n（`place_line` 给的就是目标像素坐标）。\n\n# ⚠️ 这一项**必须** `skip_serializing_if`\n\n它等于默认值时**不写进文件** —— 与 `shadow_dx_px` / `shadow_blur_ratio`\n同款。理由不是省字节，是**本仓有一条判据盯着\"老工程的样式键集\"**：\n`v2_tests::没写过阴影的样式重写出来一个字节都不多` 会把\n`SubtitleStyle` 全部键名与默认写法**逐字**比一次。少了这个 `skip`，\n任何老工程重写一次都会多出一个 `\"plate_pad_px\":12.0`，那条判据当场打红\n—— 它拦的正是\"升级之后工程文件悄悄变形\"。\n\n# ⚠️ 为什么是 `Option<f32>` 而不是裸 `f32` 默认 12.0\n\n与 `scale_in_from` / `shake_hz` 那一组**同一条理由**（见它们的文档注释）：\n\n* 裸 `f32` + `skip_serializing_if = \"等于默认值\"` 能满足\"老工程一个键都不多\"，\n  但会让**用户显式写的 `12.0`** 也被静默吃掉 —— 读回来仍是 12.0、\n  渲染逐像素一样，所以**永远不会有症状**，而\"显式写了却读不回来\"\n  正是本仓最恨的那类静默；\n* `Option` 一举两得：**不写键 = 默认 12**（老工程一个键都不多），\n  **写了就是写的那个值**（哪怕它恰好等于 12）。\n\n求值处一律 `plate_pad_px.unwrap_or(default_plate_pad_px())`。\n\n⚠️ 本仓有一条判据盯着\"老工程的样式键集\"：\n`v2_tests::没写过阴影的样式重写出来一个字节都不多` 会把 `SubtitleStyle`\n全部键名与默认写法**逐字**比一次。所以这一行少了 `skip_serializing_if`，\n任何老工程重写一次都会多出一个 `\"plate_pad_px\":12.0`，那条判据当场打红\n（加字段时实测打红过）—— 它拦的正是\"升级之后工程文件悄悄变形\"。",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
         },
         "rise_in_px": {
           "description": "入场时从下方浮上来的距离（**文档像素**）。参照实现 是 `20`。",
@@ -745,6 +1290,50 @@
           "type": "number",
           "format": "float",
           "default": 0.0
+        },
+        "scale_curve": {
+          "description": "**周期缩放曲线**（心跳，2026-10-18）：`[(毫秒, 倍率), …]`，按 `scale_cycle_ms` 循环。\n\n⚠️ 为什么要**新原语**：`scale_in_*` 那条是 `back_out3` 的**单峰**、且**只在入场窗口**\n（窗口之后恒 1.0）—— \"放大一次、回落、再小放大、每秒来一次\"这种**周期多峰**曲线\n它数学上表达不了（转译器 `heartbeat` 那一档因此长期只能退化成\"单次过冲\"并如实报 NOTE）。\n\n语义：`local_ms % cycle_ms` 落在点列两个相邻点之间，用 `back_out3` 在\n`scale_a → scale_b` 之间插值；末点之后到周期结束一律 1.0（**那就是\"停顿\"**）。\n⚠️ 首点必须是 `ms = 0`；点列要**按下标递增**（不递增时行为由实现决定，校验层不管）。\n\n`None`（默认）= 不启用 ⇒ 逐字沿用 `scale_in_*` 那条老路（**存量零回归**）。",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ScalePoint"
+          }
+        },
+        "scale_cycle_ms": {
+          "description": "**周期缩放的周期长度（毫秒）**（心跳）。`None` 或 0 ⇒ `scale_curve` 不生效。\n\n⚠️ 与曲线分开是**有意的**：同一组脉冲点可以用在不同节奏上（1s / 1.2s），\n合成一个字段就得把点列按节奏重算，而点列是\"形状\"、节奏是\"速度\"。",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "scale_in_from": {
+          "description": "**弹入的起始缩放**（T1）。`None` = 1.0（不缩）。\n\n# 为什么是 `Option<f32>` 而不是裸 `f32` 默认 1.0\n\n这一组六个字段的口径**全是** `None` = 用默认行为。理由与\n`shadow_*` 那一组不同，值得写下来：这个字段的\"默认值\"**不是一个关掉的值**\n（`scale_in_from` 的默认是 `1.0`，即\"不缩\"），而 `1.0` 同时也是一个\n**用户可能显式写的合法值**。\n\n裸 `f32` + `skip_serializing_if = \"等于默认值\"` 会让\"显式写的 1.0\"\n被静默吃掉 —— 读回来仍是 1.0、渲染也一样，所以**永远不会有症状**，\n但用户的显式意图没了。而\"显式写了却读不回来\"正是本仓最恨的那类静默。\n\n`Option` 一举两得：**不写键 = 默认行为**（老工程一个键都不多），\n**写了就是写的那个值**（哪怕它恰好等于默认值）。\n\n求值处见 [`crate::text_motion::scale_in_params`]。",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "scale_in_ms": {
+          "description": "**弹入窗口的时长（毫秒）**（T1）。`None` = 0 = 关（**不缩**）。\n\n⚠️ 三个字段里**只有它**决定\"开不开\"。`from` / `peak` 都给了但它是 0\n⇒ 不缩 —— 因为\"窗口多长\"是唯一能定义\"缩到什么程度\"的量\n（另两个只是端点）。",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "scale_in_peak": {
+          "description": "**弹入的过冲峰值**（T1）。`None` = 1.0（不过冲）。\n\n参照值是 **1.15**；`scale_in_from` 参照 **0.7**、`scale_in_ms` 参照 **180**。\n三个一起才是一个\"弹入\"（`0.7 → 1.15 → 1.0`）。",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
         },
         "shadow_blur_ratio": {
           "description": "**阴影的模糊半径**（占**文档高**的比例；0 = 硬阴影）。\n\n单位取比例而不是像素：像素在预览与成片里含义不同 —— 与 `font_ratio` /\n`stroke_ratio` 同一条理由。求值层按目标高换算成像素（`shadow_blur_px`）。\n\n# 两端实现不同，**只保证\"观感近似\"**\n\n浏览器走 canvas 原生的 `shadowBlur`（规范口径是 σ 的两倍），\n出片侧是 ffmpeg 的 `gblur`（直接吃 σ）。两者**不是同一条公式**，\n所以这里**不保证逐像素一致** —— 与\"字形像素允许不同\"同一条口径。\n谁要拿它当逐像素判据，先看 `plan/text-shadow-design.md` §2。",
@@ -776,6 +1365,30 @@
           "type": "number",
           "format": "float"
         },
+        "shake_hz": {
+          "description": "**抖动频率（Hz）**（T4）。`None` = [`crate::text_motion::DEFAULT_SHAKE_HZ`]（18.0）。\n\n只在 `shake_px > 0` 时有意义。",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "shake_phase": {
+          "description": "**抖动的相位**（弧度）（T4）。`None` = 0.0。\n\n# 为什么必须能逐条错开\n\n抖动是**纯 `t` 的函数**（见 [`crate::text_motion::text_shake_px`]），\n同屏两条若相位相同就**整体同拍**地一起晃 —— 那不是\"两条在抖\"，\n是\"整块字在抖\"，看着像画面在抖而不是文字在抖。\n宿主给每条**不同的相位**才有各自的手抖感。",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "shake_px": {
+          "description": "**抖动幅度**（T4，**文档像素**）。`None` = 0.0 = 不抖。\n\n单位与 `rise_in_px` / `transform.x/y` 同一套（文档像素），\n不是目标像素 —— 这样预览与成片落同一个比例。\n\n求值处见 [`crate::text_motion::shake_params`] /\n[`crate::text_motion::text_shake_px`]。",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
         "shrink_min_scale": {
           "description": "**装不下时整体缩字号的下限**。默认 0 = 不缩（老行为：超出直接丢行）。\n\n参照实现的换行规则是：\n\n```text\nvar scale = 1;\nif (tw > maxLineW + EPS) scale = Math.max(0.7, Math.min(1, maxLineW * 3 / tw));\n```\n\n也就是**闭式**算出缩放比（`tw` 是基准字号下的总宽），再按缩放后的字号折行；\n`size = baseSize * scale`、`lh = size * 1.5`、`swEff = sw * scale`。\n转译器按参照写 **0.7**。\n\n默认 0（不缩）是为了既有工程逐字节不变 —— 这是一条**行为变化**，\n不能悄悄改默认值（否则老工程的\"多出来的行被丢掉\"会变成\"整块字变小\"，\n两者一眼就能看出来，但那属于换行为而不是修真值）。",
           "type": "number",
@@ -805,6 +1418,13 @@
           "type": "number",
           "format": "float",
           "default": 0.0
+        },
+        "vertical": {
+          "description": "**竖排**（E 组 3 档）。`None` / `false` = 横排（既有行为）。\n\n# 为什么是 `Option<bool>` 而不是 `bool`\n\n与 `per_char` 同一个理由：**缺省时一个键都不许出现在工程文件里**，\n否则每个老工程的样式键集都变大（R4 判据当场红）。\n`Option<bool>` 的 `None` 与 `Some(false)` 在这里**语义相同**（都横排），\n但只有 `None` **不落盘** —— 所以转译器对\"没配\"必须写 `None`，不许写 `Some(false)`。\n\n# 竖排要改的是**折行**，不是只把字转 90°\n\n这是本组成本最高的一条：横排的折行是\"一行放不下就另起一行\"\n（行宽 = 安全宽、行高 = 行盒高），竖排是\"一**列**放不下就另起一列\"\n（列宽 = 行盒高、列高 = 安全高）。**两者是转置关系，不是缩放关系** ——\n直接旋转画布会让字与字之间的**基线对齐**全错（标点、拉丁字母会偏）。\n\n⚠️ 竖排下 [`Self::max_lines`] 的语义变成\"最多几**列**\"（名字没改，\n因为它在契约里的含义是\"这个方向最多几个单位\"，横竖都读得通）。\n\n⚠️⚠️ **这一点真机踩到过，值得单独说**：竖排的\"一列放得下几个字\"\n= `安全比例 / font_ratio`。实测 `font_ratio = 0.16` +\n`safe_width_ratio = 0.2` 时每列只放得下 **1.25 个字** ⇒ 6 个字要 5 列，\n而 `max_lines = 3` 于是**只画了 2 个字**。\n⇒ 症状是\"竖排只显示头两个字\"，看着像**渲染 bug**，\n  其实是**配置的数学**（列容量 = 安全比例 ÷ 字号比例）。\n  竖排档位给 `safe_width_ratio` 时要按这个式子估，别照抄横排的值。\n\n⚠️ 与 `bottom_margin` / `anchor_bottom` 的交互：那两项在横排下管**纵向**位置，\n竖排下\"纵向\"变成了**列方向** ⇒ 位置语义也跟着转置。\n第一版**不做**这套转置（E 组 3 档只用居中的竖排），\n所以竖排时**忽略** `anchor_bottom`，改为按行盒高居中 —— 这一点要如实写在判据里。",
+          "type": [
+            "boolean",
+            "null"
+          ]
         }
       }
     },
@@ -942,6 +1562,11 @@
           "format": "float"
         },
         "scale": {
+          "type": "number",
+          "format": "float"
+        },
+        "scale_y": {
+          "description": "**纵向倍数**（`1.0` = 纵向跟随 `scale`，即**等比**）。\n\n# 语义：`scale` 管横向，`scale_y` 管纵向\n\n* `scale` = **横向**缩放（`scale_y` 缺省时它同时管纵向 ⇒ 退化成等比，与改动前完全一致）；\n* `scale_y` = **纵向**的**额外**倍数，**乘在 `scale` 之上**。\n\n最终纵向倍数 = `scale × scale_y`。\n\n# 为什么是\"倍数\"而不是\"纵向绝对值\"\n\n做成\"纵向绝对值\"（让 `scale_y` 顶替 `scale` 管纵向）的话，缺省就得表达成\n\"跟随 scale\" —— 那只能靠哨兵值（`0`？`NaN`？），而哨兵值是第二份真相。\n做成倍数则让**缺省 1.0 恰好等于老语义**：纵向倍数 = `scale × 1.0` = `scale`，\n与\"没有这个字段\"逐字节相同。\n\n⇒ **非等比压缩**（横向压扁、纵向拉伸）就是 `scale` 与 `scale_y` 不相等；\n相等时走的就是老工程那条路，一个像素都不差。\n\n⚠️ **`skip_serializing_if` 不能省**：缺省 1.0 时**一个键都不许出现在工程文件里**，\n否则每个老工程的变换键集都变大（R4 判据当场红）。与 `SubtitleStyle::anchor_bottom`\n（`:537`）是同一条纪律、同一对 helper（`one` / `is_one_f32`）——这里**不新造**。",
           "type": "number",
           "format": "float"
         },

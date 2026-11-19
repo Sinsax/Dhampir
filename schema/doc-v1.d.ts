@@ -28,6 +28,8 @@ export type AssetKind = "video" | "audio" | "image" | "image_sequence" | "subtit
 
 export type BlendMode = "normal" | "add" | "multiply" | "screen" | "darken" | "lighten" | "overlay" | "soft_light" | "difference";
 
+export type ClipShape = Record<string, unknown>;
+
 export interface DanmakuSpec {
   /** 指向弹幕素材（AssetKind::Subtitle，内容是 ASS）。 */
   asset_id: string;
@@ -63,8 +65,6 @@ export interface DanmakuSpec {
   stroke_ratio?: number;
 }
 
-export type Easing = "linear" | "ease_in" | "ease_out" | "ease_in_out" | "back_out";
-
 export interface Effect {
   /** 类型串，对应 core 的特效注册表。 */
   kind: string;
@@ -81,15 +81,27 @@ export interface Generator {
   version?: string;
 }
 
+export interface GradientStop {
+  at: number;
+  coverage: number;
+}
+
 export interface Keyframe {
-  easing?: Easing;
+  /** **CSS 缓动语法的字符串**（口径见 plan/web-animation-criteria.md 的 D2）。 */
+  easing?: "linear" | "ease_in" | "ease_out" | "ease_in_out" | "back_out" | (string & {});
   frame: number;
   target?: string;
   value: number;
 }
 
 export interface Layer {
+  /** **背景滤镜**（`backdrop-filter`）：对**这一层下面已经画好的内容**跑这些特效， */
+  backdrop_effects?: Effect[];
   blend?: BlendMode;
+  /** **裁剪形状**（`None` = 不裁 = 老行为，缺省不写进文件）。 */
+  clip?: ClipShape | null;
+  /** **圆角半径**（文档像素）。0 = 无圆角 = 老行为（缺省不写进文件）。 */
+  corner_radius?: number;
   effects?: Effect[];
   enabled?: boolean;
   end: number;
@@ -101,8 +113,12 @@ export interface Layer {
   /** **素材放完了要不要从头再来。** */
   loop_source?: boolean;
   markers?: Marker[];
+  /** **掩码**（`None` = 不掩 = 老行为，缺省不写进文件）。 */
+  mask?: MaskSpec | null;
   note?: string;
   opacity?: number;
+  /** **投影**（`None` = 不投 = 老行为，缺省不写进文件）。设计见 criteria 的 D13。 */
+  shadow?: ShadowSpec | null;
   /** 没有它就不是实拍片段 —— 这正是调整图层能存在的原因。 */
   source?: SourceRef | null;
   /** 帧区间**左闭右开**：`[start, end)`。 */
@@ -113,12 +129,31 @@ export interface Layer {
   transition_in?: TransitionSpec | null;
 }
 
+export interface LinearGradient {
+  angle_deg: number;
+  /** 断点，至少两个；位置非递减。 */
+  stops: GradientStop[];
+}
+
 export interface Marker {
   color?: string | null;
   /** **相对该元素 start 的偏移**。用绝对帧号的话，元素一挪标记就错位了。 */
   frame: number;
   id: string;
   name?: string;
+}
+
+export type MaskChannel = "alpha" | "luminance";
+
+export interface MaskSpec {
+  /** 指向 `assets` 里的一条。**与 `gradient` 二选一**（缺省空串）。 */
+  asset_id?: string;
+  /** 通道，缺省 `alpha`（缺省不写进文件）。 */
+  channel?: MaskChannel;
+  /** 程序化渐变（第 46 轮）：不挂素材，直接按角度与断点生成遮罩。 */
+  gradient?: LinearGradient | null;
+  /** 是否反相，缺省 false（缺省不写进文件）。 */
+  invert?: boolean;
 }
 
 export interface Meta {
@@ -128,10 +163,69 @@ export interface Meta {
   title?: string;
 }
 
+export interface OuterStroke {
+  /** 外圈颜色（RGBA）。常态是白。 */
+  color: number[];
+  /** 外圈宽度（目标高的比例；**外侧宽**口径）。 */
+  ratio: number;
+}
+
+export interface PerCharSpec {
+  /** **曲线**（`back_out` / `linear` / …），名字与 */
+  easing?: string;
+  /** **这是第几档**（诊断用）。`None` = 本档不做逐字动效。 */
+  name?: string | null;
+  /** 逐字**位移**（em；x 向右、y 向下），起始 / 终止。 */
+  offset_x_from?: number;
+  offset_x_to?: number;
+  offset_y_from?: number;
+  offset_y_to?: number;
+  /** **每个字自己的动画时长**（帧）。 */
+  per_char_frames?: number;
+  /** **错峰方向**：`false` = 从第 0 个字往后（默认）。 */
+  reverse?: boolean;
+  /** 逐字**起始旋转**（角度）。 */
+  rotation_from?: number;
+  rotation_to?: number;
+  /** 逐字**起始缩放**（1.0 = 不缩）。 */
+  scale_from?: number;
+  /** **按序号放大的字号**（乘数，不是加法）：越靠后的字越大（负数 = 越小）。 */
+  scale_spread?: number;
+  /** 逐字**终止缩放**（1.0 = 不缩）。 */
+  scale_to?: number;
+  /** **按序号放大的位移**（em）：越靠后的字挪得越多（负数 = 越靠前挪得多）。 */
+  spread_x_em?: number;
+  /** 逐字位移的**基线**（每个字共同的，与 `offset_x_from/to` 同形）。 */
+  spread_x_from?: number;
+  spread_x_to?: number;
+  spread_y_em?: number;
+  spread_y_from?: number;
+  spread_y_to?: number;
+  /** **相邻两个字开始的间隔**（帧）。0 = 全部同时（"逐字"退化成"整行"）。 */
+  stagger_frames?: number;
+}
+
 export interface RenderHints {
+  /** **画布底色**：`#rgb` / `#rrggbb` / `#rrggbbaa`。`None` = 透明（宿主/编码器那边就是黑）。 */
+  background?: string | null;
   format?: string;
   height?: number;
   width?: number;
+}
+
+export interface ScalePoint {
+  /** 相对**周期起点**的毫秒。 */
+  ms: number;
+  /** 这一点的缩放倍率（1.0 = 基线）。 */
+  scale: number;
+}
+
+export interface ShadowSpec {
+  /** CSS `drop-shadow()` 的模糊半径（σ，文档像素）。 */
+  blur_sigma?: number;
+  offset_x?: number;
+  offset_y?: number;
+  opacity?: number;
 }
 
 export interface SourceRef {
@@ -139,9 +233,13 @@ export interface SourceRef {
   asset_id: string;
   /** 素材内起点（帧）。 */
   source_in: number;
+  /** **播放速率**。`1.0` = 原速；`2.0` = 两倍速（同样的输出时长吃掉两倍的源帧）。 */
+  source_rate?: number;
 }
 
 export interface SubtitleStyle {
+  /** **文字块底边的归一化 y**（0 = 画面顶边，1 = 画面底边）。默认 1.0 = 贴底。 */
+  anchor_bottom?: number;
   /** 底边距 = 目标高度 * 这个比例。 */
   bottom_margin?: number;
   /** 文字颜色，RGBA。 */
@@ -164,14 +262,36 @@ export interface SubtitleStyle {
   line_height?: number;
   /** 最多几行（超出的行丢掉 —— 字幕不该盖住半屏）。 */
   max_lines?: number;
+  /** **绝对盒原点**（归一化 0..1，**文字块左上角**）。None = 沿用本仓自己的锚点（现状，零回归）。 */
+  origin?: number[] | null;
+  /** **外圈描边**：在 `stroke_ratio` 那一圈**外面**再加一圈（常态白）。 */
+  outer_stroke?: OuterStroke | null;
   /** 是否加描边（压住亮背景）。 */
   outline?: boolean;
+  /** **逐字动效**（P3，2026-10-13）：每一个字各自动、按序号错峰。 */
+  per_char?: PerCharSpec | null;
+  /** **逐字出场窗口（帧）**（2026-10-18）：窗口**锚在出点**，逐字错峰沿用 */
+  per_char_out_frames?: number | null;
+  /** **底衬（plate）的颜色**。`None` = 不铺底衬（默认，既有工程逐字节不变）。 */
+  plate_color?: number[] | null;
+  /** **底衬向四周外扩的像素数**（目标像素）。默认 12。 */
+  plate_pad_px?: number | null;
   /** 入场时从下方浮上来的距离（**文档像素**）。参照实现 是 `20`。 */
   rise_in_px?: number;
   /** 退场时向上浮的距离（文档像素）。参照实现 是 `8`。 */
   rise_out_px?: number;
   /** **换行安全宽**（占画布宽的比例）。默认 0 = 沿用老行为。 */
   safe_width_ratio?: number;
+  /** **周期缩放曲线**（心跳，2026-10-18）：`[(毫秒, 倍率), …]`，按 `scale_cycle_ms` 循环。 */
+  scale_curve?: ScalePoint[] | null;
+  /** **周期缩放的周期长度（毫秒）**（心跳）。`None` 或 0 ⇒ `scale_curve` 不生效。 */
+  scale_cycle_ms?: number | null;
+  /** **弹入的起始缩放**（T1）。`None` = 1.0（不缩）。 */
+  scale_in_from?: number | null;
+  /** **弹入窗口的时长（毫秒）**（T1）。`None` = 0 = 关（**不缩**）。 */
+  scale_in_ms?: number | null;
+  /** **弹入的过冲峰值**（T1）。`None` = 1.0（不过冲）。 */
+  scale_in_peak?: number | null;
   /** **阴影的模糊半径**（占**文档高**的比例；0 = 硬阴影）。 */
   shadow_blur_ratio?: number;
   /** **文字阴影的颜色**（`None` = 不画阴影，默认 —— 既有工程逐字节不变）。 */
@@ -180,12 +300,20 @@ export interface SubtitleStyle {
   shadow_dx_px?: number;
   /** 阴影的垂直偏移（文档像素，**正数向下**）。 */
   shadow_dy_px?: number;
+  /** **抖动频率（Hz）**（T4）。`None` = [`crate::text_motion::DEFAULT_SHAKE_HZ`]（18.0）。 */
+  shake_hz?: number | null;
+  /** **抖动的相位**（弧度）（T4）。`None` = 0.0。 */
+  shake_phase?: number | null;
+  /** **抖动幅度**（T4，**文档像素**）。`None` = 0.0 = 不抖。 */
+  shake_px?: number | null;
   /** **装不下时整体缩字号的下限**。默认 0 = 不缩（老行为：超出直接丢行）。 */
   shrink_min_scale?: number;
   /** 描边颜色。`outline` 为假时忽略。 */
   stroke_color?: number[];
   /** **描边宽度** = 目标高度 * 这个比例，单位是**外侧宽度**（见下）。 */
   stroke_ratio?: number;
+  /** **竖排**（E 组 3 档）。`None` / `false` = 横排（既有行为）。 */
+  vertical?: boolean | null;
 }
 
 export interface TimebaseDto {
@@ -218,6 +346,8 @@ export interface TransformV2 {
   /** **角度制**（契约规定，不由字段名暗示）。 */
   rotation: number;
   scale: number;
+  /** **纵向倍数**（`1.0` = 纵向跟随 `scale`，即**等比**）。 */
+  scale_y?: number;
   x: number;
   y: number;
 }
