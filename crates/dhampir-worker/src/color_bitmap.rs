@@ -305,10 +305,11 @@ pub(crate) fn color_font_in(dir: &Path) -> Option<PathBuf> {
     hit
 }
 
+type StrikeCache = HashMap<(PathBuf, u32), Option<Arc<ColorStrike>>>;
+
 /// 解码结果缓存：同一 (字体, 码点) 只解一次 PNG（出片会反复问）。
 pub fn color_strike_cached(path: &Path, codepoint: u32) -> Option<Arc<ColorStrike>> {
-    static C: OnceLock<std::sync::Mutex<HashMap<(PathBuf, u32), Option<Arc<ColorStrike>>>>> =
-        OnceLock::new();
+    static C: OnceLock<std::sync::Mutex<StrikeCache>> = OnceLock::new();
     let cache = C.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(hit) = guard.get(&(path.to_path_buf(), codepoint)) {

@@ -37,9 +37,9 @@ authors = ["dhampir contributors"]
 repository = "https://github.com/Sinsax/Dhampir"  # 五个 crate 各自 `repository.workspace = true` 继承这里
 
 [workspace.dependencies]
-dhampir-timeline = { version = "0.4.0", path = "crates/dhampir-timeline" }
-dhampir-media = { version = "0.4.0", path = "crates/dhampir-media" }
-dhampir-core = { version = "0.4.0", path = "crates/dhampir-core" }
+dhampir-timeline = { version = "0.5.0", path = "crates/dhampir-timeline" }
+dhampir-media = { version = "0.5.0", path = "crates/dhampir-media" }
+dhampir-core = { version = "0.5.0", path = "crates/dhampir-core" }
 
 # wgpu：**不在这里开任何后端**。
 #   core   → 只要 std + wgsl（API 层与 WGSL 前端），后端由宿主自己加
