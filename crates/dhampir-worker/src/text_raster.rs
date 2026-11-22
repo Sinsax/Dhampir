@@ -408,6 +408,204 @@ impl TextBitmap {
 /// 填充与描边的抗锯齿边缘相叠的那一圈像素里，两种墨色是混着的，
 /// 这里按 whiteness 线性插值 —— 最坏情况下那**一个像素宽**的过渡带会有偏差。
 /// 它不是「更准」而是「有界」：叠加后的偏差不超过两种墨色之差。
+// ── 彩色 emoji 直通（CBDT）────────────────────────────────────────────────────
+
+/// 这条文本要不要走彩色直通：**主字体有画不了的码位**，且目录里有 CBDT 字体兜着。
+///
+/// 绝大多数行走第一个 early-return（一次哈希查表）—— 这个函数在每行栅格化前都会跑。
+fn needs_color_bitmap(key: &TextRasterKey, text: &str) -> bool {
+    let Some(primary) = crate::font_coverage::coverage_of(&key.font_file) else {
+        return false; // 主字体读不出 cmap ⇒ 不动（老路），别让坏字体拖出新路径
+    };
+    if text.chars().all(|c| primary.covers(c as u32)) {
+        return false;
+    }
+    key.font_dir
+        .as_deref()
+        .and_then(crate::color_bitmap::color_font_in)
+        .is_some()
+}
+
+/// 双线性重采样（预乘域 —— 预乘之后插值不会产生新的颜色）。
+fn resample_bilinear(premul: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
+        return Vec::new();
+    }
+    let mut out = vec![0u8; (dw * dh * 4) as usize];
+    for dy in 0..dh {
+        let fy = (dy as f32 + 0.5) * sh as f32 / dh as f32 - 0.5;
+        let y0 = fy.floor().max(0.0) as u32;
+        let y1 = (y0 + 1).min(sh - 1);
+        let wy = (fy - y0 as f32).clamp(0.0, 1.0);
+        for dx in 0..dw {
+            let fx = (dx as f32 + 0.5) * sw as f32 / dw as f32 - 0.5;
+            let x0 = fx.floor().max(0.0) as u32;
+            let x1 = (x0 + 1).min(sw - 1);
+            let wx = (fx - x0 as f32).clamp(0.0, 1.0);
+            for c in 0..4 {
+                let p00 = premul[(y0 * sw + x0) as usize * 4 + c] as f32;
+                let p01 = premul[(y0 * sw + x1) as usize * 4 + c] as f32;
+                let p10 = premul[(y1 * sw + x0) as usize * 4 + c] as f32;
+                let p11 = premul[(y1 * sw + x1) as usize * 4 + c] as f32;
+                let top = p00 + (p01 - p00) * wx;
+                let bot = p10 + (p11 - p10) * wx;
+                out[(dy * dw + dx) as usize * 4 + c] = (top + (bot - top) * wy).round() as u8;
+            }
+        }
+    }
+    out
+}
+
+/// 三遍盒滤波 ≈ 高斯（阴影用；正常的阴影由 ffmpeg `gblur` 做，这条只服务彩色直通）。
+fn box_blur_premul(premul: &mut [u8], w: u32, h: u32, radius: u32) {
+    if radius == 0 || w == 0 || h == 0 {
+        return;
+    }
+    let r = radius as usize;
+    let mut tmp = premul.to_vec();
+    for _ in 0..3 {
+        // 水平
+        for y in 0..h as usize {
+            let row = &premul[y * w as usize * 4..(y + 1) * w as usize * 4];
+            for x in 0..w as usize {
+                let lo = x.saturating_sub(r);
+                let hi = (x + r + 1).min(w as usize);
+                let n = (hi - lo) as f32;
+                // ⚠️ 先切整段像素（lo*4..hi*4）再按通道取 —— 带着通道下标切
+                // `row[lo*4+c .. hi*4+c]` 会在最后一列越界（行恰好 4w 字节）。
+                let band = &row[lo * 4..hi * 4];
+                for c in 0..4 {
+                    let sum: u32 = band.chunks_exact(4).map(|px| px[c] as u32).sum();
+                    tmp[(y * w as usize + x) * 4 + c] = (sum as f32 / n).round() as u8;
+                }
+            }
+        }
+        // 垂直
+        for x in 0..w as usize {
+            for y in 0..h as usize {
+                let lo = y.saturating_sub(r);
+                let hi = (y + r + 1).min(h as usize);
+                let n = (hi - lo) as f32;
+                for c in 0..4 {
+                    let sum: u32 = (lo..hi)
+                        .map(|yy| tmp[(yy * w as usize + x) * 4 + c] as u32)
+                        .sum();
+                    premul[(y * w as usize + x) * 4 + c] = (sum as f32 / n).round() as u8;
+                }
+            }
+        }
+    }
+}
+
+/// 合成一张**全尺寸**位图：emoji strike 按 `advance_em` 的步进排开、缩放到行内
+/// CJK 的墨高（探针渲染「国」量出来 —— 它与 libass 画的字共享同一套几何，
+/// 所以 emoji 的落点/大小与相邻的 CJK 段对得上）。
+///
+/// 阴影键（`shadow_color = Some`）同样走这里：画**白色剪影** + CPU 盒滤波模糊，
+/// 染上阴影色 —— 与正常路径的「白墨 → gblur → tint」产物对齐。
+fn compose_color_bitmap(key: &TextRasterKey, text: &str) -> Result<TextBitmap, String> {
+    let (w, h) = (key.width, key.height);
+    if w == 0 || h == 0 {
+        return Err(format!("位图尺寸不合法：{w}x{h}"));
+    }
+    let Some(dir) = key.font_dir.as_deref() else {
+        return Err("彩色 emoji 需要 --font-dir（里面要有 CBDT 字体）".to_string());
+    };
+    let Some(color_font) = crate::color_bitmap::color_font_in(dir) else {
+        return Err("字体目录里没有彩色位图字体".to_string());
+    };
+
+    let is_shadow = key.shadow_color.is_some();
+    // **探针**：用同一套几何画一个 CJK 字，量出墨盒 —— emoji 的底边/高度都对齐它。
+    let probe_key = TextRasterKey {
+        text: "国".into(),
+        x_offset: 0,
+        shadow_color: None,
+        shadow_blur_px: 0,
+        shadow_dx_px: 0,
+        shadow_dy_px: 0,
+        shadow_pad: 0,
+        outline: false,
+        stroke_px: 0,
+        outer_stroke_px: 0,
+        ..key.clone()
+    };
+    let probe = rasterize_line(&probe_key).ok();
+    // 目标高度 = **探针墨盒高**（不是按 advance 缩放）：emoji 与相邻 CJK 的墨迹
+    // 等高、底边对齐 —— 这样 emoji 的上下沿都不会探出位图（探出会被判「墨迹被切」，
+    // 进而把整次出片判失败）。探针失败时的保守估计：高 1em、底边在中线下方 0.35em。
+    let (target_h, bottom) = match probe.as_ref().and_then(|b| b.ink_bounds()) {
+        Some((_, iy, _, ih)) => (ih.max(8) as f32, (iy + ih) as f32),
+        None => (
+            key.font_px as f32,
+            h as f32 / 2.0 + key.font_px as f32 * 0.35,
+        ),
+    };
+
+    let font_px = key.font_px as f32;
+    let total = dhampir_core::timeline::text_layout::measure_em(text) * font_px;
+    let start_x = (w as f32 - total) / 2.0;
+
+    let mut canvas = vec![0u8; (w * h * 4) as usize];
+    let mut cursor = start_x;
+    for ch in text.chars() {
+        let adv_em = dhampir_core::timeline::text_layout::advance_em(ch);
+        let adv_px = adv_em * font_px;
+        // 零宽（ZWJ / 变体选择符 / 肤色修饰）：不占宽、不画 —— 与浏览器一致
+        if adv_em == 0.0 {
+            continue;
+        }
+        if let Some(strike) = crate::color_bitmap::color_strike_cached(&color_font, ch as u32) {
+            let scale = target_h / strike.height.max(1) as f32;
+            let dw = ((strike.width as f32) * scale).round().max(1.0) as u32;
+            let dh = target_h.round().max(1.0) as u32;
+            let scaled = resample_bilinear(&strike.pixels, strike.width, strike.height, dw, dh);
+            // 落点：水平居中在自己的步进里；垂直 = 底边对齐探针墨盒的底边
+            let cx = cursor + adv_px / 2.0;
+            let left = (cx - dw as f32 / 2.0).round() as i32;
+            let top = bottom as i32 - dh as i32;
+            for py in 0..dh as i32 {
+                let ty = top + py;
+                if ty < 0 || ty >= h as i32 {
+                    continue;
+                }
+                for px_i in 0..dw as i32 {
+                    let tx = left + px_i;
+                    if tx < 0 || tx >= w as i32 {
+                        continue;
+                    }
+                    let src = ((py as u32) * dw + px_i as u32) as usize * 4;
+                    let dst = (ty as u32 * w + tx as u32) as usize * 4;
+                    // 阴影：取 alpha 做**白色剪影**；正文：保留 strike 自己的颜色（不染色！）
+                    let a = scaled[src + 3] as u16;
+                    if is_shadow {
+                        canvas[dst] = a as u8;
+                        canvas[dst + 1] = a as u8;
+                        canvas[dst + 2] = a as u8;
+                        canvas[dst + 3] = a as u8;
+                    } else {
+                        canvas[dst] = ((scaled[src] as u16) * a / 255) as u8;
+                        canvas[dst + 1] = ((scaled[src + 1] as u16) * a / 255) as u8;
+                        canvas[dst + 2] = ((scaled[src + 2] as u16) * a / 255) as u8;
+                        canvas[dst + 3] = a as u8;
+                    }
+                }
+            }
+        }
+        cursor += adv_px;
+    }
+
+    if is_shadow {
+        // 模糊 + 染阴影色（与正常路径「白墨 → gblur → tint」同形）
+        let sigma = shadow_sigma_px(key.shadow_blur_px);
+        box_blur_premul(&mut canvas, w, h, (sigma.round() as u32).max(1));
+        let color = key.shadow_color.unwrap_or([0, 0, 0, 102]);
+        let tinted = tint(&canvas, color);
+        return TextBitmap::new(w, h, tinted);
+    }
+    TextBitmap::new(w, h, canvas)
+}
+
 pub fn tint(premultiplied: &[u8], color: [u8; 4]) -> Vec<u8> {
     let mut out = premultiplied.to_vec();
     for px in out.chunks_exact_mut(4) {
@@ -1196,6 +1394,16 @@ pub fn rasterize_line(key: &TextRasterKey) -> Result<TextBitmap, String> {
             "字体文件不在：{}（--font-file 指错了吗？本仓不猜系统字体）",
             key.font_file.display()
         ));
+    }
+
+    // **彩色 emoji 直通**（2026-11-22）：这条文本里有主字体画不了的码位，
+    // 且字体目录里有 CBDT 彩色位图字体能画 ⇒ 不走 libass（实测 0.17.5 连 CBDT
+    // 都加载不了：`Error getting metadata for embedded font`；就算能，下面的 tint
+    // 也会把彩色位图染成单色）—— 直接从 strike 合成一张全尺寸位图，
+    // **与前端浏览器用的是同一份位图数据**。判据与合成分别在
+    // [`needs_color_bitmap`] / [`compose_color_bitmap`]。
+    if needs_color_bitmap(key, text) {
+        return compose_color_bitmap(key, text);
     }
 
     let subtitle_file = write_subtitle_file(text)?;

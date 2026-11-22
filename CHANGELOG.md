@@ -4,6 +4,31 @@
 
 产品版本（本文件）与契约版本（`project_schema` / `host_api`）是两条独立的线：只有契约变化的发布，产品版本仍要动 —— 下游钉固的是产物 zip 的字节。
 
+## [0.5.0] — emoji 彩色直通（CBDT strike）+ 逐字字形回退
+
+**修的是「一条文本只用一支字体」**：用户选的 CJK 字体没有 emoji 字形时，字幕/弹幕里的 👮 之类在成片里是 `.notdef` 空心方框（2026-11-22 用户报）。`--font-dir` 只是交给 libass 的 fontsdir，缺字形**不会**触发回退 —— 实测把 `\fn` 指到 emoji 字体、甚至把 `--font-file` 整个换成 emoji 字体，出帧逐字节不变（栅格器按 `font_family` 找，这些路都改不动它）。
+
+用户随后明确口径：**要与前端一致 = 彩色**。libass 0.17.5 虽然号称支持 CBDT，实测对本仓在用的 2020 版 Noto Color Emoji 连加载都过不去（`Error getting metadata for embedded font`）；就算能加载，白墨 → 染色（`tint`）那条链路也会把彩色位图染成单色。所以彩色走**独立合成通道**。
+
+### Added
+- **`font_coverage`**（`dhampir-worker`）：读字体 `cmap`（format 4 / 12，glyph 0 = `.notdef` 判为不覆盖）回答「这支字体有没有这个码点」；**不引新依赖**（只需一个布尔，不走 ttf-parser，许可证清单不动）。进程内缓存，一条文本会问几百次。
+- **`split_runs_by_coverage`**（`text_overlay.rs`）：把每个 `TextRun` 按「谁来画这个字」切成小段，每段带自己的字体与**族名**。三条纪律：① 首选字体覆盖全部 ⇒ 段与输入一一对应、**逐字节零回归**（判据 `split_keeps_runs_verbatim_when_coverage_is_unknown` 不需要字体文件也钉得住）；② 排版口径不变（段宽仍走 `measure_em`）；③ 没有任何字体覆盖时保持主字体（豆腐，但不丢字）。
+- **`color_bitmap`**（新增模块）：直接从 CBDT/CBLC 字体里抽 glyph 的 **PNG strike**（Noto 的条目本身就是调色板 PNG），解码（`png` crate 与 core 共用 0.17，`Transformations::EXPAND` 展开调色板+tRNS）、缩放、合成。字段语义实测：CBLC 的 `bitmapSizeTable` 步长 48；`indexSubTableArrayOffset` 以 **CBLC** 为基准（数组条目 8 字节：first u16 / last u16 / addOff u32）；`imageDataOffset` / `codeOffset` 以 **CBDT** 为基准 —— 第一版把数组条目误读成 subtable 头（数字上恰好形似 `indexFmt=4, imageFmt=17`），注释里留了墓碑。
+- **`needs_color_bitmap` / `compose_color_bitmap`**（`text_raster.rs`）：栅格化入口的直通分支 —— 主字体有画不了的码位且目录里有 CBDT 字体时，绕过 libass 直接合成：emoji 高度对齐**探针渲染「国」的墨盒**（与相邻 CJK 等高、底边对齐；探出位图会被判「墨迹被切」→ 整次出片失败）；阴影键同样走这里（白色剪影 + CPU 三遍盒滤波 + `tint`，与正常路径「白墨 → gblur → tint」同形）。零宽字符（ZWJ / 变体选择符 / 肤色修饰）不占宽不画。
+- **三条路径全接**：`.hl` 分段（`paint_parts`）、普通整行（`paint_one`，单段整行落在回退字体也接住了）、逐字特效（`paint_per_char`，逐字各自挑）。段的行内定位改由**贴图平移**表达（`TextRasterKey::x_offset` 从来没被栅格器读过 —— 全仓只有 0 值）；单段时平移为 0，与改动前逐字节相同。
+- 每段把**回退字体自己的族名**交给 libass（`font_family_name` 优先吃 key 里的族名）—— 只换 `font_file` 而不换族名等于没换（`name` 表读取在 `font_coverage::family_of`）。
+
+### Verified
+- 零回归：同一工程**不含 emoji** 的帧，改动前后 PNG **逐字节相同**（md5 一致）。
+- 端到端：含 👮 的字幕/弹幕真渲染 63 帧（1080p60）：`lines_failed: 0`、`lines_clipped: 0`，成片帧里 emoji 为**彩色**（CBDT 位图，与前端同一份位图数据）。
+- `cargo test -p dhampir-worker` 172 lib 全绿（新增 6 条：cmap format 4/12、哨兵段、`covers_all`、真字体解析、CBDT 彩色 strike、缺码点回落；切段测试用**自建隔离目录**，断言不随实验目录漂）。`check-dep-graph` / `licenses --check`（新增 `png` 0.17 与 core 同源，锁里已有）/ 29 个 `check-*.mjs` 全过。
+
+### 已知残留
+- ZWJ 复合序列（👨‍👩‍👧 这类）按码点逐个画，不走 GSUB 连字 —— 浏览器会合成一个，成片会是几个并排。要修得引 shaping（harfbuzz 级），另行评估。
+- emoji 不吃所在轨的描边/白环（浏览器对彩色 emoji 同样不描边）；阴影走剪影模糊，正常。
+- 若用户**把彩色 emoji 字体本身选成字幕字体**：CJK 走轮廓回退、emoji 走直通，混排可用；纯 emoji 行之外的组合未穷举。
+- 字体族名的 `.hl` 分段定位从「`x_offset`（从未生效）」改为「贴图平移」后，带高亮的行的像素可能与旧版有细微差别（几何上新算法是逐段连续排布的正确解）。
+
 ## [0.4.1] — 文字边缘的两处真缺陷（白线 / 距离场）
 
 **修的是文字边缘**：描边压填充的白线、距离场换精确 EDT。含 0.4.0（文字纵向锚）一并发布 —— 契约号与 0.4.0 相同（`host_api = 7`、`project_schema = 1`），下游换产物即可，代码不用动。

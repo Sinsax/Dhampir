@@ -343,6 +343,7 @@ dependencies = [
  "dhampir-media",
  "env_logger",
  "log",
+ "png",
  "pollster",
  "serde",
  "serde_json",
