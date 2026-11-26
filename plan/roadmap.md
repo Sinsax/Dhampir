@@ -456,6 +456,9 @@ pkg**，而不是放宽判据 —— 这次没做（不在 0.1.0 产物范围内
 **与本轮 D24 无关**：用 `git stash` 撤下 `crates/` 全部改动复跑，
 **基线第 5 次就红在同一行**（同一条测试、同一处 panic）。登记为 **D25**（todo）。
 
+**2026-11-26 已修**（D27 那轮顺带）：`writable_scratch_dir()` 改成
+`temp_dir/dhampir-t1-{pid}-{原子计数}`，每条用例各拿一个子目录。
+
 ## D26：CI 红了两天没人看（2026-10-09，已修）
 
 **不在任何阶段里**（phase=-）。登记为 **D26**（done）。
@@ -503,6 +506,39 @@ JS 侧 `isAbsoluteUri` 同步改（Node 的 `win32.join` 实测没有 Rust 那�
 `挂根不用_path_join_以免在_windows_上丢掉_asset_root` 用 `./a.mp4` 前导点号那条
 做到了在 Linux 上也能红（实测退回 `join` 即失败）。
 
+## D27：`fontsdir=` 里的 ASCII 单引号让 `force_style` 整段被吞（2026-11-26，已修）
+
+**不在任何阶段里**（phase=-）。登记为 **D27**（done）。
+
+宿主（YekiTrim）工程目录带 ASCII 单引号（`E:\media\[2026-10-06 21-18-33-635][说会话z'z]\output\…`），
+平铺字体目录经 `--font-dir` 递进来，路径进 `fontsdir='…'`，`filter_value` 把 `'` 转成 `'\''`。
+
+**实测（ffmpeg 4.4 与 2026-11 master 一致）**：ffmpeg 解析滤镜 **option 值**时在这个转义处
+**静默截断**，同串里 `fontsdir=` **之后**的 `:force_style='…'` 整段被吞。libass 于是用默认样式
+（~16 号虚拟字、`Alignment=2` 贴底）把每行字幕栅格化成 ~9px 的贴底小条，`clip_message` 把
+**全部行**报成 `subtitle_ink_clipped`（实测一次出片 4063/4063 行，done 报 `failed:true`）。
+
+**而 ffmpeg 退出码 0、rawvideo 字节数完整** ⇒ 既有的退出码与字节数检查**一条都拦不住**。
+中文、方括号、弯引号（`’`）都不触发，**只有 ASCII `'` 触发**。
+
+另一条转义变体（`'` → `\\'`）直接解析报错（`No such filter: 'FontSize'`）：
+**`'` 在滤镜 option 值里没有合法写法，`filter_value` 救不了，只能在入口保证值干净。**
+
+修法：安全判据升级为 `filter_string_safe`（**全 ASCII 且无 `'`**，两条都要），
+沿 T1 的 `ascii_font_path`/`StagedFont` 模式扩到字体目录 —— `safe_font_dir` / `StagedFontDir`：
+不安全就整目录复制到 `temp_dir()/dhampir-fontdir-{pid}-{目录内容摘要:016x}`（`copy` 不用 `hard_link`，
+Windows 跨卷）。安全路径 `staged=None`、原样返回 —— 保住"老工程参数串一个字节不变"那条冻结判据。
+
+**教训**：`is_ascii()` **不是**滤镜串安全的充分条件。T1 只写了非 ASCII 字体**文件名**
+（`drawtext=fontfile=`，非 ASCII → SIGSEGV），漏了 **`fontsdir` 目录本身仍要进滤镜串**。
+且这次的失败形态更阴：rc=0、字节数对、只是样式丢了。
+
+**范围实测**（用来划定"哪些值要不要一起治"）：同一个单引号放在 `force_style='FontName=…'`
+**里层**时只让族名自己少一个字符，`:FontSize=` 之后的 options 全活着 ⇒ `font_family_name`
+**不改**（改了是范围外的行为变更）。`pipeline.rs` concat demuxer 的 `file '…'` 行在**文件内容**里、
+非滤镜串，实测能过 ⇒ 只补注释、不动行为。
+
+---
 ---
 
 ## 明确不做（写进台账，不假装）

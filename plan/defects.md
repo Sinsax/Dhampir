@@ -19,9 +19,9 @@
 - 根因是一串**空格分隔的记号**，每个记号要么是仓库内真实存在的路径（可带 :行号 或 :起-止），
   要么是另一个条目 id。至少一个。
 - 证据是 - 或一串同样形式的真实路径；**status=done 时必须给出至少一个存在的文件**。
-- 计数声明行 <!-- ledger: D=26 A=10 --> 必须与实际条数一致。
+- 计数声明行 <!-- ledger: D=27 A=10 --> 必须与实际条数一致。
 
-<!-- ledger: D=26 A=10 -->
+<!-- ledger: D=27 A=10 -->
 
 ## 缺陷（D）
 
@@ -237,11 +237,11 @@
   备注: **教训值得单独记**：误差随被测量的值**线性**增长时，先怀疑**量纲**，再怀疑时间 —— 真的帧漂移是**阶梯**（隔一段跳一格），不是线性。另外 `signalstats`/`gray`/`rgb24`/`showinfo`/纯 Python 解 PNG 这几条路**各自给过不同答案**，最后靠"不经过 ffmpeg 色彩转换"的两条路互证才定案。速率字段那半本就已完成（`source.source_rate` + 音轨 `atempo`），且本就精确
   证据: plan/d5-frame-rate-handoff.md
 
-- [D25] status=todo phase=-
+- [D25] status=done phase=-
   症状: `cargo test -p dhampir-worker --lib` **偶发转红**（约 1/5~1/20 次），红在 `text_raster::tests::非_ascii_字体路径会被搬到临时_ascii_路径`：`造一份源文件: Os { code: 3, kind: NotFound }`。单独跑该测试次次绿，所以一度像 flake
-  根因: crates/dhampir-worker/src/text_raster.rs:2251 crates/dhampir-worker/src/text_raster.rs:2326
+  根因: crates/dhampir-worker/src/text_raster.rs:3720
   验收: 各测试用**各自的** scratch 子目录（现在共用 `temp_dir/dhampir-t1-{pid}`，而同一测试二进制里的测试是**并行线程**，所以两条测试的 `remove_dir_all` 会删掉别人正在写的目录）。判定标准：连跑 30 次 `-p dhampir-worker --lib` 全绿，且把 `remove_dir_all` 去掉后仍有测试能证明确实清理过
-  备注: **与本轮 D24 无关**，已用 `git stash` 把 `crates/` 全部改动撤下复跑，**基线第 5 次就红在同一行**（同一条测试、同一处 panic）。属既有的测试串扰，不影响产物
+  备注: **与本轮 D24 无关**，已用 `git stash` 把 `crates/` 全部改动撤下复跑，**基线第 5 次就红在同一行**（同一条测试、同一处 panic）。属既有的测试串扰，不影响产物。**2026-11-26 已修**（D27 那轮顺带）：`writable_scratch_dir()` 改成 `temp_dir/dhampir-t1-{pid}-{原子计数}`，每条用例各拿一个子目录；`cargo test -p dhampir-worker --lib` 连跑 5 次全绿
   证据: crates/dhampir-worker/src/text_raster.rs
 
 - [D26] status=done phase=-
@@ -253,3 +253,10 @@
     (2) **测试夹具不能写死平台专属路径**。三条测试的反向用例用了 `C:/Windows/Fonts`，在 ubuntu 腿上是必然不存在的路径 ⇒ 判据成了"Windows 绿、Linux 红"的**假回归**。改用当前平台一定存在的目录、或自建夹具。注意这与"平台差异"不同：被测逻辑两平台一致，**只有夹具**挑了 Windows。
     (3) 附带：`upload-artifact@v5` **仍然是 `node20`**（v6 才是 node24）—— **大版本号 ≠ Node 版本**，要读 `action.yml` 的 `runs.using`。
   证据: .github/workflows/ci.yml
+
+- [D27] status=done phase=-
+  症状: 宿主工程目录带 ASCII 单引号（如 `[说会话z'z]`）时，`--font-dir` 那条路径进滤镜串 `fontsdir='…'`，经 `filter_value` 转义成 `'\''` 后 ffmpeg **静默截断**，同串里 `:force_style='…'` 整段被吞 ⇒ libass 用默认样式（~16 号虚拟字、Alignment=2 贴底）把每行字幕画成 ~9px 贴底小条，`clip_message` 把**全部行**报成 `subtitle_ink_clipped`（实测 4063/4063 行，done 报 `failed:true`）。而 **ffmpeg 退出码 0、rawvideo 字节数完整** —— 退出码与字节数两项既有检查**全部拦不住**
+  根因: crates/dhampir-worker/src/text_raster.rs:667 crates/dhampir-worker/src/text_raster.rs:1778
+  验收: `滤镜串不安全的目录要搬走_搬出来的必须干净`（不安全的目录 `is_staged()` 且搬后路径过判据、内容逐字节相同、Drop 清理）、`安全目录不搬_这一条是默认路径字节冻结`（反向：ASCII 路径原样返回）、`字幕临时文件路径天然安全`（防退化）、`真机_引号目录画出来的字是正常大小`（`#[ignore]` 真起 ffmpeg，修复前必红：本机实测修复前墨迹 141、修复后 >1000）。判据升级为 `filter_string_safe`（**全 ASCII 且无 `'`**，两条都要）；安全路径仍原样返回，老工程参数串逐字节不变
+  备注: **两条教训**：① `is_ascii()` **不是**滤镜串安全的充分条件 —— T1 台账只写了非 ASCII 字体**文件名**，漏了 `fontsdir` **目录**同样要进滤镜串；② 这次失败形态 rc=0、字节数对、只有样式丢了，宿主侧没有便宜的检测手段 ⇒ 只能在 `font_dir()` 入口保证值干净。另实测圈定范围：单引号放在 `force_style='FontName=…'` **里层**时只让族名自己少一个字符、后续 options 全活着，所以 `font_family_name` **不改**（改了是范围外的行为变更）。`pipeline.rs` concat demuxer 的 `file '…'` 行在**文件内容**里、非滤镜串，实测能过，只补注释
+  证据: crates/dhampir-worker/src/text_raster.rs

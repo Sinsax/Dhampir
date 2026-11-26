@@ -4,6 +4,26 @@
 
 产品版本（本文件）与契约版本（`project_schema` / `host_api`）是两条独立的线：只有契约变化的发布，产品版本仍要动 —— 下游钉固的是产物 zip 的字节。
 
+## [未发布] — `fontsdir=` 里的 ASCII 单引号让 `force_style` 整段被吞
+
+**修的是「字体目录名」**：宿主工程目录带 ASCII 单引号（`[说会话z'z]`）时，`--font-dir` 那条路径进 `fontsdir='…'`，`filter_value` 把 `'` 转成 `'\''`，而 ffmpeg 解析滤镜 **option 值**时在这里**静默截断** —— 同串里 `fontsdir=` 之后的 `:force_style='…'` 整段被吞。
+
+后果是全方位的静默：libass 用默认样式（~16 号虚拟字、`Alignment=2` 贴底）把每行字幕画成 ~9px 的贴底小条，`clip_message` 把**全部行**报成 `subtitle_ink_clipped`（实测一次出片 4063/4063 行，`done` 报 `failed:true`），而 **ffmpeg 退出码 0、rawvideo 字节数完整** —— 退出码与字节数两项既有检查**一条都拦不住**。中文、方括号、弯引号（`’`）都不触发，**只有 ASCII `'` 触发**（ffmpeg 4.4 与 2026-11 master 实测一致）。
+
+### Fixed
+- **`filter_string_safe`**（`text_raster.rs`）：滤镜串 option 值的安全判据升级为「全 ASCII **且**无 `'`」——`is_ascii()` 不是充分条件。`'` 在滤镜 option 值里**没有合法写法**：`'\''` 静默吞后续 options，`\\'` 直接报 `No such filter: 'FontSize'`。
+- **`StagedFontDir` / `safe_font_dir`**：沿 T1 的 `ascii_font_path` / `StagedFont` 模式扩到**目录** —— 不安全就整目录复制到 `temp_dir()/dhampir-fontdir-{pid}-{目录内容摘要:016x}`（`copy` 不用 `hard_link`，Windows 跨卷），用完即删。安全路径 `staged=None`、**原样返回**：老工程的参数串一个字节不变（冻结判据仍绿）。进程内按目录共享一份（多线程分块渲染不会「一个线程删掉另一个线程正要用的目录」）。
+- **`writable_scratch_dir()` 测试夹具**：`temp_dir/dhampir-t1-{pid}` → `…-{pid}-{原子计数}`，修掉 D25 登记的并行测试串扰（`cargo test -p dhampir-worker --lib` 连跑 5 次全绿）。
+
+### 范围（实测圈定，不是猜的）
+- 单引号放在 `force_style='FontName=…'` **里层**时只让族名自己少一个字符、后续 options 全活着 ⇒ `font_family_name` **不改**（改了是范围外的行为变更）。
+- `pipeline.rs` concat demuxer 的 `file '…'` 行在**文件内容**里、非滤镜串，实测能过 ⇒ 只补注释、不动行为。
+
+### 判据
+- `滤镜串不安全的目录要搬走_搬出来的必须干净`、`安全目录不搬_这一条是默认路径字节冻结`（反向）、`字幕临时文件路径天然安全`（防退化）、`搬字体目录失败要响亮报错而不是递一个空路径`；
+- `真机_引号目录画出来的字是正常大小`（`#[ignore]`，真起 ffmpeg）：修复前必红（墨迹 141 → 修复后 >1000，本机实测 2135、高 33px、不碰边界）。
+- `cargo test -p dhampir-worker --lib` 176 全绿；`cargo clippy -p dhampir-worker --all-targets` 零警告；`cargo fmt --check` 干净。
+
 ## [0.5.0] — emoji 彩色直通（CBDT strike）+ 逐字字形回退
 
 **修的是「一条文本只用一支字体」**：用户选的 CJK 字体没有 emoji 字形时，字幕/弹幕里的 👮 之类在成片里是 `.notdef` 空心方框（2026-11-22 用户报）。`--font-dir` 只是交给 libass 的 fontsdir，缺字形**不会**触发回退 —— 实测把 `\fn` 指到 emoji 字体、甚至把 `--font-file` 整个换成 emoji 字体，出帧逐字节不变（栅格器按 `font_family` 找，这些路都改不动它）。

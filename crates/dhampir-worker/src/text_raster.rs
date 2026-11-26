@@ -136,6 +136,25 @@
 //! 用户决策：**让它能画**，不是只报错。做法是把字体复制到一份 ASCII 名的临时路径
 //! （见 [`ascii_font_path`]），用完即删。
 //!
+//! ## 2026-11-26 补记：`is_ascii()` **不是**滤镜串安全的充分条件
+//!
+//! 上面整节讲的是**字体文件名**，而"`--font-dir` 那个**目录**"同样要进滤镜串
+//! （`fontsdir=`）—— 这一点在 T1 台账里漏了。且比非 ASCII 更阴的是 **ASCII 单引号**：
+//! 宿主工程目录叫 `[说会话z'z]`，路径里只有那一个 `'`，`filter_value` 把它转成
+//! `'\''`，ffmpeg 在解析滤镜**选项**值时就在这里**静默截断** —— 同串里
+//! `fontsdir=` 之后的 `:force_style='…'` 整段被吞。
+//!
+//! 后果是全方位的静默：libass 用默认样式（约 16 号虚拟字、`Alignment=2` 贴底）
+//! 把每行字幕栅格化成 ~9px 的小条，`clip_message` 把**全部行**报成
+//! `subtitle_ink_clipped`（实测一次出片 4063/4063 行，`done` 报 `failed:true`），
+//! 而 **ffmpeg 退出码 0、rawvideo 字节数完整** —— 本模块所有的退出码与字节数检查
+//! **一条都拦不住**。实测触发的只有 ASCII `'`：中文、方括号、弯引号（`’`）都不触发。
+//!
+//! 所以安全判据是 [`filter_string_safe`]（**全 ASCII 且无 `'`**，两条都要），
+//! 字体目录走 [`safe_font_dir`]：不安全就整目录复制到临时目录，让进串的那条路径干净。
+//! 教训写在这里：**"路径能进参数"与"路径能进滤镜串"是两条不同的判据**，
+//! 后者更窄，且它的失败形态不会给你任何退出码。
+//!
 //! # 有意不做的事
 //!
 //! * 不做字距 / 连字 / 禁则：那是共享布局的模型，宿主**不许**自己再算一遍，否则两端分叉。
@@ -630,6 +649,41 @@ pub fn tint(premultiplied: &[u8], color: [u8; 4]) -> Vec<u8> {
     out
 }
 
+/// 一条路径能不能**安全地**放进 ffmpeg 滤镜串的 option 值里。
+///
+/// # 两条判据，两条都是实测出来的
+///
+/// * **非 ASCII** → ffmpeg 可能直接段错误（T1 台账：`drawtext` 的 `fontfile=` 对
+///   非 ASCII 文件名退出码 139、一个字节都不吐，见模块文档那张表）；
+/// * **含 `'`** → 见 [`filter_value`] 上面那段：这个字符在滤镜 option 值里
+///   **没有合法写法**，怎么写都会让 ffmpeg 在它那儿把**同串后续的 options 整段吞掉**
+///   （2026-11-26 实测：`fontsdir=` 里的 `'` 让后面的 `:force_style=` 整段消失，
+///   libass 于是静默用默认样式 —— 退出码 0、字节数完整，所有既有检查都拦不住）。
+///   反斜杠与冒号**不在**这里排除：它们有已验证的转义写法。
+///
+/// 于是判据是「全 ASCII **且**没有单引号」，两者缺一不可。
+/// 满足它不代表串一定对（还有长度、编码之类），但**不满足它一定不许进串**。
+///
+/// # 它管的是**路径**这一类值，不是所有值
+///
+/// 实测把这条坑的范围量清楚了：同一个单引号，放在 `fontsdir=` 的值里会吞掉
+/// 后面的 `:force_style=` 整段；放在 `force_style='FontName=…'` **里层**时只让
+/// 族名自己少一个字符，后续 options 全活着（原因：那一层是**两层**引号，
+/// 内层的 `'\''` 只作用在族名字符串上）。所以：
+///
+/// * `fontsdir=` / `subtitles=` 这类**整条路径**的值 —— 必须过本函数；
+/// * 族名 —— 不过本函数（见 [`font_family_name`] 的说明，改了反而是范围外的行为变更）。
+///
+/// `ascii_font_path` 用的判据是**更窄的** `is_ascii()`：那一条只管字体文件路径，
+/// 而本函数管的是"进滤镜串"这件事。两者的关系是**包含**（本函数 ⊆ is_ascii），
+/// 不共用是因为字体文件那条路的既有判据与冻结字节另有约定 —— 别把它们合并。
+pub fn filter_string_safe(path: &Path) -> bool {
+    path.as_os_str()
+        .as_encoded_bytes()
+        .iter()
+        .all(|byte| byte.is_ascii() && *byte != b'\'')
+}
+
 /// 把一段值放进 ffmpeg 滤镜串里**安全**的位置。
 ///
 /// 滤镜串被解析两遍（滤镜图一层、滤镜选项一层），所以：值包在单引号里，
@@ -639,7 +693,24 @@ pub fn tint(premultiplied: &[u8], color: [u8; 4]) -> Vec<u8> {
 /// fontfile='C\:/Windows/Fonts/msyh.ttc'
 /// ```
 ///
-/// 注意用户文本**不走这条路** —— 它进的是 `textfile=` 指的临时文件，
+/// # ⚠️ 它救不了单引号（2026-11-26 事故）
+///
+/// 上面那条 `'\''` 的转义**只在滤镜图那一层成立**。ffmpeg 解析到滤镜**选项**值
+/// （`subtitles='…':fontsdir='…':force_style='…'` 这种）时，会在这个转义处
+/// **静默截断**：同串里 `fontsdir=` **之后**的 `:force_style='…'` 整段被吞，
+/// 而退出码仍是 0、rawvideo 字节数也完整。实测两种写法都不可用：
+///
+/// | 写法 | 结果 |
+/// |---|---|
+/// | `'` → `'\''` | 静默吞后续 options（rc=0、字节数完整、样式丢失） |
+/// | `'` → `\\'` | `No such filter: 'FontSize'`（直接解析报错） |
+///
+/// 所以**单引号在滤镜 option 值里没有合法写法**，只能由入口保证值干净：
+/// 见 [`filter_string_safe`] 与 [`safe_font_dir`]。
+/// 字幕临时文件的路径不让用户碰，由 [`write_subtitle_file`] 自己把关
+/// （判据见 `字幕临时文件路径天然安全`）。
+///
+/// 注意用户文本**不走这条路** —— 它进的是 `subtitles=` 指向的 SRT 临时文件，
 /// 所以文本里的冒号引号一个都伤不到命令（单测里有一条专盯这个）。
 fn filter_value(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len() + 4);
@@ -1018,6 +1089,15 @@ fn rawvideo_args(source: String, filter: String) -> Vec<String> {
 /// 因为字体家族名与文件名同源；但**不是保证**（本机那份乐米就不行）。
 /// 真要做准就得解析字体文件的 `name` 表，而"本仓不解析字体文件"是一条既有约定
 /// （见文件头）。**不为了一个名字去破它** —— 名字由契约给是正路。
+///
+/// # 族名里的单引号（与 2026-11-26 事故的关系，**不改行为**）
+///
+/// 族名也在同一段滤镜串里（`force_style='FontName=…'`），所以第一反应会是
+/// "这里也有同一个坑"。实测**不是**：族名的值嵌在 `force_style` 里面，多一层引号，
+/// `'\''` 在那里只会让**族名自己少一个字符**，`FontSize=` 之后的 options 全都活着
+/// （探针见本轮记录）。**代价是找不到那份字体**（名字变了），终态与"名字推错了"
+/// 那条路相同 —— 换成全角引号同样是找不到，只是更难看、还改动了老工程的参数串。
+/// 所以这里**一个字都不动**，只在 [`filter_string_safe`] 的注释里记下这条边界。
 fn font_family_name(key: &TextRasterKey, font_file: &Path) -> String {
     if let Some(family) = key.font_family.as_ref() {
         if !family.trim().is_empty() {
@@ -1318,6 +1398,267 @@ pub fn font_dir(font_dir: Option<&Path>, font_file: &Path) -> Result<FontDir, St
     }
 }
 
+/// 一次栅格化用的字体目录，**顺带管着**为它整目录复制出来的那份。
+///
+/// # 为什么要一份（2026-11-26 事故）
+///
+/// `fontsdir=` 是**进滤镜串**的（见 [`filter_string_safe`]）。路径里有一个 ASCII
+/// 单引号时，[`filter_value`] 那套转义会让 ffmpeg **静默吞掉**同串里它之后的
+/// `:force_style='…'` —— 于是 libass 用默认样式（约 16 号虚拟字、Alignment=2 贴底）
+/// 把每行字幕画成一条 9px 的小条，`clip_message` 把**全部行**报成
+/// `subtitle_ink_clipped`，而 ffmpeg 退出码 0、rawvideo 字节数完整 ——
+/// 退出码与字节数两项既有检查**都拦不住**（宿主侧也没有便宜的检测手段）。
+///
+/// 单引号在滤镜 option 值里没有合法写法（见 [`filter_value`] 那张表），所以只能
+/// 在入口保证值干净：不安全就**整目录复制**到临时目录，让滤镜串里那条路径干净。
+///
+/// # 与 [`StagedFont`] 同形，但有一处不同
+///
+/// 清理交给 [`Drop`]（覆盖提前 return 与 panic），`path()` 给出该用的那条 ——
+/// 「搬了却没换上」在类型上写不出来，与字体文件那条路一个纪律。
+/// **不同的是临时名**：字体文件按**内容摘要**命名（换字体就换名），目录按
+/// **目录内容摘要**命名（目录里换了一个字体文件就换名，免得复用上一次的残留）。
+///
+/// # 安全路径暂存为 `None`、原样返回
+///
+/// 这是「老工程参数串一个字节不变」那条冻结判据的前提：安全目录不许触发复制，
+/// 也不许改写成 `to_string_lossy` 之类的往返（那会改动非 UTF-8 路径的字节）。
+#[derive(Debug)]
+pub struct StagedFontDir {
+    /// 喂给 ffmpeg 的那条路径（安全时 = 调用方原来那条）。
+    path: PathBuf,
+    /// 整目录复制出来的那份；`None` = 没搬。
+    ///
+    /// 拿的是**进程内共享**的那一份：一次出片里几百行用同一个字体目录，
+    /// 每行复制一次是几百次几 MB 的 I/O（而分块渲染是多线程的 —— 各线程各自
+    /// 复制到同一个临时名，还会撞上「一个线程删、另一个线程还在读」）。
+    /// 最后一个持有者 drop 时目录才删，见 [`SharedStagedDir`]。
+    staged: Option<std::sync::Arc<SharedStagedDir>>,
+}
+
+impl StagedFontDir {
+    /// 交给 ffmpeg `fontsdir=` 的那条路径。
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// 这一份是不是**搬出来的**（给测试与诊断用：安全目录必须给 `false`）。
+    pub fn is_staged(&self) -> bool {
+        self.staged.is_some()
+    }
+}
+
+impl Drop for StagedFontDir {
+    /// 什么也不做 —— 清理交给 [`SharedStagedDir`] 的 Drop（最后一个持有者）。
+    fn drop(&mut self) {}
+}
+
+/// 一份**进程内共享**的临时字体目录：引用计数归零时整目录删掉。
+///
+/// 这就是 [`StagedFontDir`] 的 Drop 语义：`StagedFontDir` 掉了不一定删，
+/// 最后一根引用掉了才删 —— 提前 return 与 panic 都覆盖得到（`Arc` 的计数
+/// 在 unwind 里同样递减）。共享是为了同时解决两件事：几百行重复复制，
+/// 以及多线程下「一个线程删掉另一个线程正要用的目录」。
+pub struct SharedStagedDir {
+    path: PathBuf,
+}
+
+impl std::ops::Deref for SharedStagedDir {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for SharedStagedDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+impl std::fmt::Debug for SharedStagedDir {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SharedStagedDir")
+            .field("path", &self.path)
+            .finish()
+    }
+}
+
+/// 保证「进滤镜串的字体目录」是干净的：安全就原样返回，不安全就整目录复制到临时目录。
+///
+/// 判据见 [`filter_string_safe`]。复制用 `copy` 而不是 `hard_link` —— 与
+/// [`stage_font_file`] 同一条纪律（Windows 上跨卷硬链会失败，而临时目录与工程目录
+/// 常常不在一个卷上）。
+///
+/// 复制**整目录**（含子目录）而不是只挑字体文件：libass 的 `fontsdir` 会递归扫，
+/// 挑文件就得在这里复制一份"哪些算字体"的判据 —— 那是会跟字体格式一起腐烂的知识
+/// （本仓不解析字体文件，见文件头）。一份平铺字体目录通常只有几 MB。
+pub fn safe_font_dir(dir: &Path) -> Result<StagedFontDir, String> {
+    if filter_string_safe(dir) {
+        // **不用搬**：原样还回去，连 `to_string_lossy` 那一次往返都不做。
+        return Ok(StagedFontDir {
+            path: dir.to_path_buf(),
+            staged: None,
+        });
+    }
+    let staged = shared_staged_dir(dir)?;
+    Ok(StagedFontDir {
+        path: staged.path.clone(),
+        staged: Some(staged),
+    })
+}
+
+/// 进程内共享的那一份（按**目录内容摘要**认，同一次出片里同一个目录只复制一次）。
+///
+/// 用 `Mutex` 包住一张表：两个分块线程同时第一次撞上同一个目录时，一个复制、
+/// 另一个等（不这样的话两边会同时往同一个临时目录里写）。
+fn shared_staged_dir(dir: &Path) -> Result<std::sync::Arc<SharedStagedDir>, String> {
+    type Table = HashMap<PathBuf, std::sync::Weak<SharedStagedDir>>;
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Table>> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut table = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // 表里放 **`Weak`**：长期跑着的进程（服务型宿主、`cargo test` 同一个进程里
+    // 跑几百条用例）不该因为一次出片就把一份字体目录钉死到进程结束。
+    // 最后一个 `Arc` 掉了目录就删，这里再问到就重新复制 —— 语义仍然正确。
+    if let Some(hit) = table.get(dir).and_then(std::sync::Weak::upgrade) {
+        return Ok(hit);
+    }
+    let staged = std::sync::Arc::new(SharedStagedDir {
+        path: stage_font_dir(dir)?,
+    });
+    table.insert(dir.to_path_buf(), std::sync::Arc::downgrade(&staged));
+    Ok(staged)
+}
+
+/// 真的把目录搬过去 —— 与 [`safe_font_dir`] 拆开只为让"要不要搬"这一个判断能单独看。
+///
+/// # 临时名：**目录内容**摘要进名字
+///
+/// 沿 [`stage_font_file`] 的纪律，但摘的是**目录内容**而不是某一份文件：
+/// 递归列出 `(相对路径, 长度, mtime)`，**排序**之后逐条喂进 FNV-1a。
+/// 排序是必须的（同一目录两次 `read_dir` 的顺序不保证一致，那样摘要会抖，
+/// 同一次出片里几百行就会各复制一份）；mtime 与长度进摘要而不是文件内容，
+/// 是因为这里要回答的是「这份目录还是不是上一次那份」（换一个字体就换名），
+/// 不是「内容是否逐字节可信」—— 后者要为一份几 MB 的字体目录读几百 MB 的字节，
+/// 而代价（复制一次目录）本来就比哈希一次小得多。
+///
+/// 摘要撞了（换了内容但同名同长同 mtime）的后果只是**复用上一次的复制**，
+/// 与 [`stage_font_file`] 的残留在同一个量级：进程被杀时残留的靠
+/// `dhampir-fontdir-` 前缀认领。
+fn stage_font_dir(dir: &Path) -> Result<PathBuf, String> {
+    let digest = font_dir_digest(dir)?;
+    let path = std::env::temp_dir().join(format!(
+        "dhampir-fontdir-{}-{digest:016x}",
+        std::process::id()
+    ));
+    // 「同一次出片里同一个目录只复制一次」由 [`shared_staged_dir`] 的进程内表负责，
+    // 这里只管复制。目标已存在 = 上一次进程留下的残留（同 pid 不可能重号，但
+    // pid 会被复用）—— 整目录当成空的复制一遍，宁可浪费一次 I/O 也不复用
+    // 来路不明的内容。
+    if path.exists() {
+        let _ = std::fs::remove_dir_all(&path);
+    }
+    copy_tree(dir, &path)?;
+    Ok(path)
+}
+
+/// 目录内容的 FNV-1a：递归 `(相对路径, 长度, mtime)`，**排序**后逐条喂进去。
+fn font_dir_digest(dir: &Path) -> Result<u64, String> {
+    let mut entries: Vec<(PathBuf, u64, i128)> = Vec::new();
+    collect_entries(dir, dir, &mut entries)?;
+    // 排序必须排在**摘要之前**：`read_dir` 的顺序不保证一致，不排的话同一个目录
+    // 两次算出的摘要会不同，同一次出片里就会各复制一份。
+    entries.sort();
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for (relative, length, modified) in &entries {
+        let name = relative.to_string_lossy();
+        // 分隔符与字段边界都进摘要，免得 `("a/b", 1)` 与 `("a", "b1")` 撞在一起。
+        for part in [name.as_ref(), &format!("\u{1}{length}\u{1}{modified}")] {
+            hash = fnv1a64_step(hash, part.as_bytes());
+        }
+        hash = fnv1a64_step(hash, &[0x02]);
+    }
+    Ok(hash)
+}
+
+/// FNV-1a 的单步（[`dhampir_core::timeline::selfcheck::fnv1a64`] 是整串一次算完的，
+/// 这里要边算边把几段拼起来 —— 用同一个常数与质数，两处结果是同一种摘要）。
+fn fnv1a64_step(mut hash: u64, bytes: &[u8]) -> u64 {
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
+/// 递归收集 `(相对路径, 长度, mtime)`。
+fn collect_entries(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<(PathBuf, u64, i128)>,
+) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|error| format!("读不了字体目录 {}：{error}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("读不了字体目录 {}：{error}", dir.display()))?;
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|error| format!("路径不在字体目录里（{}）：{error}", path.display()))?;
+        let metadata = entry
+            .metadata()
+            .map_err(|error| format!("读不了字体目录项 {}：{error}", path.display()))?;
+        if metadata.is_dir() {
+            collect_entries(root, &path, out)?;
+        } else {
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos() as i128)
+                .unwrap_or(-1);
+            out.push((relative.to_path_buf(), metadata.len(), modified));
+        }
+    }
+    Ok(())
+}
+
+/// 把整棵目录复制到 `target`（含子目录）。
+fn copy_tree(source: &Path, target: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(target)
+        .map_err(|error| format!("建不了字体目录临时目录 {}：{error}", target.display()))?;
+    let entries = std::fs::read_dir(source)
+        .map_err(|error| format!("读不了字体目录 {}：{error}", source.display()))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("读不了字体目录 {}：{error}", source.display()))?;
+        let from = entry.path();
+        let to = target.join(entry.file_name());
+        if entry
+            .metadata()
+            .map_err(|error| format!("读不了字体目录项 {}：{error}", from.display()))?
+            .is_dir()
+        {
+            copy_tree(&from, &to)?;
+        } else {
+            // 用 `copy` 不用 `hard_link`：Windows 跨卷硬链会失败，而临时目录与
+            // 工程目录常常不在一个卷上（与 [`stage_font_file`] 同一条纪律）。
+            std::fs::copy(&from, &to).map_err(|error| {
+                format!(
+                    "复制字体目录失败（{} → {}）：{error}",
+                    from.display(),
+                    to.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
 /// 把这一行文本落成一份**单条字幕的 SRT**，给 `subtitles=` 用。
 ///
 /// # 为什么不直接写文本文件（`drawtext` 那种做法）
@@ -1412,9 +1753,15 @@ pub fn rasterize_line(key: &TextRasterKey) -> Result<TextBitmap, String> {
     // libass 路线下它**不再进滤镜串**（字体按名字找），但仍然要它：
     // 回退到父目录当字体目录是兜底，见 [`font_dir`]。
     let font = ascii_font_path(&key.font_file)?;
-    // 字体目录：宿主给了 `--font-dir` 就用它，否则退回这份字体的父目录。
-    // 它是 libass 找字体与**回退字体**的唯一入口，见 [`font_dir`]。
-    let dir = font_dir(key.font_dir.as_deref(), font.path())?;
+    let raw_dir = font_dir(key.font_dir.as_deref(), font.path())?;
+    // ⚠️ 再包一层 [`safe_font_dir`]：**目录名也要进滤镜串**（`fontsdir=`），
+    //    而滤镜串里的 ASCII 单引号没有任何合法写法 —— 不干净就整目录复制一份
+    //    （2026-11-26 事故：工程目录 `[说会话z'z]` 让 `:force_style=` 整段被吞，
+    //    所有行被画成 9px 贴底小条、全报 `subtitle_ink_clipped`，而 rc=0、字节数完整）。
+    //    与 `font`（`StagedFont`）并排同写法：两者都自己给出该用哪条路径、自己管清理。
+    //    `dir` 的存活期覆盖下面两遍渲染（`rasterize_with_stroke` 内的两遍也覆盖得到，
+    //    因为这里持有到函数结束）。
+    let dir = safe_font_dir(raw_dir.path())?;
     // ⚠️ **开了描边走两次渲染**（见 [`rasterize_with_stroke`] 的长注释）：
     //    一次渲染给不出"描边另一种颜色"，因为 libass 那条路必须把填充与描边
     //    都画成白墨，底座拿到的是一张并集掩码。
@@ -3294,8 +3641,18 @@ mod tests {
     /// 而不是让一条环境差异伪装成"实现坏了"。
     ///
     /// 判据是**真去试着建一次**，不是去嗅探环境变量：能建就返回，建不了就 None。
+    ///
+    /// 用**原子计数**而不是 `process::id()`：同一个进程里的用例是**并行**跑的，
+    /// 共用 `dhampir-t1-{pid}` 时一条 `remove_dir_all` 会把另一条正在用的目录删掉
+    /// （本次新增的几条都建在这个目录下面，串味就是这样发生的）。
     fn writable_scratch_dir() -> Option<PathBuf> {
-        let dir = std::env::temp_dir().join(format!("dhampir-t1-{}", std::process::id()));
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "dhampir-t1-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         match std::fs::create_dir_all(&dir) {
             Ok(()) => Some(dir),
             Err(error) => {
@@ -4330,6 +4687,241 @@ mod tests {
             before,
             "搬过去的字体副本没被删掉 —— 临时目录里每画一行就多留几 MB"
         );
+    }
+
+    /// **判据（2026-11-26 事故）**：滤镜串不安全的目录要整目录搬走，且搬出来的那条**干净**。
+    ///
+    /// # 这条在防什么（这是本次事故的判据）
+    ///
+    /// 宿主工程目录带 ASCII 单引号（`[说会话z'z]`），路径经 `--font-dir` 递进来、
+    /// 进 `fontsdir=`。`filter_value` 把 `'` 转成 `'\''`，而 ffmpeg 解析滤镜 option 值时
+    /// 在这里**静默截断** —— 同串里 `fontsdir=` 之后的 `:force_style='…'` 整段被吞，
+    /// libass 用默认样式（约 16 号虚拟字、Alignment=2 贴底）把每行画成 9px 小条。
+    /// rc=0、字节数完整 ⇒ 既有检查全拦不住。所以**入口必须保证值干净**。
+    ///
+    /// 只说 `is_staged() == true` 不够：命令里写着一个不存在的目录同样是"搬过了"，
+    /// 而 ffmpeg 对不存在的 fontsdir 会**静默用系统默认字体** —— 与本次事故是
+    /// 两种不同的静默失败，混在一起就证不实了。所以这里要真去 `is_dir()`、
+    /// 要逐文件比对内容、还要核对"搬过去的那条路径能过判据"。
+    #[test]
+    fn 滤镜串不安全的目录要搬走_搬出来的必须干净() {
+        let Some(scratch) = writable_scratch_dir() else {
+            return;
+        };
+        // 造一个**真的存在、真的有字体**的目录：名字里带 ASCII 单引号 ——
+        // 正是本次事故里那条工程目录的形态。
+        let source = scratch.join("说会话z'z");
+        std::fs::create_dir_all(&source).expect("建得下字体目录");
+        // 内容不必是真字体：这条只看"搬"这个动作（内容比对是逐字节的）。
+        std::fs::write(source.join("font.ttf"), b"FAKE-FONT-BYTES").expect("写得下字体文件");
+        std::fs::write(source.join("readme.txt"), b"ignore me").expect("写得下非字体文件");
+
+        assert!(
+            !filter_string_safe(&source),
+            "前提不成立：含单引号的路径竟然被判成安全（{}）",
+            source.display()
+        );
+        let staged = safe_font_dir(&source).expect("不安全目录要搬得动");
+        assert!(
+            staged.is_staged(),
+            "含单引号的目录**必须**搬 —— 不搬的话 ffmpeg 静默吞掉后面的 force_style"
+        );
+        let moved = staged.path().to_path_buf();
+
+        assert!(
+            filter_string_safe(&moved),
+            "搬完之后那条路径必须过判据，否则搬了等于没搬：{}",
+            moved.display()
+        );
+        assert!(
+            moved.is_dir(),
+            "搬完之后目录必须真的在：{}",
+            moved.display()
+        );
+        assert!(
+            moved.starts_with(std::env::temp_dir()),
+            "临时目录要落在临时目录里"
+        );
+        assert!(
+            moved
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("dhampir-fontdir-"),
+            "临时名要可识别（进程被杀时靠它认领残留）：{}",
+            moved.display()
+        );
+        // **整目录**复制：字体与子目录都得在（libass 的 fontsdir 会递归扫，
+        // 只挑字体文件就得在这里复制一份"哪些算字体"的判据）。
+        assert_eq!(
+            std::fs::read(moved.join("font.ttf")).unwrap(),
+            b"FAKE-FONT-BYTES",
+            "搬过去的那一份内容必须与源逐字节相同"
+        );
+        assert!(
+            moved.join("readme.txt").is_file(),
+            "非字体文件也要跟着搬（`fontsdir` 不只看扩展名）"
+        );
+
+        // 搬出来的那份由 Drop 清理（最后一个持有者）。
+        let moved_copy = moved.clone();
+        drop(staged);
+        assert!(
+            !moved_copy.exists(),
+            "StagedFontDir 掉了之后临时目录还在：{}",
+            moved_copy.display()
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// **反向用例（关键的一半）**：安全路径**原样返回、一个字节都不动**。
+    ///
+    /// 这条与上面那条合起来才是完整的：上面证明"不安全就搬"，这条证明"安全就不搬"。
+    /// 若这条红成 `is_staged() == true`，**所有老工程**的每一帧字幕都会走一条
+    /// 新临时目录 —— 参数串变了，像素也可能跟着变（那正是"默认路径字节冻结"要拦的）。
+    ///
+    /// 与 `真起_ffmpeg_ascii_字体路径不搬_参数串逐字符不变` 同构；区别是它**不起进程**
+    /// （这里判的是"要不要搬"这一个判断，不需要 ffmpeg）。
+    ///
+    /// ⚠️ 用**写死的 ASCII 路径**而不是 `temp_dir()`：`temp_dir()` 在 Windows 上是
+    /// `C:\Users\<名>\…`，用户名带中文时它本身就是非 ASCII 目录 —— 拿它当"安全"
+    /// 的样本，这条判据在那些机器上会红成"实现坏了"。这条只判"安不安全"这一个
+    /// 纯字符串判断，不需要路径真的存在（[`safe_font_dir`] 在安全那条路上不读盘）。
+    #[test]
+    fn 安全目录不搬_这一条是默认路径字节冻结() {
+        let plain = Path::new("C:/Windows/Fonts");
+        assert!(
+            filter_string_safe(plain),
+            "前提不成立：纯 ASCII 路径竟然被判成不安全"
+        );
+        let staged = safe_font_dir(plain).expect("安全目录不该读盘");
+        assert!(
+            !staged.is_staged(),
+            "安全路径不许触发整目录复制 —— 老工程的参数串会因此改变"
+        );
+        assert_eq!(staged.path(), plain, "不搬时必须**原样**给回调用方那条路径");
+        // 反斜杠这种"看着像转义"的 ASCII 字符也不许触发。
+        assert!(
+            !safe_font_dir(Path::new("C:\\Windows\\Fonts"))
+                .unwrap()
+                .is_staged()
+        );
+        // **非 ASCII 也判不安全**（与 `ascii_font_path` 同一把尺子：T1 台账里
+        // 非 ASCII 路径能让 ffmpeg 段错误）。这条**不改**上面的行为结论：
+        // 中文目录会走"整目录复制"，那条路本身是安全的，只是多一次 I/O。
+        assert!(
+            !filter_string_safe(Path::new("C:/工程/字体目录")),
+            "非 ASCII 按本判据不安全（T1 台账）"
+        );
+        // 单引号是**唯一**因为"引号"被拦下的字符；冒号与反斜杠有已验证的转义写法。
+        assert!(!filter_string_safe(Path::new("C:/说会话z'z")));
+        assert!(filter_string_safe(Path::new("/tmp/a:b")));
+    }
+
+    /// **判据**：`write_subtitle_file` 产出的路径必须过 [`filter_string_safe`]。
+    ///
+    /// 它的路径由本模块自己拼（temp 目录 + 进程号 + 序号 + 摘要），**用户碰不到**，
+    /// 所以现在天然安全 —— 这条钉住的是**防退化**：将来谁把 `temp_dir()` 换成
+    /// "跟工程目录放一起"（例如为了排查方便），字幕路径就会带上工程目录里的 `'`，
+    /// 那时 `subtitles=` 这一层也会以同样的方式静默吞掉后面的 options。
+    /// 它不比较具体路径（那随机器变），只比较**判据的结论**。
+    #[test]
+    fn 字幕临时文件路径天然安全() {
+        let path = write_subtitle_file("一言").expect("写得下字幕临时文件");
+        assert!(
+            filter_string_safe(&path),
+            "字幕临时文件路径必须能安全进滤镜串：{}",
+            path.display()
+        );
+        assert!(
+            path.to_string_lossy().bytes().all(|byte| byte.is_ascii()),
+            "它该落在 ASCII 的临时目录里：{}",
+            path.display()
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// **反向用例（会红的那一半）**：源目录不在时，搬这一步必须**响亮报错**，
+    /// 而不是返回一个指向不存在目录的路径让 ffmpeg 去撞。
+    ///
+    /// 与 `搬字体失败要响亮报错而不是递一个空路径` 同构。挡住的是
+    /// "把 `stage_font_dir` 的错误吞掉（`.ok()`、`unwrap_or_default()` 那一类）"。
+    #[test]
+    fn 搬字体目录失败要响亮报错而不是递一个空路径() {
+        let missing = std::env::temp_dir().join("不存在的中文字体目录（T1）'x");
+        let err = safe_font_dir(&missing).unwrap_err();
+        assert!(
+            err.contains("读不了字体目录"),
+            "读不到源目录要给一条人话：{err}"
+        );
+        assert!(
+            err.contains("不存在的中文字体目录"),
+            "错误里要点出是哪个目录：{err}"
+        );
+    }
+
+    /// **判据（真起 ffmpeg）**：`fontsdir` 指向含 `'` 的目录时，画出来的字是**正常大小**。
+    ///
+    /// # 这条是本次事故的主判据 —— 修复前必红
+    ///
+    /// 修复前：`fontsdir=` 里的 `'` 让 `:force_style='…'` 整段被吞，libass 用默认样式
+    /// （约 16 号虚拟字、Alignment=2 贴底）渲染 ⇒ 位图里只剩一条贴底的小条。
+    /// 本机实测（ffmpeg 4.4 与 master 一致）：ink 从 16406 掉到 141，
+    /// 墨迹高度从 71px 掉到 7px —— **rc 与字节数都正常**，所以只能靠墨迹量判。
+    ///
+    /// 断言三件，缺一不可：
+    /// * `ink > 1000` —— 四个字、字号 40，正常字形在 thousands 量级；
+    ///   默认样式那条路只剩百位数（实测 141），挡得住；
+    /// * `!ink_touches_edge()` —— 默认样式是 Alignment=2 **贴底**，它总会碰到下边界；
+    ///   正常样式居中（`Alignment=10,MarginV=0`），四个边缘都留白；
+    /// * 墨迹**高度** > 字号的一半 —— 直接量"字是不是被压成了小条"，
+    ///   这一条与上一条不同源（一个看边界、一个看尺寸），任一条写错另一条兜得住。
+    #[test]
+    #[ignore = "真起 ffmpeg：需要 PATH 上的 ffmpeg 与一份中文字体"]
+    fn 真机_引号目录画出来的字是正常大小() {
+        let font = test_font_ascii();
+        let Some(scratch) = writable_scratch_dir() else {
+            return;
+        };
+        // 字体目录：**名字里带 ASCII 单引号**（本次事故的形态）。
+        let quoted_dir = scratch.join("说会话z'z");
+        std::fs::create_dir_all(&quoted_dir).expect("建得下字体目录");
+        // 把真字体复制进去（`copy` 会在 `safe_font_dir` 里再做一次，
+        // 但源目录里得真有那份字体，否则 libass 找不到它 —— 找不到也是静默回退）。
+        let font_name = font.file_name().expect("字体总有文件名");
+        std::fs::copy(&font, quoted_dir.join(font_name)).expect("复制得下字体");
+
+        let font_px = 40u32;
+        let (width, height) = bitmap_size(640, font_px as f32 * 1.2, font_px);
+        let mut k = key("笑靥如花", 20);
+        k.text = "笑靥如花".to_string();
+        k.font_px = font_px;
+        // 字体文件**留在原处**（ASCII 路径，不触发 StagedFont）：
+        // 这条只让**目录**不干净，事故形态才纯。
+        k.font_file = font.clone();
+        k.font_family = Some(font_family_name(&k, &font));
+        k.font_dir = Some(quoted_dir.clone());
+        k.width = width;
+        k.height = height;
+
+        let bitmap = rasterize_line(&k).expect("引号目录也必须画得出来（2026-11-26）");
+        let inked = ink_count(&bitmap);
+        assert!(
+            inked > 1000,
+            "墨迹只有 {inked} 像素 —— 像是被画成了默认样式的小字条（修复前实测 141）"
+        );
+        let (_, y0, _, y1) = bitmap.ink_bounds().expect("有墨迹");
+        let ink_height = y1 - y0 + 1;
+        assert!(
+            ink_height > font_px / 2,
+            "墨迹高度只有 {ink_height}px（字号 {font_px}）—— 字被压成了贴底小条"
+        );
+        assert!(
+            !bitmap.ink_touches_edge(),
+            "字碰到位图边界 —— 默认样式 Alignment=2 贴底的症状（正常样式居中、四边留白）"
+        );
+
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     /// **反向用例**：尺寸不进缓存键的话，这条会拿到高度 20 的那张位图。

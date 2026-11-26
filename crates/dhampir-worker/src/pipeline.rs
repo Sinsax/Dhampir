@@ -2285,6 +2285,15 @@ fn concat_video(parts: &[PathBuf], output: &Path) -> Result<(), String> {
         let absolute = std::fs::canonicalize(part)
             .map_err(|error| format!("分块 {} 不在：{error}", part.display()))?;
         // concat demuxer 的 `file` 行：单引号包住、内部单引号要转义成 '\''。
+        //
+        // ⚠️ `'\''` 这个写法在**滤镜串**里是坏的（见 `text_raster.rs` 的
+        // `filter_string_safe` 与 2026-11-26 事故：ffmpeg 解析滤镜 option 值时
+        // 会在这里静默截断，吞掉同串后续 options）。这里是**文件内容**、不是滤镜串：
+        // concat demuxer 按**行**读清单，`av_get_token` 对 `'` 与 `\` 的处理与滤镜层
+        // 不同 —— 实测这份清单能被正确解析（同一工程带 `'` 的路径拼得出来），
+        // 所以**行为不动**，只记下它与滤镜串那条坑不是同一个机制。
+        // 将来若要在这里动，判据是「起一次真 ffmpeg 拼两段带 `'` 的路径」，
+        // 而不是"看起来像就照抄 filter_value"。
         let text = absolute.display().to_string().replace('\'', "'\\''");
         list.push_str(&format!("file '{text}'\n"));
     }
