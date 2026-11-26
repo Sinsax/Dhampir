@@ -43,6 +43,9 @@ compile_error!(
 
 pub mod audio;
 pub mod baseline;
+/// 字体字形覆盖检查（cmap format 4/12）—— 出片时**逐字换字体**的判据。
+pub mod color_bitmap;
+pub mod font_coverage;
 pub mod offscreen;
 pub mod pipeline;
 pub mod scenes;

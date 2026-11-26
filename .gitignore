@@ -1,6 +1,8 @@
 # Rust 构建产物。
 # 注意：Cargo.lock **要提交**（workspace 里有二进制），不要加进来。
 /target/
+# 容器内构建的产物目录（release-local.sh linux 用，见 docker/Dockerfile.linux-x64）。
+/target-docker/
 **/*.rs.bk
 
 # 运行产物（临时）。里程碑证据在 records/，那个是要提交的。

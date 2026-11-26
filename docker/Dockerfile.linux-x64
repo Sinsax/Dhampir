@@ -1,0 +1,64 @@
+# docker/Dockerfile.linux-x64 —— Dhampir 的 **linux-x64 发布基座**
+#
+#   docker build -f docker/Dockerfile.linux-x64 -t dhampir-linux-x64-builder .
+#
+# 为什么必须有这个文件（不是"建议"，是**发布产物的正确性前提**）——
+# 与下游宿主 YekiTrim 的 docker/Dockerfile.linux-x64 同一条理由：
+#
+#   在滚动发行版（Arch 等）上直编出来的 ELF，会写死它需要的最高 `GLIBC_x.y` 符号。
+#   宿主 glibc 2.44 上编出的二进制要求 **GLIBC_2.43** —— 而我们要支持的
+#   Ubuntu 24.04（glibc 2.39）/ Debian 13（2.36）等全都起不来：
+#
+#       version `GLIBC_2.43' not found
+#
+#   这个失败在构建期完全看不出来（链接零错误），只有用户下载后才炸。
+#   所以发布口径固定在**一个明确的 glibc 基线**上，容器就是那条基线；
+#   `scripts/package.mjs` 的 glibc 门禁（MAX_GLIBC = 2.39）会把超标产物拒收，
+#   双保险 —— 门禁拦的是"真的出来了什么"，容器保证"出来的东西能达标"。
+#
+# 选 ubuntu:24.04（glibc 2.39）的理由与下游宿主对齐：覆盖 Ubuntu 24.04+ /
+# Debian 13+ / Fedora 40+ 等；改基座版本就要同步改 `scripts/package.mjs` 的 MAX_GLIBC。
+#
+# Dhampir 的依赖（png / gif / image-webp / wgpu）全是纯 Rust —— 容器里只需要
+# 能链接的 gcc 与固定版本的 Rust 工具链，没有 C++ 归档那一摊。
+#
+# ⚠️ wasm 那半（wasm-pack）**不进容器**：wasm32 产物与 glibc 无关，
+#    宿主机上出即可（scripts/release-local.sh 的分工就是这样）。
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 构建期依赖：
+#   · build-essential —— Rust 链接要 cc（纯 Rust 依赖，无需 cmake / g++ 大件）
+#   · git / ca-certificates / curl —— rustup 安装与 cargo 拉 crates.io
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        git \
+        tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rust 固定版本：与仓库 rust-toolchain.toml 一致（1.97.0），避免
+# "同一天两次构建产出不同二进制"。rustup 是唯一从网络装的东西。
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH \
+    RUST_VERSION=1.97.0
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --no-modify-path --default-toolchain "${RUST_VERSION}" \
+    && rustc --version && cargo --version
+
+# 基线自检：容器里的 glibc 必须就是我们要的 2.39，rustc 必须是钉住的 1.97.0。
+# 漏了这步的话，"基座悄悄换了"要到门禁拒收才被发现。
+RUN set -eux; \
+    echo "glibc: $(ldd --version | head -1)"; \
+    ldd --version | head -1 | grep -q " 2\.39\$" || \
+      echo "WARNING: glibc 基线与 2.39 不一致 —— 同步改 scripts/package.mjs 的 MAX_GLIBC"; \
+    printf 'int main(void){return 0;}\n' > /tmp/probe.c; \
+    cc /tmp/probe.c -o /tmp/probe && /tmp/probe; \
+    rm -f /tmp/probe /tmp/probe.c
+
+WORKDIR /src

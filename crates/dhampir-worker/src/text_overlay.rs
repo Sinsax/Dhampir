@@ -497,6 +497,224 @@ enum Painted {
     Nothing,
 }
 
+/// 一段要画的文字 + 它该用的字体（[`split_runs_by_coverage`] 的产物）。
+#[derive(Debug)]
+struct CoveredRun {
+    text: String,
+    font: PathBuf,
+    color: [u8; 4],
+    /// 这一段的**族名**（libass 按族名找字体）。`None` = 用样式里那个（老路径）。
+    family: Option<String>,
+}
+
+/// 字体目录里除 `primary` 之外的候选，**顺序固定**（确定性对拍要靠它）：
+/// emoji 类字形文件名优先，其余按文件名升序。
+fn fallback_candidates(primary: &Path, font_dir: Option<&Path>) -> Vec<PathBuf> {
+    let Some(dir) = font_dir else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let primary_canon = std::fs::canonicalize(primary).unwrap_or_else(|_| primary.to_path_buf());
+    let mut out: Vec<PathBuf> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let canon = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if canon == primary_canon {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        if !["ttf", "otf", "ttc"].iter().any(|e| name.ends_with(e)) {
+            continue;
+        }
+        out.push(path);
+    }
+    // 排序：**轮廓版 emoji 最前**，其次其它 emoji，再其余（按文件名，稳定）。
+    //
+    // ⚠️ 为什么轮廓版要排在彩色版前面（2026-11-22 实测）：
+    // `Noto Color Emoji` 是 **CBDT/CBLC 位图**字体，libass 画不出它 —— 实测换成它之后
+    // 仍然是豆腐块；而 `Noto Emoji`（glyf 轮廓）逐帧正常。所以彩色版只能当**最后一档**。
+    let name_of = |p: &Path| {
+        p.file_name()
+            .map(|n| n.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default()
+    };
+    let rank = |p: &Path| -> u8 {
+        let n = name_of(p);
+        let emoji = n.contains("emoji");
+        let color = n.contains("color") || n.contains("cbdt") || n.contains("cbcl");
+        match (emoji, color) {
+            (true, false) => 0, // 轮廓 emoji：首选
+            (true, true) => 2,  // 彩色位图 emoji：最后才试（libass 多半画不出）
+            _ => 1,             // 普通字体：可能是含字形的 CJK/符号字体
+        }
+    };
+    out.sort_by(|a, b| {
+        rank(a)
+            .cmp(&rank(b))
+            .then_with(|| a.file_name().cmp(&b.file_name()))
+    });
+    out
+}
+
+/// 这一段该用什么**族名**交给 libass：主字体给 `None`（沿用样式里的那个，老路径），
+/// 回退字体则必须给出它自己的族名 —— libass 是按族名在 fontsdir 里找的，只换文件路径没用。
+fn family_for(font: &Path, primary: &Path) -> Option<String> {
+    if font == primary {
+        return None;
+    }
+    crate::font_coverage::family_of(font).or_else(|| {
+        // 读不出族名时退回文件名主干（staged 名是 `<id>-<hash>`，聊胜于无）。
+        font.file_stem().map(|s| s.to_string_lossy().into_owned())
+    })
+}
+
+/// 给 `ch` 挑一支能画的字体。返回 `(字体文件, 是否走**彩色直通**)`。
+///
+/// 优先序（2026-11-22 用户口径「预期是前端这样的」= 彩色）：
+///
+/// 1. 主字体覆盖 ⇒ 主字体（绝大多数字符走这里，老路径）；
+/// 2. 主字体不覆盖、但目录里有 **CBDT 彩色位图字体**覆盖 ⇒ **仍返回主字体 + `native=true`**
+///    —— 彩色不走 libass（它加载不了 CBDT，就算能也会被白墨染色），由栅格器
+///    `compose_color_bitmap` 直接从 strike 合成；
+/// 3. 都不行 ⇒ 第一支覆盖的回退字体（轮廓 emoji 优先，单色）；
+/// 4. 全都不覆盖 ⇒ 主字体（豆腐，与今天一致，不许丢字）。
+fn pick_font_for_char(
+    ch: char,
+    primary: &Path,
+    primary_covers: Option<&crate::font_coverage::Coverage>,
+    color: Option<&(PathBuf, std::sync::Arc<crate::font_coverage::Coverage>)>,
+    fallbacks: &[(
+        PathBuf,
+        Option<std::sync::Arc<crate::font_coverage::Coverage>>,
+    )],
+) -> (PathBuf, bool) {
+    let cp = ch as u32;
+    if primary_covers.map(|c| c.covers(cp)).unwrap_or(true) {
+        return (primary.to_path_buf(), false);
+    }
+    if let Some((_, cov)) = color {
+        if cov.covers(cp) {
+            return (primary.to_path_buf(), true); // 字体留在主字体上：栅格器据文本判直通
+        }
+    }
+    for (path, cov) in fallbacks {
+        if cov.as_ref().map(|c| c.covers(cp)).unwrap_or(false) {
+            return (path.clone(), false);
+        }
+    }
+    (primary.to_path_buf(), false)
+}
+
+/// **字形回退**：把每个 `TextRun` 按「首选字体有没有这个字」切成小段。
+///
+/// # 为什么需要（2026-11-22 用户报「emoji 作字幕出片是豆腐块」）
+///
+/// 出片时一条文本只用**一支字体**（`TextRasterKey::font_file`）。用户选的 CJK 字体没有
+/// emoji 字形 ⇒ 👮 变豆腐。判据：字体目录里已经有 `NotoColorEmoji` 这类字体，但**没有任何
+/// 一层会去用它**（`--font-dir` 只是交给 libass 的 fontsdir，缺字形不会触发回退）。
+///
+/// # 三条纪律
+///
+/// 1. **覆盖就不切**：整段都被首选字体覆盖时，返回段与 `parts` 一一对应 —— 老路径
+///    一个字段都不变（逐字节零回归）。
+/// 2. **只换字体、不改排版**：段宽仍由 `measure_em`（逻辑字宽）算，与原来逐段累加的总宽
+///    一致 ⇒ 位置不会因为回退而漂。
+/// 3. **找不到就保持原样**：没有任何字体覆盖那个字时仍用它自己的字体（豆腐），
+///    不静默丢字。
+fn split_runs_by_coverage(
+    primary: &Path,
+    font_dir: Option<&Path>,
+    parts: &[dhampir_core::overlay::TextRun],
+) -> Vec<CoveredRun> {
+    let primary_cov = crate::font_coverage::coverage_of(primary);
+    // 快路径：**首选字体覆盖全部**（绝大多数情况）⇒ 直接一一对应，连候选目录都不读。
+    let all_covered = primary_cov
+        .as_ref()
+        .map(|c| parts.iter().all(|p| c.covers_all(&p.text)))
+        .unwrap_or(true);
+    if all_covered {
+        return parts
+            .iter()
+            .map(|p| CoveredRun {
+                text: p.text.clone(),
+                font: primary.to_path_buf(),
+                color: p.color,
+                family: None,
+            })
+            .collect();
+    }
+    // 慢路径：候选只在真要回退时才枚举（一次读目录 + 每支字体一次 cmap 解析，带缓存）。
+    let color = font_dir
+        .and_then(crate::color_bitmap::color_font_in)
+        .and_then(|f| crate::font_coverage::coverage_of(&f).map(|c| (f, c)));
+    let fallbacks: Vec<(
+        PathBuf,
+        Option<std::sync::Arc<crate::font_coverage::Coverage>>,
+    )> = fallback_candidates(primary, font_dir)
+        .into_iter()
+        .map(|p| {
+            let c = crate::font_coverage::coverage_of(&p);
+            (p, c)
+        })
+        .collect();
+    let mut out: Vec<CoveredRun> = Vec::new();
+    for part in parts {
+        let mut buf = String::new();
+        let mut buf_font = primary.to_path_buf();
+        let mut buf_family = None;
+        // ⚠️ **native 也是分组键**（2026-11-22 第二版教训）：只按 (字体, 族名) 分组时，
+        // native 字符与主字体覆盖的字符同键 ⇒ 整行合并成一段 → 栅格器对整行走彩色
+        // 直通，而直通只画有 strike 的 emoji，**CJK 文字整行消失**（用户实测报的
+        // 「只输出了 emoji 没有输出同行的文字」就是这个）。native 必须单独成段。
+        let mut buf_native = false;
+        for ch in part.text.chars() {
+            let (font, native) = pick_font_for_char(
+                ch,
+                primary,
+                primary_cov.as_deref(),
+                color.as_ref(),
+                &fallbacks,
+            );
+            // native 段 = 字体留在主字体上（栅格器据文本判直通），族名照旧
+            let family = if native {
+                None
+            } else {
+                family_for(&font, primary)
+            };
+            if !buf.is_empty() && (font != buf_font || family != buf_family || native != buf_native)
+            {
+                out.push(CoveredRun {
+                    text: std::mem::take(&mut buf),
+                    family: buf_family,
+                    font: buf_font,
+                    color: part.color,
+                });
+            }
+            buf_font = font;
+            buf_family = family;
+            buf_native = native;
+            buf.push(ch);
+        }
+        if !buf.is_empty() {
+            out.push(CoveredRun {
+                text: buf,
+                family: buf_family,
+                font: buf_font,
+                color: part.color,
+            });
+        }
+    }
+    out
+}
+
 /// 画一条：落点 → 栅格化 → 叠上去 →（可选）切线判定。
 ///
 /// **字幕与弹幕共用这一份**。共用的前提是两者对得上同一个规则：位图恒取**整条目标宽**、
@@ -553,7 +771,11 @@ fn paint_parts(
     // 逻辑字宽（em -> 目标像素）累加出的**行内偏移**。
     // 参照用的是 canvas 真实字宽；这里只能是逻辑宽，理由见 `paint_one` 那段注释。
     let font_px = placement.font_px as f32;
-    let widths: Vec<f32> = parts
+    // **字形回退**（2026-11-22）：按"谁来画这个字"把每段再切开。
+    // 首选字体覆盖了整段时，这里返回的段与 `parts` **一一对应**（文字、颜色都一样）
+    // ⇒ 老路径一个字段都没变、逐字节相同（判据见本文件的 `split_keeps_runs_when_covered`）。
+    let runs = split_runs_by_coverage(&font_file, font_dir.as_deref(), parts);
+    let widths: Vec<f32> = runs
         .iter()
         .map(|p| dhampir_core::timeline::text_layout::measure_em(&p.text) * font_px)
         .collect();
@@ -565,13 +787,26 @@ fn paint_parts(
     let shadow = shadow_spec(style);
 
     let mut clipped = false;
+    // ⚠️ **多段才做水平排布**：单段时 `shift = 0`（与改动前逐字节相同）。
+    //
+    // 为什么不能靠 `TextRasterKey::x_offset`：那个字段**栅格器从不读**（历史遗留，
+    // 全是 0）。位图恒等于目标宽、文字在中间，所以"段在行内的位置"只能由**贴图原点**
+    // 平移表达 —— 平移量就是各段之前的累计宽度（`cursor`）。
+    let multi = runs.len() > 1;
     let mut cursor = -total / 2.0;
-    for (index, run) in parts.iter().enumerate() {
+    for (index, run) in runs.iter().enumerate() {
+        // 位移 = 这一段的**中心**相对行中心的偏移。
+        // ⚠️ 位图里的文字是**居中**的（宽度恒等于目标宽），所以不能直接用左边界的 `cursor`
+        //    —— 那样每段都会再往左错半个段宽，段与段之间凭空多出一个空隙。
+        let shift = if multi {
+            (cursor + widths[index] / 2.0).round() as i32
+        } else {
+            0
+        };
         let key = TextRasterKey {
             text: run.text.clone(),
-            // `drawtext` 那边是 `x=(w-text_w)/2+本项`，而 `text_w` 只知道自己这一段
-            // —— 所以"整行居中"由这里算好（见 `paint_one` 的残差说明）。
-            x_offset: cursor.round() as i32,
+            // ⚠️ 恒 0：这个字段**栅格器不读**（见下面 `shift` 那段说明）。段的位置靠贴图平移。
+            x_offset: 0,
             font_px: placement.font_px,
             color: run.color,
             outline: style.outline,
@@ -587,10 +822,13 @@ fn paint_parts(
             shadow_dx_px: 0,
             shadow_dy_px: 0,
             shadow_pad: 0,
-            font_file: font_file.clone(),
+            // **这一段的字体**（字形回退的产物）：没切段时就是 `--font-file` 那一支。
+            font_file: run.font.clone(),
             // **契约里的家族名**带下去：libass 按名字找字体，而名字从文件名推
             // 不可靠（实测会静默回退到 ArialMT，见 `TextRasterKey::font_family`）。
-            font_family: style.family.clone(),
+            // **字形回退的段**带自己的族名（`run.family`）—— libass 只认族名，
+            // 换 `font_file` 而不换族名等于没换。
+            font_family: run.family.clone().or_else(|| style.family.clone()),
             font_dir: font_dir.clone(),
             width: placement.bitmap_width,
             height: placement.bitmap_height,
@@ -606,7 +844,7 @@ fn paint_parts(
                 &key,
                 shadow,
                 image,
-                (placement.x + offset_x, placement.y + offset_y),
+                (placement.x + offset_x + shift, placement.y + offset_y),
                 alpha,
                 transform,
                 &path,
@@ -622,7 +860,7 @@ fn paint_parts(
         };
         // ⚠️ **恒等时走老路径**（`blit_scaled` 逐行拷贝：零开销、逐字节不变）；
         // 非恒等才走 CPU 仿射（双线性 + 越界透明）。判据是 `is_identity()`。
-        let text_origin = (placement.x + offset_x, placement.y + offset_y);
+        let text_origin = (placement.x + offset_x + shift, placement.y + offset_y);
         let blitted = if transform.is_identity() {
             blit_scaled(image, &bitmap, text_origin.0, text_origin.1, alpha)
         } else {
@@ -728,6 +966,23 @@ fn paint_per_char(
     let half_w = (placement.bitmap_width as f32 / 2.0).round() as i32;
     let half_h = (placement.bitmap_height as f32 / 2.0).round() as i32;
 
+    // **字形回退**（逐字路径）：每个字各自挑字体。主字体覆盖时保持原样（逐字节零回归）。
+    let primary_cov = crate::font_coverage::coverage_of(&font_file);
+    let color = font_dir
+        .as_deref()
+        .and_then(crate::color_bitmap::color_font_in)
+        .and_then(|f| crate::font_coverage::coverage_of(&f).map(|c| (f, c)));
+    let fallbacks: Vec<(
+        PathBuf,
+        Option<std::sync::Arc<crate::font_coverage::Coverage>>,
+    )> = fallback_candidates(&font_file, font_dir.as_deref())
+        .into_iter()
+        .map(|p| {
+            let c = crate::font_coverage::coverage_of(&p);
+            (p, c)
+        })
+        .collect();
+
     for cell in cells {
         // 这个字自己的字号：**整条缩放 × 逐字缩放**（乘法关系）。
         let cell_font = font_px * cell.scale * scale;
@@ -752,6 +1007,13 @@ fn paint_per_char(
         let y =
             (row_center_y + cell.offset_y_em * font_px + offset_y as f32).round() as i32 - half_h;
 
+        let (cell_font, _native) = pick_font_for_char(
+            cell.ch,
+            &font_file,
+            primary_cov.as_deref(),
+            color.as_ref(),
+            &fallbacks,
+        );
         let key = TextRasterKey {
             text: cell.ch.to_string(),
             // ⚠️ **不用 `x_offset` 做行内定位**（那是"段相对整行中心"的旧口径）。
@@ -772,8 +1034,10 @@ fn paint_per_char(
             shadow_dx_px: 0,
             shadow_dy_px: 0,
             shadow_pad: 0,
-            font_file: font_file.clone(),
-            font_family: style.family.clone(),
+            // **字形回退（逐字）**：这个字主字体画不了就换回退字体（族名一起换 ——
+            // libass 按族名找，只换文件路径没用）。主字体覆盖时与老路径逐字节相同。
+            font_file: cell_font.clone(),
+            font_family: family_for(&cell_font, &font_file).or_else(|| style.family.clone()),
             font_dir: font_dir.clone(),
             width: placement.bitmap_width,
             height: placement.bitmap_height,
@@ -1240,6 +1504,45 @@ fn paint_one(
             placement,
         );
     }
+    // **字形回退**（2026-11-22）：整行都被首选字体覆盖 ⇒ 走下面的老路，**逐字节不变**；
+    // 只有"有字缺字形"（emoji 这类）时才切成几段、逐段换字体 —— 与 `.hl` 那条分支
+    // 共用 `paint_parts`（它已经会算段内偏移，排版口径与老路一致）。
+    let runs = split_runs_by_coverage(
+        &font_file,
+        font_dir.as_deref(),
+        &[dhampir_core::overlay::TextRun {
+            text: text.to_string(),
+            color,
+        }],
+    );
+    // ⚠️ `runs.len() > 1` 之外还要看**单段整行落在回退字体**的情况（整条字幕就是一个
+    // emoji、或全是 emoji+符号）：那时 len==1 但字体已经换了，掉回老路就还是豆腐。
+    if runs.len() > 1 || runs.first().map(|r| r.family.is_some()).unwrap_or(false) {
+        let segs: Vec<dhampir_core::overlay::TextRun> = runs
+            .into_iter()
+            .map(|r| dhampir_core::overlay::TextRun {
+                text: r.text,
+                color: r.color,
+            })
+            .collect();
+        return paint_parts(
+            rasterize,
+            Some(font_file),
+            font_dir.clone(),
+            image,
+            target,
+            &segs,
+            style,
+            scale,
+            opacity,
+            dy_px,
+            dx_px,
+            transform,
+            judge_clip,
+            log,
+            placement,
+        );
+    }
     let key = TextRasterKey {
         text: text.to_string(),
         // 整行居中：老行为（`.hl` 的分段走上面那条分支）。
@@ -1605,6 +1908,114 @@ mod font_reason_tests {
 
         // `--font-file` 给了不影响①②③（那两路本来就不看它）。
         let _ = file;
+    }
+}
+
+#[cfg(test)]
+mod glyph_fallback_tests {
+    use super::*;
+
+    /// **零回归判据**：字体解析不出来（文件不在 / cmap 读不出）时**一段都不许切**。
+    ///
+    /// 这是这条回退最重要的性质 —— 它跑在每一条字幕上，切错一刀就会让老工程
+    /// 的成片与改动前不再是逐字节相同。
+    #[test]
+    fn split_keeps_runs_verbatim_when_coverage_is_unknown() {
+        let parts = vec![dhampir_core::overlay::TextRun {
+            text: "标题👮".to_string(),
+            color: [1, 2, 3, 255],
+        }];
+        let out = split_runs_by_coverage(
+            Path::new("/definitely/not/a/font.ttf"),
+            None,
+            parts.as_slice(),
+        );
+        assert_eq!(out.len(), 1, "解析不出字体 ⇒ 必须原样一段");
+        assert_eq!(out[0].text, "标题👮");
+        assert_eq!(out[0].color, [1, 2, 3, 255]);
+    }
+
+    /// 取样字体的三个来源（都在这台机上；缺了就跳过 —— CI 不装）。
+    const CJK_SRC: &str = "/tmp/fonts2/NotoSansSC-Regular.ttf";
+    const OUTLINE_SRC: &str = "/tmp/NotoEmoji.ttf";
+    const COLOR_SRC: &str = "/home/toki/project/yekitrim-release/data/global/resources/fonts/NotoColorEmoji-CBDT/font.ttf";
+
+    /// 建一个**只装指定字体**的隔离目录（测试之间互不串味 —— `/tmp/fonts` 被各种实验
+    /// 摸过，断言会随目录内容漂）。
+    fn staged_dir(extra: &[&str]) -> Option<(PathBuf, PathBuf, PathBuf)> {
+        if !Path::new(CJK_SRC).is_file() {
+            return None;
+        }
+        // 不引 tempfile 依赖（本仓第三方清单逐条过 gate）：std 临时目录 + 进程内序号
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "dhampir-glyph-test-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        ));
+        let cjk = dir.join("NotoSansSC-Regular.ttf");
+        std::fs::copy(CJK_SRC, &cjk).ok()?;
+        for (i, src) in extra.iter().enumerate() {
+            if !Path::new(src).is_file() {
+                return None; // 指定的字体缺 ⇒ 整个用例不适用
+            }
+            let dst = dir.join(format!("extra-{i}.ttf"));
+            std::fs::copy(src, dst).ok()?;
+        }
+        Some((dir.clone(), cjk, dir))
+    }
+
+    /// **没有彩色字体时**：emoji 走轮廓回退（libass 单色画）。
+    #[test]
+    fn split_moves_emoji_to_a_fallback_font_without_color_font() {
+        let Some((dir, cjk, dpath)) = staged_dir(&[OUTLINE_SRC]) else {
+            return;
+        };
+        let parts = vec![dhampir_core::overlay::TextRun {
+            text: "中文👮".to_string(),
+            color: [255, 255, 255, 255],
+        }];
+        let out = split_runs_by_coverage(&cjk, Some(&dpath), parts.as_slice());
+        let joined: String = out.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(joined, "中文👮", "切段不许丢字或重排");
+        assert_eq!(out.len(), 2, "应当是 [中文] + [👮] 两段：{out:?}");
+        assert_eq!(out[0].font, cjk, "第一段仍是原来的 CJK 字体");
+        let second = out[1]
+            .font
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_ascii_lowercase();
+        assert!(
+            second.contains("emoji"),
+            "第二段要落到 emoji 字体上，实际 {second}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **有彩色位图字体时**：emoji 码位**留在主字体上**（`native` 直通）——
+    /// 栅格器看到「主字体画不了 + 目录里有 CBDT」就走 `compose_color_bitmap`。
+    /// 判据：单段、族名 `None`（沿用样式 ⇒ 主字体）。
+    #[test]
+    fn split_keeps_emoji_with_primary_when_color_font_present() {
+        let Some((dir, cjk, dpath)) = staged_dir(&[COLOR_SRC]) else {
+            return;
+        };
+        let parts = vec![dhampir_core::overlay::TextRun {
+            text: "中文👮".to_string(),
+            color: [255, 255, 255, 255],
+        }];
+        let out = split_runs_by_coverage(&cjk, Some(&dpath), parts.as_slice());
+        // ⚠️ **必须切成两段**（native 是分组键）：整行一段会让栅格器对整行走彩色
+        // 直通，而直通只画 emoji ⇒ CJK 文字消失（2026-11-22 用户实测报的就是这个）。
+        assert_eq!(out.len(), 2, "[中文] + [👮(native)] 两段：{out:?}");
+        assert_eq!(out[0].text, "中文");
+        assert_eq!(out[0].font, cjk);
+        assert_eq!(out[0].family, None, "族名照旧 ⇒ 主字体");
+        assert_eq!(out[1].text, "👮");
+        assert_eq!(out[1].font, cjk, "native 段的字体也留在主字体上");
+        assert_eq!(out[1].family, None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

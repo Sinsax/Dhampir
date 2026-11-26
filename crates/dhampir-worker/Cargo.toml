@@ -29,3 +29,5 @@ env_logger = { workspace = true }
 pollster = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# 彩色 emoji 的 CBDT strike 本身就是 PNG —— 解码与 core 共用同一份 0.17（见 color_bitmap.rs）。
+png = "0.17"
